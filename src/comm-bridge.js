@@ -14,5 +14,5 @@ const config = loadConfig();
 // TODO: implement reconnection with exponential backoff
 // TODO: implement heartbeat and sync:request for gap recovery
 
-console.log('[zylos-workspace] comm-bridge starting...');
-console.log('[zylos-workspace] not yet implemented');
+console.log('[zylos-coco-workspace] comm-bridge starting...');
+console.log('[zylos-coco-workspace] not yet implemented');

@@ -1,5 +1,5 @@
 {
-  "name": "zylos-workspace",
+  "name": "zylos-coco-workspace",
   "version": "0.1.0",
   "description": "COCO Workspace native communication and service integration",
   "type": "module",
@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://git.coco.xyz/coco-workspace/zylos-workspace.git"
+    "url": "https://git.coco.xyz/coco-workspace/zylos-coco-workspace.git"
   },
   "keywords": [
     "zylos",

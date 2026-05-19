@@ -1,22 +1,23 @@
 #!/usr/bin/env node
 
-/**
- * C4 standard send interface.
- * Called by c4-send to deliver Agent responses back to COCO Workspace.
- *
- * Usage: node send.js <endpoint> <message>
- *
- * Endpoint format:
- *   [COCO DM]/<conversationId>
- *   [COCO GROUP]/<conversationId>|reply:<messageId>
- *   [COCO THREAD]/<conversationId>|thread:<threadConvId>|parent:<parentMsgId>
- *
- * Message may contain media prefix:
- *   [MEDIA:image]/path/to/file.png
- *   [MEDIA:file]/path/to/doc.pdf
- */
+const args = process.argv.slice(2);
+
+if (args.length < 2) {
+  console.error('Usage: node send.js <endpoint> <message>');
+  console.error('');
+  console.error('Endpoint format:');
+  console.error('  [COCO DM]/<conversationId>');
+  console.error('  [COCO GROUP]/<conversationId>|reply:<messageId>');
+  console.error('  [COCO THREAD]/<conversationId>|thread:<threadConvId>|parent:<parentMsgId>');
+  process.exit(1);
+}
+
+const [endpoint, ...messageParts] = args;
+const message = messageParts.join(' ');
 
 // TODO: implement endpoint parsing
 // TODO: implement text message sending via cws-comm API
 // TODO: implement media upload (→ AS) + message sending
 // TODO: implement thread reply routing
+console.error('[zylos-coco-workspace] send.js not yet implemented');
+process.exit(1);

@@ -6,9 +6,9 @@ import fs from 'fs';
 import path from 'path';
 
 const HOME = process.env.HOME;
-const CONFIG_PATH = path.join(HOME, 'zylos/components/workspace/config.json');
+const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json');
 
-const DEFAULT_CONFIG = {
+export const DEFAULT_CONFIG = {
   enabled: true,
   comm: {
     ws_url: 'ws://127.0.0.1:8080/ws',
@@ -42,7 +42,7 @@ export function loadConfig() {
 
 export function watchConfig(onChange) {
   let debounce = null;
-  fs.watch(CONFIG_PATH, () => {
+  const watcher = fs.watch(CONFIG_PATH, () => {
     clearTimeout(debounce);
     debounce = setTimeout(() => {
       currentConfig = null;
@@ -50,4 +50,8 @@ export function watchConfig(onChange) {
       onChange?.(config);
     }, 100);
   });
+  return () => {
+    clearTimeout(debounce);
+    watcher.close();
+  };
 }

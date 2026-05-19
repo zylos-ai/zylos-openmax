@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Development guidelines for zylos-workspace.
+Development guidelines for zylos-coco-workspace.
 
 ## Project Conventions
 
@@ -36,11 +36,11 @@ All CLIs follow the same pattern: `node <cli>.js <command> '<json>'`, output JSO
 ### Skill Layer (progressive loading)
 
 - `SKILL.md` — Layer 1+2: role detection + Lead/Worker lifecycle (always loaded)
-- `skills/*-operations.md` — Layer 3: per-service operation guides (loaded on demand)
+- `references/*-operations.md` — Layer 3: per-service operation guides (loaded on demand)
 
 ### Team Ownership
 
-Each service team contributes a pair of files: `src/cli/xx.js` + `skills/xx-operations.md`.
+Each service team contributes a pair of files: `src/cli/xx.js` + `references/xx-operations.md`.
 
 ## Release Process
 
@@ -48,7 +48,7 @@ Update version in both `package.json` and `SKILL.md` frontmatter in the same com
 
 ## References
 
-- [DESIGN.md](./DESIGN.md) — Full architecture documentation
+- [DESIGN.md](./docs/DESIGN.md) — Full architecture documentation
 - [zylos-lark](../zylos-lark/) — Reference implementation for communication plugin pattern
 - [Agent Skill Spec](../cws-work/docs/skill-design/agent-skill-spec.md) — Behavioral specification
 - [KB/AS Operations Reference](../cws-work/docs/skill-design/kb-as-operations-reference.md) — KB/AS operation patterns
