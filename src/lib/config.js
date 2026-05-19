@@ -42,14 +42,23 @@ export function loadConfig() {
 
 export function watchConfig(onChange) {
   let debounce = null;
-  const watcher = fs.watch(CONFIG_PATH, () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      currentConfig = null;
-      const config = loadConfig();
-      onChange?.(config);
-    }, 100);
-  });
+  let watcher;
+  try {
+    watcher = fs.watch(CONFIG_PATH, () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        currentConfig = null;
+        const config = loadConfig();
+        onChange?.(config);
+      }, 100);
+    });
+  } catch (err) {
+    // File may not exist yet (e.g. before post-install). The bridge can
+    // still run on DEFAULT_CONFIG; we just skip hot-reload until the
+    // operator creates the file and restarts the service.
+    console.warn(`[config] cannot watch ${CONFIG_PATH}: ${err.message} — hot reload disabled`);
+    return () => {};
+  }
   return () => {
     clearTimeout(debounce);
     watcher.close();

@@ -1,17 +1,123 @@
 /**
- * Message parsing (COCO Message → C4 format) and formatting (C4 response → COCO Message).
+ * Message format helpers per DESIGN.md §3.4 and §3.5.
  *
- * Inbound format (to C4 bridge):
- *   [COCO DM] 张三 said: message content
- *   [COCO GROUP] 张三 said: [Group context - recent messages:] ... [Current message:] ...
- *   [COCO THREAD] 张三 said: [Thread context:] ... [Current message:] ...
- *
- * Endpoint format:
+ * Endpoint format (C4 routing key):
  *   [COCO DM]/<conversationId>
  *   [COCO GROUP]/<conversationId>|reply:<messageId>
  *   [COCO THREAD]/<conversationId>|thread:<threadConvId>|parent:<parentMsgId>
+ *
+ * Inbound C4 text format:
+ *   [COCO DM]    <name> said: <content>
+ *   [COCO GROUP] <name> said: [Group context - recent messages:]\n<ctx>\n\n[Current message:] <content>
+ *   [COCO THREAD]<name> said: [Thread context:]\n<ctx>\n\n[Current message:] <content>
+ *   (with optional `---- file: <path>` or `---- image: <path>` suffix)
  */
 
-// TODO: implement inbound message formatting (COCO Message → C4 text)
-// TODO: implement outbound message parsing (C4 response → COCO API call params)
-// TODO: implement context building (fetch recent messages for group/thread context)
+const TYPE_TAG = { dm: '[COCO DM]', group: '[COCO GROUP]', thread: '[COCO THREAD]' };
+const VALID_TYPES = new Set(['dm', 'group', 'thread']);
+
+/**
+ * Parse a C4 endpoint string into structured fields.
+ * @param {string} endpoint
+ * @returns {{type:string, conversationId:string, replyTo?:string,
+ *            threadConversationId?:string, parentMessageId?:string}}
+ */
+export function parseEndpoint(endpoint) {
+  const m = /^\[COCO (DM|GROUP|THREAD)\]\/([^|]+)(.*)$/.exec(endpoint || '');
+  if (!m) throw new Error(`invalid endpoint: ${endpoint}`);
+
+  const result = { type: m[1].toLowerCase(), conversationId: m[2] };
+  for (const part of (m[3] || '').split('|').filter(Boolean)) {
+    const idx = part.indexOf(':');
+    if (idx === -1) continue;
+    const k = part.slice(0, idx);
+    const v = part.slice(idx + 1);
+    if (k === 'reply')  result.replyTo = v;
+    else if (k === 'thread') result.threadConversationId = v;
+    else if (k === 'parent') result.parentMessageId = v;
+  }
+  return result;
+}
+
+/**
+ * Build a C4 endpoint string from structured fields.
+ * @param {{type:string, conversationId:string, replyTo?:string,
+ *          threadConversationId?:string, parentMessageId?:string}} ep
+ */
+export function formatEndpoint(ep) {
+  const tag = TYPE_TAG[ep.type];
+  if (!tag) throw new Error(`unknown conversation type: ${ep.type}`);
+  let s = `${tag}/${ep.conversationId}`;
+  if (ep.replyTo)              s += `|reply:${ep.replyTo}`;
+  if (ep.threadConversationId) s += `|thread:${ep.threadConversationId}`;
+  if (ep.parentMessageId)      s += `|parent:${ep.parentMessageId}`;
+  return s;
+}
+
+/**
+ * Format a single recent-message line for context blocks: `[name]: content`.
+ */
+function formatContextLine(m) {
+  const name = m.senderName || m.sender_display_name || m.sender_id || 'unknown';
+  const text = m.content ?? m.content_text ?? '';
+  return `[${name}]: ${text}`;
+}
+
+/**
+ * Build the C4-bridge inbound text for a single incoming message.
+ *
+ * @param {object} conv - { type:'dm'|'group'|'thread', id?:string }
+ * @param {object} sender - { displayName }
+ * @param {object} current - { content:string, type?:'text'|'image'|'file',
+ *                             mediaLocalPath?:string }
+ * @param {Array}  [recent] - prior messages used for group/thread context
+ * @returns {string}
+ */
+export function formatInboundForC4(conv, sender, current, recent = []) {
+  const type = VALID_TYPES.has(conv.type) ? conv.type : 'dm';
+  const tag = TYPE_TAG[type];
+  const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
+  const content = current?.content ?? '';
+
+  let body;
+  if (type === 'dm') {
+    body = content;
+  } else {
+    const ctxLabel = type === 'thread'
+      ? '[Thread context:]'
+      : '[Group context - recent messages:]';
+    const ctxLines = (recent || []).map(formatContextLine).join('\n');
+    body = ctxLines
+      ? `${ctxLabel}\n${ctxLines}\n\n[Current message:] ${content}`
+      : `[Current message:] ${content}`;
+  }
+
+  let line = `${tag} ${name} said: ${body}`;
+  if (current?.mediaLocalPath) {
+    const kind = current.type === 'image' ? 'image' : 'file';
+    line += ` ---- ${kind}: ${current.mediaLocalPath}`;
+  }
+  return line;
+}
+
+/**
+ * Heuristic markdown auto-detection for outbound messages.
+ * Matches presence of headings, emphasis, code fences, lists, or links.
+ */
+export function looksLikeMarkdown(text) {
+  if (typeof text !== 'string' || !text) return false;
+  return /(^|\n)(#{1,6}\s|[*_-]{1,3}\s|```|\|\s|>\s|\d+\.\s)/.test(text) ||
+         /\[[^\]]+\]\([^)]+\)/.test(text) ||
+         /\*\*\S/.test(text) ||
+         /`[^`]+`/.test(text);
+}
+
+/**
+ * MEDIA prefix detection for outbound messages.
+ * Matches `[MEDIA:image]/path/to/file` or `[MEDIA:file]/path/to/doc.pdf`.
+ */
+export function parseMediaPrefix(message) {
+  const m = /^\[MEDIA:(image|file)\](.+)$/s.exec(message || '');
+  if (!m) return null;
+  return { kind: m[1], localPath: m[2].trim() };
+}
