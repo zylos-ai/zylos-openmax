@@ -132,16 +132,17 @@ export const del   = (path)        => request('DELETE', path);
 /**
  * Prefix a logical path with the active API prefix.
  *
- * The cws-fe API Gateway uses `/api/gateway/v1/*` as the public surface.
- * For dev-time work against cws-work / cws-core standalone (where the
- * gateway layer is absent and resources sit at `/api/*` directly), set
- * `COCO_API_PREFIX=/api`.
+ * cws-core exposes its surface under `/api/v1/*` (per the live OpenAPI
+ * at https://zylos01.jinglever.com/cws-core/openapi.json). Earlier
+ * scaffolding aimed at the `/api/gateway/v1/*` draft from cws-fe; that
+ * prefix is no longer used. Override via `COCO_API_PREFIX` if you need
+ * to talk to a different deployment (e.g. cws-work standalone on `/api`).
  *
- *   apiPath('/projects')            -> '/api/gateway/v1/projects'
- *   apiPath('/tasks/abc/status')    -> '/api/gateway/v1/tasks/abc/status'
+ *   apiPath('/projects')            -> '/api/v1/projects'
+ *   apiPath('/tasks/abc/status')    -> '/api/v1/tasks/abc/status'
  */
 export function apiPath(p) {
-  const prefix = process.env.COCO_API_PREFIX ?? '/api/gateway/v1';
+  const prefix = process.env.COCO_API_PREFIX ?? '/api/v1';
   return prefix + p;
 }
 
