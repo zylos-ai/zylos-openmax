@@ -1,31 +1,33 @@
 # TM 操作指南
 
 > Layer 3 操作参考。Agent 在需要操作 Task Management 时按需加载本文档。
-> 命令规格的权威来源是 `src/cli/tm.js`，本文档与 CLI 保持 1:1 对应。
+> 命令规格的权威来源是 `src/cli/tm.js`,本文档与 CLI 保持 1:1 对应。
+> 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
 
-CLI 位置：`src/cli/tm.js`
-调用方式：`node src/cli/tm.js <command> '<json>'`
-帮助：`node src/cli/tm.js help`
+CLI 位置:`src/cli/tm.js`
+调用方式:`node src/cli/tm.js <command> '<json>'`
+帮助:`node src/cli/tm.js help`
+
+状态:✅ cws-core 已有 · ⏳ 暂未暴露(调用会 404)
 
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `COCO_API_URL` | `http://127.0.0.1:8080` | COCO 网关基地址（cws-work 独立开发时设为 `http://127.0.0.1:18080`） |
-| `COCO_AUTH_TOKEN` | （空） | Bearer token，认证端点必填 |
-| `COCO_API_PREFIX` | `/api/gateway/v1` | 网关路径前缀；cws-work 独立后端置为 `/api` 绕过网关层 |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core 基地址 |
+| `COCO_AUTH_TOKEN` | (空) | Bearer token,认证端点必填 |
+| `COCO_API_PREFIX` | `/api/v1` | 路径前缀;非默认场景才需要覆盖 |
 
-## 路径路由（gateway 迁移中状态）
+## 当前覆盖度速览
 
-| 命令族 | 路由 | 说明 |
+| 域 | ✅ 可用 | ⏳ 暂缺 |
 | --- | --- | --- |
-| `project.*` | gateway `/api/gateway/v1/projects/*` | 已对齐;`project.unarchive` 内部走 `/restore` |
-| `task.{create,get,list,transition,status,archive,subtask_create}` | gateway `/api/gateway/v1/tasks/*` | 已对齐;`transition` 内部 POST 到 `/status` |
-| `task.{claim,reassign}` | cws-work `/api/tasks/{id}/...` | 网关草案未暴露,待迁 |
-| `issue.*` | cws-work `/api/issues/*` | 网关只有嵌套形 `/projects/{pid}/issues/*`,结构不兼容;后续要么扩网关要么重塑本 CLI |
-| `taskboard.*` / `attempt.*` / `blueprint.*` / `comment.*` / `link.*` / `system.*` | cws-work `/api/*` | 网关草案未暴露 |
+| Project | list / create / get / update / archive / restore / members | — |
+| Issue | list / list_in_project / get(嵌套) | create / update / transition / move / acceptance |
+| Task | list | get / create / transition / archive / subtask / claim / reassign |
+| Blueprint / Attempt / Comment / Link / System / TaskBoard | — | 整族 ⏳ |
 
-执行任意 `*.{create,update,transition}` 前请确认环境变量指向了支持该路径族的后端。
+`task.*` 写、`issue.*` 写、`blueprint.*`、`attempt.*` 等是 Agent loop 的核心,目前**只能读、不能写**。Agent 在 ⏳ 命令上得到 404 时应**回退到对话流**(让人类辅助)而不是反复重试。
 
 ## 错误处理
 
@@ -40,102 +42,111 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit co
 
 ## 命令清单
 
-### Project
+### Project ✅ 全套可用
 
-| 命令 | 用途 | 入参 |
-| --- | --- | --- |
-| `project.create` | 创建项目 | `{workspaceId, teamId, name, slug, isInbox?}` |
-| `project.get` | 查询项目 | `{id}` |
-| `project.list` | 列出项目 | `{workspaceId, tab?, status?, cursor?, limit?, offset?}` |
-| `project.archive` | 归档项目 | `{id}` |
-| `project.unarchive` / `project.restore` | 取消归档（同一动作，两个命令名） | `{id}` |
+| 状态 | 命令 | 入参 | 端点 |
+| --- | --- | --- | --- |
+| ✅ | `project.list` | `{status?, pageSize?, pageToken?}` | `GET /projects` |
+| ✅ | `project.create` | `{name, description?, icon?, leadIds?, memberIds?}` | `POST /projects` |
+| ✅ | `project.get` | `{id}` | `GET /projects/{id}` |
+| ✅ | `project.update` | `{id, description?, icon?, leadIds?, memberIds?}` | `PATCH /projects/{id}` |
+| ✅ | `project.archive` | `{id}` | `POST /projects/{id}/archive` |
+| ✅ | `project.restore` / `project.unarchive` | `{id}` | `POST /projects/{id}/restore` |
+| ✅ | `project.members` | `{id}` | `GET /projects/{id}/members` |
 
-### Issue
+`create` body 严格按 `CreateProjectRequestBody`(`additionalProperties:false`):只有 `{name, description?, icon?, lead_ids?, member_ids?}`。不要传 `workspace_id` / `team_id` / `slug` / `is_inbox` —— 会被拒。
 
-| 命令 | 用途 | 入参 |
-| --- | --- | --- |
-| `issue.create` | 创建 Issue | `{projectId, title, description?, mode, leadAgentId, originConversationId?, originMessageId?}` |
-| `issue.get` | 查询 Issue | `{id}` |
-| `issue.list` | 列出 Issue | `{projectId, status?, limit?, offset?}` |
-| `issue.update` | 编辑 Issue | `{id, title?, description?}` |
-| `issue.transition` | 流转状态 | `{id, status}` |
-| `issue.move_project` | 移动到其他项目 | `{id, projectId}` |
-| `issue.set_acceptance` | 设置验收结果 | `{id, accepted, source}` |
+### Issue (读 ✅ · 写 ⏳)
 
-`mode` 取值：`light`（直接执行流） / `heavy`（Blueprint 编排流）。
+| 状态 | 命令 | 入参 | 端点 |
+| --- | --- | --- | --- |
+| ✅ | `issue.list` | `{status?, assigneeId?, pageSize?, pageToken?}` | `GET /issues`(全局) |
+| ✅ | `issue.list_in_project` | `{projectId, status?, archived?, pageSize?, pageToken?}` | `GET /projects/{pid}/issues` |
+| ✅ | `issue.get` | `{projectId, id}` | `GET /projects/{pid}/issues/{iid}`(嵌套) |
+| ⏳ | `issue.create` | `{projectId, title, description?, mode, leadAgentId, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
+| ⏳ | `issue.update` | `{projectId, id, title?, description?}` | `PATCH /projects/{pid}/issues/{iid}` |
+| ⏳ | `issue.transition` | `{projectId, id, status}` | `POST /projects/{pid}/issues/{iid}/transition` |
+| ⏳ | `issue.move_project` | `{projectId, id, targetProjectId}` | `POST /projects/{pid}/issues/{iid}/move` |
+| ⏳ | `issue.set_acceptance` | `{projectId, id, accepted, source}` | `POST /projects/{pid}/issues/{iid}/acceptance` |
 
-### Task
+注意 `issue.get` / 写操作都需要 `projectId`(嵌套路径),不能像旧版那样只传 issue id。
 
-| 命令 | 用途 | 入参 |
-| --- | --- | --- |
-| `task.create` | 创建任务 | `{issueId?, projectId?, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?, mode?, priority?, status?}` |
-| `task.get` | 查询任务 | `{id}` |
-| `task.list` | 列出任务 | `{issueId?, projectId?, assigneeId?, status?, mode?, cursor?, limit?, offset?}` |
-| `task.transition` / `task.status` | 流转状态（POSTs `/tasks/{id}/status`） | `{id, status}` |
-| `task.archive` | 软归档 | `{id}` |
-| `task.subtask_create` | 添加子任务 | `{id, title, assigneeId?, status?}` |
-| `task.claim` | Worker 领取（cws-work direct） | `{id, assigneeId}` |
-| `task.reassign` | 重新指派（cws-work direct） | `{id, assigneeId}` |
+`mode` 取值:`light`(直接执行流) / `heavy`(Blueprint 编排流)。
+
+### Task (列表 ✅ · 其他 ⏳)
+
+| 状态 | 命令 | 入参 | 端点 |
+| --- | --- | --- | --- |
+| ✅ | `task.list` | `{projectId?, issueId?, status?, assigneeId?, pageSize?, pageToken?}` | `GET /tasks` |
+| ⏳ | `task.get` | `{id}` | `GET /tasks/{id}` |
+| ⏳ | `task.create` | `{issueId?, projectId?, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?, mode?, priority?, status?}` | `POST /tasks` |
+| ⏳ | `task.transition` / `task.status` | `{id, status}` | `POST /tasks/{id}/status` |
+| ⏳ | `task.archive` | `{id}` | `POST /tasks/{id}/archive` |
+| ⏳ | `task.subtask_create` | `{id, title, assigneeId?, status?}` | `POST /tasks/{id}/subtasks` |
+| ⏳ | `task.claim` | `{id, assigneeId}` | `POST /tasks/{id}/claim` |
+| ⏳ | `task.reassign` | `{id, assigneeId}` | `POST /tasks/{id}/reassign` |
 
 ### TaskBoard
 
 | 命令 | 用途 | 入参 |
 | --- | --- | --- |
-| `taskboard.list` | 浏览待认领任务 | `{workspaceId, skillTags?, status?, limit?, offset?}` |
+| ⏳ | `taskboard.list` | 浏览待认领任务 | `{workspaceId, skillTags?, status?, pageSize?, pageToken?}` |
 
-### Attempt
+### Attempt(整族 ⏳)
 
-| 命令 | 用途 | 入参 |
-| --- | --- | --- |
-| `attempt.create` | 显式创建 Attempt（通常由 `task.claim` 触发） | `{taskId, assigneeId}` |
-| `attempt.get` | 查询 Attempt | `{id}` |
-| `attempt.list` | 列出某 Task 的 Attempt 历史 | `{taskId, limit?, offset?}` |
-| `attempt.transition` | 流转 Attempt 状态 | `{id, status, failureReason?}` |
+| 状态 | 命令 | 用途 | 入参 |
+| --- | --- | --- | --- |
+| ⏳ | `attempt.create` | 显式创建 Attempt(通常由 `task.claim` 触发) | `{taskId, assigneeId}` |
+| ⏳ | `attempt.get` | 查询 Attempt | `{id}` |
+| ⏳ | `attempt.list` | 列出某 Task 的 Attempt 历史 | `{taskId, pageSize?, pageToken?}` |
+| ⏳ | `attempt.transition` | 流转 Attempt 状态 | `{id, status, failureReason?}` |
 
-### Blueprint（heavy mode 编排）
+### Blueprint(整族 ⏳ · heavy mode 编排)
 
-| 命令 | 用途 | 入参 |
-| --- | --- | --- |
-| `blueprint.create` | 创建 Blueprint 草稿 | `{issueId}` |
-| `blueprint.get` | 查询 Blueprint | `{id}` |
-| `blueprint.list` | 列出某 Issue 的 Blueprint | `{issueId, limit?, offset?}` |
-| `blueprint.add_step` | 添加 Step | `{blueprintId, description, sortOrder?, requiredResources?, dependsOn?}` |
-| `blueprint.update_step` | 编辑 Step | `{id, description?, sortOrder?, requiredResources?}` |
-| `blueprint.delete_step` | 删除 Step | `{id}` |
-| `blueprint.set_step_depends_on` | 设置 Step 依赖 | `{id, dependsOn}` |
-| `blueprint.set_estimated_budget` | 设置预算 | `{id, estimatedBudget}` |
-| `blueprint.set_notes` | 设置备注 | `{id, notes}` |
-| `blueprint.render_markdown` | 渲染为 markdown 预览 | `{id}` |
-| `blueprint.submit_for_approval` | 提交审批 | `{id}` |
-| `blueprint.create_amendment` | 创建修订版 | `{issueId}` |
+| 状态 | 命令 | 用途 | 入参 |
+| --- | --- | --- | --- |
+| ⏳ | `blueprint.create` | 创建 Blueprint 草稿 | `{issueId}` |
+| ⏳ | `blueprint.get` | 查询 Blueprint | `{id}` |
+| ⏳ | `blueprint.list` | 列出某 Issue 的 Blueprint | `{issueId, pageSize?, pageToken?}` |
+| ⏳ | `blueprint.add_step` | 添加 Step | `{blueprintId, description, sortOrder?, requiredResources?, dependsOn?}` |
+| ⏳ | `blueprint.update_step` | 编辑 Step | `{id, description?, sortOrder?, requiredResources?}` |
+| ⏳ | `blueprint.delete_step` | 删除 Step | `{id}` |
+| ⏳ | `blueprint.set_step_depends_on` | 设置 Step 依赖 | `{id, dependsOn}` |
+| ⏳ | `blueprint.set_estimated_budget` | 设置预算 | `{id, estimatedBudget}` |
+| ⏳ | `blueprint.set_notes` | 设置备注 | `{id, notes}` |
+| ⏳ | `blueprint.render_markdown` | 渲染为 markdown 预览 | `{id}` |
+| ⏳ | `blueprint.submit_for_approval` | 提交审批 | `{id}` |
+| ⏳ | `blueprint.create_amendment` | 创建修订版 | `{issueId}` |
 
-### Comment
+### Comment(整族 ⏳)
 
-| 命令 | 用途 | 入参 |
-| --- | --- | --- |
-| `comment.append` | 追加结论性记录 | `{workType, workId, authorId, bodyMarkdown, eventType?, eventPayload?}` |
-| `comment.list` | 列出评论 | `{workType, workId, limit?, offset?}` |
+| 状态 | 命令 | 用途 | 入参 |
+| --- | --- | --- | --- |
+| ⏳ | `comment.append` | 追加结论性记录 | `{workType, workId, authorId, bodyMarkdown, eventType?, eventPayload?}` |
+| ⏳ | `comment.list` | 列出评论 | `{workType, workId, pageSize?, pageToken?}` |
 
-`workType` 取值：`issue` / `task` / `attempt` / `blueprint`。
+`workType` 取值:`issue` / `task` / `attempt` / `blueprint`。
 
-### Link（WorkConversationLink）
+### Link(整族 ⏳ · WorkConversationLink)
 
-| 命令 | 用途 | 入参 |
-| --- | --- | --- |
-| `link.create` | 把 Issue/Task 跟 IM 会话锚定 | `{workType, workId, conversationId, linkRole, anchorMessageId?}` |
-| `link.list` | 列出 Link | `{workType?, workId?, conversationId?}` |
+| 状态 | 命令 | 用途 | 入参 |
+| --- | --- | --- | --- |
+| ⏳ | `link.create` | 把 Issue/Task 跟 IM 会话锚定 | `{workType, workId, conversationId, linkRole, anchorMessageId?}` |
+| ⏳ | `link.list` | 列出 Link | `{workType?, workId?, conversationId?}` |
 
-`linkRole` 取值：`origin`（需求源） / `update`（进度同步）/ `delivery`（交付通道）。
+`linkRole` 取值:`origin`(需求源) / `update`(进度同步)/ `delivery`(交付通道)。
 
-### System
+### System(整族 ⏳)
 
-| 命令 | 用途 | 入参 |
-| --- | --- | --- |
-| `system.initialize_workspace` | 工作区初始化（部署时调用） | `{workspaceId, teamId}` |
-| `system.approval_decision` | 审批决策回调 | `{blueprintId, approved}` |
-| `system.auto_archive` | 触发自动归档检查 | `{workspaceId}` |
+| 状态 | 命令 | 用途 | 入参 |
+| --- | --- | --- | --- |
+| ⏳ | `system.initialize_workspace` | 工作区初始化(部署时调用) | `{workspaceId, teamId}` |
+| ⏳ | `system.approval_decision` | 审批决策回调 | `{blueprintId, approved}` |
+| ⏳ | `system.auto_archive` | 触发自动归档检查 | `{workspaceId}` |
 
 ## 典型使用场景
+
+> 下面流程示例**部分步骤**会触达 ⏳ 命令(标出来了);⏳ 步骤等 core 暴露后即可跑通,目前会 404。
 
 ### 1. Lead 接 light 模式 Issue 且自做
 
