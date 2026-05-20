@@ -128,3 +128,54 @@ export const post  = (path, body)  => request('POST',   path, { body });
 export const patch = (path, body)  => request('PATCH',  path, { body });
 export const put   = (path, body)  => request('PUT',    path, { body });
 export const del   = (path)        => request('DELETE', path);
+
+/**
+ * Prefix a logical path with the active API prefix.
+ *
+ * The cws-fe API Gateway uses `/api/gateway/v1/*` as the public surface.
+ * For dev-time work against cws-work / cws-core standalone (where the
+ * gateway layer is absent and resources sit at `/api/*` directly), set
+ * `COCO_API_PREFIX=/api`.
+ *
+ *   apiPath('/projects')            -> '/api/gateway/v1/projects'
+ *   apiPath('/tasks/abc/status')    -> '/api/gateway/v1/tasks/abc/status'
+ */
+export function apiPath(p) {
+  const prefix = process.env.COCO_API_PREFIX ?? '/api/gateway/v1';
+  return prefix + p;
+}
+
+/**
+ * Multipart upload helper (for file endpoints that take `multipart/form-data`).
+ * Wraps the same auth + base URL resolution as `request()`.
+ *
+ *   await upload('/im/uploads/{id}/complete', { file: <Buffer|Blob>, name, mime, fields: {...} })
+ */
+export async function upload(path, { file, name, mime, fields = {} }) {
+  const url = buildUrl(path);
+  const headers = { Accept: 'application/json', ...resolveHeaders() };
+  const token = resolveToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  const form = new FormData();
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined || v === null) continue;
+    form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  }
+  const blob = file instanceof Blob ? file : new Blob([file], { type: mime || 'application/octet-stream' });
+  form.append('file', blob, name || 'file');
+
+  const res = await fetch(url, { method: 'POST', headers, body: form });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) {
+    const message =
+      (data && typeof data === 'object' && (data.detail || data.error || data.message)) || text;
+    const err = new Error(message);
+    err.status = res.status;
+    err.body = data;
+    throw err;
+  }
+  return data;
+}
