@@ -1,27 +1,29 @@
 #!/usr/bin/env node
 
 /**
- * C4 standard outbound interface — aligned with cws-comm api-design.md §5.1.
+ * C4 standard outbound interface — aligned with cws-core OpenAPI
+ * `POST /api/v1/conversations/{conversation_id}/messages`.
  *
  * Usage:
  *   node scripts/send.js '<endpoint>' '<message>'
  *
- * Endpoint forms (per api-design.md §5; mirrored into our C4 routing):
+ * Endpoint forms (per docs/DESIGN.md §3.4; encoded by C4):
  *   [COCO DM]/<conversationId>
  *   [COCO GROUP]/<conversationId>|reply:<messageId>
- *   [COCO THREAD]/<conversationId>|thread:<threadId>|parent:<parentMsgId>
+ *   [COCO THREAD]/<conversationId>|thread:<threadConvId>|parent:<parentMsgId>
  *
  * Message body forms:
- *   plain text         → type=text,   content={text, version:1}
- *   markdown-looking   → type=text,   content={text, version:1, markdown:true}  (heuristic)
- *   [MEDIA:image]/path → upload via /api/v1/media/upload then type=image
- *   [MEDIA:file]/path  → upload via /api/v1/media/upload then type=file
+ *   plain text         → content=[{type:"text", body:<text>}]
+ *   markdown-looking   → content=[{type:"markdown", body:<text>}]   (heuristic)
+ *   [MEDIA:image]/path → upload via as.js → content=[{type:"image", body:<media_id>}]
+ *   [MEDIA:file]/path  → upload via as.js → content=[{type:"file",  body:<media_id>}]
  *
- * Auth resolution:
- *   1. session_token  (~/zylos/components/coco-workspace/runtime/session.json, written by comm-bridge)
- *   2. COCO_AUTH_TOKEN env (API key fallback, degraded mode)
+ * cws-core SendMessageRequestBody (additionalProperties: false):
+ *   { client_msg_id, content: MessageContent[], reply_to? }
+ *   MessageContent: { type: string, body: string }
  *
- * Required config.workspace_id (for X-Workspace-Id header).
+ * Auth: Bearer api_key (COCO_AUTH_TOKEN env or config.agent.api_key) plus
+ *       X-Workspace-Id header (handled by client.js).
  */
 
 import dotenv from 'dotenv';
@@ -29,14 +31,14 @@ import path from 'path';
 
 dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 
-import { post } from '../src/lib/client.js';
+import { post, apiPath } from '../src/lib/client.js';
 import {
   parseEndpoint,
   looksLikeMarkdown,
   parseMediaPrefix,
   newClientMsgId,
 } from '../src/lib/message.js';
-import { uploadMedia } from '../src/lib/media.js';
+import { uploadMedia } from '../src/cli/as.js';
 
 function usage() {
   console.error('Usage: node scripts/send.js <endpoint> <message>');
@@ -49,40 +51,42 @@ function usage() {
   console.error('Message: plain text, markdown (auto-detected), or [MEDIA:image|file]/abs/path');
 }
 
-async function sendText(conversationId, ep, text) {
-  const content = { text, version: 1 };
-  if (looksLikeMarkdown(text)) content.markdown = true;
-  return post('/api/v1/messages', {
-    conversation_id: conversationId,
-    client_msg_id:   newClientMsgId(),
-    type:            'text',
-    content,
-    thread_id:       ep.threadConversationId,
-    reply_to:        ep.replyTo,
-    parent_message_id: ep.parentMessageId,
+/**
+ * Pick the conversation_id the message actually targets. For a thread
+ * endpoint, the thread is its own conversation so we send to it; for
+ * DM/group, we send to the parent conversation. reply_to is the only
+ * field cws-core's SendMessageRequestBody supports for in-context
+ * replies (thread parent_message_id is not in the schema).
+ */
+function resolveTargetConversation(ep) {
+  return ep.threadConversationId || ep.conversationId;
+}
+
+async function sendText(_unused, ep, text) {
+  const convId = resolveTargetConversation(ep);
+  const blockType = looksLikeMarkdown(text) ? 'markdown' : 'text';
+  return post(apiPath(`/conversations/${convId}/messages`), {
+    client_msg_id: newClientMsgId(),
+    content:       [{ type: blockType, body: text }],
+    reply_to:      ep.replyTo,
   });
 }
 
-async function sendMediaMessage(conversationId, ep, kind, localPath) {
+async function sendMediaMessage(_unused, ep, kind, localPath) {
+  const convId = resolveTargetConversation(ep);
   const mediaType = kind === 'image' ? 'image' : 'file';
-  const { mediaId, fileName, mimeType, size } = await uploadMedia(localPath, {
-    conversationId,
+  const { mediaId } = await uploadMedia(localPath, {
+    conversationId: convId,
     mediaType,
   });
-  return post('/api/v1/messages', {
-    conversation_id: conversationId,
-    client_msg_id:   newClientMsgId(),
-    type:            mediaType,
-    content: {
-      media_id:  mediaId,
-      filename:  fileName,
-      mime_type: mimeType,
-      size,
-      version:   1,
-    },
-    thread_id:       ep.threadConversationId,
-    reply_to:        ep.replyTo,
-    parent_message_id: ep.parentMessageId,
+  // Per cws-core MessageContent {type, body}, body is a string. For media
+  // we encode the reference as JSON so the server (or upstream cws-comm)
+  // can resolve to bytes via the media_id. TODO: confirm the agreed
+  // encoding once cws-core exposes a media-attached message schema.
+  return post(apiPath(`/conversations/${convId}/messages`), {
+    client_msg_id: newClientMsgId(),
+    content:       [{ type: mediaType, body: JSON.stringify({ media_id: mediaId }) }],
+    reply_to:      ep.replyTo,
   });
 }
 

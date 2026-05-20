@@ -34,8 +34,8 @@ dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 import { loadConfig, watchConfig } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint } from './lib/message.js';
-import { downloadMedia } from './lib/media.js';
-import { get, setApiKey, setHeaders } from './lib/client.js';
+import { getMediaUrl, downloadMedia } from './cli/as.js';
+import { get, setApiKey, setHeaders, apiPath } from './lib/client.js';
 import { saveSession, loadSession, clearSession } from './lib/session.js';
 import {
   buildConnectFrame,
@@ -79,8 +79,11 @@ function persistSession(extra) {
 
 async function fetchConversation(conversationId) {
   if (conversationCache.has(conversationId)) return conversationCache.get(conversationId);
+  // TODO: cws-core OpenAPI does not yet expose GET /conversations/{id}.
+  // When it lands, this path is correct. For now the call may 404 and
+  // we degrade gracefully (handleIncomingMessage tolerates a null conv).
   try {
-    const conv = await get(`/api/v1/conversations/${conversationId}`);
+    const conv = await get(apiPath(`/conversations/${conversationId}`));
     conversationCache.set(conversationId, conv);
     return conv;
   } catch (e) {
@@ -90,10 +93,11 @@ async function fetchConversation(conversationId) {
 }
 
 async function fetchRecentMessages(conversationId, beforeSeq, limit) {
+  // cws-core OpenAPI: GET /api/v1/conversations/{id}/messages?after_seq=&before_seq=&limit=
   try {
-    const r = await get(`/api/v1/conversations/${conversationId}/messages`, {
+    const r = await get(apiPath(`/conversations/${conversationId}/messages`), {
       before_seq: beforeSeq,
-      limit: limit || 10,
+      limit:      limit || 10,
     });
     return Array.isArray(r) ? r : (r?.messages || r?.items || []);
   } catch (e) {
@@ -163,8 +167,7 @@ async function handleIncomingMessage(payload) {
   const mediaId = content.media_id;
   if (mediaId) {
     try {
-      const meta = await get(`/api/v1/media/${mediaId}/url`);
-      const url = meta?.url || meta?.signed_url || meta?.download_url;
+      const { url } = await getMediaUrl(mediaId);
       if (url) mediaLocalPath = await downloadMedia(url, content.filename || mediaId);
     } catch (e) {
       warn('media fetch failed:', e.message);

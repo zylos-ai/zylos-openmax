@@ -1,146 +1,157 @@
 #!/usr/bin/env node
 
 /**
- * Communication CLI — IM REST surface on the cws-core Gateway
- * (/api/gateway/v1/im/*).
+ * Communication CLI — IM operations against cws-core
+ * (paths and shapes match the live OpenAPI at
+ *  https://zylos01.jinglever.com/cws-core/openapi.json).
  *
- * Day-to-day reactive IM (Agent replying to a user via C4) goes through
- * comm-bridge.js automatically. This CLI is for *proactive* IM ops:
- * starting a new DM, sending into a non-current conversation, searching
- * history, marking read, etc.
+ * Reactive IM (Agent replying to a user via the WebSocket frame) is handled
+ * by `src/comm-bridge.js` automatically. This CLI is for proactive IM:
+ * starting a new DM, sending into a non-current conversation, pulling
+ * history, etc.
  *
- * WebSocket frames (real-time delivery) are NOT handled here — that lives
- * in src/lib/ws.js and stays on the direct cws-comm link.
+ * WebSocket frames stay on the direct cws-comm link (src/lib/ws.js) —
+ * this CLI is REST only.
  *
  * Usage:
  *   node src/cli/comm.js <command> '<json-params>'
- *   node src/cli/comm.js comm.send '{"conversationId":"cv-1","content":{"text":"hi"}}'
+ *   node src/cli/comm.js comm.send '{"conversationId":"cv-1","content":"hi"}'
+ *
+ * Status:
+ *   ✅  available in cws-core today
+ *   ⏳  not exposed by cws-core yet (call will 404); kept here so the
+ *      surface is ready when core adds the endpoint
  */
 
 import { randomUUID } from 'crypto';
 import { get, post, patch, del, apiPath } from '../lib/client.js';
+import { looksLikeMarkdown } from '../lib/message.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
-/**
- * The doc requires `client_message_id` on every send (so the eventual
- * WS echo can be deduped). Auto-fill when caller didn't provide one.
- */
-function ensureClientMessageId(id) {
+function ensureClientMsgId(id) {
   return id || `cmsg_${randomUUID()}`;
 }
 
 /**
- * `content` may arrive as a bare string ("hello") or as the full envelope
- * ({text, format?, mentions?}). Normalize to envelope.
+ * Normalize caller-supplied content into cws-core's MessageContent[] shape:
+ *   - string                                  → [{type:"text"|"markdown", body}]
+ *   - {text, markdown?}                       → [{type:"text"|"markdown", body:text}]
+ *   - {type, body}                            → [{type, body}]   (pre-built block)
+ *   - [{type, body}, ...]                     → passthrough
  */
 function normalizeContent(c) {
-  if (c == null) return { text: '' };
-  if (typeof c === 'string') return { text: c };
-  return c;
+  if (c == null) return [{ type: 'text', body: '' }];
+  if (typeof c === 'string') {
+    return [{ type: looksLikeMarkdown(c) ? 'markdown' : 'text', body: c }];
+  }
+  if (Array.isArray(c)) return c;
+  if (typeof c === 'object' && c.body != null && c.type != null) return [c];
+  // Legacy envelope {text, format?, markdown?}
+  if (typeof c === 'object' && (c.text != null || c.body != null)) {
+    const body = c.body ?? c.text ?? '';
+    const type = c.type || (c.markdown || c.format === 'markdown' ? 'markdown' : 'text');
+    return [{ type, body }];
+  }
+  return [{ type: 'text', body: String(c) }];
 }
 
 const COMMANDS = {
-  // Conversation collection
-  'comm.list_conversations': () => get(apiPath('/im/conversations'), {
-    type:   params.type,      // all|dm|group|b2b
-    q:      params.q,
-    cursor: params.cursor,
-    limit:  params.limit,
-  }),
-  'comm.get_conversation': () => get(apiPath(`/im/conversations/${params.conversationId}`), {
-    include: params.include,
-  }),
-  'comm.create_conversation': () => post(apiPath('/im/conversations'), {
-    type:              params.type,
-    name:              params.name,
-    member_ids:        params.memberIds,
-    agent_1_id:        params.agent1Id,
-    agent_2_id:        params.agent2Id,
-    trigger:           params.trigger,
-    trigger_detail:    params.triggerDetail,
-    viewer_member_ids: params.viewerMemberIds,
-  }),
-  // Helper — DM is just create_conversation with type:"dm"
-  'comm.create_dm': () => post(apiPath('/im/conversations'), {
-    type:       'dm',
-    member_ids: [params.participantId],
+  // ---- Conversation collection -------------------------------------------------
+  // ✅ core: GET /api/v1/conversations?page_size=&page_token=
+  'comm.list_conversations': () => get(apiPath('/conversations'), {
+    page_size:  params.pageSize  ?? params.limit,
+    page_token: params.pageToken ?? params.cursor,
   }),
 
-  // Messages
-  'comm.get_messages': () => get(apiPath(`/im/conversations/${params.conversationId}/messages`), {
-    cursor:    params.cursor,
-    limit:     params.limit,
-    direction: params.direction,    // before|after
+  // ✅ core: POST /api/v1/conversations  body {type, title?, participant_ids?}
+  // For DMs, participant_ids should be exactly one other member.
+  // P0 only supports type ∈ {dm, group}; broadcast/bridge not yet.
+  'comm.create_conversation': () => post(apiPath('/conversations'), {
+    type:            params.type,
+    title:           params.title,
+    participant_ids: params.participantIds || params.memberIds,
   }),
-  'comm.send': () => post(apiPath(`/im/conversations/${params.conversationId}/messages`), {
-    client_message_id: ensureClientMessageId(params.clientMessageId),
-    message_type:      params.messageType || 'text',
-    content:           normalizeContent(params.content),
-    attachments:       params.attachments,
-    reply_to:          params.replyTo,
+  'comm.create_dm': () => post(apiPath('/conversations'), {
+    type:            'dm',
+    participant_ids: [params.participantId],
   }),
-  'comm.edit_message':   () => patch(apiPath(`/im/messages/${params.messageId}`), {
+
+  // ⏳ core MISSING — single conversation GET. Listed for forward-compat;
+  //                  comm-bridge falls back to null when this 404s.
+  'comm.get_conversation': () => get(apiPath(`/conversations/${params.conversationId}`)),
+
+  // ---- Messages ---------------------------------------------------------------
+  // ✅ core: GET /api/v1/conversations/{id}/messages?after_seq=&before_seq=&limit=
+  'comm.get_messages': () => get(apiPath(`/conversations/${params.conversationId}/messages`), {
+    after_seq:  params.afterSeq,
+    before_seq: params.beforeSeq,
+    limit:      params.limit,
+  }),
+
+  // ✅ core: POST /api/v1/conversations/{id}/messages
+  //          body { client_msg_id, content: [{type,body}], reply_to? }
+  'comm.send': () => post(apiPath(`/conversations/${params.conversationId}/messages`), {
+    client_msg_id: ensureClientMsgId(params.clientMsgId || params.clientMessageId),
+    content:       normalizeContent(params.content),
+    reply_to:      params.replyTo,
+  }),
+
+  // ⏳ core MISSING — message edit/delete/pin not yet exposed.
+  'comm.edit_message':   () => patch(apiPath(`/messages/${params.messageId}`), {
     content: normalizeContent(params.content),
   }),
-  'comm.delete_message': () => del(apiPath(`/im/messages/${params.messageId}`)),
+  'comm.delete_message': () => del(apiPath(`/messages/${params.messageId}`)),
+  'comm.pin':            () => post(apiPath(`/messages/${params.messageId}/pin`)),
+  'comm.unpin':          () => del(apiPath(`/messages/${params.messageId}/pin`)),
 
-  // Pin / mark-read / typing
-  'comm.pin':       () => post(apiPath(`/im/messages/${params.messageId}/pin`)),
-  'comm.unpin':     () => del(apiPath(`/im/messages/${params.messageId}/pin`)),
-  'comm.mark_read': () => post(apiPath(`/im/conversations/${params.conversationId}/read`), {
+  // ⏳ core MISSING — mark-read / typing / search not yet exposed.
+  'comm.mark_read': () => post(apiPath(`/conversations/${params.conversationId}/read`), {
     message_id: params.messageId,
   }),
-  'comm.typing':    () => post(apiPath(`/im/conversations/${params.conversationId}/typing`), {
-    state: params.state || 'started',  // started|stopped
+  'comm.typing':    () => post(apiPath(`/conversations/${params.conversationId}/typing`), {
+    state: params.state || 'started',
   }),
-
-  // Search across IM
-  'comm.search': () => get(apiPath('/im/search'), {
+  'comm.search':    () => get(apiPath('/search'), {
     q:               params.q,
-    type:            params.type,           // messages|files|links
+    type:            params.type,
     conversation_id: params.conversationId,
     sender_id:       params.senderId,
-    cursor:          params.cursor,
-    limit:           params.limit,
+    page_size:       params.pageSize ?? params.limit,
+    page_token:      params.pageToken ?? params.cursor,
   }),
 };
 
 function printUsage() {
-  console.log(`Comm CLI — IM operations on the cws-core Gateway
+  console.log(`Comm CLI — IM operations on cws-core
 
 Usage: node src/cli/comm.js <command> '<json-params>'
 
 Conversations
-  comm.list_conversations    {type?, q?, cursor?, limit?}                # type: all|dm|group|b2b
-  comm.get_conversation      {conversationId, include?}
-  comm.create_conversation   {type, name?, memberIds?, agent1Id?, agent2Id?, trigger?, triggerDetail?, viewerMemberIds?}
-  comm.create_dm             {participantId}                             # shortcut: create_conversation type:dm
+  ✅ comm.list_conversations   {pageSize?, pageToken?}
+  ✅ comm.create_conversation  {type, title?, participantIds?}     # type: dm|group
+  ✅ comm.create_dm            {participantId}                     # shortcut for type:dm
+  ⏳ comm.get_conversation     {conversationId}                    # pending core
 
 Messages
-  comm.send                  {conversationId, content, messageType?, attachments?, replyTo?, clientMessageId?}
-                             # content can be a string or {text, format?, mentions?}
-                             # clientMessageId auto-generated if omitted
-  comm.get_messages          {conversationId, cursor?, limit?, direction?}    # direction: before|after
-  comm.edit_message          {messageId, content}
-  comm.delete_message        {messageId}                                  # recall / soft-delete
-  comm.pin                   {messageId}
-  comm.unpin                 {messageId}
-  comm.mark_read             {conversationId, messageId}
-  comm.typing                {conversationId, state?}                     # state: started|stopped
+  ✅ comm.send                 {conversationId, content, replyTo?, clientMsgId?}
+                               # content: string | {text|body, markdown?} | {type,body} | [{type,body}]
+                               # clientMsgId auto-generated if omitted
+  ✅ comm.get_messages         {conversationId, afterSeq?, beforeSeq?, limit?}
+  ⏳ comm.edit_message         {messageId, content}                # pending core
+  ⏳ comm.delete_message       {messageId}                         # pending core
+  ⏳ comm.pin / comm.unpin     {messageId}                         # pending core
+  ⏳ comm.mark_read            {conversationId, messageId}         # pending core
+  ⏳ comm.typing               {conversationId, state?}            # pending core
 
 Search
-  comm.search                {q, type?, conversationId?, senderId?, cursor?, limit?}
+  ⏳ comm.search               {q, type?, conversationId?, senderId?, ...}   # pending core
 
 Environment:
-  COCO_API_URL       Gateway base URL (default: http://127.0.0.1:8080).
-  COCO_AUTH_TOKEN    Bearer token for authenticated endpoints.
-  COCO_API_PREFIX    Path prefix override (default: /api/gateway/v1).
-
-Not yet on the gateway (pending #待确认问题):
-  comm.create_thread         # thread spawning from a message — no dedicated endpoint
-  comm.add_reaction          # reactions surface (WS event exists; REST shape TBD)
+  COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)
+  COCO_AUTH_TOKEN    Bearer token
+  COCO_API_PREFIX    Path prefix override (default: /api/v1)
 `);
 }
 
