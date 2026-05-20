@@ -200,7 +200,7 @@ cws-comm WebSocket 连接
 Agent 通过 C4 bridge 回复
     │
     ▼
-c4-send workspace <endpoint> <message>
+c4-send coco-workspace <endpoint> <message>
     │
     ▼
 send.js 解析 endpoint

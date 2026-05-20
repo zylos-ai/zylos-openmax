@@ -45,7 +45,10 @@ import {
 } from './lib/connect.js';
 
 const LOG_PREFIX = '[comm-bridge]';
-const CHANNEL = 'workspace';
+// Must match the install directory under ~/zylos/.claude/skills/, so that
+// C4 routes via SKILLS_DIR/<CHANNEL>/scripts/send.js. SKILL.md installs
+// this component as `coco-workspace`.
+const CHANNEL = 'coco-workspace';
 const C4_RECEIVE = path.join(
   process.env.HOME || '',
   'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js',
