@@ -3,46 +3,63 @@
 /**
  * Task Management CLI.
  *
- * Thin stateless wrapper around the cws-work TM HTTP API. Each command
- * maps to a single HTTP call; no business logic lives here.
+ * Thin stateless wrapper around the COCO TM HTTP surface. Each command maps
+ * to a single HTTP call; no business logic lives here.
  *
- * Usage:
- *   node src/cli/tm.js <command> '<json-params>'
- *   node src/cli/tm.js issue.create '{"projectId":"proj-1","title":"竞品分析","mode":"light","leadAgentId":"agent-1"}'
+ * Path routing (mixed during the gateway buildout):
  *
- * Output: success → JSON to stdout, exit 0; failure → JSON error to stderr, exit 1.
+ *   - **Gateway-routed** (use `apiPath()`, default prefix `/api/gateway/v1`):
+ *     Project basic CRUD + archive/restore, top-level Task CRUD + status/
+ *     archive/subtasks. These match the cws-fe Gateway draft exactly.
+ *
+ *   - **cws-work direct** (raw `/api/*` paths, no prefix): Issue (flat shape
+ *     doesn't fit gateway's nested `/projects/{pid}/issues/*`), TaskBoard,
+ *     Attempt, Blueprint, Comment, Link, System. These currently only
+ *     work against a cws-work standalone backend; the gateway will catch
+ *     up incrementally and these can migrate later.
+ *
+ * Run against cws-work standalone in dev with:
+ *   COCO_API_URL=http://127.0.0.1:18080  COCO_API_PREFIX=/api
+ *
+ * Run against the gateway (production-style):
+ *   COCO_API_URL=http://127.0.0.1:8080   # default
+ *   # COCO_API_PREFIX defaults to /api/gateway/v1
  *
  * Origin: this file replaces the standalone `cws-work/zylos-tm/src/cli.js`
- * per DESIGN.md §1.2 ("zylos-tm 开发阶段独立迭代，成熟后合入 cli/tm.js").
- * The HTTP client is now the shared `src/lib/client.js`, which reads
- * COCO_API_URL / COCO_AUTH_TOKEN per DESIGN.md §6.2.
+ * per DESIGN.md §1.2.
  */
 
-import { get, post, patch, put, del } from '../lib/client.js';
+import { get, post, patch, put, del, apiPath } from '../lib/client.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
 const COMMANDS = {
-  // Project
-  'project.create':    () => post('/api/projects', {
+  // Project — gateway-routed
+  'project.create':    () => post(apiPath('/projects'), {
     workspace_id: params.workspaceId,
     team_id:      params.teamId,
     name:         params.name,
     slug:         params.slug,
     is_inbox:     params.isInbox,
   }),
-  'project.get':       () => get(`/api/projects/${params.id}`),
-  'project.list':      () => get('/api/projects', {
+  'project.get':       () => get(apiPath(`/projects/${params.id}`)),
+  'project.list':      () => get(apiPath('/projects'), {
     workspace_id: params.workspaceId,
+    tab:          params.tab,
     status:       params.status,
+    cursor:       params.cursor,
     limit:        params.limit,
-    offset:       params.offset,
+    offset:       params.offset,   // cws-work direct fallback
   }),
-  'project.archive':   () => post(`/api/projects/${params.id}/archive`),
-  'project.unarchive': () => post(`/api/projects/${params.id}/unarchive`),
+  'project.archive':   () => post(apiPath(`/projects/${params.id}/archive`)),
+  // Gateway names this `restore`; we keep `unarchive` as the command name
+  // for backward compatibility with existing scripts.
+  'project.unarchive': () => post(apiPath(`/projects/${params.id}/restore`)),
+  'project.restore':   () => post(apiPath(`/projects/${params.id}/restore`)),
 
-  // Issue
+  // Issue — cws-work direct (gateway uses nested /projects/{pid}/issues/*,
+  // shape-incompatible with this flat surface; gateway migration TBD)
   'issue.create': () => post('/api/issues', {
     projectId:            params.projectId,
     title:                params.title,
@@ -70,29 +87,48 @@ const COMMANDS = {
     source:   params.source,
   }),
 
-  // Task
-  'task.create': () => post('/api/tasks', {
+  // Task — gateway-routed for core CRUD; claim/reassign stay cws-work direct
+  'task.create': () => post(apiPath('/tasks'), {
     issueId:         params.issueId,
     title:           params.title,
     description:     params.description || '',
+    project_id:      params.projectId,
     assigneeId:      params.assigneeId,
+    assignee_id:     params.assigneeId,         // gateway field name
     skillTags:       params.skillTags,
     blueprintStepId: params.blueprintStepId,
     dependsOn:       params.dependsOn,
     contextPageIds:  params.contextPageIds,
+    mode:            params.mode,
+    priority:        params.priority,
+    status:          params.status,
   }),
-  'task.get':        () => get(`/api/tasks/${params.id}`),
-  'task.list':       () => get('/api/tasks', {
-    issue_id: params.issueId,
-    status:   params.status,
-    limit:    params.limit,
-    offset:   params.offset,
+  'task.get':        () => get(apiPath(`/tasks/${params.id}`)),
+  'task.list':       () => get(apiPath('/tasks'), {
+    issue_id:    params.issueId,
+    project_id:  params.projectId,
+    assignee_id: params.assigneeId,
+    status:      params.status,
+    mode:        params.mode,
+    cursor:      params.cursor,
+    limit:       params.limit,
+    offset:      params.offset,                  // cws-work fallback
   }),
-  'task.claim':      () => post(`/api/tasks/${params.id}/claim`,      { assigneeId: params.assigneeId }),
-  'task.transition': () => post(`/api/tasks/${params.id}/transition`, { status:     params.status     }),
-  'task.reassign':   () => post(`/api/tasks/${params.id}/reassign`,   { assigneeId: params.assigneeId }),
+  // Gateway exposes /tasks/{id}/status — same body shape. `task.transition`
+  // is kept as the command name; the path is the gateway one.
+  'task.transition': () => post(apiPath(`/tasks/${params.id}/status`), { status: params.status }),
+  'task.status':     () => post(apiPath(`/tasks/${params.id}/status`), { status: params.status }),
+  'task.archive':    () => post(apiPath(`/tasks/${params.id}/archive`)),
+  'task.subtask_create': () => post(apiPath(`/tasks/${params.id}/subtasks`), {
+    title:       params.title,
+    assignee_id: params.assigneeId,
+    status:      params.status,
+  }),
+  // Not on the gateway draft — kept on cws-work direct paths.
+  'task.claim':      () => post(`/api/tasks/${params.id}/claim`,    { assigneeId: params.assigneeId }),
+  'task.reassign':   () => post(`/api/tasks/${params.id}/reassign`, { assigneeId: params.assigneeId }),
 
-  // TaskBoard
+  // TaskBoard — cws-work direct
   'taskboard.list': () => get('/api/task-board', {
     workspace_id: params.workspaceId,
     skill_tags:   params.skillTags,
@@ -199,12 +235,13 @@ function printUsage() {
 
 Usage: node src/cli/tm.js <command> '<json-params>'
 
-Project
+Project (gateway-routed)
   project.create        {workspaceId, teamId, name, slug, isInbox?}
   project.get           {id}
-  project.list          {workspaceId, status?, limit?, offset?}
+  project.list          {workspaceId, tab?, status?, cursor?, limit?, offset?}
   project.archive       {id}
-  project.unarchive     {id}
+  project.unarchive     {id}   # alias for project.restore
+  project.restore       {id}
 
 Issue
   issue.create          {projectId, title, description?, mode, leadAgentId, originConversationId?, originMessageId?}
@@ -215,13 +252,16 @@ Issue
   issue.move_project    {id, projectId}
   issue.set_acceptance  {id, accepted, source}
 
-Task
-  task.create           {issueId, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}
+Task (gateway-routed except claim/reassign)
+  task.create           {issueId?, projectId?, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?, mode?, priority?, status?}
   task.get              {id}
-  task.list             {issueId, status?, limit?, offset?}
-  task.claim            {id, assigneeId}
-  task.transition       {id, status}
-  task.reassign         {id, assigneeId}
+  task.list             {issueId?, projectId?, assigneeId?, status?, mode?, cursor?, limit?, offset?}
+  task.transition       {id, status}     # POSTs to /tasks/{id}/status
+  task.status           {id, status}     # alias
+  task.archive          {id}
+  task.subtask_create   {id, title, assigneeId?, status?}
+  task.claim            {id, assigneeId}   # cws-work direct (no gateway yet)
+  task.reassign         {id, assigneeId}   # cws-work direct (no gateway yet)
 
 TaskBoard
   taskboard.list        {workspaceId, skillTags?, status?, limit?, offset?}
@@ -261,8 +301,18 @@ System
 
 Environment:
   COCO_API_URL     COCO backend base URL (default: http://127.0.0.1:8080).
-                   In dev with cws-work standalone, set to http://127.0.0.1:18080.
+                   In dev with cws-work standalone, set to http://127.0.0.1:18080
+                   AND set COCO_API_PREFIX=/api to bypass the gateway prefix.
   COCO_AUTH_TOKEN  Bearer token for authenticated endpoints (optional).
+  COCO_API_PREFIX  Gateway path prefix (default: /api/gateway/v1).
+                   Set to "/api" for cws-work standalone.
+
+Routing notes:
+  - Project + Task core CRUD route through the cws-fe Gateway
+    (/api/gateway/v1/*).
+  - Issue, Blueprint, Attempt, Comment, Link, System, TaskBoard, task.claim,
+    task.reassign currently target cws-work direct paths (/api/*) until the
+    gateway exposes equivalents.
 `);
 }
 

@@ -11,8 +11,21 @@ CLI 位置：`src/cli/tm.js`
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `COCO_API_URL` | `http://127.0.0.1:8080` | COCO 后端基地址（cws-work 独立开发时设为 `http://127.0.0.1:18080`） |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | COCO 网关基地址（cws-work 独立开发时设为 `http://127.0.0.1:18080`） |
 | `COCO_AUTH_TOKEN` | （空） | Bearer token，认证端点必填 |
+| `COCO_API_PREFIX` | `/api/gateway/v1` | 网关路径前缀；cws-work 独立后端置为 `/api` 绕过网关层 |
+
+## 路径路由（gateway 迁移中状态）
+
+| 命令族 | 路由 | 说明 |
+| --- | --- | --- |
+| `project.*` | gateway `/api/gateway/v1/projects/*` | 已对齐;`project.unarchive` 内部走 `/restore` |
+| `task.{create,get,list,transition,status,archive,subtask_create}` | gateway `/api/gateway/v1/tasks/*` | 已对齐;`transition` 内部 POST 到 `/status` |
+| `task.{claim,reassign}` | cws-work `/api/tasks/{id}/...` | 网关草案未暴露,待迁 |
+| `issue.*` | cws-work `/api/issues/*` | 网关只有嵌套形 `/projects/{pid}/issues/*`,结构不兼容;后续要么扩网关要么重塑本 CLI |
+| `taskboard.*` / `attempt.*` / `blueprint.*` / `comment.*` / `link.*` / `system.*` | cws-work `/api/*` | 网关草案未暴露 |
+
+执行任意 `*.{create,update,transition}` 前请确认环境变量指向了支持该路径族的后端。
 
 ## 错误处理
 
@@ -33,9 +46,9 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit co
 | --- | --- | --- |
 | `project.create` | 创建项目 | `{workspaceId, teamId, name, slug, isInbox?}` |
 | `project.get` | 查询项目 | `{id}` |
-| `project.list` | 列出项目 | `{workspaceId, status?, limit?, offset?}` |
+| `project.list` | 列出项目 | `{workspaceId, tab?, status?, cursor?, limit?, offset?}` |
 | `project.archive` | 归档项目 | `{id}` |
-| `project.unarchive` | 取消归档 | `{id}` |
+| `project.unarchive` / `project.restore` | 取消归档（同一动作，两个命令名） | `{id}` |
 
 ### Issue
 
@@ -55,12 +68,14 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit co
 
 | 命令 | 用途 | 入参 |
 | --- | --- | --- |
-| `task.create` | 创建任务 | `{issueId, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}` |
+| `task.create` | 创建任务 | `{issueId?, projectId?, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?, mode?, priority?, status?}` |
 | `task.get` | 查询任务 | `{id}` |
-| `task.list` | 列出任务 | `{issueId, status?, limit?, offset?}` |
-| `task.claim` | Worker 领取（创建 Attempt） | `{id, assigneeId}` |
-| `task.transition` | 流转任务状态 | `{id, status}` |
-| `task.reassign` | 重新指派 | `{id, assigneeId}` |
+| `task.list` | 列出任务 | `{issueId?, projectId?, assigneeId?, status?, mode?, cursor?, limit?, offset?}` |
+| `task.transition` / `task.status` | 流转状态（POSTs `/tasks/{id}/status`） | `{id, status}` |
+| `task.archive` | 软归档 | `{id}` |
+| `task.subtask_create` | 添加子任务 | `{id, title, assigneeId?, status?}` |
+| `task.claim` | Worker 领取（cws-work direct） | `{id, assigneeId}` |
+| `task.reassign` | 重新指派（cws-work direct） | `{id, assigneeId}` |
 
 ### TaskBoard
 
