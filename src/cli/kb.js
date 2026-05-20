@@ -3,22 +3,23 @@
 /**
  * KnowledgeBase CLI.
  *
- * Wraps the cws-core Gateway KB endpoints (/api/gateway/v1/knowledge-bases/*).
- * Each command maps to a single HTTP call; no business logic here.
+ * Wraps /api/v1/knowledge-bases/* on cws-core. **Every endpoint here is
+ * currently ⏳** — cws-core's OpenAPI does not yet expose any KB routes.
+ * Commands are kept so the agent surface is ready when core adds them;
+ * calls 404 today.
  *
  * Usage:
  *   node src/cli/kb.js <command> '<json-params>'
- *   node src/cli/kb.js kb.list  '{"q":"growth","limit":20}'
- *   node src/cli/kb.js kb.read  '{"kbId":"kb-1","pageId":"pg-abc"}'
  *
- * Output: success → JSON to stdout, exit 0; failure → JSON error to stderr, exit 1.
+ * Status legend:
+ *   ⏳  not exposed by cws-core yet (call will 404)
  *
- * NOTE: semantic search (`kb.search`) is not yet exposed by the gateway
- * (#待确认问题). For now, locate content by KB → tree → node → page.
+ * File upload delegates to as.js (uploadMedia) so there is one canonical
+ * upload path in the codebase.
  */
 
-import { get, post, patch, put, del, apiPath, upload } from '../lib/client.js';
-import fs from 'fs';
+import { get, post, patch, put, del, apiPath } from '../lib/client.js';
+import { uploadMedia } from './as.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -72,19 +73,17 @@ const COMMANDS = {
     base_version:    params.baseVersion,      // for optimistic-concurrency on PUT
   }),
 
-  // File attachment (binary)
+  // File attachment — delegates to as.js's canonical uploadMedia().
+  // The kbId acts as the access-scoping key (instead of a conversation_id).
+  // ⏳ until core exposes either /knowledge-bases/{id}/files or
+  //   /media/upload — uploadMedia hits the latter.
   'kb.upload': () => {
     if (!params.filePath) throw new Error('filePath is required');
-    const buf  = fs.readFileSync(params.filePath);
-    const name = params.filename || params.filePath.split('/').pop();
-    return upload(apiPath(`/knowledge-bases/${params.kbId}/files`), {
-      file: buf,
-      name,
-      mime: params.contentType,
-      fields: {
-        parent_id: params.parentId,
-        title:     params.title,
-      },
+    if (!params.kbId)     throw new Error('kbId is required');
+    return uploadMedia(params.filePath, {
+      conversationId: params.kbId,        // re-use the scoping field name
+      mediaType:      params.mediaType || 'file',
+      mimeType:       params.contentType,
     });
   },
 };
@@ -94,37 +93,40 @@ function printUsage() {
 
 Usage: node src/cli/kb.js <command> '<json-params>'
 
+⚠ Every kb.* command below is ⏳ — cws-core's OpenAPI has no
+   /knowledge-bases endpoints yet. Calls will 404 today. The surface
+   is kept so the agent code is ready when core adds the KB domain.
+
 KB collection
-  kb.list          {tab?, q?, cursor?, limit?}
-  kb.get           {kbId}
-  kb.create        {name, description?, teamId?, icon?}
-  kb.archive       {kbId}
-  kb.restore       {kbId}
+  ⏳ kb.list          {tab?, q?, cursor?, limit?}
+  ⏳ kb.get           {kbId}
+  ⏳ kb.create        {name, description?, teamId?, icon?}
+  ⏳ kb.archive       {kbId}
+  ⏳ kb.restore       {kbId}
 
 Nodes (folders + pages share the node model)
-  kb.tree          {kbId}
-  kb.nodes         {kbId, parentId?, cursor?, limit?}
-  kb.node_create   {kbId, parentId?, kind, title, icon?}     # kind: folder|page
-  kb.node_get      {kbId, nodeId}
-  kb.node_update   {kbId, nodeId, title?, parentId?, icon?}
-  kb.node_delete   {kbId, nodeId}
+  ⏳ kb.tree          {kbId}
+  ⏳ kb.nodes         {kbId, parentId?, cursor?, limit?}
+  ⏳ kb.node_create   {kbId, parentId?, kind, title, icon?}     # kind: folder|page
+  ⏳ kb.node_get      {kbId, nodeId}
+  ⏳ kb.node_update   {kbId, nodeId, title?, parentId?, icon?}
+  ⏳ kb.node_delete   {kbId, nodeId}
 
 Page content
-  kb.read          {kbId, pageId}
-  kb.write         {kbId, pageId, title?, content, contentFormat?, commitMessage?, baseVersion?}
+  ⏳ kb.read          {kbId, pageId}
+  ⏳ kb.write         {kbId, pageId, title?, content, contentFormat?, commitMessage?, baseVersion?}
 
-File attachment (binary)
-  kb.upload        {kbId, filePath, filename?, contentType?, parentId?, title?}
+File attachment (delegates to as.js → uploadMedia)
+  ⏳ kb.upload        {kbId, filePath, mediaType?, contentType?}
 
 Environment:
-  COCO_API_URL       Gateway base URL (default: http://127.0.0.1:8080).
-  COCO_AUTH_TOKEN    Bearer token for authenticated endpoints.
-  COCO_API_PREFIX    Path prefix override (default: /api/gateway/v1).
-                     Set to "/api" when talking to cws-core/cws-work directly.
+  COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)
+  COCO_AUTH_TOKEN    Bearer token
+  COCO_API_PREFIX    Path prefix override (default: /api/v1)
 
-Not yet supported by the gateway (kept here as design intent):
-  kb.search          # semantic search — pending #待确认问题
-  kb.history         # page revision history — pending
+Not yet planned in any core spec (design intent only):
+  kb.search          # semantic search
+  kb.history         # page revision history
 `);
 }
 

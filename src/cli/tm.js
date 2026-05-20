@@ -3,30 +3,23 @@
 /**
  * Task Management CLI.
  *
- * Thin stateless wrapper around the COCO TM HTTP surface. Each command maps
- * to a single HTTP call; no business logic lives here.
+ * Thin stateless wrapper over cws-core's task/project/issue surface
+ * (paths + bodies per OpenAPI at
+ *  https://zylos01.jinglever.com/cws-core/openapi.json).
  *
- * Path routing (mixed during the gateway buildout):
+ * Usage:
+ *   node src/cli/tm.js <command> '<json-params>'
+ *   node src/cli/tm.js project.create '{"name":"Growth","memberIds":["..."]}'
  *
- *   - **Gateway-routed** (use `apiPath()`, default prefix `/api/gateway/v1`):
- *     Project basic CRUD + archive/restore, top-level Task CRUD + status/
- *     archive/subtasks. These match the cws-fe Gateway draft exactly.
+ * Status legend:
+ *   ✅  available in cws-core today (path + body match OpenAPI)
+ *   ⏳  not exposed by cws-core yet (call will 404); kept here so the
+ *      surface is ready when core adds the endpoint. Path follows the
+ *      most-likely future shape; body shape is best-effort guess.
  *
- *   - **cws-work direct** (raw `/api/*` paths, no prefix): Issue (flat shape
- *     doesn't fit gateway's nested `/projects/{pid}/issues/*`), TaskBoard,
- *     Attempt, Blueprint, Comment, Link, System. These currently only
- *     work against a cws-work standalone backend; the gateway will catch
- *     up incrementally and these can migrate later.
- *
- * Run against cws-work standalone in dev with:
- *   COCO_API_URL=http://127.0.0.1:18080  COCO_API_PREFIX=/api
- *
- * Run against the gateway (production-style):
- *   COCO_API_URL=http://127.0.0.1:8080   # default
- *   # COCO_API_PREFIX defaults to /api/gateway/v1
- *
- * Origin: this file replaces the standalone `cws-work/zylos-tm/src/cli.js`
- * per DESIGN.md §1.2.
+ * Most "writeful" TM surface (Issue write, Task write, Blueprint,
+ * Attempt, Comment, Link, System, TaskBoard) is currently ⏳ — core
+ * exposes the read side only.
  */
 
 import { get, post, patch, put, del, apiPath } from '../lib/client.js';
@@ -35,284 +28,288 @@ const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
 const COMMANDS = {
-  // Project — gateway-routed
-  'project.create':    () => post(apiPath('/projects'), {
-    workspace_id: params.workspaceId,
-    team_id:      params.teamId,
-    name:         params.name,
-    slug:         params.slug,
-    is_inbox:     params.isInbox,
-  }),
-  'project.get':       () => get(apiPath(`/projects/${params.id}`)),
-  'project.list':      () => get(apiPath('/projects'), {
-    workspace_id: params.workspaceId,
-    tab:          params.tab,
-    status:       params.status,
-    cursor:       params.cursor,
-    limit:        params.limit,
-    offset:       params.offset,   // cws-work direct fallback
-  }),
-  'project.archive':   () => post(apiPath(`/projects/${params.id}/archive`)),
-  // Gateway names this `restore`; we keep `unarchive` as the command name
-  // for backward compatibility with existing scripts.
-  'project.unarchive': () => post(apiPath(`/projects/${params.id}/restore`)),
-  'project.restore':   () => post(apiPath(`/projects/${params.id}/restore`)),
+  // =========================================================================
+  //  PROJECT  (✅ all in core)
+  // =========================================================================
 
-  // Issue — cws-work direct (gateway uses nested /projects/{pid}/issues/*,
-  // shape-incompatible with this flat surface; gateway migration TBD)
-  'issue.create': () => post('/api/issues', {
-    projectId:            params.projectId,
-    title:                params.title,
-    description:          params.description || '',
-    mode:                 params.mode,
-    leadAgentId:          params.leadAgentId,
-    originConversationId: params.originConversationId,
-    originMessageId:      params.originMessageId,
-  }),
-  'issue.get':            () => get(`/api/issues/${params.id}`),
-  'issue.list':           () => get('/api/issues', {
-    project_id: params.projectId,
+  'project.list': () => get(apiPath('/projects'), {
     status:     params.status,
-    limit:      params.limit,
-    offset:     params.offset,
-  }),
-  'issue.update':         () => patch(`/api/issues/${params.id}`, {
-    title:       params.title,
-    description: params.description,
-  }),
-  'issue.transition':     () => post(`/api/issues/${params.id}/transition`, { status: params.status }),
-  'issue.move_project':   () => post(`/api/issues/${params.id}/move`,       { projectId: params.projectId }),
-  'issue.set_acceptance': () => post(`/api/issues/${params.id}/acceptance`, {
-    accepted: params.accepted,
-    source:   params.source,
+    page_size:  params.pageSize  ?? params.limit,
+    page_token: params.pageToken ?? params.cursor,
   }),
 
-  // Task — gateway-routed for core CRUD; claim/reassign stay cws-work direct
-  'task.create': () => post(apiPath('/tasks'), {
-    issueId:         params.issueId,
-    title:           params.title,
-    description:     params.description || '',
-    project_id:      params.projectId,
-    assigneeId:      params.assigneeId,
-    assignee_id:     params.assigneeId,         // gateway field name
-    skillTags:       params.skillTags,
-    blueprintStepId: params.blueprintStepId,
-    dependsOn:       params.dependsOn,
-    contextPageIds:  params.contextPageIds,
-    mode:            params.mode,
-    priority:        params.priority,
-    status:          params.status,
+  // CreateProjectRequestBody: {name (required), description?, icon?,
+  //                            lead_ids?:[uuid], member_ids?:[uuid]}
+  'project.create': () => post(apiPath('/projects'), {
+    name:        params.name,
+    description: params.description,
+    icon:        params.icon,
+    lead_ids:    params.leadIds,
+    member_ids:  params.memberIds,
   }),
-  'task.get':        () => get(apiPath(`/tasks/${params.id}`)),
-  'task.list':       () => get(apiPath('/tasks'), {
-    issue_id:    params.issueId,
-    project_id:  params.projectId,
-    assignee_id: params.assigneeId,
+
+  'project.get': () => get(apiPath(`/projects/${params.id}`)),
+
+  // UpdateProjectRequestBody: {description?, icon?, lead_ids?, member_ids?}
+  // (name is not in the update schema — projects are renamed via a separate
+  //  endpoint if/when added)
+  'project.update': () => patch(apiPath(`/projects/${params.id}`), {
+    description: params.description,
+    icon:        params.icon,
+    lead_ids:    params.leadIds,
+    member_ids:  params.memberIds,
+  }),
+
+  'project.archive':   () => post(apiPath(`/projects/${params.id}/archive`)),
+  'project.restore':   () => post(apiPath(`/projects/${params.id}/restore`)),
+  // backward-compat alias for older scripts
+  'project.unarchive': () => post(apiPath(`/projects/${params.id}/restore`)),
+
+  'project.members': () => get(apiPath(`/projects/${params.id}/members`)),
+
+  // =========================================================================
+  //  ISSUE  (✅ read-only in core: global list + nested read; writes ⏳)
+  // =========================================================================
+
+  // Global list (cross-project)
+  'issue.list': () => get(apiPath('/issues'), {
     status:      params.status,
-    mode:        params.mode,
-    cursor:      params.cursor,
-    limit:       params.limit,
-    offset:      params.offset,                  // cws-work fallback
+    assignee_id: params.assigneeId,
+    page_size:   params.pageSize  ?? params.limit,
+    page_token:  params.pageToken ?? params.cursor,
   }),
-  // Gateway exposes /tasks/{id}/status — same body shape. `task.transition`
-  // is kept as the command name; the path is the gateway one.
-  'task.transition': () => post(apiPath(`/tasks/${params.id}/status`), { status: params.status }),
-  'task.status':     () => post(apiPath(`/tasks/${params.id}/status`), { status: params.status }),
-  'task.archive':    () => post(apiPath(`/tasks/${params.id}/archive`)),
+
+  // Per-project nested list
+  'issue.list_in_project': () => get(apiPath(`/projects/${params.projectId}/issues`), {
+    status:     params.status,
+    archived:   params.archived,
+    page_size:  params.pageSize  ?? params.limit,
+    page_token: params.pageToken ?? params.cursor,
+  }),
+
+  // Nested single-issue read.
+  'issue.get': () => get(apiPath(`/projects/${params.projectId}/issues/${params.id}`)),
+
+  // ⏳ Write side — core has not exposed these yet. Paths follow the most-
+  //   likely future shape (nested under /projects/{pid}/issues/*).
+  'issue.create': () => post(apiPath(`/projects/${params.projectId}/issues`), {
+    title:                  params.title,
+    description:            params.description || '',
+    mode:                   params.mode,
+    lead_agent_id:          params.leadAgentId,
+    origin_conversation_id: params.originConversationId,
+    origin_message_id:      params.originMessageId,
+  }),
+  'issue.update': () => patch(
+    apiPath(`/projects/${params.projectId}/issues/${params.id}`),
+    { title: params.title, description: params.description },
+  ),
+  'issue.transition': () => post(
+    apiPath(`/projects/${params.projectId}/issues/${params.id}/transition`),
+    { status: params.status },
+  ),
+  'issue.move_project': () => post(
+    apiPath(`/projects/${params.projectId}/issues/${params.id}/move`),
+    { project_id: params.targetProjectId },
+  ),
+  'issue.set_acceptance': () => post(
+    apiPath(`/projects/${params.projectId}/issues/${params.id}/acceptance`),
+    { accepted: params.accepted, source: params.source },
+  ),
+
+  // =========================================================================
+  //  TASK  (✅ list only in core; single read + writes ⏳)
+  // =========================================================================
+
+  'task.list': () => get(apiPath('/tasks'), {
+    project_id:  params.projectId,
+    issue_id:    params.issueId,
+    status:      params.status,
+    assignee_id: params.assigneeId,
+    page_size:   params.pageSize  ?? params.limit,
+    page_token:  params.pageToken ?? params.cursor,
+  }),
+
+  // ⏳ Single-task read — core not yet exposed.
+  'task.get': () => get(apiPath(`/tasks/${params.id}`)),
+
+  // ⏳ Task writes — pending core.
+  'task.create': () => post(apiPath('/tasks'), {
+    issue_id:          params.issueId,
+    project_id:        params.projectId,
+    title:             params.title,
+    description:       params.description || '',
+    assignee_id:       params.assigneeId,
+    skill_tags:        params.skillTags,
+    blueprint_step_id: params.blueprintStepId,
+    depends_on:        params.dependsOn,
+    context_page_ids:  params.contextPageIds,
+    mode:              params.mode,
+    priority:          params.priority,
+    status:            params.status,
+  }),
+  'task.transition': () => post(apiPath(`/tasks/${params.id}/status`), {
+    status: params.status,
+  }),
+  'task.status':   () => post(apiPath(`/tasks/${params.id}/status`),   { status: params.status }),
+  'task.archive':  () => post(apiPath(`/tasks/${params.id}/archive`)),
   'task.subtask_create': () => post(apiPath(`/tasks/${params.id}/subtasks`), {
     title:       params.title,
     assignee_id: params.assigneeId,
     status:      params.status,
   }),
-  // Not on the gateway draft — kept on cws-work direct paths.
-  'task.claim':      () => post(`/api/tasks/${params.id}/claim`,    { assigneeId: params.assigneeId }),
-  'task.reassign':   () => post(`/api/tasks/${params.id}/reassign`, { assigneeId: params.assigneeId }),
+  'task.claim':    () => post(apiPath(`/tasks/${params.id}/claim`),    { assignee_id: params.assigneeId }),
+  'task.reassign': () => post(apiPath(`/tasks/${params.id}/reassign`), { assignee_id: params.assigneeId }),
 
-  // TaskBoard — cws-work direct
-  'taskboard.list': () => get('/api/task-board', {
-    workspace_id: params.workspaceId,
-    skill_tags:   params.skillTags,
-    status:       params.status,
-    limit:        params.limit,
-    offset:       params.offset,
-  }),
+  // =========================================================================
+  //  BLUEPRINT / ATTEMPT / COMMENT / LINK / SYSTEM / TASKBOARD  (all ⏳)
+  //  Kept as best-effort path placeholders so the agent surface is ready.
+  // =========================================================================
 
-  // Attempt
-  'attempt.create':     () => post('/api/attempts', {
-    taskId:     params.taskId,
-    assigneeId: params.assigneeId,
+  'blueprint.create':              () => post(apiPath('/blueprints'), { issue_id: params.issueId }),
+  'blueprint.get':                 () => get(apiPath(`/blueprints/${params.id}`)),
+  'blueprint.list':                () => get(apiPath('/blueprints'), {
+    issue_id:   params.issueId,
+    page_size:  params.pageSize ?? params.limit,
+    page_token: params.pageToken ?? params.cursor,
   }),
-  'attempt.get':        () => get(`/api/attempts/${params.id}`),
-  'attempt.list':       () => get('/api/attempts', {
-    task_id: params.taskId,
-    limit:   params.limit,
-    offset:  params.offset,
+  'blueprint.add_step':            () => post(apiPath(`/blueprints/${params.blueprintId}/steps`), {
+    description:        params.description,
+    sort_order:         params.sortOrder,
+    required_resources: params.requiredResources,
+    depends_on:         params.dependsOn,
   }),
-  'attempt.transition': () => post(`/api/attempts/${params.id}/transition`, {
-    status:        params.status,
-    failureReason: params.failureReason,
+  'blueprint.update_step':         () => patch(apiPath(`/blueprint-steps/${params.id}`), {
+    description:        params.description,
+    sort_order:         params.sortOrder,
+    required_resources: params.requiredResources,
   }),
-
-  // Blueprint
-  'blueprint.create':  () => post('/api/blueprints', { issueId: params.issueId }),
-  'blueprint.get':     () => get(`/api/blueprints/${params.id}`),
-  'blueprint.list':    () => get('/api/blueprints', {
-    issue_id: params.issueId,
-    limit:    params.limit,
-    offset:   params.offset,
+  'blueprint.delete_step':         () => del(apiPath(`/blueprint-steps/${params.id}`)),
+  'blueprint.set_step_depends_on': () => put(apiPath(`/blueprint-steps/${params.id}/depends-on`), {
+    depends_on: params.dependsOn,
   }),
-  'blueprint.add_step': () => post(`/api/blueprints/${params.blueprintId}/steps`, {
-    description:       params.description,
-    sortOrder:         params.sortOrder,
-    requiredResources: params.requiredResources,
-    dependsOn:         params.dependsOn,
+  'blueprint.set_estimated_budget':() => put(apiPath(`/blueprints/${params.id}/budget`), {
+    estimated_budget: params.estimatedBudget,
   }),
-  'blueprint.update_step':         () => patch(`/api/blueprint-steps/${params.id}`, {
-    description:       params.description,
-    sortOrder:         params.sortOrder,
-    requiredResources: params.requiredResources,
-  }),
-  'blueprint.delete_step':         () => del(`/api/blueprint-steps/${params.id}`),
-  'blueprint.set_step_depends_on': () => put(`/api/blueprint-steps/${params.id}/depends-on`, {
-    dependsOn: params.dependsOn,
-  }),
-  'blueprint.set_estimated_budget':() => put(`/api/blueprints/${params.id}/budget`, {
-    estimatedBudget: params.estimatedBudget,
-  }),
-  'blueprint.set_notes':           () => put(`/api/blueprints/${params.id}/notes`, {
+  'blueprint.set_notes':           () => put(apiPath(`/blueprints/${params.id}/notes`), {
     notes: params.notes,
   }),
-  'blueprint.render_markdown':     () => get(`/api/blueprints/${params.id}/markdown`),
-  'blueprint.submit_for_approval': () => post(`/api/blueprints/${params.id}/submit`),
-  'blueprint.create_amendment':    () => post('/api/blueprints/amend', { issueId: params.issueId }),
+  'blueprint.render_markdown':     () => get(apiPath(`/blueprints/${params.id}/markdown`)),
+  'blueprint.submit_for_approval': () => post(apiPath(`/blueprints/${params.id}/submit`)),
+  'blueprint.create_amendment':    () => post(apiPath('/blueprints/amend'), { issue_id: params.issueId }),
 
-  // Comment
-  'comment.append': () => post('/api/comments', {
-    workType:     params.workType,
-    workId:       params.workId,
-    authorId:     params.authorId,
-    bodyMarkdown: params.bodyMarkdown,
-    eventType:    params.eventType,
-    eventPayload: params.eventPayload,
+  'attempt.create':     () => post(apiPath('/attempts'), {
+    task_id:     params.taskId,
+    assignee_id: params.assigneeId,
   }),
-  'comment.list':   () => get('/api/comments', {
-    work_type: params.workType,
-    work_id:   params.workId,
-    limit:     params.limit,
-    offset:    params.offset,
+  'attempt.get':        () => get(apiPath(`/attempts/${params.id}`)),
+  'attempt.list':       () => get(apiPath('/attempts'), {
+    task_id:    params.taskId,
+    page_size:  params.pageSize ?? params.limit,
+    page_token: params.pageToken ?? params.cursor,
   }),
-
-  // System
-  'system.initialize_workspace': () => post('/api/system/initialize-workspace', {
-    workspaceId: params.workspaceId,
-    teamId:      params.teamId,
-  }),
-  'system.approval_decision':    () => post('/api/system/approval-decision', {
-    blueprintId: params.blueprintId,
-    approved:    params.approved,
-  }),
-  'system.auto_archive':         () => post('/api/system/auto-archive', {
-    workspaceId: params.workspaceId,
+  'attempt.transition': () => post(apiPath(`/attempts/${params.id}/transition`), {
+    status:         params.status,
+    failure_reason: params.failureReason,
   }),
 
-  // WorkConversationLink
-  'link.create': () => post('/api/links', {
-    workType:        params.workType,
-    workId:          params.workId,
-    conversationId:  params.conversationId,
-    linkRole:        params.linkRole,
-    anchorMessageId: params.anchorMessageId,
+  'comment.append': () => post(apiPath('/comments'), {
+    work_type:     params.workType,
+    work_id:       params.workId,
+    author_id:     params.authorId,
+    body_markdown: params.bodyMarkdown,
+    event_type:    params.eventType,
+    event_payload: params.eventPayload,
   }),
-  'link.list':   () => get('/api/links', {
+  'comment.list':   () => get(apiPath('/comments'), {
+    work_type:  params.workType,
+    work_id:    params.workId,
+    page_size:  params.pageSize ?? params.limit,
+    page_token: params.pageToken ?? params.cursor,
+  }),
+
+  'link.create': () => post(apiPath('/links'), {
+    work_type:         params.workType,
+    work_id:           params.workId,
+    conversation_id:   params.conversationId,
+    link_role:         params.linkRole,
+    anchor_message_id: params.anchorMessageId,
+  }),
+  'link.list':   () => get(apiPath('/links'), {
     work_type:       params.workType,
     work_id:         params.workId,
     conversation_id: params.conversationId,
   }),
+
+  'taskboard.list': () => get(apiPath('/task-board'), {
+    workspace_id: params.workspaceId,
+    skill_tags:   params.skillTags,
+    status:       params.status,
+    page_size:    params.pageSize ?? params.limit,
+    page_token:   params.pageToken ?? params.cursor,
+  }),
+
+  'system.initialize_workspace': () => post(apiPath('/system/initialize-workspace'), {
+    workspace_id: params.workspaceId,
+    team_id:      params.teamId,
+  }),
+  'system.approval_decision':    () => post(apiPath('/system/approval-decision'), {
+    blueprint_id: params.blueprintId,
+    approved:     params.approved,
+  }),
+  'system.auto_archive':         () => post(apiPath('/system/auto-archive'), {
+    workspace_id: params.workspaceId,
+  }),
 };
 
 function printUsage() {
-  console.log(`TM CLI — Task Management for COCO agents
+  console.log(`TM CLI — Task Management against cws-core
 
 Usage: node src/cli/tm.js <command> '<json-params>'
 
-Project (gateway-routed)
-  project.create        {workspaceId, teamId, name, slug, isInbox?}
-  project.get           {id}
-  project.list          {workspaceId, tab?, status?, cursor?, limit?, offset?}
-  project.archive       {id}
-  project.unarchive     {id}   # alias for project.restore
-  project.restore       {id}
+PROJECT
+  ✅ project.list           {status?, pageSize?, pageToken?}
+  ✅ project.create         {name, description?, icon?, leadIds?, memberIds?}
+  ✅ project.get            {id}
+  ✅ project.update         {id, description?, icon?, leadIds?, memberIds?}
+  ✅ project.archive        {id}
+  ✅ project.restore        {id}   # alias: project.unarchive
+  ✅ project.members        {id}
 
-Issue
-  issue.create          {projectId, title, description?, mode, leadAgentId, originConversationId?, originMessageId?}
-  issue.get             {id}
-  issue.list            {projectId, status?, limit?, offset?}
-  issue.update          {id, title?, description?}
-  issue.transition      {id, status}
-  issue.move_project    {id, projectId}
-  issue.set_acceptance  {id, accepted, source}
+ISSUE
+  ✅ issue.list             {status?, assigneeId?, pageSize?, pageToken?}     # global
+  ✅ issue.list_in_project  {projectId, status?, archived?, pageSize?, pageToken?}
+  ✅ issue.get              {projectId, id}                                    # nested
+  ⏳ issue.create           {projectId, title, description?, mode, leadAgentId, ...}
+  ⏳ issue.update           {projectId, id, title?, description?}
+  ⏳ issue.transition       {projectId, id, status}
+  ⏳ issue.move_project     {projectId, id, targetProjectId}
+  ⏳ issue.set_acceptance   {projectId, id, accepted, source}
 
-Task (gateway-routed except claim/reassign)
-  task.create           {issueId?, projectId?, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?, mode?, priority?, status?}
-  task.get              {id}
-  task.list             {issueId?, projectId?, assigneeId?, status?, mode?, cursor?, limit?, offset?}
-  task.transition       {id, status}     # POSTs to /tasks/{id}/status
-  task.status           {id, status}     # alias
-  task.archive          {id}
-  task.subtask_create   {id, title, assigneeId?, status?}
-  task.claim            {id, assigneeId}   # cws-work direct (no gateway yet)
-  task.reassign         {id, assigneeId}   # cws-work direct (no gateway yet)
+TASK
+  ✅ task.list              {projectId?, issueId?, status?, assigneeId?, pageSize?, pageToken?}
+  ⏳ task.get               {id}
+  ⏳ task.create            {issueId?, projectId?, title, description?, assigneeId?, ...}
+  ⏳ task.transition        {id, status}    # alias: task.status
+  ⏳ task.archive           {id}
+  ⏳ task.subtask_create    {id, title, assigneeId?, status?}
+  ⏳ task.claim             {id, assigneeId}
+  ⏳ task.reassign          {id, assigneeId}
 
-TaskBoard
-  taskboard.list        {workspaceId, skillTags?, status?, limit?, offset?}
-
-Attempt
-  attempt.create        {taskId, assigneeId}
-  attempt.get           {id}
-  attempt.list          {taskId, limit?, offset?}
-  attempt.transition    {id, status, failureReason?}
-
-Blueprint
-  blueprint.create                 {issueId}
-  blueprint.get                    {id}
-  blueprint.list                   {issueId, limit?, offset?}
-  blueprint.add_step               {blueprintId, description, sortOrder?, requiredResources?, dependsOn?}
-  blueprint.update_step            {id, description?, sortOrder?, requiredResources?}
-  blueprint.delete_step            {id}
-  blueprint.set_step_depends_on    {id, dependsOn}
-  blueprint.set_estimated_budget   {id, estimatedBudget}
-  blueprint.set_notes              {id, notes}
-  blueprint.render_markdown        {id}
-  blueprint.submit_for_approval    {id}
-  blueprint.create_amendment       {issueId}
-
-Comment
-  comment.append        {workType, workId, authorId, bodyMarkdown, eventType?, eventPayload?}
-  comment.list          {workType, workId, limit?, offset?}
-
-Link (WorkConversationLink)
-  link.create           {workType, workId, conversationId, linkRole, anchorMessageId?}
-  link.list             {workType?, workId?, conversationId?}
-
-System
-  system.initialize_workspace  {workspaceId, teamId}
-  system.approval_decision     {blueprintId, approved}
-  system.auto_archive          {workspaceId}
+BLUEPRINT / ATTEMPT / COMMENT / LINK / SYSTEM / TASKBOARD  — all ⏳
+  blueprint.create / get / list / add_step / update_step / delete_step
+  blueprint.set_step_depends_on / set_estimated_budget / set_notes
+  blueprint.render_markdown / submit_for_approval / create_amendment
+  attempt.create / get / list / transition
+  comment.append / comment.list
+  link.create / link.list
+  taskboard.list
+  system.initialize_workspace / approval_decision / auto_archive
 
 Environment:
-  COCO_API_URL     COCO backend base URL (default: http://127.0.0.1:8080).
-                   In dev with cws-work standalone, set to http://127.0.0.1:18080
-                   AND set COCO_API_PREFIX=/api to bypass the gateway prefix.
-  COCO_AUTH_TOKEN  Bearer token for authenticated endpoints (optional).
-  COCO_API_PREFIX  Gateway path prefix (default: /api/gateway/v1).
-                   Set to "/api" for cws-work standalone.
-
-Routing notes:
-  - Project + Task core CRUD route through the cws-fe Gateway
-    (/api/gateway/v1/*).
-  - Issue, Blueprint, Attempt, Comment, Link, System, TaskBoard, task.claim,
-    task.reassign currently target cws-work direct paths (/api/*) until the
-    gateway exposes equivalents.
+  COCO_API_URL     cws-core base URL (default: http://127.0.0.1:8080)
+  COCO_AUTH_TOKEN  Bearer token
+  COCO_API_PREFIX  Path prefix override (default: /api/v1)
 `);
 }
 
@@ -321,14 +318,12 @@ async function main() {
     printUsage();
     process.exit(0);
   }
-
   const handler = COMMANDS[command];
   if (!handler) {
     console.error(`Unknown command: ${command}`);
     printUsage();
     process.exit(1);
   }
-
   try {
     const result = await handler();
     console.log(JSON.stringify(result, null, 2));
