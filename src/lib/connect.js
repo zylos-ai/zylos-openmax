@@ -1,25 +1,34 @@
 /**
- * WebSocket connection helpers.
+ * WebSocket connection helpers — cws-comm api-usage-guide §1 + §6.
  *
- * Sequence (combining cws-core ws-ticket-handoff and cws-comm api-design):
- *   1. POST cws-core `/auth/ws-ticket` with the agent's api_key in the
- *      Authorization header. Receive a short-lived single-use ticket
- *      (30s TTL). [fetchWsTicket]
- *   2. WS connect to cws-comm at `<ws_url>?ticket=<X>`. cws-comm validates
- *      the ticket by calling cws-core's internal gRPC ConsumeWSTicket.
- *   3. After WS is open, client sends a `connect` text frame with
- *      {token, client_id, platform, last_seq, app_version, device_id}
- *      to convey app-layer identity and seq cursor. [buildConnectFrame]
- *   4. Server replies with `connect_response` carrying
- *      {session_token, server_time, max_seq, user_id, resume_result?}.
- *      The session_token authenticates subsequent WS frames on this
- *      direct cws-comm link; it is NOT used for REST (REST always goes
- *      through cws-core with api_key). [parseConnectResponse]
- *   5. ResumeResult tells the client whether the gap can be filled
+ * Sequence:
+ *   1. WS upgrade against cws-comm with HTTP headers:
+ *        Authorization: Bearer <api_key>
+ *        X-Workspace-Id: <workspace_id>
+ *        X-Device-Id:    <device_id>          (optional but recommended)
+ *        X-Client-Version: <app_version>      (optional)
+ *      Header injection is handled by `WsClient` in ./ws.js.
+ *   2. After WS open, client sends a `connect` text frame conveying
+ *      app-layer identity + seq cursor:
+ *        {type:"connect", payload:{
+ *          token: api_key, client_id, platform, last_seq,
+ *          app_version, device_id
+ *        }}                                                [buildConnectFrame]
+ *   3. Server replies with a `connect_response` frame:
+ *        {type:"connect_response", payload:{
+ *          session_token, server_time, max_seq, user_id, resume_result?
+ *        }}                                                [parseConnectResponse]
+ *      The session_token is persisted for diagnostics. We keep using
+ *      api_key as the WS-upgrade credential on reconnects (long-lived
+ *      and key-based, per §6 agent flow); session_token is not required
+ *      for our REST path either (REST uses api_key throughout).
+ *   4. resume_result tells the client whether the gap can be filled
  *      inline via missed_messages, or via the SYNC_BATCH flow.
+ *
+ * Earlier scaffold went via cws-core /auth/ws-ticket; that path is no
+ * longer used (the ticket helpers were removed). If you need to talk
+ * to a deployment that requires tickets, restore them from VCS history.
  */
-
-import { post } from './client.js';
 
 export function buildConnectFrame({
   token,
@@ -79,42 +88,4 @@ export function buildSyncAck(lastReceivedSeq) {
     type: 'sync_ack',
     payload: { last_received_seq: Number(lastReceivedSeq) || 0 },
   };
-}
-
-/**
- * Fetch a short-lived WebSocket ticket from cws-core.
- *
- * @param {string} ticketPath - relative path on cws-core (e.g. `/auth/ws-ticket`)
- * @returns {Promise<string>} the opaque ticket string
- *
- * Honours HTTP 429 Retry-After by throwing an error tagged with .retryAfterMs;
- * caller's backoff loop should respect it.
- */
-export async function fetchWsTicket(ticketPath = '/auth/ws-ticket') {
-  try {
-    const r = await post(ticketPath, { audience: 'cws-comm' });
-    const ticket = (r && (r.ticket || r.token || r.ws_ticket)) || null;
-    if (!ticket) throw new Error('cws-core ws-ticket response missing ticket field');
-    return ticket;
-  } catch (err) {
-    // client.js attaches `.status` and `.body` on HTTP errors
-    if (err.status === 429) {
-      const retryAfter = Number(err.body?.retry_after_ms ?? err.body?.retry_after ?? 0);
-      err.retryAfterMs = retryAfter > 0 ? retryAfter : 2000;
-    }
-    throw err;
-  }
-}
-
-/**
- * Compose the final WebSocket URL with the ticket in the query string.
- *
- * @param {string} baseWsUrl  e.g. `ws://comm/ws`
- * @param {string} ticket     opaque ticket from fetchWsTicket
- */
-export function buildWsUrlWithTicket(baseWsUrl, ticket) {
-  if (!baseWsUrl) throw new Error('buildWsUrlWithTicket: baseWsUrl required');
-  if (!ticket)    throw new Error('buildWsUrlWithTicket: ticket required');
-  const sep = baseWsUrl.includes('?') ? '&' : '?';
-  return `${baseWsUrl}${sep}ticket=${encodeURIComponent(ticket)}`;
 }

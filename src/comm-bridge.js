@@ -3,10 +3,12 @@
 /**
  * Communication bridge — PM2 service entry point.
  *
- * Implements cws-comm api-design.md §3-§4 client side:
- *   1. Opens WebSocket with Authorization+X-Workspace-Id headers.
- *   2. Sends ConnectRequest first frame, awaits ConnectResponse,
- *      persists session_token + user_id + last_seq into runtime/session.json.
+ * Implements cws-comm api-usage-guide §1 + §6 (Agent integration):
+ *   1. Opens WebSocket directly to cws-comm with `Authorization: Bearer
+ *      <api_key>` + `X-Workspace-Id` headers (no ws-ticket pre-fetch).
+ *   2. Sends ConnectRequest first frame (token = api_key), awaits
+ *      ConnectResponse, persists session_token + user_id + last_seq
+ *      into runtime/session.json.
  *   3. Handles inbound frames:
  *        message            → responseMode filter → ctx fetch → c4-receive
  *        sync_start         → expect sync_batch series
@@ -40,8 +42,6 @@ import {
   parseConnectResponse,
   buildSyncAck,
   computeClockOffset,
-  fetchWsTicket,
-  buildWsUrlWithTicket,
 } from './lib/connect.js';
 
 const LOG_PREFIX = '[comm-bridge]';
@@ -348,19 +348,20 @@ if (!wsUrl) {
   process.exit(1);
 }
 
-// Each connect (initial + every reconnect) mints a fresh single-use ticket
-// from cws-core's /auth/ws-ticket endpoint. cws-comm validates it via
-// internal gRPC ConsumeWSTicket. Ticket TTL is 30s.
-async function provideTicketedUrl() {
-  const ticket = await fetchWsTicket(config.comm?.ws_ticket_path || '/auth/ws-ticket');
-  return buildWsUrlWithTicket(wsUrl, ticket);
+// api_key is the WS-upgrade credential per api-usage-guide §1 + §6.
+// Lookup order matches client.js token resolution.
+const apiKey =
+  config.agent?.api_key ||
+  process.env.COCO_AUTH_TOKEN ||
+  '';
+if (!apiKey) {
+  warn('no api_key/COCO_AUTH_TOKEN — WS upgrade will be rejected by cws-comm');
 }
 
 const ws = new WsClient({
-  // urlProvider replaces `url`; called before each connect to mint a fresh ticket
-  urlProvider: provideTicketedUrl,
-  // No Authorization header on the WS upgrade — auth happens via the
-  // ticket in the URL query string. We keep this empty (token undefined).
+  url: wsUrl,
+  // WsClient turns this into `Authorization: Bearer <token>` on upgrade.
+  token: apiKey,
   workspaceId:   config.workspace_id,
   deviceId:      config.device_id,
   clientVersion: config.app_version,
@@ -379,8 +380,8 @@ const ws = new WsClient({
     connected = false;
     log(`closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
     if (code === 4003) {
-      // Session expired — next ticket fetch will mint a new one via
-      // api_key; nothing else to do here besides clearing persisted state.
+      // Session expired — our reconnect uses api_key again on the next
+      // upgrade, so just clear the cached session state.
       log('session expired; clearing persisted session');
       sessionToken = '';
       clearSession();
@@ -390,7 +391,7 @@ const ws = new WsClient({
   onFatal: (code, reason) => {
     connected = false;
     console.error(LOG_PREFIX, `fatal close code=${code} reason="${reason || ''}" — not reconnecting`);
-    if (code === 4002) console.error(LOG_PREFIX, '→ auth failed; check agent.api_key');
+    if (code === 4002) console.error(LOG_PREFIX, '→ auth failed; check COCO_AUTH_TOKEN / agent.api_key');
     if (code === 4005) console.error(LOG_PREFIX, '→ workspace suspended');
     if (code === 4006) console.error(LOG_PREFIX, '→ duplicate connection');
     process.exit(1);

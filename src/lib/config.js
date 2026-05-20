@@ -11,20 +11,25 @@ const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json
 /**
  * Default configuration.
  *
- * Architecture (per user clarification 2026-05-20):
- *   - ALL REST traffic goes through cws-core (BFF). cws-core internally
- *     forwards to backend services (cws-comm / cws-work / cws-kb / cws-as
- *     / ...) via gRPC. From the client's perspective there is exactly
- *     one REST base URL: cws-core.
- *   - WebSocket ALONE is direct to cws-comm. Connection is gated by a
- *     short-lived single-use ticket obtained from cws-core
- *     (POST /auth/ws-ticket). cws-comm validates the ticket via gRPC
- *     callback to cws-core (ConsumeWSTicket) at handshake time.
+ * Architecture (cws-comm api-usage-guide §1 + §6, agent integration):
+ *   - REST IM endpoints (POST /api/v1/messages etc.) hit cws-comm directly
+ *     with `Authorization: Bearer <api_key>` + `X-Workspace-Id`.
+ *   - Non-IM REST (KB/AS/TM/Core directory queries) hit the cws-fe Gateway
+ *     under /api/gateway/v1/*; same Bearer + workspace header.
+ *   - WebSocket is direct to cws-comm. Per api-usage-guide §6, the WS
+ *     upgrade carries `Authorization: Bearer <api_key>` directly; no
+ *     ticket pre-fetch is needed. The first `connect` frame echoes the
+ *     api_key as `token` (along with client_id, device_id, last_seq).
+ *   - Server replies with `connect_response` carrying a `session_token`.
+ *     We persist it for diagnostics but keep using api_key on reconnect
+ *     (api_key is long-lived; session_token would also work but adds
+ *     no value for a server-side agent).
  *
  * Required at install time (post-install hook will prompt):
  *   - workspace_id          (X-Workspace-Id header on every request)
- *   - agent.api_key         (Bearer credential for cws-core REST + for
- *                            fetching the WS ticket)
+ *   - agent.api_key         (Bearer credential for both REST and WS upgrade;
+ *                            post-install writes it to ~/zylos/.env as
+ *                            COCO_AUTH_TOKEN, not into this file)
  *
  * Generated at install time:
  *   - device_id, client_id  (UUIDv4, persisted across restarts)
@@ -36,16 +41,12 @@ export const DEFAULT_CONFIG = {
   client_id: '',
   app_version: '0.1.0',
   comm: {
-    // REST base — cws-core (BFF). Used for /auth/* and /api/v1/*.
+    // REST base — cws-comm direct for IM, cws-fe Gateway for the rest.
+    // Both are reached via this URL (they share host/port in production).
     core_url: 'http://127.0.0.1:8080',
-    // WebSocket direct endpoint — cws-comm. May share host/port with
-    // core_url in some deployments, or differ in dev.
+    // WebSocket direct endpoint — cws-comm. Auth: Bearer api_key header
+    // on upgrade (api-usage-guide §1.步骤一 / §6.步骤一). No ws-ticket.
     ws_url:  'ws://127.0.0.1:8080/ws',
-    // ws-ticket path on cws-core (api-versioning.md §"Path Convention" D14).
-    // TODO confirm with cws-core team — ws-ticket-handoff.md §3.1 had
-    // an older spelling `/api/v1/ws/ticket`; the newer api-versioning
-    // doc places it under /auth/*.
-    ws_ticket_path: '/auth/ws-ticket',
     reconnect_max_delay: 30000,
     heartbeat_interval: 30000,
     platform: 'server',
