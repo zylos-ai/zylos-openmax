@@ -42,6 +42,11 @@ const RATE_LIMITED_CLOSE_CODES = new Set([4004]);
 export class WsClient {
   constructor({
     url,
+    urlProvider,            // optional async () => string; if present, called
+                            // before each connect to mint a fresh URL (e.g.
+                            // to fetch a one-shot ticket and append it).
+                            // If it throws, the connect is retried via the
+                            // normal backoff loop.
     token,
     workspaceId,
     deviceId,
@@ -54,6 +59,7 @@ export class WsClient {
     onFatal,
   }) {
     this.url = url;
+    this.urlProvider = urlProvider || null;
     this.token = token;
     this.workspaceId   = workspaceId   || '';
     this.deviceId      = deviceId      || '';
@@ -75,7 +81,7 @@ export class WsClient {
 
   start() {
     this.stopped = false;
-    this._connect();
+    this._connect().catch(err => console.error('[ws] connect threw:', err.message));
   }
 
   stop() {
@@ -102,14 +108,32 @@ export class WsClient {
 
   isOpen() { return this.ws && this.ws.readyState === WebSocket.OPEN; }
 
-  _connect() {
+  async _connect() {
+    let url = this.url;
+    if (this.urlProvider) {
+      try {
+        url = await this.urlProvider();
+      } catch (err) {
+        console.error('[ws] urlProvider failed:', err.message);
+        // Respect Retry-After hints from cws-core when fetching ws-ticket
+        const retryHint = Number(err.retryAfterMs) || 0;
+        if (!this.stopped) this._scheduleReconnect(false, retryHint);
+        return;
+      }
+    }
+    if (!url) {
+      console.error('[ws] no URL to connect to');
+      if (!this.stopped) this._scheduleReconnect(false);
+      return;
+    }
+
     const headers = {};
     if (this.token)         headers.Authorization      = `Bearer ${this.token}`;
     if (this.workspaceId)   headers['X-Workspace-Id']  = this.workspaceId;
     if (this.deviceId)      headers['X-Device-Id']     = this.deviceId;
     if (this.clientVersion) headers['X-Client-Version'] = this.clientVersion;
 
-    this.ws = new WebSocket(this.url, { headers });
+    this.ws = new WebSocket(url, { headers });
     this.lastFrameAt = Date.now();
 
     this.ws.on('open', () => {

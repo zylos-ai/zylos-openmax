@@ -1,25 +1,30 @@
 /**
- * Session token persistence — cross-process bridge between comm-bridge.js
- * (which performs the WebSocket handshake and receives the session token)
- * and scripts/send.js (which needs to authenticate without re-handshaking).
+ * WebSocket runtime-state persistence.
+ *
+ * In this architecture REST always uses the agent's api_key (via cws-core),
+ * so the cws-comm session_token is NOT a cross-process REST credential.
+ * It only authenticates WebSocket frames on the direct cws-comm link.
+ *
+ * We still persist a small amount of runtime state across restarts so a
+ * warm-restart can present `last_seq` in its ConnectRequest and avoid
+ * re-syncing the full backlog.
  *
  * State is stored as JSON at:
  *   ~/zylos/components/coco-workspace/runtime/session.json
  *
  * Schema:
  *   {
- *     session_token: string,
- *     user_id:       string,
+ *     user_id:       string,   // own participant id (from connect_response)
  *     workspace_id:  string,
- *     server_time:   number,   // server epoch ms at handshake
- *     received_at:   number,   // local epoch ms at handshake
- *     last_seq:      number    // updated by comm-bridge as it processes frames
+ *     server_time:   number,   // server epoch ms at last handshake
+ *     received_at:   number,   // local epoch ms at last handshake
+ *     last_seq:      number,   // updated as comm-bridge processes frames
+ *     session_token: string    // optional, opaque to other processes; kept
+ *                              // only for diagnostic / future WS reuse
  *   }
  *
- * Concurrency note: this file is written by exactly one writer
- * (comm-bridge) and read by occasional callers (send.js). Best-effort
- * serialisation via atomic rename; if rename loses to a concurrent write,
- * the loser silently drops — both writers carry equivalent token state.
+ * Best-effort atomic writes via tmp + rename. Single-writer (comm-bridge),
+ * occasional readers (send.js for diagnostics).
  */
 
 import fs from 'fs';

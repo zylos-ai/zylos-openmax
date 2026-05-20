@@ -33,13 +33,15 @@ import { loadConfig, watchConfig } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint } from './lib/message.js';
 import { downloadMedia } from './lib/media.js';
-import { get, post, setSessionToken, setHeaders } from './lib/client.js';
+import { get, setApiKey, setHeaders } from './lib/client.js';
 import { saveSession, loadSession, clearSession } from './lib/session.js';
 import {
   buildConnectFrame,
   parseConnectResponse,
   buildSyncAck,
   computeClockOffset,
+  fetchWsTicket,
+  buildWsUrlWithTicket,
 } from './lib/connect.js';
 
 const LOG_PREFIX = '[comm-bridge]';
@@ -212,7 +214,9 @@ function processConnectResponse(frame) {
     sessionToken = cr.sessionToken;
     userId = cr.userId || userId;
     clockOffset = computeClockOffset(cr.serverTime, Date.now());
-    setSessionToken(sessionToken);
+    // NOTE: session_token authenticates WS frames on the direct cws-comm
+    // link only. REST goes through cws-core with the agent's api_key —
+    // do not overwrite the REST client's token here.
     persistSession({
       session_token: sessionToken,
       user_id: userId,
@@ -232,7 +236,6 @@ function processConnectResponse(frame) {
     }
     if (cr.resume?.new_session_token) {
       sessionToken = cr.resume.new_session_token;
-      setSessionToken(sessionToken);
       persistSession({ session_token: sessionToken });
       log('session_token rotated');
     }
@@ -325,14 +328,15 @@ setHeaders({
   // client.js will pull from config too, but seed explicit values here
 });
 
-// On boot, try to reuse a persisted session_token (warm restart)
+// On boot, try to reuse persisted runtime state (warm restart).
+// session_token is NOT seeded into the REST client — REST uses api_key
+// via cws-core. session_token only authenticates WS frames.
 const sess = loadSession();
-if (sess?.session_token) {
-  sessionToken = sess.session_token;
+if (sess) {
+  sessionToken = sess.session_token || '';
   userId = sess.user_id || '';
   lastSeq = sess.last_seq || 0;
-  setSessionToken(sessionToken);
-  log(`warm-restart: loaded session user=${userId} lastSeq=${lastSeq}`);
+  log(`warm-restart: loaded user=${userId} lastSeq=${lastSeq}`);
 }
 
 const wsUrl = process.env.COCO_WS_URL || config.comm?.ws_url;
@@ -341,10 +345,19 @@ if (!wsUrl) {
   process.exit(1);
 }
 
+// Each connect (initial + every reconnect) mints a fresh single-use ticket
+// from cws-core's /auth/ws-ticket endpoint. cws-comm validates it via
+// internal gRPC ConsumeWSTicket. Ticket TTL is 30s.
+async function provideTicketedUrl() {
+  const ticket = await fetchWsTicket(config.comm?.ws_ticket_path || '/auth/ws-ticket');
+  return buildWsUrlWithTicket(wsUrl, ticket);
+}
+
 const ws = new WsClient({
-  url: wsUrl,
-  // Use api_key for HTTP upgrade auth; the in-band connect frame also carries it.
-  token: config.agent?.api_key || process.env.COCO_AUTH_TOKEN || sessionToken,
+  // urlProvider replaces `url`; called before each connect to mint a fresh ticket
+  urlProvider: provideTicketedUrl,
+  // No Authorization header on the WS upgrade — auth happens via the
+  // ticket in the URL query string. We keep this empty (token undefined).
   workspaceId:   config.workspace_id,
   deviceId:      config.device_id,
   clientVersion: config.app_version,
@@ -363,12 +376,11 @@ const ws = new WsClient({
     connected = false;
     log(`closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
     if (code === 4003) {
-      // session expired — clear so next handshake uses api_key fresh
-      log('session expired; clearing session_token');
+      // Session expired — next ticket fetch will mint a new one via
+      // api_key; nothing else to do here besides clearing persisted state.
+      log('session expired; clearing persisted session');
       sessionToken = '';
-      setSessionToken(null);
       clearSession();
-      ws.setToken(config.agent?.api_key || process.env.COCO_AUTH_TOKEN || '');
     }
   },
 

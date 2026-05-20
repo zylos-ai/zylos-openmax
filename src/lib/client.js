@@ -1,24 +1,28 @@
 /**
- * Shared HTTP client for all CLI modules.
+ * Shared HTTP client for all REST calls.
  *
- * Uses Node.js 20+ native fetch with Bearer token authentication.
- * Aligned with cws-comm api-design.md §2:
- *   - Authorization: Bearer <session_token | api_key>
- *   - X-Workspace-Id:  <workspace_id>            (required)
- *   - X-Device-Id:     <device_id>               (recommended)
- *   - X-Client-Version: <semver>                 (recommended)
+ * In this architecture all REST goes through cws-core (BFF), even for
+ * functionality logically owned by cws-comm / cws-work / etc. — cws-core
+ * forwards over gRPC internally. We therefore have ONE REST base URL
+ * (cws-core) and the cws-comm WS session_token is NOT a REST credential
+ * (it only authenticates WebSocket frames on the direct cws-comm link).
  *
- * Token resolution order (per request):
- *   1. setSessionToken(t)                — set explicitly by handshake
- *   2. ~/zylos/components/coco-workspace/runtime/session.json  (cross-process)
- *   3. process.env.COCO_AUTH_TOKEN       (long-lived API key fallback)
- *   4. config.agent.api_key              (api key from config)
+ * Token resolution order for REST (per request):
+ *   1. setApiKey(t)                  — set explicitly by caller
+ *   2. process.env.COCO_AUTH_TOKEN   — long-lived API key
+ *   3. config.agent.api_key          — same key, from config
  *
  * Base URL resolution:
- *   1. setBaseUrl(u)                     — explicit
- *   2. process.env.COCO_API_URL
- *   3. config.comm.api_url
- *   4. http://127.0.0.1:8080
+ *   1. setBaseUrl(u)                 — explicit
+ *   2. process.env.COCO_API_URL      — env override (deploy convenience)
+ *   3. config.comm.core_url          — canonical config field
+ *   4. http://127.0.0.1:8080         — dev fallback
+ *
+ * Headers attached on every request (cws-comm api-design §2):
+ *   - Authorization: Bearer <api_key>
+ *   - X-Workspace-Id  (required)
+ *   - X-Device-Id     (recommended)
+ *   - X-Client-Version (recommended)
  *
  * Method signatures (matches cws-work/zylos-tm):
  *   - get(path, query?)              GET with optional query params
@@ -33,27 +37,27 @@
  */
 
 import { loadConfig } from './config.js';
-import { loadSession } from './session.js';
 
-let activeSessionToken = null;
+let activeApiKey = null;
 let activeBaseUrl = null;
 let activeHeaders = null;
 
-export function setSessionToken(token) { activeSessionToken = token || null; }
-export function setBaseUrl(url)        { activeBaseUrl = url || null; }
-export function setHeaders(h)          { activeHeaders = h || null; }
+export function setApiKey(token)  { activeApiKey = token || null; }
+export function setBaseUrl(url)   { activeBaseUrl = url || null; }
+export function setHeaders(h)     { activeHeaders = h || null; }
+
+// Back-compat alias — older callers expected setSessionToken; deprecated.
+export const setSessionToken = setApiKey;
 
 function resolveBaseUrl() {
   if (activeBaseUrl) return activeBaseUrl;
   if (process.env.COCO_API_URL) return process.env.COCO_API_URL;
   const cfg = loadConfig();
-  return cfg.comm?.api_url || 'http://127.0.0.1:8080';
+  return cfg.comm?.core_url || cfg.comm?.api_url || 'http://127.0.0.1:8080';
 }
 
 function resolveToken() {
-  if (activeSessionToken) return activeSessionToken;
-  const sess = loadSession();
-  if (sess?.session_token) return sess.session_token;
+  if (activeApiKey) return activeApiKey;
   if (process.env.COCO_AUTH_TOKEN) return process.env.COCO_AUTH_TOKEN;
   const cfg = loadConfig();
   return cfg.agent?.api_key || '';

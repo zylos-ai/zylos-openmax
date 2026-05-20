@@ -9,13 +9,22 @@ const HOME = process.env.HOME;
 const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json');
 
 /**
- * Default configuration aligned with cws-comm api-design.md §1-§4.
+ * Default configuration.
+ *
+ * Architecture (per user clarification 2026-05-20):
+ *   - ALL REST traffic goes through cws-core (BFF). cws-core internally
+ *     forwards to backend services (cws-comm / cws-work / cws-kb / cws-as
+ *     / ...) via gRPC. From the client's perspective there is exactly
+ *     one REST base URL: cws-core.
+ *   - WebSocket ALONE is direct to cws-comm. Connection is gated by a
+ *     short-lived single-use ticket obtained from cws-core
+ *     (POST /auth/ws-ticket). cws-comm validates the ticket via gRPC
+ *     callback to cws-core (ConsumeWSTicket) at handshake time.
  *
  * Required at install time (post-install hook will prompt):
  *   - workspace_id          (X-Workspace-Id header on every request)
- *   - agent.api_key         (used for the initial ConnectRequest handshake;
- *                            once a session_token is received it is preferred
- *                            for subsequent calls)
+ *   - agent.api_key         (Bearer credential for cws-core REST + for
+ *                            fetching the WS ticket)
  *
  * Generated at install time:
  *   - device_id, client_id  (UUIDv4, persisted across restarts)
@@ -27,8 +36,16 @@ export const DEFAULT_CONFIG = {
   client_id: '',
   app_version: '0.1.0',
   comm: {
-    api_url: 'http://127.0.0.1:8080',  // REST base (cws-comm gateway)
+    // REST base — cws-core (BFF). Used for /auth/* and /api/v1/*.
+    core_url: 'http://127.0.0.1:8080',
+    // WebSocket direct endpoint — cws-comm. May share host/port with
+    // core_url in some deployments, or differ in dev.
     ws_url:  'ws://127.0.0.1:8080/ws',
+    // ws-ticket path on cws-core (api-versioning.md §"Path Convention" D14).
+    // TODO confirm with cws-core team — ws-ticket-handoff.md §3.1 had
+    // an older spelling `/api/v1/ws/ticket`; the newer api-versioning
+    // doc places it under /auth/*.
+    ws_ticket_path: '/auth/ws-ticket',
     reconnect_max_delay: 30000,
     heartbeat_interval: 30000,
     platform: 'server',
