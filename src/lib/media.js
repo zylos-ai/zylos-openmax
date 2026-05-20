@@ -1,18 +1,19 @@
 /**
  * Media file handling.
  *
- * Inbound:  download from COCO message attachment → local temp path,
- *           the path is then embedded into the C4 inbound text so Agents
- *           can read it directly (cf. DESIGN.md §3.5).
+ * Inbound:  download attachment bytes referenced in an incoming
+ *           message frame → local temp file, the path is then embedded
+ *           into the C4 inbound text so the Agent can read it directly.
  *
- * Outbound: upload local file to ArtifactStore (cws-as), get artifact:// URI,
- *           pass URI back to caller who sends it via cli/comm.js or
- *           scripts/send.js (cf. DESIGN.md §3.3 "[MEDIA:image]/path → AS").
+ * Outbound: upload local file via cws-comm `/api/v1/media/upload`
+ *           (api-design.md §5.8). cws-comm delegates storage to AS and
+ *           returns `{media_id, upload_url, upload_headers, expires_at}`.
+ *           The caller then PUTs the bytes to `upload_url` with the
+ *           returned headers. No separate finalize step.
  *
- * Note: cws-as is not implemented yet (DESIGN.md §8 待细化 #3). The
- * uploadToAS function assumes a 3-step presigned-URL flow consistent with
- * §3.3 kb-as-operations-reference.md, but the exact endpoint paths must
- * be confirmed once cws-as publishes its API.
+ * The returned `media_id` is what messages reference in
+ * `content.media_id`, not an `artifact://` URI (AS internals are hidden
+ * behind cws-comm).
  */
 
 import fs from 'fs';
@@ -27,11 +28,12 @@ async function ensureTmpDir() {
 }
 
 /**
- * Download a media file referenced by a COCO message attachment.
+ * Download a media file from a (typically pre-signed) URL provided by
+ * cws-comm in the incoming message frame.
  *
- * @param {string} url - presigned download URL (provided by cws-comm in the message frame)
- * @param {string} [filename] - suggested filename; auto-generated if omitted
- * @returns {Promise<string>} - absolute local path of the downloaded file
+ * @param {string} url
+ * @param {string} [filename]
+ * @returns {Promise<string>} absolute local path
  */
 export async function downloadMedia(url, filename) {
   if (!url) throw new Error('downloadMedia: url is required');
@@ -46,40 +48,55 @@ export async function downloadMedia(url, filename) {
   return localPath;
 }
 
+const MIME_BY_KIND = {
+  image: 'image/png',
+  video: 'video/mp4',
+  audio: 'audio/mpeg',
+  voice: 'audio/ogg',
+  file:  'application/octet-stream',
+  sticker: 'image/webp',
+};
+
 /**
- * Upload a local file to ArtifactStore via a 3-step presigned flow:
- *   1. POST /api/artifacts/presign  → { uploadUrl, artifactId }
- *   2. PUT  uploadUrl  with raw bytes
- *   3. POST /api/artifacts/{id}/finalize → artifact becomes `active`
- *
- * Returns the `artifact://{id}` URI for embedding in messages / KB pages.
+ * Upload a local file via cws-comm's media endpoint and return the
+ * server-assigned media_id.
  *
  * @param {string} localPath
- * @param {object} [opts]
- * @param {string} [opts.contentType]
+ * @param {object} opts
+ * @param {string} opts.conversationId  required (access-control scoping)
+ * @param {string} [opts.mediaType]     image|video|audio|voice|file|sticker (default file)
+ * @param {string} [opts.mimeType]      explicit MIME; inferred from mediaType otherwise
+ * @returns {Promise<{mediaId:string, mediaType:string, mimeType:string, size:number}>}
  */
-export async function uploadToAS(localPath, opts = {}) {
-  if (!localPath) throw new Error('uploadToAS: localPath is required');
+export async function uploadMedia(localPath, opts = {}) {
+  if (!localPath) throw new Error('uploadMedia: localPath is required');
+  if (!opts.conversationId) {
+    throw new Error('uploadMedia: opts.conversationId is required for access scoping');
+  }
   const stat = await fs.promises.stat(localPath);
+  const mediaType = opts.mediaType || 'file';
+  const mimeType  = opts.mimeType || MIME_BY_KIND[mediaType] || 'application/octet-stream';
+  const fileName  = path.basename(localPath);
 
-  const presign = await post('/api/artifacts/presign', {
-    filename:    path.basename(localPath),
-    size:        stat.size,
-    contentType: opts.contentType || 'application/octet-stream',
+  const init = await post('/api/v1/media/upload', {
+    file_name:       fileName,
+    mime_type:       mimeType,
+    file_size:       stat.size,
+    conversation_id: opts.conversationId,
+    media_type:      mediaType,
   });
-  const { uploadUrl, artifactId } = presign;
-  if (!uploadUrl || !artifactId) {
-    throw new Error('AS presign returned no uploadUrl/artifactId');
+  const { media_id: mediaId, upload_url: uploadUrl, upload_headers: uploadHeaders } = init || {};
+  if (!mediaId || !uploadUrl) {
+    throw new Error('cws-comm /media/upload returned no media_id/upload_url');
   }
 
   const data = await fs.promises.readFile(localPath);
   const r = await fetch(uploadUrl, {
     method: 'PUT',
     body: data,
-    headers: { 'Content-Type': opts.contentType || 'application/octet-stream' },
+    headers: { 'Content-Type': mimeType, ...(uploadHeaders || {}) },
   });
-  if (!r.ok) throw new Error(`AS upload failed: HTTP ${r.status}`);
+  if (!r.ok) throw new Error(`media PUT failed: HTTP ${r.status}`);
 
-  await post(`/api/artifacts/${artifactId}/finalize`, {});
-  return `artifact://${artifactId}`;
+  return { mediaId, mediaType, mimeType, size: stat.size, fileName };
 }

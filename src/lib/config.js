@@ -8,16 +8,35 @@ import path from 'path';
 const HOME = process.env.HOME;
 const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json');
 
+/**
+ * Default configuration aligned with cws-comm api-design.md §1-§4.
+ *
+ * Required at install time (post-install hook will prompt):
+ *   - workspace_id          (X-Workspace-Id header on every request)
+ *   - agent.api_key         (used for the initial ConnectRequest handshake;
+ *                            once a session_token is received it is preferred
+ *                            for subsequent calls)
+ *
+ * Generated at install time:
+ *   - device_id, client_id  (UUIDv4, persisted across restarts)
+ */
 export const DEFAULT_CONFIG = {
   enabled: true,
+  workspace_id: '',
+  device_id: '',
+  client_id: '',
+  app_version: '0.1.0',
   comm: {
-    ws_url: 'ws://127.0.0.1:8080/ws',
+    api_url: 'http://127.0.0.1:8080',  // REST base (cws-comm gateway)
+    ws_url:  'ws://127.0.0.1:8080/ws',
     reconnect_max_delay: 30000,
     heartbeat_interval: 30000,
+    platform: 'server',
   },
   agent: {
     id: '',
     participant_id: '',
+    api_key: '',
   },
   message: {
     context_messages: 10,
@@ -27,14 +46,28 @@ export const DEFAULT_CONFIG = {
 
 let currentConfig = null;
 
+function deepMerge(base, override) {
+  if (!override || typeof override !== 'object' || Array.isArray(override)) return base;
+  const out = { ...base };
+  for (const [k, v] of Object.entries(override)) {
+    if (v && typeof v === 'object' && !Array.isArray(v)
+        && base[k] && typeof base[k] === 'object' && !Array.isArray(base[k])) {
+      out[k] = deepMerge(base[k], v);
+    } else if (v !== undefined) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
 export function loadConfig() {
   if (currentConfig) return currentConfig;
 
   try {
     const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
-    currentConfig = { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    currentConfig = deepMerge(DEFAULT_CONFIG, JSON.parse(raw));
   } catch {
-    currentConfig = { ...DEFAULT_CONFIG };
+    currentConfig = deepMerge(DEFAULT_CONFIG, {});
   }
 
   return currentConfig;

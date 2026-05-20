@@ -13,8 +13,18 @@
  *   (with optional `---- file: <path>` or `---- image: <path>` suffix)
  */
 
+import { randomUUID } from 'crypto';
+
 const TYPE_TAG = { dm: '[COCO DM]', group: '[COCO GROUP]', thread: '[COCO THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
+
+/**
+ * Generate a client-side idempotency key for SendMessageRequest.client_msg_id.
+ * The server de-dupes identical client_msg_id within 5 minutes (api-design.md §5.1).
+ */
+export function newClientMsgId() {
+  return `c_${randomUUID()}`;
+}
 
 /**
  * Parse a C4 endpoint string into structured fields.
