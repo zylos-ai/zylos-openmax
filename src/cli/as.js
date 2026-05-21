@@ -237,6 +237,24 @@ const COMMANDS = {
     return asClient().get(`/api/v1/artifacts/${params.artifactId}`);
   },
 
+  // ✅ Update artifact metadata (PATCH /artifacts/{id})
+  //    Fields allowed: name, description, metadata. Bytes are immutable.
+  'as.update': async (params) => {
+    if (!params.artifactId) throw new Error('artifactId is required');
+    return asClient().patch(`/api/v1/artifacts/${params.artifactId}`, {
+      name:        params.name,
+      description: params.description,
+      metadata:    params.metadata,
+    });
+  },
+
+  // ✅ Soft-delete artifact (DELETE /artifacts/{id})
+  //    Marks status=deleted; bytes are kept until retention sweep.
+  'as.delete': async (params) => {
+    if (!params.artifactId) throw new Error('artifactId is required');
+    return asClient().del(`/api/v1/artifacts/${params.artifactId}`);
+  },
+
   // ✅ Pre-signed download URL
   'as.url': async (params) => {
     if (!params.artifactId) throw new Error('artifactId is required');
@@ -278,6 +296,12 @@ Commands (all ✅ — cws-as has these wired up)
 
   as.get        {artifactId}
                 # → full artifact metadata
+
+  as.update     {artifactId, name?, description?, metadata?}
+                # PATCH /artifacts/{id} — bytes are immutable, only metadata edits
+
+  as.delete     {artifactId}
+                # DELETE /artifacts/{id} — soft delete (status → deleted)
 
   as.url        {artifactId, mode?}
                 # mode: download|preview (default download)

@@ -35,8 +35,8 @@ Org(组织,scope 单位)
 | --- | --- | --- | --- |
 | ✅ | `kb.init` | `{orgId?}` | `POST /api/v1/kbs/init` |
 | ✅ | `kb.list` | `{orgId?, status?}` | `GET /api/v1/orgs/{orgId}/kbs?status=` |
-| ✅ | `kb.archive` | `{orgId?}` | `POST /api/v1/orgs/{orgId}/kbs/archive` |
-| ✅ | `kb.unarchive` | `{orgId?}` | `POST /api/v1/orgs/{orgId}/kbs/unarchive` |
+| ✅ | `kb.archive` | `{orgId?}` | `PUT /api/v1/orgs/{orgId}/kbs/archive` |
+| ✅ | `kb.unarchive` | `{orgId?}` | `PUT /api/v1/orgs/{orgId}/kbs/unarchive` |
 
 `status` 取值:`active` / `archived` / `all`。
 
@@ -45,14 +45,15 @@ Org(组织,scope 单位)
 | 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
 | ✅ | `kb.tree_roots` | `{orgId?}` | `GET /tree/roots` |
-| ✅ | `kb.tree_folders` | `{orgId?}` | `GET /tree/folders` |
+| ✅ | `kb.folder_create` | `{parentId, name, sortOrder?, orgId?}` | `POST /tree/folders` |
 | ✅ | `kb.node_get` | `{nodeId, orgId?}` | `GET /tree/nodes/{nodeId}` |
 | ✅ | `kb.node_breadcrumb` | `{nodeId, orgId?}` | `GET /tree/nodes/{nodeId}/breadcrumb` |
 | ✅ | `kb.node_children` | `{parentId, orgId?, pageSize?, pageToken?}` | `GET /tree/nodes/{parentId}/children` |
-| ✅ | `kb.node_move` | `{nodeId, parentId, sortOrder?, orgId?}` | `POST /tree/nodes/{nodeId}/move` |
-| ✅ | `kb.node_rename` | `{nodeId, name, orgId?}` | `POST /tree/nodes/{nodeId}/rename` |
+| ✅ | `kb.node_move` | `{nodeId, parentId, sortOrder?, orgId?}` | `PATCH /tree/nodes/{nodeId}/move` |
+| ✅ | `kb.node_rename` | `{nodeId, name, orgId?}` | `PATCH /tree/nodes/{nodeId}/rename` |
+| ✅ | `kb.node_delete` | `{nodeId, orgId?}` | `DELETE /tree/nodes/{nodeId}` |
 
-节点 ID 形态:`tn-{uuid}`。
+节点 ID 形态:`tn-{uuid}`。`kb.folder_create` 是 cws-kb 唯一的建节点入口(page 通过 `kb.page_create` 间接建出对应 tree node)。
 
 ### 页面
 
@@ -60,18 +61,24 @@ Org(组织,scope 单位)
 | --- | --- | --- | --- |
 | ✅ | `kb.pages` | `{parentId?, orgId?, pageSize?, pageToken?}` | `GET /pages` |
 | ✅ | `kb.page_get` | `{pageId, orgId?}` | `GET /pages/{pageId}` |
+| ✅ | `kb.page_create` | `{title, parentId, format?, content:{body, front_matter?}, commitMessage?, orgId?}` | `POST /pages` |
+| ✅ | `kb.page_update` | `{pageId, title?, parentId?, content?, baseRevisionId, commitMessage?, orgId?}` | `PATCH /pages/{pageId}` |
+| ✅ | `kb.page_delete` | `{pageId, orgId?}` | `DELETE /pages/{pageId}` |
 | ✅ | `kb.page_content` | `{pageId, orgId?}` | `GET /pages/{pageId}/content` |
+| ✅ | `kb.page_content_write` | `{pageId, content:{body, front_matter?}, baseRevisionId, commitMessage?, orgId?}` | `POST /pages/{pageId}/content` |
 | ✅ | `kb.page_revisions` | `{pageId, orgId?, pageSize?, pageToken?}` | `GET /pages/{pageId}/revisions` |
 | ✅ | `kb.page_revision` | `{pageId, revisionId, orgId?}` | `GET /pages/{pageId}/revisions/{revId}` |
-| ✅ | `kb.page_diff` | `{pageId, fromRevisionId, toRevisionId, orgId?}` | `POST /pages/{pageId}/diff` |
+| ✅ | `kb.page_diff` | `{pageId, fromRevisionId, toRevisionId, orgId?}` | `GET /pages/{pageId}/diff?from_revision_id=&to_revision_id=` |
 | ✅ | `kb.page_restore` | `{pageId, revisionId, commitMessage?, orgId?}` | `POST /pages/{pageId}/restore-version` |
-| ⏳ | `kb.page_create` | `{title, parentId, format?, content:{body, front_matter?}, commitMessage?, orgId?}` | `POST /pages`(api-usage-guide §3) |
-| ⏳ | `kb.page_update` | `{pageId, content, baseRevisionId, commitMessage?, orgId?}` | `PUT /pages/{pageId}`(乐观并发) |
-| ⏳ | `kb.page_delete` | `{pageId, orgId?}` | `DELETE /pages/{pageId}` |
 
 页面 ID 形态:`pg-{uuid}`。Revision 是每页自增整数从 1 起。
 
-页面更新走乐观并发:先 `kb.page_get` 拿 `revision_id`,`kb.page_update` 时把它当 `baseRevisionId` 传过去,服务端若发现不一致返回 409 + 当前 revision_id,客户端重读后合并再写。
+**两个写入入口的区别**:
+
+- `kb.page_update`(`PATCH /pages/{pid}`):改页面**任意属性**(标题、parent、内容…),body 里能传哪个传哪个
+- `kb.page_content_write`(`POST /pages/{pid}/content`):**只**改内容主体,语义更专,适合 Agent 后续大段编辑
+
+两者都支持乐观并发:先 `kb.page_get` 拿 `revision_id`,写时把它当 `baseRevisionId` 传过去,服务端若发现不一致返回 409 + 当前 revision_id,客户端重读后合并再写。
 
 ### 搜索 ⭐
 
@@ -108,6 +115,7 @@ Org(组织,scope 单位)
 | ✅ | `kb.relations_list` | `{resourceType?, resourceId?, targetType?, targetId?, orgId?}` | `GET /relations` |
 | ✅ | `kb.relations_create` | `{resourceType, resourceId, targetType, targetId, role, orgId?}` | `POST /relations` |
 | ✅ | `kb.relations_check` | 同 list | `GET /relations/check` |
+| ✅ | `kb.relations_delete` | `{resourceType, resourceId, targetType, targetId, role?, orgId?}` | `DELETE /relations?...` |
 
 用例:把一个 Project 关到一个 KB folder("项目交付物归档到这"),后续 `kb.search` 可以按 `folder_id` 限定到这个 folder。
 

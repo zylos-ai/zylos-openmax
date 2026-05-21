@@ -49,10 +49,15 @@ Base URL:`config.comm.as_url`(env `COCO_AS_URL` 可覆盖)
 | ✅ | `as.upload` | `{filePath, mediaType?, contentType?, description?, metadata?}` | 3-step(上面那条) |
 | ✅ | `as.list` | `{pageSize?, pageToken?, mime?, status?, producer?}` | `GET /api/v1/artifacts` |
 | ✅ | `as.get` | `{artifactId}` | `GET /api/v1/artifacts/{id}` |
+| ✅ | `as.update` | `{artifactId, name?, description?, metadata?}` | `PATCH /api/v1/artifacts/{id}` |
+| ✅ | `as.delete` | `{artifactId}` | `DELETE /api/v1/artifacts/{id}` |
 | ✅ | `as.url` | `{artifactId, mode?}` | `GET /api/v1/artifacts/{id}/download` |
 | ✅ | `as.download` | `{artifactId, filename?}` | `as.url` + 字节下载到本地 |
 | ✅ | `as.abort` | `{artifactId}` | `POST /api/v1/artifacts/{id}/abort` |
 | ✅ | `as.resolve` | `{uris:["as://org_x/art_y", ...]}` | `POST /api/v1/artifacts/resolve` |
+
+`as.update` 只能改 metadata(name / description / metadata),**字节不可变**;要换内容就 `as.upload` 重新建 artifact。
+`as.delete` 是软删除(status 转 `deleted`),保留期后真删除;期间 `as.list` 加 `status=deleted` 还能找回来。
 
 ### `as.upload` 详细
 

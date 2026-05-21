@@ -45,23 +45,23 @@ cws-core 没有 KB 端点。我们直连 cws-kb(`comm.kb_url`,`X-Org-Id` 头 sco
 |---|---|---|---|
 | 初始化 KB | `kb.init` | `POST /api/v1/kbs/init` | 🔀 ✅ |
 | 列 KB | `kb.list` | `GET /api/v1/orgs/{orgId}/kbs` | 🔀 ✅ |
-| 归档 / 恢复 | `kb.archive` / `kb.unarchive` | `POST /api/v1/orgs/{orgId}/kbs/{archive,unarchive}` | 🔀 ✅ |
+| 归档 / 恢复 | `kb.archive` / `kb.unarchive` | `PUT /api/v1/orgs/{orgId}/kbs/{archive,unarchive}` | 🔀 ✅ |
 | 目录根 | `kb.tree_roots` | `GET /tree/roots` | 🔀 ✅ |
-| 文件夹列表 | `kb.tree_folders` | `GET /tree/folders` | 🔀 ✅ |
+| 建文件夹 | `kb.folder_create` | `POST /tree/folders` | 🔀 ✅ |
 | 节点详情 | `kb.node_get` | `GET /tree/nodes/{nodeId}` | 🔀 ✅ |
 | 面包屑 | `kb.node_breadcrumb` | `GET /tree/nodes/{nodeId}/breadcrumb` | 🔀 ✅ |
 | 子节点 | `kb.node_children` | `GET /tree/nodes/{parentId}/children` | 🔀 ✅ |
-| 移动 / 重命名 | `kb.node_move` / `kb.node_rename` | `POST /tree/nodes/{nodeId}/{move,rename}` | 🔀 ✅ |
+| 移动 / 重命名 | `kb.node_move` / `kb.node_rename` | `PATCH /tree/nodes/{nodeId}/{move,rename}` | 🔀 ✅ |
+| 删节点 | `kb.node_delete` | `DELETE /tree/nodes/{nodeId}` | 🔀 ✅ |
 | 列页面 | `kb.pages` | `GET /pages` | 🔀 ✅ |
 | 页详情 / 内容 | `kb.page_get` / `kb.page_content` | `GET /pages/{pid}[/content]` | 🔀 ✅ |
+| 建页 / 改页 / 删页 | `kb.page_create` / `kb.page_update` / `kb.page_delete` | `POST` / `PATCH` / `DELETE /pages[/{pid}]` | 🔀 ✅ |
+| 写内容(独立端点) | `kb.page_content_write` | `POST /pages/{pid}/content` | 🔀 ✅ |
 | 版本列表 / 详情 | `kb.page_revisions` / `kb.page_revision` | `GET /pages/{pid}/revisions[/{rid}]` | 🔀 ✅ |
-| 版本对比 | `kb.page_diff` | `POST /pages/{pid}/diff` | 🔀 ✅ |
+| 版本对比 | `kb.page_diff` | `GET /pages/{pid}/diff?from_revision_id=&to_revision_id=` | 🔀 ✅ |
 | 版本恢复 | `kb.page_restore` | `POST /pages/{pid}/restore-version` | 🔀 ✅ |
 | **全文搜索** ⭐ | `kb.search` | `GET /search/pages?query=&folder_id=&author_id=&format=&sync=&...` | 🔀 ✅(Meilisearch+NATS) |
-| 关联管理 | `kb.relations_*` | `GET POST /relations` + `GET /relations/check` | 🔀 ✅ |
-| 创建页面 | `kb.page_create` | `POST /pages`(api-usage-guide §3) | ⏳ cws-kb code 未实装 |
-| 更新页面 | `kb.page_update` | `PUT /pages/{pid}` | ⏳ cws-kb code 未实装 |
-| 删除页面 | `kb.page_delete` | `DELETE /pages/{pid}` | ⏳ cws-kb code 未实装 |
+| 关联管理 | `kb.relations_list/create/check/delete` | `GET POST DELETE /relations` + `GET /relations/check` | 🔀 ✅ |
 | 文件上传 | `kb.upload` | 委托给 `as.uploadMedia()` | 🔀 ✅ |
 
 ---
@@ -75,6 +75,8 @@ cws-core 没有 AS 端点。我们直连 cws-as(`comm.as_url`,`X-Org-Id` 头)。
 | **上传(3-step)** | `as.upload` | `POST /artifacts` → `PUT <upload_url>` → `POST /artifacts/{id}/finalize` | 🔀 ✅ |
 | 列 artifact | `as.list` | `GET /api/v1/artifacts` | 🔀 ✅ |
 | 单个详情 | `as.get` | `GET /api/v1/artifacts/{id}` | 🔀 ✅ |
+| 改 metadata | `as.update` | `PATCH /api/v1/artifacts/{id}` | 🔀 ✅ |
+| 软删除 | `as.delete` | `DELETE /api/v1/artifacts/{id}` | 🔀 ✅ |
 | 下载 URL | `as.url` | `GET /api/v1/artifacts/{id}/download?mode=download\|preview` | 🔀 ✅ |
 | 全量下载 | `as.download` | `as.url` + 字节 GET | 🔀 ✅ |
 | 取消上传 | `as.abort` | `POST /api/v1/artifacts/{id}/abort` | 🔀 ✅ |
