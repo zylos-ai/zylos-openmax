@@ -3,94 +3,203 @@
 CLI 位置:`src/cli/kb.js`
 调用方式:`node src/cli/kb.js <command> '<json>'`
 
-> ⚠️ **整个 KB 域 cws-core 尚未暴露**。OpenAPI 里没有 `/knowledge-bases/*` 任何路径。
-> 全部命令 ⏳,调用今天都会 404。本文档把"期望的接口形态"先定下来,等 core 上线即用即跑。
+状态:✅ cws-kb code 里已有 · ⏳ 在 cws-kb api-design.md 但 transport 层未实装
 
-状态:**全部 ⏳**
+> 本 CLI **直连 cws-kb**(不走 cws-core BFF,因为 cws-core OpenAPI 没暴露 KB)。
+> Base URL:`config.comm.kb_url`(env `COCO_KB_URL` 可覆盖)
+> 真实路径以 cws-kb 仓库代码为准:`https://git.coco.xyz/coco-workspace/cws-kb`
 
-## 数据模型(规划中)
+## 数据模型
 
 ```
-KB(仓库,顶层)
-  └─ Node(节点,目录树的格子)
-       ├─ kind:"folder"     (没有内容,只有子节点)
-       └─ kind:"page"       (有 Page 内容主体)
-              ↓
-            Page(内容)
+Org(组织,scope 单位)
+  └─ KB Config(每 org 1 个,storage_quota / search 开关等)
+       │
+       ├─ Tree Node(目录树节点)
+       │    ├─ kind="folder"  → 文件夹,只有子节点
+       │    └─ kind="page"    → 页面外壳,关联一个 Page
+       │
+       ├─ Page(内容主体,与 tree node 1:1)
+       │    └─ Revision(版本,从 1 开始自增)
+       │
+       └─ Relation(KB ↔ Project / Issue 等的关联)
 ```
 
-一个 `kind:"page"` 的 Node 通过 `page_id` 关联一个 Page。这样目录结构 / 元信息 / 重命名只动 Node,大内容只动 Page,扩展性好。
+`org_id` 是所有 KB 操作的 scope 单位 —— 从 `config.org_id` 或 `COCO_ORG_ID` env 取,安装时配。
 
 ## 命令列表
 
 ### KB 集合
 
-| 状态 | 命令 | 入参 | 期望端点 |
+| 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ⏳ | `kb.list` | `{tab?, q?, cursor?, limit?}` | `GET /api/v1/knowledge-bases` |
-| ⏳ | `kb.get` | `{kbId}` | `GET /api/v1/knowledge-bases/{id}` |
-| ⏳ | `kb.create` | `{name, description?, teamId?, icon?}` | `POST /api/v1/knowledge-bases` |
-| ⏳ | `kb.archive` | `{kbId}` | `POST /api/v1/knowledge-bases/{id}/archive` |
-| ⏳ | `kb.restore` | `{kbId}` | `POST /api/v1/knowledge-bases/{id}/restore` |
+| ✅ | `kb.init` | `{orgId?}` | `POST /api/v1/kbs/init` |
+| ✅ | `kb.list` | `{orgId?, status?}` | `GET /api/v1/orgs/{orgId}/kbs?status=` |
+| ✅ | `kb.archive` | `{orgId?}` | `POST /api/v1/orgs/{orgId}/kbs/archive` |
+| ✅ | `kb.unarchive` | `{orgId?}` | `POST /api/v1/orgs/{orgId}/kbs/unarchive` |
 
-### 节点(目录树)
+`status` 取值:`active` / `archived` / `all`。
 
-| 状态 | 命令 | 入参 | 期望端点 |
+### 目录树
+
+| 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ⏳ | `kb.tree` | `{kbId}` | `GET /api/v1/knowledge-bases/{id}/tree` |
-| ⏳ | `kb.nodes` | `{kbId, parentId?, cursor?, limit?}` | `GET /api/v1/knowledge-bases/{id}/nodes` |
-| ⏳ | `kb.node_create` | `{kbId, parentId?, kind, title, icon?}` | `POST /api/v1/knowledge-bases/{id}/nodes` |
-| ⏳ | `kb.node_get` | `{kbId, nodeId}` | `GET /api/v1/knowledge-bases/{id}/nodes/{nid}` |
-| ⏳ | `kb.node_update` | `{kbId, nodeId, title?, parentId?, icon?}` | `PATCH /api/v1/knowledge-bases/{id}/nodes/{nid}` |
-| ⏳ | `kb.node_delete` | `{kbId, nodeId}` | `DELETE /api/v1/knowledge-bases/{id}/nodes/{nid}` |
+| ✅ | `kb.tree_roots` | `{orgId?}` | `GET /tree/roots` |
+| ✅ | `kb.tree_folders` | `{orgId?}` | `GET /tree/folders` |
+| ✅ | `kb.node_get` | `{nodeId, orgId?}` | `GET /tree/nodes/{nodeId}` |
+| ✅ | `kb.node_breadcrumb` | `{nodeId, orgId?}` | `GET /tree/nodes/{nodeId}/breadcrumb` |
+| ✅ | `kb.node_children` | `{parentId, orgId?, pageSize?, pageToken?}` | `GET /tree/nodes/{parentId}/children` |
+| ✅ | `kb.node_move` | `{nodeId, parentId, sortOrder?, orgId?}` | `POST /tree/nodes/{nodeId}/move` |
+| ✅ | `kb.node_rename` | `{nodeId, name, orgId?}` | `POST /tree/nodes/{nodeId}/rename` |
 
-`kind` 取值:`folder` / `page`(创建 `page` 时同步开 Page 主体)。
+节点 ID 形态:`tn-{uuid}`。
 
-### 页面内容
+### 页面
 
-| 状态 | 命令 | 入参 | 期望端点 |
+| 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ⏳ | `kb.read` | `{kbId, pageId}` | `GET /api/v1/knowledge-bases/{id}/pages/{pid}` |
-| ⏳ | `kb.write` | `{kbId, pageId, title?, content, contentFormat?, commitMessage?, baseVersion?}` | `PUT /api/v1/knowledge-bases/{id}/pages/{pid}` |
+| ✅ | `kb.pages` | `{parentId?, orgId?, pageSize?, pageToken?}` | `GET /pages` |
+| ✅ | `kb.page_get` | `{pageId, orgId?}` | `GET /pages/{pageId}` |
+| ✅ | `kb.page_content` | `{pageId, orgId?}` | `GET /pages/{pageId}/content` |
+| ✅ | `kb.page_revisions` | `{pageId, orgId?, pageSize?, pageToken?}` | `GET /pages/{pageId}/revisions` |
+| ✅ | `kb.page_revision` | `{pageId, revisionId, orgId?}` | `GET /pages/{pageId}/revisions/{revId}` |
+| ✅ | `kb.page_diff` | `{pageId, fromRevisionId, toRevisionId, orgId?}` | `POST /pages/{pageId}/diff` |
+| ✅ | `kb.page_restore` | `{pageId, revisionId, commitMessage?, orgId?}` | `POST /pages/{pageId}/restore-version` |
+| ⏳ | `kb.page_create` | `{title, parentId, format?, content:{body, front_matter?}, commitMessage?, orgId?}` | `POST /pages`(api-usage-guide §3) |
+| ⏳ | `kb.page_update` | `{pageId, content, baseRevisionId, commitMessage?, orgId?}` | `PUT /pages/{pageId}`(乐观并发) |
+| ⏳ | `kb.page_delete` | `{pageId, orgId?}` | `DELETE /pages/{pageId}` |
 
-写入约束(规划):`baseVersion` 用于乐观并发 —— 先 read 拿 version,write 时附上,409 时重读合并再写。
+页面 ID 形态:`pg-{uuid}`。Revision 是每页自增整数从 1 起。
+
+页面更新走乐观并发:先 `kb.page_get` 拿 `revision_id`,`kb.page_update` 时把它当 `baseRevisionId` 传过去,服务端若发现不一致返回 409 + 当前 revision_id,客户端重读后合并再写。
+
+### 搜索 ⭐
+
+| 状态 | 命令 | 入参 | 真实端点 |
+| --- | --- | --- | --- |
+| ✅ | `kb.search` | `{query, folderId?, authorId?, format?, pageSize?, pageToken?, sync?, orgId?}` | `GET /search/pages` |
+
+底层:**Meilisearch(模糊+typo容错+中文分词)+ NATS 事件驱动索引**。返回结构:
+
+```json
+{
+  "results": [
+    {
+      "page": { "id": "pg-...", "title": "...", "path": "...", "format": "markdown", ... },
+      "highlights": [
+        { "field": "title", "snippet": "Week 21 <mark>周会纪要</mark>" },
+        { "field": "body",  "snippet": "..." }
+      ],
+      "score": 0.98
+    }
+  ],
+  "pagination": { "next_page_token": null, "total_count": 1 }
+}
+```
+
+**`sync=true` 给 Agent 用**:Agent 刚写完一页就搜,异步索引可能还没建好。`sync=true` 等 Meilisearch task 完成才返回(最长 5s 超时),保证读到刚写的。人类用户默认走 async,UX 快。
+
+限流:1000 次/分钟/工作区。
+
+### 关联(KB ↔ Project / Issue 等)
+
+| 状态 | 命令 | 入参 | 真实端点 |
+| --- | --- | --- | --- |
+| ✅ | `kb.relations_list` | `{resourceType?, resourceId?, targetType?, targetId?, orgId?}` | `GET /relations` |
+| ✅ | `kb.relations_create` | `{resourceType, resourceId, targetType, targetId, role, orgId?}` | `POST /relations` |
+| ✅ | `kb.relations_check` | 同 list | `GET /relations/check` |
+
+用例:把一个 Project 关到一个 KB folder("项目交付物归档到这"),后续 `kb.search` 可以按 `folder_id` 限定到这个 folder。
 
 ### 文件附件
 
-| 状态 | 命令 | 入参 | 期望端点 |
+| 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ⏳ | `kb.upload` | `{kbId, filePath, mediaType?, contentType?}` | 委托给 `as.uploadMedia()` |
+| ✅ | `kb.upload` | `{filePath, mediaType?, contentType?, description?, nodeId?, pageId?, orgId?}` | 委托给 `as.uploadMedia()` |
 
-`kb.upload` **不走 KB 私有 multipart 端点**,而是统一走 `as.uploadMedia()`(`as.js` 是仓库唯一上传入口)。`kbId` 作为 scoping 字段传给 `conversationId`(后端访问控制按 scope 校验即可)。返回 `{mediaId, ...}`,在 KB 节点里登记这个 `mediaId` 即可。
+`kb.upload` **不调 KB 私有 multipart 端点**,统一走 `as.uploadMedia()`(cws-as 3-step:create artifact + PUT + finalize)。返回的 `mediaId` / `artifactId` 可以塞到 Page body 里(比如 markdown 里写 `![](as://org_x/art_y)`),配合 `kb.relations_create` 把这个 artifact 跟当前页面挂上。
 
-## 搜索策略(没有 `kb.search` 怎么办)
+## 典型流程
 
-cws-core 现在 + 规划里都没有 `kb.search` —— 语义搜索是更上游的能力,可能由独立服务做。临时方案:
+### Agent 写一页周会纪要后立即搜索验证(⏳ + ✅)
 
-1. **已知节点 id** → 直接 `kb.node_get` / `kb.read`
-2. **目录已知** → `kb.tree` 一次拉树,客户端筛选 → `kb.read`
-3. **路径未知** → 走 `kb.nodes {parentId}` 逐层下钻
-4. **关联 Issue / Task** → 通过 `tm.*` 拿 link 后回到 `kb.read`
+```bash
+# 1. 创建页面(⏳ 待 cws-kb 实装)
+node src/cli/kb.js kb.page_create '{
+  "title":"2026-05-21 周会纪要",
+  "parentId":"tn-projects-root",
+  "format":"markdown",
+  "content":{
+    "body":"# 2026-05-21 周会纪要\n\n## 议题\n\n...",
+    "front_matter":{"tags":"meeting,weekly","date":"2026-05-21"}
+  },
+  "commitMessage":"feat: Agent 自动生成周会纪要"
+}'
+# -> {page:{id:"pg-...", revision_id:1}, revision_id:1}
 
-## 常用 KB 用途规划
+# 2. 立即搜索验证(sync=true 等索引建好)
+node src/cli/kb.js kb.search '{
+  "query":"周会纪要",
+  "sync":true,
+  "limit":5
+}'
+# -> {results:[{page:{id:"pg-..."}, highlights:[...], score:0.95}], pagination:{...}}
+```
 
-| 用途 | 典型节点 | 操作 |
-| --- | --- | --- |
-| 组织级知识 | 顶层 `org/` | 读 |
-| 团队 playbook | team KB 下的 `playbooks/` | 读,偶尔 PR |
-| 项目背景 / ADR | project KB 下的 `decisions/`、`research/` | 读 + 写 |
-| 交付物索引 | project KB 下的 `deliverables/` | 写(链向 `kb.upload` 文件) |
-| Agent 主记忆 | agent 私有 KB 下的 `memory.md` | 读 + 写 |
+### Lead 上下文组装 —— 找项目的设计决策文档
 
-## 错误处理(规划)
+```bash
+# 1. 在指定 folder 内搜索
+node src/cli/kb.js kb.search '{
+  "query":"架构决策",
+  "folderId":"tn-projects-growth",
+  "format":"markdown",
+  "limit":20
+}'
 
-- `404 NOT_FOUND` → 资源不存在或无读权限
-- `403 PERMISSION_DENIED` → 有读无写,换写入位置
-- `409 CONFLICT` → 并发写,重读后合并
-- `413 PAYLOAD_TOO_LARGE` → 单 Page 体积超限,拆页或用 `kb.upload`
+# 2. 拿到 page_id 后读详细内容
+node src/cli/kb.js kb.page_content '{"pageId":"pg-arch-decisions-001"}'
+
+# 3. 看历史改动(如果发现内容不太对)
+node src/cli/kb.js kb.page_revisions '{"pageId":"pg-arch-decisions-001"}'
+node src/cli/kb.js kb.page_diff '{
+  "pageId":"pg-arch-decisions-001",
+  "fromRevisionId":3,
+  "toRevisionId":5
+}'
+```
+
+### Agent 产出物挂到 KB 节点下
+
+```bash
+# 1. 通过 as.js 上传产出文件
+node src/cli/as.js as.upload '{
+  "filePath":"/tmp/q2-report.pdf",
+  "mediaType":"file",
+  "description":"Q2 报告终版"
+}'
+# -> {artifactId:"art_...", mediaId:"art_...", instantUpload:false}
+
+# 2. 写一页 deliverables 索引(⏳)引用这个 artifact
+node src/cli/kb.js kb.page_create '{
+  "parentId":"tn-deliverables",
+  "title":"Q2 交付物索引",
+  "content":{"body":"# Q2 交付物\n\n- [报告](as://<org_id>/art_...)"}
+}'
+```
+
+## 注意事项
+
+- **org_id 必填**:每个命令都要 scope。`config.org_id` 没设就 throw。
+- `lb.list` 一个 org 通常只有 1 个 KB(per `kb_org_configs`),但 list 返回的是配置数组以便未来扩展
+- 页面写入有限流:60 次/分钟/用户(`rate_limited` 429)
+- `kb.search` 结果受 ReBAC 过滤:只返回调用者有 `viewer+` 权限的页
+- `format` 取值:`markdown` / `code` / `pdf` / `image` / `archive` / `other`
+- 树节点排序:同 parent 下按 `sort_order` 排,移动节点时可指定新 `sortOrder`
+- 跨 org 引用通过 `kb://pg-{uuid}` URI(stable ID,移动/重命名不变)
 
 ## 环境变量
 
-- `COCO_API_URL` — cws-core 入口(默认 `http://127.0.0.1:8080`)
-- `COCO_AUTH_TOKEN` — Bearer token
-- `COCO_API_PREFIX` — 路径前缀(默认 `/api/v1`)
+- `COCO_KB_URL` — cws-kb 直连地址(默认 `config.comm.kb_url`,即 `http://127.0.0.1:8080`)
+- `COCO_AUTH_TOKEN` — Bearer token(跟 cws-core / cws-as 共用)
+- `COCO_ORG_ID` — 覆盖 `config.org_id`

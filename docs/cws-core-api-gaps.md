@@ -1,6 +1,6 @@
 # cws-core 接口对比表
 
-> **日期**:2026-05-20
+> **日期**:2026-05-21
 > **核对版本**:cws-core OpenAPI(`https://zylos01.jinglever.com/cws-core/openapi.json`)
 > **范围**:zylos-coco-workspace 用到的端点 vs cws-core 已暴露的端点
 
@@ -8,6 +8,19 @@
 - ✅ core 已有,签名一致
 - ⚠️ core 已有,但路径/字段位置不一致(需要客户端或服务端对齐)
 - ❌ core 完全没有
+- 🔀 KB / AS 直连(不走 cws-core,在 cws-kb / cws-as 本身实装)
+
+## 架构说明(2026-05-21 更新)
+
+cws-core 不是所有 REST 的入口。下面三个 backend 各管一摊:
+
+| 服务 | base URL 配置项 | 我们调用方式 | 状态 |
+|---|---|---|---|
+| **cws-core** | `comm.core_url` | `client.js → get/post/...`(模块全局) | 38 个端点 |
+| **cws-kb** | `comm.kb_url` | `client.js → kbClient(orgId)` factory | 21 个端点 ✅ |
+| **cws-as** | `comm.as_url` | `client.js → asClient(orgId)` factory | 7 个端点 ✅ |
+
+通过共用 Bearer api_key 鉴权;cws-core 走 `X-Workspace-Id` 头,cws-kb / cws-as 走 `X-Org-Id` 头。后者也要 `config.org_id`(post-install 时配)。
 
 ---
 
@@ -24,37 +37,52 @@
 
 ---
 
-## 2. KB(知识库)
+## 2. KB(知识库)— 🔀 直连 cws-kb
 
-| 操作 | 我们用的 | cws-core 现状 | 对比 |
+cws-core 没有 KB 端点。我们直连 cws-kb(`comm.kb_url`,`X-Org-Id` 头 scope)。21 个端点对应关系:
+
+| 操作 | 我们用的(`kb.js` 命令) | cws-kb 真实端点 | 状态 |
 |---|---|---|---|
-| 列 KB | `GET /knowledge-bases` | — | ❌ |
-| 建 KB | `POST /knowledge-bases` | — | ❌ |
-| KB 详情 | `GET /knowledge-bases/{id}` | — | ❌ |
-| 归档 KB | `POST /knowledge-bases/{id}/archive` | — | ❌ |
-| 恢复 KB | `POST /knowledge-bases/{id}/restore` | — | ❌ |
-| 目录树 | `GET /knowledge-bases/{id}/tree` | — | ❌ |
-| 节点列表 | `GET /knowledge-bases/{id}/nodes` | — | ❌ |
-| 建节点 | `POST /knowledge-bases/{id}/nodes` | — | ❌ |
-| 节点详情 | `GET /knowledge-bases/{id}/nodes/{nid}` | — | ❌ |
-| 改节点 | `PATCH /knowledge-bases/{id}/nodes/{nid}` | — | ❌ |
-| 删节点 | `DELETE /knowledge-bases/{id}/nodes/{nid}` | — | ❌ |
-| 读 Page | `GET /knowledge-bases/{id}/pages/{pid}` | — | ❌ |
-| 写 Page | `PUT /knowledge-bases/{id}/pages/{pid}` | — | ❌ |
-| 上传文件到 KB | `POST /knowledge-bases/{id}/files` | — | ❌ |
+| 初始化 KB | `kb.init` | `POST /api/v1/kbs/init` | 🔀 ✅ |
+| 列 KB | `kb.list` | `GET /api/v1/orgs/{orgId}/kbs` | 🔀 ✅ |
+| 归档 / 恢复 | `kb.archive` / `kb.unarchive` | `POST /api/v1/orgs/{orgId}/kbs/{archive,unarchive}` | 🔀 ✅ |
+| 目录根 | `kb.tree_roots` | `GET /tree/roots` | 🔀 ✅ |
+| 文件夹列表 | `kb.tree_folders` | `GET /tree/folders` | 🔀 ✅ |
+| 节点详情 | `kb.node_get` | `GET /tree/nodes/{nodeId}` | 🔀 ✅ |
+| 面包屑 | `kb.node_breadcrumb` | `GET /tree/nodes/{nodeId}/breadcrumb` | 🔀 ✅ |
+| 子节点 | `kb.node_children` | `GET /tree/nodes/{parentId}/children` | 🔀 ✅ |
+| 移动 / 重命名 | `kb.node_move` / `kb.node_rename` | `POST /tree/nodes/{nodeId}/{move,rename}` | 🔀 ✅ |
+| 列页面 | `kb.pages` | `GET /pages` | 🔀 ✅ |
+| 页详情 / 内容 | `kb.page_get` / `kb.page_content` | `GET /pages/{pid}[/content]` | 🔀 ✅ |
+| 版本列表 / 详情 | `kb.page_revisions` / `kb.page_revision` | `GET /pages/{pid}/revisions[/{rid}]` | 🔀 ✅ |
+| 版本对比 | `kb.page_diff` | `POST /pages/{pid}/diff` | 🔀 ✅ |
+| 版本恢复 | `kb.page_restore` | `POST /pages/{pid}/restore-version` | 🔀 ✅ |
+| **全文搜索** ⭐ | `kb.search` | `GET /search/pages?query=&folder_id=&author_id=&format=&sync=&...` | 🔀 ✅(Meilisearch+NATS) |
+| 关联管理 | `kb.relations_*` | `GET POST /relations` + `GET /relations/check` | 🔀 ✅ |
+| 创建页面 | `kb.page_create` | `POST /pages`(api-usage-guide §3) | ⏳ cws-kb code 未实装 |
+| 更新页面 | `kb.page_update` | `PUT /pages/{pid}` | ⏳ cws-kb code 未实装 |
+| 删除页面 | `kb.page_delete` | `DELETE /pages/{pid}` | ⏳ cws-kb code 未实装 |
+| 文件上传 | `kb.upload` | 委托给 `as.uploadMedia()` | 🔀 ✅ |
 
 ---
 
-## 3. AS(独立 ArtifactStore 域)
+## 3. AS(ArtifactStore)— 🔀 直连 cws-as
 
-| 操作 | 我们用的 | cws-core 现状 | 对比 |
+cws-core 没有 AS 端点。我们直连 cws-as(`comm.as_url`,`X-Org-Id` 头)。7 个端点全部对接:
+
+| 操作 | 我们用的(`as.js` 命令) | cws-as 真实端点 | 状态 |
 |---|---|---|---|
-| (IM 附件 presign) | `POST /im/uploads/presign` | — | ❌(同 IM 域) |
-| (IM 附件 complete) | `POST /im/uploads/{id}/complete` | — | ❌(同 IM 域) |
-| 媒体上传(单步) | `POST /api/v1/media/upload` | — | ❌ |
-| 媒体下载 URL | `GET /api/v1/media/{id}/url` | — | ❌ |
+| **上传(3-step)** | `as.upload` | `POST /artifacts` → `PUT <upload_url>` → `POST /artifacts/{id}/finalize` | 🔀 ✅ |
+| 列 artifact | `as.list` | `GET /api/v1/artifacts` | 🔀 ✅ |
+| 单个详情 | `as.get` | `GET /api/v1/artifacts/{id}` | 🔀 ✅ |
+| 下载 URL | `as.url` | `GET /api/v1/artifacts/{id}/download?mode=download\|preview` | 🔀 ✅ |
+| 全量下载 | `as.download` | `as.url` + 字节 GET | 🔀 ✅ |
+| 取消上传 | `as.abort` | `POST /api/v1/artifacts/{id}/abort` | 🔀 ✅ |
+| 批量解析 URI | `as.resolve` | `POST /api/v1/artifacts/resolve` | 🔀 ✅(Redis 缓存) |
 
-AS 端点全部跟 KB / IM 域共用,不重复计。
+**秒传(`instant_upload`)**:`POST /artifacts` 返回时若服务端按 SHA-256 命中已存在 artifact,返回 `instant_upload:true`,客户端跳过 PUT + finalize。`uploadMedia()` 内部已处理。
+
+**大文件**:cws-as 支持 multipart 模式(`upload_mode:"multipart"`,文件 > 100MB),我们 CLI 目前只走单步 PUT —— 大文件场景标 TODO。
 
 ---
 
