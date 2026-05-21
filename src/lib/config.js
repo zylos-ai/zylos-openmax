@@ -37,13 +37,20 @@ const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json
 export const DEFAULT_CONFIG = {
   enabled: true,
   workspace_id: '',
+  // org_id scopes every cws-kb / cws-as call (X-Org-Id header + path).
+  // Filled at install time; one org per agent install.
+  org_id: '',
   device_id: '',
   client_id: '',
   app_version: '0.1.0',
   comm: {
-    // REST base — cws-comm direct for IM, cws-fe Gateway for the rest.
-    // Both are reached via this URL (they share host/port in production).
+    // cws-core REST + cws-comm IM REST (path-routed):
     core_url: 'http://127.0.0.1:8080',
+    // cws-kb direct. Defaults same as core_url for single-binary dev;
+    // production usually puts kb behind its own service ingress.
+    kb_url:   'http://127.0.0.1:8080',
+    // cws-as direct.
+    as_url:   'http://127.0.0.1:8080',
     // WebSocket direct endpoint — cws-comm. Auth: Bearer api_key header
     // on upgrade (api-usage-guide §1.步骤一 / §6.步骤一). No ws-ticket.
     ws_url:  'ws://127.0.0.1:8080/ws',

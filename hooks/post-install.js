@@ -11,8 +11,9 @@
  *   1. Create data subdirectories under ~/zylos/components/coco-workspace/
  *   2. Initialize config.json from DEFAULT_CONFIG if missing
  *   3. Generate device_id and client_id (UUIDv4) if not set
- *   4. Prompt for workspace_id  → ~/zylos/components/coco-workspace/config.json
- *   5. Prompt for api_key       → ~/zylos/.env  (COCO_AUTH_TOKEN)
+ *   4. Prompt for workspace_id  → config.json (cws-core scope)
+ *   5. Prompt for org_id        → config.json (cws-kb / cws-as scope)
+ *   6. Prompt for api_key       → ~/zylos/.env  (COCO_AUTH_TOKEN)
  *
  * The split between config.json (non-secret) and ~/zylos/.env (secret)
  * mirrors the zylos-lark convention: workspace_id is just an ID and
@@ -126,7 +127,7 @@ if (isInteractive) {
   console.log('');
 
   if (!config.workspace_id) {
-    const wsId = await ask('  Workspace ID (e.g. ws_abc123): ');
+    const wsId = await ask('  Workspace ID (e.g. ws_abc123, cws-core scope): ');
     if (wsId) {
       config.workspace_id = wsId;
       console.log('  ✓ workspace_id saved to config.json');
@@ -135,6 +136,18 @@ if (isInteractive) {
     }
   } else {
     console.log(`  workspace_id already set (${config.workspace_id})`);
+  }
+
+  if (!config.org_id) {
+    const orgId = await ask('  Org ID (e.g. org_abc123, cws-kb / cws-as scope): ');
+    if (orgId) {
+      config.org_id = orgId;
+      console.log('  ✓ org_id saved to config.json');
+    } else {
+      console.log('  ! org_id left empty — KB / AS calls will fail until set');
+    }
+  } else {
+    console.log(`  org_id already set (${config.org_id})`);
   }
 
   const existingKey = readEnvVar('COCO_AUTH_TOKEN');
@@ -153,7 +166,8 @@ if (isInteractive) {
   console.log('');
   console.log('[post-install] non-interactive mode — skipping prompts');
   console.log('[post-install] before starting the service, set:');
-  console.log(`  - workspace_id    in ${CONFIG_PATH}`);
+  console.log(`  - workspace_id    in ${CONFIG_PATH}    (cws-core scope)`);
+  console.log(`  - org_id          in ${CONFIG_PATH}    (cws-kb / cws-as scope)`);
   console.log('  - COCO_AUTH_TOKEN in ~/zylos/.env');
 }
 

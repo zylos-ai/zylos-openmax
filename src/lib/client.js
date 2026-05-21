@@ -1,35 +1,30 @@
 /**
  * Shared HTTP client for all REST calls.
  *
- * In this architecture all REST goes through cws-core (BFF), even for
- * functionality logically owned by cws-comm / cws-work / etc. — cws-core
- * forwards over gRPC internally. We therefore have ONE REST base URL
- * (cws-core) and the cws-comm WS session_token is NOT a REST credential
- * (it only authenticates WebSocket frames on the direct cws-comm link).
+ * zylos-coco-workspace targets THREE different backend services:
  *
- * Token resolution order for REST (per request):
+ *   - cws-core  → /me, /members, /agents, /projects, /tasks, /issues,
+ *                 /conversations, /conversations/{id}/messages
+ *                 base URL  : comm.core_url
+ *                 scope hdr : X-Workspace-Id
+ *
+ *   - cws-kb    → /api/v1/kbs/init, /api/v1/orgs/{orgId}/*
+ *                 base URL  : comm.kb_url
+ *                 scope hdr : X-Org-Id  (also embedded in path today)
+ *
+ *   - cws-as    → /api/v1/artifacts/*
+ *                 base URL  : comm.as_url
+ *                 scope hdr : X-Org-Id
+ *
+ * All three share ONE bearer credential — the agent's api_key. The cws-core
+ * helpers (get/post/...) preserve the original module-global behavior;
+ * cws-kb and cws-as get their own service-bound clients via kbClient() /
+ * asClient() factories.
+ *
+ * Token resolution order (per request):
  *   1. setApiKey(t)                  — set explicitly by caller
  *   2. process.env.COCO_AUTH_TOKEN   — long-lived API key
  *   3. config.agent.api_key          — same key, from config
- *
- * Base URL resolution:
- *   1. setBaseUrl(u)                 — explicit
- *   2. process.env.COCO_API_URL      — env override (deploy convenience)
- *   3. config.comm.core_url          — canonical config field
- *   4. http://127.0.0.1:8080         — dev fallback
- *
- * Headers attached on every request (cws-comm api-design §2):
- *   - Authorization: Bearer <api_key>
- *   - X-Workspace-Id  (required)
- *   - X-Device-Id     (recommended)
- *   - X-Client-Version (recommended)
- *
- * Method signatures (matches cws-work/zylos-tm):
- *   - get(path, query?)              GET with optional query params
- *   - post(path, body?)              POST with optional JSON body
- *   - patch(path, body?)             PATCH with optional JSON body
- *   - put(path, body?)               PUT with optional JSON body
- *   - del(path)                      DELETE
  *
  * On success: returns parsed JSON (or raw text if response is not JSON).
  * On HTTP error: throws Error whose .message is the server's error detail
@@ -49,11 +44,33 @@ export function setHeaders(h)     { activeHeaders = h || null; }
 // Back-compat alias — older callers expected setSessionToken; deprecated.
 export const setSessionToken = setApiKey;
 
+// ============================================================================
+//  Base URL / token / header resolution
+// ============================================================================
+
 function resolveBaseUrl() {
   if (activeBaseUrl) return activeBaseUrl;
   if (process.env.COCO_API_URL) return process.env.COCO_API_URL;
   const cfg = loadConfig();
   return cfg.comm?.core_url || cfg.comm?.api_url || 'http://127.0.0.1:8080';
+}
+
+function resolveKbBaseUrl() {
+  if (process.env.COCO_KB_URL) return process.env.COCO_KB_URL;
+  const cfg = loadConfig();
+  return cfg.comm?.kb_url || resolveBaseUrl();
+}
+
+function resolveAsBaseUrl() {
+  if (process.env.COCO_AS_URL) return process.env.COCO_AS_URL;
+  const cfg = loadConfig();
+  return cfg.comm?.as_url || resolveBaseUrl();
+}
+
+function resolveOrgId() {
+  if (process.env.COCO_ORG_ID) return process.env.COCO_ORG_ID;
+  const cfg = loadConfig();
+  return cfg.org_id || '';
 }
 
 function resolveToken() {
@@ -63,7 +80,7 @@ function resolveToken() {
   return cfg.agent?.api_key || '';
 }
 
-function resolveHeaders() {
+function resolveCoreHeaders() {
   if (activeHeaders) return activeHeaders;
   const cfg = loadConfig();
   const out = {};
@@ -76,8 +93,12 @@ function resolveHeaders() {
   return out;
 }
 
-function buildUrl(path, query) {
-  const base = resolveBaseUrl().replace(/\/$/, '');
+// ============================================================================
+//  URL building
+// ============================================================================
+
+function buildUrl(baseUrl, path, query) {
+  const base = (baseUrl || '').replace(/\/$/, '');
   let url = path.startsWith('http') ? path : `${base}${path}`;
   if (!query) return url;
 
@@ -95,9 +116,13 @@ function buildUrl(path, query) {
   return url;
 }
 
-async function request(method, path, { body, query, extraHeaders } = {}) {
-  const url = buildUrl(path, query);
-  const headers = { Accept: 'application/json', ...resolveHeaders(), ...(extraHeaders || {}) };
+// ============================================================================
+//  Generic request impl (baseUrl + headers injected by caller)
+// ============================================================================
+
+async function doRequest(baseUrl, method, path, { body, query, extraHeaders } = {}) {
+  const url = buildUrl(baseUrl, path, query);
+  const headers = { Accept: 'application/json', ...(extraHeaders || {}) };
   const token = resolveToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -123,6 +148,17 @@ async function request(method, path, { body, query, extraHeaders } = {}) {
   return data;
 }
 
+// ============================================================================
+//  cws-core client (module-global helpers — backward compatible)
+// ============================================================================
+
+async function request(method, path, opts = {}) {
+  return doRequest(resolveBaseUrl(), method, path, {
+    ...opts,
+    extraHeaders: { ...resolveCoreHeaders(), ...(opts.extraHeaders || {}) },
+  });
+}
+
 export const get   = (path, query) => request('GET',    path, { query });
 export const post  = (path, body)  => request('POST',   path, { body });
 export const patch = (path, body)  => request('PATCH',  path, { body });
@@ -130,53 +166,100 @@ export const put   = (path, body)  => request('PUT',    path, { body });
 export const del   = (path)        => request('DELETE', path);
 
 /**
- * Prefix a logical path with the active API prefix.
+ * Prefix a logical path with the cws-core API prefix.
  *
  * cws-core exposes its surface under `/api/v1/*` (per the live OpenAPI
- * at https://zylos01.jinglever.com/cws-core/openapi.json). Earlier
- * scaffolding aimed at the `/api/gateway/v1/*` draft from cws-fe; that
- * prefix is no longer used. Override via `COCO_API_PREFIX` if you need
- * to talk to a different deployment (e.g. cws-work standalone on `/api`).
- *
- *   apiPath('/projects')            -> '/api/v1/projects'
- *   apiPath('/tasks/abc/status')    -> '/api/v1/tasks/abc/status'
+ * at https://zylos01.jinglever.com/cws-core/openapi.json). Override via
+ * `COCO_API_PREFIX` to talk to a different deployment.
  */
 export function apiPath(p) {
   const prefix = process.env.COCO_API_PREFIX ?? '/api/v1';
   return prefix + p;
 }
 
+// ============================================================================
+//  Service-bound clients (cws-kb, cws-as)
+//
+//  Each factory call resolves the service's base URL + X-Org-Id at call
+//  time (so config hot-reload + env override both work). Returned object
+//  has the same {get, post, patch, put, del} surface as the module-global
+//  helpers; no apiPath wrapping (paths are written explicitly because the
+//  KB/AS routes are too varied for a single prefix to be helpful).
+// ============================================================================
+
+function makeClient(baseUrl, scopeHeaders) {
+  const wrap = (method) => (path, second) => {
+    const opts = method === 'GET' ? { query: second } : { body: second };
+    return doRequest(baseUrl, method, path, { ...opts, extraHeaders: scopeHeaders });
+  };
+  return {
+    get:    wrap('GET'),
+    post:   wrap('POST'),
+    patch:  wrap('PATCH'),
+    put:    wrap('PUT'),
+    del:    (path) => doRequest(baseUrl, 'DELETE', path, { extraHeaders: scopeHeaders }),
+    baseUrl,
+    headers: scopeHeaders,
+  };
+}
+
 /**
- * Multipart upload helper (for file endpoints that take `multipart/form-data`).
- * Wraps the same auth + base URL resolution as `request()`.
+ * Service-bound client for cws-kb.
  *
- *   await upload('/im/uploads/{id}/complete', { file: <Buffer|Blob>, name, mime, fields: {...} })
+ * @param {string} [orgId]  override the resolved org id (else uses config.org_id / COCO_ORG_ID)
+ * @returns {{get,post,patch,put,del,baseUrl,headers}}
+ *
+ * Example:
+ *   const kb = kbClient();
+ *   const tree = await kb.get(`/api/v1/orgs/${kb.headers['X-Org-Id']}/tree/roots`);
  */
-export async function upload(path, { file, name, mime, fields = {} }) {
-  const url = buildUrl(path);
-  const headers = { Accept: 'application/json', ...resolveHeaders() };
-  const token = resolveToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
+export function kbClient(orgId) {
+  const headers = {};
+  const oid = orgId || resolveOrgId();
+  if (oid) headers['X-Org-Id'] = oid;
+  return makeClient(resolveKbBaseUrl(), headers);
+}
 
-  const form = new FormData();
-  for (const [k, v] of Object.entries(fields)) {
-    if (v === undefined || v === null) continue;
-    form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
-  }
-  const blob = file instanceof Blob ? file : new Blob([file], { type: mime || 'application/octet-stream' });
-  form.append('file', blob, name || 'file');
+/**
+ * Service-bound client for cws-as.
+ *
+ * @param {string} [orgId]  override the resolved org id
+ */
+export function asClient(orgId) {
+  const headers = {};
+  const oid = orgId || resolveOrgId();
+  if (oid) headers['X-Org-Id'] = oid;
+  return makeClient(resolveAsBaseUrl(), headers);
+}
 
-  const res = await fetch(url, { method: 'POST', headers, body: form });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = text; }
+// ============================================================================
+//  Raw helpers (used by upload flows that need direct fetch)
+// ============================================================================
+
+/**
+ * PUT raw bytes to an absolute (typically pre-signed) URL.
+ * No Bearer header added — pre-signed URLs carry their own auth.
+ *
+ *   await putBytes(signedUrl, buf, 'application/pdf', { 'x-amz-server-side-encryption': 'AES256' })
+ */
+export async function putBytes(url, buf, contentType, extraHeaders = {}) {
+  const headers = { 'Content-Type': contentType || 'application/octet-stream', ...extraHeaders };
+  const res = await fetch(url, { method: 'PUT', headers, body: buf });
   if (!res.ok) {
-    const message =
-      (data && typeof data === 'object' && (data.detail || data.error || data.message)) || text;
-    const err = new Error(message);
+    const text = await res.text().catch(() => '');
+    const err = new Error(`PUT ${res.status}: ${text || res.statusText}`);
     err.status = res.status;
-    err.body = data;
     throw err;
   }
-  return data;
+  return { ok: true, status: res.status };
+}
+
+/**
+ * GET raw bytes from an absolute URL. Used to follow pre-signed download
+ * URLs returned by cws-as.
+ */
+export async function getBytes(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`GET ${res.status}: ${res.statusText}`);
+  return Buffer.from(await res.arrayBuffer());
 }

@@ -2,36 +2,50 @@
 
 /**
  * ArtifactStore — canonical interface for all file upload / download in
- * zylos-coco-workspace.
+ * zylos-coco-workspace. Talks directly to cws-as
+ * (https://git.coco.xyz/coco-workspace/cws-as).
  *
  * Two roles in one file:
  *
- *   1. **Library exports** (imported by scripts/send.js and src/comm-bridge.js):
- *        - uploadMedia(localPath, opts)   — IM/KB attachment upload
- *        - downloadMedia(url, filename)   — fetch bytes from a signed URL
- *        - getMediaUrl(mediaId)           — mint a download URL for media_id
- *      Everything that touches media bytes goes through these functions, so
- *      there is exactly one implementation per operation.
+ *   1. Library exports (imported by scripts/send.js, src/comm-bridge.js,
+ *      src/cli/kb.js):
+ *        - uploadMedia(localPath, opts)   — full 3-step cws-as upload
+ *        - downloadMedia(url, filename)   — fetch bytes from any URL
+ *        - getMediaUrl(artifactId, mode?) — mint a download URL
+ *      Exactly one implementation per operation — no duplication.
  *
- *   2. **CLI dispatcher** (when invoked as `node src/cli/as.js <cmd> '<json>'`):
- *        - as.upload     — generic media upload, wraps uploadMedia()
- *        - as.url        — wraps getMediaUrl()
- *        - as.download   — wraps downloadMedia(), saves to local temp
- *      The CLI dispatcher only runs when this file is the entry point
- *      (see the `import.meta.url === ...` guard at the bottom).
+ *   2. CLI dispatcher (when invoked as
+ *      `node src/cli/as.js <cmd> '<json>'`):
+ *        - as.upload     {filePath, mediaType?, contentType?, description?}
+ *        - as.list       {pageSize?, pageToken?, mime?, status?, producer?}
+ *        - as.get        {artifactId}
+ *        - as.url        {artifactId, mode?}     # mode=download|preview
+ *        - as.download   {artifactId, filename?}
+ *        - as.abort      {artifactId}
+ *        - as.resolve    {uris:[as://...]}
  *
- * Endpoint backing (per cws-comm api-design.md §5.8 — cws-core does not
- * yet expose these in its OpenAPI; calls 404 until core adds them):
+ * cws-as upload flow (api-usage-guide §1):
+ *   step 1: POST /api/v1/artifacts
+ *           Body: {name, mime_type, size_bytes, content_hash, description?, metadata?}
+ *           Resp: {artifact, upload:{upload_mode, upload_url, required_headers,
+ *                                    expires_at}, instant_upload}
+ *   step 2: PUT <upload.upload_url>
+ *           Body: raw bytes
+ *           Headers: upload.required_headers (Content-Type + x-goog-content-sha256 etc.)
+ *   step 3: POST /api/v1/artifacts/{id}/finalize
+ *           Body: {content_hash, content_length}
+ *           Resp: {artifact: {..., status: "pending_verification"}}
+ *           Server async-verifies SHA-256 → "active" or "hash_mismatch"
  *
- *     POST /api/v1/media/upload       → { media_id, upload_url, upload_headers }
- *     PUT  <upload_url>               ← raw bytes (S3-style direct upload)
- *     GET  /api/v1/media/{id}/url     → { url, expires_at }
+ * If response carries `instant_upload: true`, the bytes already exist
+ * server-side (content-addressable dedup); skip steps 2-3.
  */
 
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { get, post, apiPath } from '../lib/client.js';
+import { asClient, putBytes, getBytes } from '../lib/client.js';
 
 const HOME = process.env.HOME || '/tmp';
 const TMP_DIR = path.join(HOME, 'zylos/components/coco-workspace/media');
@@ -49,158 +63,246 @@ async function ensureTmpDir() {
   await fs.promises.mkdir(TMP_DIR, { recursive: true });
 }
 
+function sha256Hex(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex');
+}
+
 // ============================================================================
-//  Library functions (also used by scripts/send.js, src/comm-bridge.js)
+//  Library functions
 // ============================================================================
 
 /**
- * Upload a local file to cws-core's media endpoint and return the
- * server-assigned media_id.
+ * Upload a local file to cws-as via the 3-step flow. Returns the artifact
+ * metadata (or the existing artifact when instant_upload kicks in).
  *
- *   1. POST /api/v1/media/upload with file metadata → { media_id, upload_url, upload_headers }
- *   2. PUT the raw bytes to upload_url (typically a signed S3 URL)
+ * Backward-compatible signature: callers in send.js / comm-bridge use
+ * `{conversationId, mediaType, mimeType}`. `conversationId` is currently
+ * unused by cws-as (it scopes by org_id only); accepted to keep the call
+ * sites unchanged.
  *
  * @param {string} localPath
  * @param {object} opts
- * @param {string} opts.conversationId  required (access-control scoping)
- * @param {string} [opts.mediaType]     image|video|audio|voice|file|sticker (default 'file')
+ * @param {string} [opts.mediaType]     image|video|audio|voice|file|sticker
  * @param {string} [opts.mimeType]      explicit MIME; inferred from mediaType otherwise
- * @returns {Promise<{mediaId:string, mediaType:string, mimeType:string, size:number, fileName:string}>}
+ * @param {string} [opts.description]
+ * @param {object} [opts.metadata]
+ * @returns {Promise<{mediaId, artifactId, status, sizeBytes, mimeType, fileName, instantUpload}>}
  */
 export async function uploadMedia(localPath, opts = {}) {
   if (!localPath) throw new Error('uploadMedia: localPath is required');
-  if (!opts.conversationId) {
-    throw new Error('uploadMedia: opts.conversationId is required for access scoping');
-  }
+  const buf = await fs.promises.readFile(localPath);
   const stat = await fs.promises.stat(localPath);
+  const fileName = path.basename(localPath);
   const mediaType = opts.mediaType || 'file';
   const mimeType  = opts.mimeType || MIME_BY_KIND[mediaType] || 'application/octet-stream';
-  const fileName  = path.basename(localPath);
+  const contentHash = sha256Hex(buf);
 
-  const init = await post(apiPath('/media/upload'), {
-    file_name:       fileName,
-    mime_type:       mimeType,
-    file_size:       stat.size,
-    conversation_id: opts.conversationId,
-    media_type:      mediaType,
+  const c = asClient();
+
+  // Step 1: create artifact, receive upload instruction
+  const init = await c.post('/api/v1/artifacts', {
+    name:         fileName,
+    mime_type:    mimeType,
+    size_bytes:   stat.size,
+    content_hash: contentHash,
+    description:  opts.description,
+    metadata:     opts.metadata,
   });
-  const { media_id: mediaId, upload_url: uploadUrl, upload_headers: uploadHeaders } = init || {};
-  if (!mediaId || !uploadUrl) {
-    throw new Error('cws-core /media/upload returned no media_id/upload_url');
+  const artifact = init?.artifact || init?.data?.artifact;
+  const upload   = init?.upload   || init?.data?.upload;
+  const instant  = init?.instant_upload ?? init?.data?.instant_upload ?? false;
+  if (!artifact?.id) {
+    throw new Error('cws-as /artifacts returned no artifact.id');
   }
 
-  const data = await fs.promises.readFile(localPath);
-  const r = await fetch(uploadUrl, {
-    method:  'PUT',
-    body:    data,
-    headers: { 'Content-Type': mimeType, ...(uploadHeaders || {}) },
+  // Short-circuit: content-addressable dedup hit
+  if (instant) {
+    return {
+      mediaId:       artifact.id,
+      artifactId:    artifact.id,
+      status:        artifact.status,
+      sizeBytes:     artifact.size_bytes,
+      mimeType:      artifact.mime_type,
+      fileName:      artifact.name,
+      instantUpload: true,
+    };
+  }
+  if (!upload?.upload_url) {
+    throw new Error('cws-as /artifacts returned no upload.upload_url');
+  }
+
+  // Step 2: direct PUT to pre-signed URL
+  await putBytes(upload.upload_url, buf, mimeType, upload.required_headers || {});
+
+  // Step 3: tell cws-as we're done
+  const finalized = await c.post(`/api/v1/artifacts/${artifact.id}/finalize`, {
+    content_hash:   contentHash,
+    content_length: stat.size,
   });
-  if (!r.ok) throw new Error(`media PUT failed: HTTP ${r.status}`);
+  const finalArtifact = finalized?.artifact || finalized?.data?.artifact || artifact;
 
-  return { mediaId, mediaType, mimeType, size: stat.size, fileName };
+  return {
+    mediaId:       finalArtifact.id,
+    artifactId:    finalArtifact.id,
+    status:        finalArtifact.status,
+    sizeBytes:     finalArtifact.size_bytes ?? stat.size,
+    mimeType:      finalArtifact.mime_type ?? mimeType,
+    fileName:      finalArtifact.name ?? fileName,
+    instantUpload: false,
+  };
 }
 
 /**
- * Get a (typically signed) download URL for a media_id. Inbound message
- * frames carry media_id only; this turns it into a fetchable URL.
- *
- * @param {string} mediaId
- * @returns {Promise<{url:string, expiresAt?:string}>}
+ * Abort a pending upload. Cleans up the artifact + any uploaded chunks.
  */
-export async function getMediaUrl(mediaId) {
-  if (!mediaId) throw new Error('getMediaUrl: mediaId is required');
-  const meta = await get(apiPath(`/media/${mediaId}/url`));
-  const url = meta?.url || meta?.signed_url || meta?.download_url;
-  if (!url) throw new Error('cws-core /media/{id}/url returned no url');
-  return { url, expiresAt: meta?.expires_at || meta?.expiresAt };
+export async function abortUpload(artifactId) {
+  if (!artifactId) throw new Error('abortUpload: artifactId is required');
+  return asClient().post(`/api/v1/artifacts/${artifactId}/abort`);
 }
 
 /**
- * Download bytes from a (typically signed) URL into the component's
- * temp media directory. Returns the absolute local path.
+ * Get a (typically pre-signed) download URL for an artifact id.
  *
- * @param {string} url
- * @param {string} [filename]
- * @returns {Promise<string>} absolute local path
+ * @param {string} artifactId
+ * @param {'download'|'preview'} [mode='download']
+ *   download → Content-Disposition: attachment
+ *   preview  → Content-Disposition: inline (for in-browser preview)
  */
-export async function downloadMedia(url, filename) {
-  if (!url) throw new Error('downloadMedia: url is required');
+export async function getMediaUrl(artifactId, mode = 'download') {
+  if (!artifactId) throw new Error('getMediaUrl: artifactId is required');
+  const meta = await asClient().get(`/api/v1/artifacts/${artifactId}/download`, { mode });
+  const url = meta?.url || meta?.download_url || meta?.data?.url || meta?.data?.download_url;
+  if (!url) throw new Error('cws-as /artifacts/{id}/download returned no url');
+  return { url, expiresAt: meta?.expires_at || meta?.data?.expires_at };
+}
+
+/**
+ * Download an artifact's bytes to a local file under the component's
+ * media tmp dir. Returns the absolute local path.
+ */
+export async function downloadMedia(urlOrArtifactId, filename) {
+  let url = urlOrArtifactId;
+  // If we were handed an artifact id rather than a URL, resolve it.
+  if (!/^https?:\/\//i.test(urlOrArtifactId)) {
+    ({ url } = await getMediaUrl(urlOrArtifactId));
+  }
   await ensureTmpDir();
   const safeName = (filename || `media-${Date.now()}`).replace(/[/\\]/g, '_');
   const localPath = path.join(TMP_DIR, safeName);
-
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`media download failed: HTTP ${res.status}`);
-  const buf = Buffer.from(await res.arrayBuffer());
+  const buf = await getBytes(url);
   await fs.promises.writeFile(localPath, buf);
   return localPath;
 }
 
+/**
+ * Batch-resolve `as://` URIs to short-lived download URLs.
+ */
+export async function resolveUris(uris) {
+  if (!Array.isArray(uris) || uris.length === 0) {
+    throw new Error('resolveUris: uris must be a non-empty array');
+  }
+  return asClient().post('/api/v1/artifacts/resolve', { uris });
+}
+
 // ============================================================================
-//  CLI dispatcher (only when this file is the entry point)
+//  CLI dispatcher
 // ============================================================================
 
 const COMMANDS = {
-  // Upload a local file to a conversation.
-  // Returns: {mediaId, mediaType, mimeType, size, fileName}
+  // ✅ Upload (3-step internally)
   'as.upload': async (params) => {
-    if (!params.filePath)       throw new Error('filePath is required');
-    if (!params.conversationId) throw new Error('conversationId is required');
+    if (!params.filePath) throw new Error('filePath is required');
     return uploadMedia(params.filePath, {
-      conversationId: params.conversationId,
-      mediaType:      params.mediaType,
-      mimeType:       params.contentType,
+      mediaType:   params.mediaType,
+      mimeType:    params.contentType,
+      description: params.description,
+      metadata:    params.metadata,
     });
   },
 
-  // Get a signed download URL for a media_id.
-  // Returns: {url, expiresAt?}
-  'as.url': async (params) => {
-    if (!params.mediaId) throw new Error('mediaId is required');
-    return getMediaUrl(params.mediaId);
+  // ✅ List artifacts
+  'as.list': async (params) => {
+    return asClient().get('/api/v1/artifacts', {
+      page_size:  params.pageSize ?? params.limit,
+      page_token: params.pageToken ?? params.cursor,
+      mime_type:  params.mime,
+      status:     params.status,
+      producer:   params.producer,
+    });
   },
 
-  // Download a media_id to a local file. Pulls fresh URL + bytes.
-  // Returns: {localPath}
+  // ✅ Single artifact metadata
+  'as.get': async (params) => {
+    if (!params.artifactId) throw new Error('artifactId is required');
+    return asClient().get(`/api/v1/artifacts/${params.artifactId}`);
+  },
+
+  // ✅ Pre-signed download URL
+  'as.url': async (params) => {
+    if (!params.artifactId) throw new Error('artifactId is required');
+    return getMediaUrl(params.artifactId, params.mode);
+  },
+
+  // ✅ Full download → local file
   'as.download': async (params) => {
-    if (!params.mediaId) throw new Error('mediaId is required');
-    const { url } = await getMediaUrl(params.mediaId);
-    const localPath = await downloadMedia(url, params.filename);
+    if (!params.artifactId) throw new Error('artifactId is required');
+    const localPath = await downloadMedia(params.artifactId, params.filename);
     return { localPath };
+  },
+
+  // ✅ Abort a pending upload session
+  'as.abort': async (params) => {
+    if (!params.artifactId) throw new Error('artifactId is required');
+    return abortUpload(params.artifactId);
+  },
+
+  // ✅ Batch resolve as:// URIs
+  'as.resolve': async (params) => {
+    return resolveUris(params.uris);
   },
 };
 
 function printUsage() {
-  console.log(`AS CLI — ArtifactStore for COCO agents
+  console.log(`AS CLI — cws-as ArtifactStore (file upload / download)
 
 Usage: node src/cli/as.js <command> '<json-params>'
 
-Commands
-  as.upload      {conversationId, filePath, mediaType?, contentType?}
-                 # mediaType: image|video|audio|voice|file|sticker (default file)
-                 # → {mediaId, mediaType, mimeType, size, fileName}
+Commands (all ✅ — cws-as has these wired up)
+  as.upload     {filePath, mediaType?, contentType?, description?, metadata?}
+                # mediaType: image|video|audio|voice|file|sticker (default file)
+                # → {mediaId, artifactId, status, sizeBytes, mimeType, fileName, instantUpload}
+                # 3-step internally: POST /artifacts → PUT bytes → POST /finalize
+                # If server detects existing content-hash, instantUpload=true (skip PUT)
 
-  as.url         {mediaId}
-                 # → {url, expiresAt}
+  as.list       {pageSize?, pageToken?, mime?, status?, producer?}
 
-  as.download    {mediaId, filename?}
-                 # → {localPath}
+  as.get        {artifactId}
+                # → full artifact metadata
+
+  as.url        {artifactId, mode?}
+                # mode: download|preview (default download)
+                # → {url, expiresAt}
+
+  as.download   {artifactId, filename?}
+                # mints URL then fetches bytes to local tmp dir
+                # → {localPath}
+
+  as.abort      {artifactId}
+                # cancel a pending upload session
+
+  as.resolve    {uris:["as://org_x/art_y", ...]}
+                # batch as:// URI → pre-signed URL map (with partial-auth tolerance)
 
 Environment:
-  COCO_API_URL       Gateway base URL (default: http://127.0.0.1:8080)
-  COCO_AUTH_TOKEN    Bearer token for authenticated endpoints
-  COCO_API_PREFIX    Path prefix override (default: /api/v1)
-
-Pending cws-core support (calls 404 today):
-  POST /api/v1/media/upload    — referenced by as.upload
-  GET  /api/v1/media/{id}/url  — referenced by as.url / as.download
+  COCO_AS_URL        cws-as base URL (default: comm.as_url in config)
+  COCO_AUTH_TOKEN    Bearer token (shared with cws-core / cws-kb)
+  COCO_ORG_ID        Override config.org_id (X-Org-Id scope header)
 `);
 }
 
 async function runCli() {
   const [command, ...rest] = process.argv.slice(2);
   const params = rest.length ? JSON.parse(rest.join(' ')) : {};
-
   if (!command || command === 'help' || command === '--help' || command === '-h') {
     printUsage();
     process.exit(0);
@@ -222,8 +324,7 @@ async function runCli() {
   }
 }
 
-// Run the CLI dispatcher only when invoked as a script (`node src/cli/as.js ...`),
-// not when imported as a module (`import { uploadMedia } from '.../as.js'`).
+// Run CLI only when invoked as a script.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   runCli();
 }
