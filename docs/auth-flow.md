@@ -23,7 +23,7 @@ Agent 与 COCO Workspace 的交互分为三个阶段：
 
 阶段三：运行时消息处理（持续）
   ├─ 入站：WS frame → comm-bridge → C4 → Agent → CLI
-  └─ 出站：Agent → C4 → send.js → REST API
+  └─ 出站：Agent → C4 → send.js → IPC HTTP → WS（REST 降级）
 ```
 
 ---
@@ -220,10 +220,22 @@ c4-send coco-workspace "[COCO DM]/<convId>" "<message>"
   ▼
 scripts/send.js
   ├─ 解析 endpoint → conversationId / threadId / replyTo
+  │
   ├─ 纯文本 / Markdown
-  │   └─ POST /api/v1/conversations/{id}/messages
-  │          { client_msg_id, content:[{type,body}], reply_to? }
-  └─ [MEDIA:image|file]/path
+  │   ├─ [主路径] 读取 runtime/bridge.json → 验证 pid 存活
+  │   │    └─ POST 127.0.0.1:<port>/send
+  │   │         { conversationId, text, threadId?, replyTo? }
+  │   │              │
+  │   │              ▼
+  │   │         comm-bridge IPC server
+  │   │           ├─ 长消息拆分（≤3000 chars，按段落/换行/硬截断）
+  │   │           └─ buildWsSendFrame() → WS → cws-comm
+  │   │
+  │   └─ [降级] bridge 离线 / WS 断开（IPC 返回 503）
+  │         └─ POST /api/v1/conversations/{id}/messages
+  │                { client_msg_id, content:[{type,body}], reply_to? }
+  │
+  └─ [MEDIA:image|file]/path（始终走 REST）
       ├─ as.uploadMedia(localPath) → { mediaId }
       └─ POST /api/v1/conversations/{id}/messages
              { content:[{type:"image", body:<mediaId>}] }
@@ -254,6 +266,7 @@ scripts/send.js
 | `src/lib/ws.js` | WebSocket 连接管理（重连、心跳、urlProvider 钩子） |
 | `src/lib/connect.js` | ConnectRequest / ConnectResponse 帧构建与解析 |
 | `src/lib/client.js` | 统一 HTTP 客户端（自动注入 JWT Bearer） |
-| `src/comm-bridge.js` | PM2 服务入口，串联上述所有模块 |
+| `src/comm-bridge.js` | PM2 服务入口；兼作 IPC HTTP server（`POST /send`，监听随机端口） |
 | `src/lib/session.js` | WS runtime 状态持久化（last_seq、session_token） |
 | `runtime/token.json` | JWT 磁盘缓存（CLI 子进程跨进程复用） |
+| `runtime/bridge.json` | IPC bridge 端口 + pid，send.js 用于定位 comm-bridge 服务 |
