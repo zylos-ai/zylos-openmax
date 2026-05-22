@@ -27,13 +27,15 @@
 
 import dotenv from 'dotenv';
 import path from 'path';
+import http from 'http';
+import fs from 'fs';
 import { execFile } from 'child_process';
 
 dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 
 import { loadConfig, watchConfig } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
-import { formatInboundForC4, formatEndpoint } from './lib/message.js';
+import { formatInboundForC4, formatEndpoint, buildWsSendFrame, splitMessage } from './lib/message.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { get, setApiKey, setHeaders, apiPath } from './lib/client.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
@@ -46,10 +48,11 @@ import {
 } from './lib/connect.js';
 
 const LOG_PREFIX = '[comm-bridge]';
-// Must match the install directory under ~/zylos/.claude/skills/, so that
-// C4 routes via SKILLS_DIR/<CHANNEL>/scripts/send.js. SKILL.md installs
-// this component as `coco-workspace`.
 const CHANNEL = 'coco-workspace';
+
+const HOME        = process.env.HOME || '';
+const RUNTIME_DIR = path.join(HOME, 'zylos/components/coco-workspace/runtime');
+const BRIDGE_PATH = path.join(RUNTIME_DIR, 'bridge.json');
 const C4_RECEIVE = path.join(
   process.env.HOME || '',
   'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js',
@@ -419,8 +422,84 @@ watchConfig((next) => {
   log('config reloaded — WS settings apply on next reconnect');
 });
 
-process.on('SIGTERM', () => { log('SIGTERM, stopping'); ws.stop(); process.exit(0); });
-process.on('SIGINT',  () => { log('SIGINT, stopping');  ws.stop(); process.exit(0); });
+// ── IPC send server ──────────────────────────────────────────────────────────
+// send.js (Claude's outbound subprocess) POSTs here; we forward via the open
+// WS connection so the reply reaches users in the same conversation they used.
+//
+// POST /send  body: { conversationId, text, threadId?, replyTo? }
+//   conversationId — already resolved by send.js (DM conv, group conv, or
+//                    thread conv depending on endpoint type)
+//   threadId       — set only for thread-type endpoints
+//   replyTo        — set for group reply-to-message endpoints
+//
+// Long messages are split into ≤3000-char chunks (paragraph → newline → hard)
+// and sent as sequential frames to the same conversation. Each chunk gets its
+// own client_msg_id, so the server de-dupes them independently.
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', c => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
+
+const ipcServer = http.createServer(async (req, res) => {
+  const reply = (code, obj) => {
+    res.writeHead(code, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(obj));
+  };
+
+  if (req.method !== 'POST' || req.url !== '/send') {
+    return reply(404, { error: 'not found' });
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(req));
+  } catch {
+    return reply(400, { error: 'invalid JSON' });
+  }
+
+  const { conversationId, text, threadId, replyTo } = payload;
+  if (!conversationId || typeof text !== 'string') {
+    return reply(400, { error: 'conversationId and text required' });
+  }
+  if (!connected) {
+    return reply(503, { error: 'ws not connected' });
+  }
+
+  const chunks = splitMessage(text);
+  try {
+    for (const chunk of chunks) {
+      ws.send(buildWsSendFrame({
+        workspaceId: config.workspace_id,
+        conversationId,
+        text:     chunk,
+        threadId: threadId || undefined,
+        replyTo:  chunks.length === 1 ? (replyTo || undefined) : undefined,
+      }));
+    }
+    log(`ipc→ws conv=${conversationId} chunks=${chunks.length}${threadId ? ' thread' : ''}`);
+    reply(200, { ok: true, chunks: chunks.length });
+  } catch (e) {
+    reply(500, { error: e.message });
+  }
+});
+
+ipcServer.listen(0, '127.0.0.1', () => {
+  const { port } = ipcServer.address();
+  try {
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true });
+    fs.writeFileSync(BRIDGE_PATH, JSON.stringify({ port, pid: process.pid }));
+  } catch (e) { warn('bridge.json write failed:', e.message); }
+  log(`IPC server on 127.0.0.1:${port}`);
+});
+
+function removeBridgeFile() { try { fs.unlinkSync(BRIDGE_PATH); } catch {} }
+process.on('SIGTERM', () => { removeBridgeFile(); log('SIGTERM, stopping'); ipcServer.close(); ws.stop(); process.exit(0); });
+process.on('SIGINT',  () => { removeBridgeFile(); log('SIGINT, stopping');  ipcServer.close(); ws.stop(); process.exit(0); });
 
 log(`starting (ws=${wsBaseUrl}?ticket=..., workspace=${config.workspace_id || '<unset>'}, device=${config.device_id || '<unset>'})`);
 ws.start();

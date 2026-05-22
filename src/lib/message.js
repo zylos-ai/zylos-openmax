@@ -131,3 +131,66 @@ export function parseMediaPrefix(message) {
   if (!m) return null;
   return { kind: m[1], localPath: m[2].trim() };
 }
+
+/**
+ * Split a long message into chunks that fit within maxLen characters.
+ * Tries to break at paragraph (double-newline) boundaries first, then
+ * single-newline boundaries, then hard-cuts as a last resort.
+ */
+export function splitMessage(text, maxLen = 3000) {
+  if (!text || text.length <= maxLen) return [text];
+
+  const chunks = [];
+  let remaining = text;
+
+  while (remaining.length > maxLen) {
+    let cut = -1;
+
+    // prefer paragraph break
+    cut = remaining.lastIndexOf('\n\n', maxLen);
+    if (cut > maxLen * 0.4) { chunks.push(remaining.slice(0, cut).trimEnd()); remaining = remaining.slice(cut).trimStart(); continue; }
+
+    // fallback: single newline
+    cut = remaining.lastIndexOf('\n', maxLen);
+    if (cut > maxLen * 0.4) { chunks.push(remaining.slice(0, cut).trimEnd()); remaining = remaining.slice(cut + 1).trimStart(); continue; }
+
+    // last resort: hard cut at maxLen
+    chunks.push(remaining.slice(0, maxLen));
+    remaining = remaining.slice(maxLen);
+  }
+
+  if (remaining.trim()) chunks.push(remaining.trim());
+  return chunks;
+}
+
+/**
+ * Build a WebSocket outbound message frame (client → server).
+ * Format per cws-comm api-design.md §4.2 "出站消息".
+ *
+ * Works for DM, group, and thread conversations — caller must pass the
+ * correct conversationId (resolveTargetConversation handles the routing).
+ *
+ * @param {object} opts
+ * @param {string} opts.workspaceId
+ * @param {string} opts.conversationId   DM / group / thread conv id
+ * @param {string} opts.text
+ * @param {string} [opts.msgType='text']
+ * @param {string} [opts.threadId]       present only for thread replies
+ * @param {string} [opts.replyTo]        reply_to message id
+ */
+export function buildWsSendFrame({ workspaceId, conversationId, text, msgType = 'text', threadId, replyTo }) {
+  return {
+    type: 'message',
+    id: `frame_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
+    timestamp: Date.now(),
+    workspace_id: workspaceId || '',
+    payload: {
+      client_msg_id: newClientMsgId(),
+      conversation_id: conversationId,
+      content: { text: text || '', version: 1 },
+      type: msgType,
+      ...(threadId ? { thread_id: threadId } : {}),
+      ...(replyTo  ? { reply_to:  replyTo  } : {}),
+    },
+  };
+}

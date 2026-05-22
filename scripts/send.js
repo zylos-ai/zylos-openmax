@@ -28,6 +28,7 @@
 
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 
 dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 
@@ -39,6 +40,33 @@ import {
   newClientMsgId,
 } from '../src/lib/message.js';
 import { uploadMedia } from '../src/cli/as.js';
+
+const BRIDGE_PATH = path.join(process.env.HOME || '', 'zylos/components/coco-workspace/runtime/bridge.json');
+
+/**
+ * Send a text message via comm-bridge's IPC server (→ WebSocket → user).
+ * Returns the response on success; returns null if bridge is not running.
+ * Throws if bridge is up but rejected the request (e.g. WS disconnected).
+ */
+async function tryWsBridge(ep, text) {
+  let info;
+  try { info = JSON.parse(fs.readFileSync(BRIDGE_PATH, 'utf8')); } catch { return null; }
+  try { process.kill(info.pid, 0); } catch { return null; }  // bridge process dead
+
+  const res = await fetch(`http://127.0.0.1:${info.port}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      conversationId: resolveTargetConversation(ep),
+      text,
+      threadId: ep.threadConversationId || undefined,
+      replyTo:  ep.replyTo             || undefined,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `bridge ${res.status}`);
+  return data;
+}
 
 function usage() {
   console.error('Usage: node scripts/send.js <endpoint> <message>');
@@ -63,6 +91,12 @@ function resolveTargetConversation(ep) {
 }
 
 async function sendText(_unused, ep, text) {
+  // Prefer WS path via comm-bridge IPC (handles DM, group, thread, long msgs).
+  // Falls back to REST if bridge is offline or WS is disconnected.
+  const wsResult = await tryWsBridge(ep, text).catch(() => null);
+  if (wsResult) return wsResult;
+
+  // REST fallback — single request; server-side splitting not guaranteed.
   const convId = resolveTargetConversation(ep);
   const blockType = looksLikeMarkdown(text) ? 'markdown' : 'text';
   return post(apiPath(`/conversations/${convId}/messages`), {
