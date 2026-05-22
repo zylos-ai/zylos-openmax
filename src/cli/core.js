@@ -16,7 +16,7 @@
  *      surface is ready when core adds the endpoint
  */
 
-import { get, apiPath } from '../lib/client.js';
+import { get, post, del, apiPath } from '../lib/client.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -72,8 +72,38 @@ const COMMANDS = {
   }),
 
   // ✅ Organizations.
-  'core.org_list': () => get(apiPath('/organizations')),
-  'core.org_get':  () => get(apiPath(`/organizations/${params.orgId}`)),
+  'core.org_list':   () => get(apiPath('/organizations')),
+  'core.org_get':    () => get(apiPath(`/organizations/${params.orgId}`)),
+  // POST /api/v1/organizations  — name (required), slug (required)
+  'core.org_create': () => post(apiPath('/organizations'), {
+    name: params.name,
+    slug: params.slug,
+  }),
+
+  // ✅ Roles — GET /api/v1/roles  — scope? (org|system)
+  'core.role_list': () => get(apiPath('/roles'), { scope: params.scope }),
+
+  // ✅ Invitations
+  // POST /api/v1/invitations — org_id (required), email?, role_id (required), message?
+  'core.invitation_create': () => post(apiPath('/invitations'), {
+    org_id:  params.orgId,
+    email:   params.email,
+    role_id: params.roleId,
+    message: params.message,
+  }),
+  // GET /api/v1/invitations — org_id (required), status?, cursor?, limit?
+  'core.invitation_list': () => get(apiPath('/invitations'), {
+    org_id: params.orgId,
+    status: params.status,
+    cursor: params.cursor,
+    limit:  params.limit,
+  }),
+  // POST /api/v1/invitations/{invitation_id}/accept — token? (in body)
+  'core.invitation_accept': () => post(apiPath(`/invitations/${params.invitationId}/accept`), {
+    token: params.token,
+  }),
+  // DELETE /api/v1/invitations/{invitation_id}
+  'core.invitation_revoke': () => del(apiPath(`/invitations/${params.invitationId}`)),
 };
 
 function printUsage() {
@@ -108,6 +138,16 @@ Projects (directory view — workflow ops live in tm.js)
 Organizations
   ✅ core.org_list        {}
   ✅ core.org_get         {orgId}
+  ✅ core.org_create      {name, slug}
+
+Roles
+  ✅ core.role_list       {scope?}
+
+Invitations
+  ✅ core.invitation_create  {orgId, roleId, email?, message?}
+  ✅ core.invitation_list    {orgId, status?, cursor?, limit?}
+  ✅ core.invitation_accept  {invitationId, token?}
+  ✅ core.invitation_revoke  {invitationId}
 
 Environment:
   COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)

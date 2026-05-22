@@ -120,12 +120,14 @@ export async function exchange(orgId) {
   const apiKey = resolveApiKey();
   if (!apiKey) throw new Error('token.exchange: COCO_AUTH_TOKEN / config.agent.api_key not set');
   const oid = resolveOrgId(orgId);
-  const data = await corePost('/auth/agent/token', oid ? { org_id: oid } : {}, apiKey);
+  const raw = await corePost('/auth/agent/token', oid ? { org_id: oid } : {}, apiKey);
+  // cws-core wraps all auth responses in D8 envelope: { data: {...}, request_id, server_time }
+  const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
   const state = {
-    access_token:             data.access_token,
-    access_token_expires_at:  toMs(data.access_token_expires_at),
-    refresh_token:            data.refresh_token,
-    refresh_token_expires_at: toMs(data.refresh_token_expires_at),
+    access_token:             d.access_token,
+    access_token_expires_at:  toMs(d.access_token_expires_at),
+    refresh_token:            d.refresh_token,
+    refresh_token_expires_at: toMs(d.refresh_token_expires_at),
   };
   _state = state;
   writeDisk(state);
@@ -142,12 +144,13 @@ export async function refresh(orgId) {
   const oid = resolveOrgId(orgId);
   try {
     const body = { refresh_token: s.refresh_token, ...(oid ? { org_id: oid } : {}) };
-    const data = await corePost('/auth/refresh', body, s.access_token);
+    const raw = await corePost('/auth/refresh', body, s.access_token);
+    const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
     const state = {
-      access_token:             data.access_token,
-      access_token_expires_at:  toMs(data.access_token_expires_at),
-      refresh_token:            data.refresh_token ?? s.refresh_token,
-      refresh_token_expires_at: toMs(data.refresh_token_expires_at) || s.refresh_token_expires_at,
+      access_token:             d.access_token,
+      access_token_expires_at:  toMs(d.access_token_expires_at),
+      refresh_token:            d.refresh_token ?? s.refresh_token,
+      refresh_token_expires_at: toMs(d.refresh_token_expires_at) || s.refresh_token_expires_at,
     };
     _state = state;
     writeDisk(state);
@@ -182,9 +185,10 @@ export async function getWsTicket(orgId) {
   const accessToken = await getAccessToken(orgId);
   const oid = resolveOrgId(orgId);
   if (!oid) throw new Error('token.getWsTicket: org_id required (set config.org_id or COCO_ORG_ID)');
-  const data = await corePost('/auth/ws-ticket', { org_id: oid }, accessToken);
-  if (!data.ticket) throw new Error('token.getWsTicket: server returned no ticket');
-  return data.ticket;
+  const raw = await corePost('/auth/ws-ticket', { org_id: oid }, accessToken);
+  const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
+  if (!d.ticket) throw new Error('token.getWsTicket: server returned no ticket');
+  return d.ticket;
 }
 
 /**

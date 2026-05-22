@@ -160,10 +160,16 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders } = 
 // ============================================================================
 
 async function request(method, path, opts = {}) {
-  return doRequest(resolveBaseUrl(), method, path, {
+  const result = await doRequest(resolveBaseUrl(), method, path, {
     ...opts,
     extraHeaders: { ...resolveCoreHeaders(), ...(opts.extraHeaders || {}) },
   });
+  // cws-core wraps all responses in D8 envelope: { data, request_id, server_time }.
+  // Unwrap so callers receive the payload directly.
+  if (result && typeof result === 'object' && 'data' in result && 'request_id' in result) {
+    return result.data;
+  }
+  return result;
 }
 
 export const get   = (path, query) => request('GET',    path, { query });
