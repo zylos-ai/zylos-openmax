@@ -18,8 +18,7 @@
  *      most-likely future shape; body shape is best-effort guess.
  *
  * Most "writeful" TM surface (Issue write, Task write, Blueprint,
- * Attempt, Comment, Link, System, TaskBoard) is currently ⏳ — core
- * exposes the read side only.
+ * TaskBoard) is currently ⏳ — core exposes the read side only.
  */
 
 import { get, post, patch, put, del, apiPath } from '../lib/client.js';
@@ -71,14 +70,6 @@ const COMMANDS = {
   //  ISSUE  (✅ read-only in core: global list + nested read; writes ⏳)
   // =========================================================================
 
-  // Global list (cross-project)
-  'issue.list': () => get(apiPath('/issues'), {
-    status:      params.status,
-    assignee_id: params.assigneeId,
-    page_size:   params.pageSize  ?? params.limit,
-    page_token:  params.pageToken ?? params.cursor,
-  }),
-
   // Per-project nested list
   'issue.list_in_project': () => get(apiPath(`/projects/${params.projectId}/issues`), {
     status:     params.status,
@@ -111,10 +102,6 @@ const COMMANDS = {
   'issue.move_project': () => post(
     apiPath(`/projects/${params.projectId}/issues/${params.id}/move`),
     { project_id: params.targetProjectId },
-  ),
-  'issue.set_acceptance': () => post(
-    apiPath(`/projects/${params.projectId}/issues/${params.id}/acceptance`),
-    { accepted: params.accepted, source: params.source },
   ),
 
   // =========================================================================
@@ -158,7 +145,6 @@ const COMMANDS = {
     assignee_id: params.assigneeId,
     status:      params.status,
   }),
-  'task.claim':    () => post(apiPath(`/tasks/${params.id}/claim`),    { assignee_id: params.assigneeId }),
   'task.reassign': () => post(apiPath(`/tasks/${params.id}/reassign`), { assignee_id: params.assigneeId }),
 
   // =========================================================================
@@ -198,49 +184,6 @@ const COMMANDS = {
   'blueprint.submit_for_approval': () => post(apiPath(`/blueprints/${params.id}/submit`)),
   'blueprint.create_amendment':    () => post(apiPath('/blueprints/amend'), { issue_id: params.issueId }),
 
-  'attempt.create':     () => post(apiPath('/attempts'), {
-    task_id:     params.taskId,
-    assignee_id: params.assigneeId,
-  }),
-  'attempt.get':        () => get(apiPath(`/attempts/${params.id}`)),
-  'attempt.list':       () => get(apiPath('/attempts'), {
-    task_id:    params.taskId,
-    page_size:  params.pageSize ?? params.limit,
-    page_token: params.pageToken ?? params.cursor,
-  }),
-  'attempt.transition': () => post(apiPath(`/attempts/${params.id}/transition`), {
-    status:         params.status,
-    failure_reason: params.failureReason,
-  }),
-
-  'comment.append': () => post(apiPath('/comments'), {
-    work_type:     params.workType,
-    work_id:       params.workId,
-    author_id:     params.authorId,
-    body_markdown: params.bodyMarkdown,
-    event_type:    params.eventType,
-    event_payload: params.eventPayload,
-  }),
-  'comment.list':   () => get(apiPath('/comments'), {
-    work_type:  params.workType,
-    work_id:    params.workId,
-    page_size:  params.pageSize ?? params.limit,
-    page_token: params.pageToken ?? params.cursor,
-  }),
-
-  'link.create': () => post(apiPath('/links'), {
-    work_type:         params.workType,
-    work_id:           params.workId,
-    conversation_id:   params.conversationId,
-    link_role:         params.linkRole,
-    anchor_message_id: params.anchorMessageId,
-  }),
-  'link.list':   () => get(apiPath('/links'), {
-    work_type:       params.workType,
-    work_id:         params.workId,
-    conversation_id: params.conversationId,
-  }),
-
   'taskboard.list': () => get(apiPath('/task-board'), {
     workspace_id: params.workspaceId,
     skill_tags:   params.skillTags,
@@ -249,17 +192,6 @@ const COMMANDS = {
     page_token:   params.pageToken ?? params.cursor,
   }),
 
-  'system.initialize_workspace': () => post(apiPath('/system/initialize-workspace'), {
-    workspace_id: params.workspaceId,
-    team_id:      params.teamId,
-  }),
-  'system.approval_decision':    () => post(apiPath('/system/approval-decision'), {
-    blueprint_id: params.blueprintId,
-    approved:     params.approved,
-  }),
-  'system.auto_archive':         () => post(apiPath('/system/auto-archive'), {
-    workspace_id: params.workspaceId,
-  }),
 };
 
 function printUsage() {
@@ -277,14 +209,12 @@ PROJECT
   ✅ project.members        {id}
 
 ISSUE
-  ✅ issue.list             {status?, assigneeId?, pageSize?, pageToken?}     # global
   ✅ issue.list_in_project  {projectId, status?, archived?, pageSize?, pageToken?}
   ✅ issue.get              {projectId, id}                                    # nested
   ⏳ issue.create           {projectId, title, description?, mode, leadAgentId, ...}
   ⏳ issue.update           {projectId, id, title?, description?}
   ⏳ issue.transition       {projectId, id, status}
   ⏳ issue.move_project     {projectId, id, targetProjectId}
-  ⏳ issue.set_acceptance   {projectId, id, accepted, source}
 
 TASK
   ✅ task.list              {projectId?, issueId?, status?, assigneeId?, pageSize?, pageToken?}
@@ -293,18 +223,13 @@ TASK
   ⏳ task.transition        {id, status}    # alias: task.status
   ⏳ task.archive           {id}
   ⏳ task.subtask_create    {id, title, assigneeId?, status?}
-  ⏳ task.claim             {id, assigneeId}
   ⏳ task.reassign          {id, assigneeId}
 
-BLUEPRINT / ATTEMPT / COMMENT / LINK / SYSTEM / TASKBOARD  — all ⏳
+BLUEPRINT / TASKBOARD  — all ⏳
   blueprint.create / get / list / add_step / update_step / delete_step
   blueprint.set_step_depends_on / set_estimated_budget / set_notes
   blueprint.render_markdown / submit_for_approval / create_amendment
-  attempt.create / get / list / transition
-  comment.append / comment.list
-  link.create / link.list
   taskboard.list
-  system.initialize_workspace / approval_decision / auto_archive
 
 Environment:
   COCO_API_URL     cws-core base URL (default: http://127.0.0.1:8080)

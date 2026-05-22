@@ -3,7 +3,7 @@
 > **架构说明**：
 > - **COMM**：直连 cws-comm（`COCO_COMM_URL`）
 > - **TM 读操作**（project/issue/task 列表与详情）：通过 cws-core BFF（`COCO_API_URL`）
-> - **TM 写操作**（issue/task/blueprint/attempt/comment/link 增删改）：直连 cws-work（`COCO_WORK_URL`），cws-core 尚未代理这些端点
+> - **TM 写操作**（issue/task/blueprint 增删改）：直连 cws-work（`COCO_WORK_URL`），cws-core 尚未代理这些端点
 > - **KB**：直连 cws-kb（`COCO_KB_URL`），cws-core 尚未代理
 > - **AS**：直连 cws-as（`COCO_AS_URL`），cws-core 尚未代理
 >
@@ -240,7 +240,7 @@
 | 操作类型 | 后端 | URL |
 |---|---|---|
 | Project / Issue / Task 读操作 | cws-core（BFF） | `COCO_API_URL` |
-| Issue / Task / Blueprint / Attempt / Comment / Link 写操作 | cws-work（直连） | `COCO_WORK_URL` |
+| Issue / Task / Blueprint 写操作 | cws-work（直连） | `COCO_WORK_URL` |
 
 ### Project
 
@@ -258,14 +258,12 @@
 
 | 命令 | 参数 | 描述 | 返回 | 状态 |
 |------|------|------|------|------|
-| `issue.list` | `{status?, assigneeId?, pageSize?, pageToken?}` | 全局 Issue 列表 | `{items:[{id, project_id, title, description, mode, status, lead_agent_id, created_at}]}` | ✅ |
 | `issue.list_in_project` | `{projectId, status?, archived?, pageSize?, pageToken?}` | 项目内 Issue 列表 | `{items:[{id, project_id, title, description, mode, status, lead_agent_id, created_at}]}` | ✅ |
 | `issue.get` | `{id}` | 获取 Issue 详情 | `{id, project_id, title, description, mode, status, lead_agent_id, origin_conversation_id?, origin_message_id?, accepted_at?, rejected_at?, acceptance_source?, created_at, updated_at}` | ✅ |
 | `issue.create` | `{projectId, title, description?, mode, leadAgentId, originConversationId?}` | 创建 Issue | `{id, project_id, title, description, mode, status, lead_agent_id, created_at}` | ✅ |
 | `issue.update` | `{id, title?, description?}` | 更新 Issue | `{id, project_id, title, description, status, updated_at}` | ✅ |
 | `issue.transition` | `{id, status}` | Issue 状态流转 | `{id, project_id, title, status, updated_at}` | ✅ |
 | `issue.move_project` | `{id, targetProjectId}` | Issue 跨项目移动 | `{id, project_id, title, status, updated_at}` | ✅ |
-| `issue.set_acceptance` | `{id, accepted, source}` | 设置 Issue 验收结果 | `{id, project_id, title, status, accepted_at?, rejected_at?, acceptance_source?}` | ✅ |
 
 ### Task
 
@@ -275,7 +273,6 @@
 | `task.get` | `{id}` | 获取任务详情 | `{id, issue_id, title, description, status, assignee_id?, skill_tags?, blueprint_step_id?, depends_on?, current_attempt_number, context_page_ids?, created_at, updated_at}` | ✅ |
 | `task.create` | `{issueId, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?}` | 创建任务 | `{id, issue_id, title, description, status, assignee_id?, skill_tags?, blueprint_step_id?, depends_on?, created_at}` | ✅ |
 | `task.transition` | `{id, status}` | 任务状态流转 | `{id, issue_id, title, status, updated_at}` | ✅ |
-| `task.claim` | `{id, assigneeId}` | 认领任务 | `{id, issue_id, title, status, assignee_id, updated_at}` | ✅ |
 | `task.reassign` | `{id, assigneeId}` | 重新分配任务 | `{id, issue_id, title, status, assignee_id, updated_at}` | ✅ |
 | `taskboard.list` | `{projectId?, issueId?}` | 任务看板视图 | `{items:[{id, issue_id, title, status, assignee_id?, skill_tags?, created_at}]}` | ✅ |
 
@@ -296,26 +293,6 @@
 | `blueprint.submit_for_approval` | `{blueprintId}` | 提交蓝图审批 | `{id, issue_id, version_number, status, updated_at}` | ✅ |
 | `blueprint.create_amendment` | `{blueprintId, reason?}` | 创建蓝图修正版本 | `{id, issue_id, version_number, status, notes, created_at}` | ✅ |
 
-### Attempt（执行尝试）
-
-| 命令 | 参数 | 描述 | 返回 | 状态 |
-|------|------|------|------|------|
-| `attempt.create` | `{taskId, assigneeId}` | 创建执行尝试 | `{id, task_id, assignee_id, attempt_number, status, created_at}` | ✅ |
-| `attempt.get` | `{id}` | 获取尝试详情 | `{id, task_id, assignee_id, attempt_number, status, failure_reason?, blocked_at?, blocked_on_approval_request_ids?, created_at, updated_at}` | ✅ |
-| `attempt.list` | `{taskId}` | 列出任务的所有尝试 | `{items:[{id, task_id, assignee_id, attempt_number, status, created_at}]}` | ✅ |
-| `attempt.transition` | `{id, status}` | 尝试状态流转 | `{id, task_id, assignee_id, attempt_number, status, updated_at}` | ✅ |
-
-### Comment / Link / System
-
-| 命令 | 参数 | 描述 | 返回 | 状态 |
-|------|------|------|------|------|
-| `comment.append` | `{resourceType, resourceId, content}` | 添加评论 | `{id, work_type, work_id, author_id, body_markdown, event_type?, event_payload?, created_at}` | ✅ |
-| `comment.list` | `{resourceType, resourceId}` | 列出评论 | `{items:[{id, work_type, work_id, author_id, body_markdown, event_type?, created_at}]}` | ✅ |
-| `link.create` | `{resourceType, resourceId, conversationId, role?}` | 关联工作项与会话 | `{id, work_type, work_id, conversation_id, link_role, anchor_message_id?, created_at}` | ✅ |
-| `link.list` | `{resourceType, resourceId}` | 列出关联 | `{items:[{id, work_type, work_id, conversation_id, link_role, anchor_message_id?, created_at}]}` | ✅ |
-| `system.initialize_workspace` | `{orgId}` | 初始化工作区 | `{id, workspace_id, name, slug, is_inbox, status, created_at}` (inbox projectResponse) | ✅ |
-| `system.approval_decision` | `{blueprintId, approved, comment?}` | 蓝图审批决策 | `{id, issue_id, version_number, status, approved_at?, updated_at}` | ✅ |
-| `system.auto_archive` | `{}` | 自动归档过期工作项 | `{archived}` (归档数量) | ✅ |
 
 ---
 
@@ -327,7 +304,7 @@
 | COMM | 30     | 30   | 100%   |
 | CORE | 16     | 16   | 100%   |
 | KB   | 35     | 35   | 100%   |
-| TM   | 34     | 34   | 100%   |
-| **合计** | **125** | **125** | **100%** |
+| TM   | 20     | 20   | 100%   |
+| **合计** | **111** | **111** | **100%** |
 
 > 最后更新：2026-05-22，对照各服务 main 分支（cws-as `fc1020e`、cws-comm `bfb6db2`、cws-core `35ca93b`、cws-kb `1554242`、cws-work `18377d2`）
