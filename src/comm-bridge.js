@@ -27,15 +27,13 @@
 
 import dotenv from 'dotenv';
 import path from 'path';
-import http from 'http';
-import fs from 'fs';
 import { execFile } from 'child_process';
 
 dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 
 import { loadConfig, watchConfig } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
-import { formatInboundForC4, formatEndpoint, buildWsSendFrame } from './lib/message.js';
+import { formatInboundForC4, formatEndpoint } from './lib/message.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { get, setApiKey, setHeaders, apiPath } from './lib/client.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
@@ -48,11 +46,10 @@ import {
 } from './lib/connect.js';
 
 const LOG_PREFIX = '[comm-bridge]';
+// Must match the install directory under ~/zylos/.claude/skills/, so that
+// C4 routes via SKILLS_DIR/<CHANNEL>/scripts/send.js. SKILL.md installs
+// this component as `coco-workspace`.
 const CHANNEL = 'coco-workspace';
-
-const HOME = process.env.HOME || '';
-const RUNTIME_DIR = path.join(HOME, 'zylos/components/coco-workspace/runtime');
-const BRIDGE_PATH  = path.join(RUNTIME_DIR, 'bridge.json');
 const C4_RECEIVE = path.join(
   process.env.HOME || '',
   'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js',
@@ -422,55 +419,8 @@ watchConfig((next) => {
   log('config reloaded — WS settings apply on next reconnect');
 });
 
-// ── IPC server: send.js posts here → WS frame → cws-comm → user ─────────────
-const ipcServer = http.createServer((req, res) => {
-  if (req.method !== 'POST' || req.url !== '/send') {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'not found' }));
-    return;
-  }
-  let body = '';
-  req.on('data', chunk => { body += chunk; });
-  req.on('end', () => {
-    try {
-      const { conversationId, text, msgType, threadId, replyTo } = JSON.parse(body);
-      if (!conversationId || text === undefined) throw new Error('conversationId and text required');
-      if (!connected) {
-        res.writeHead(503, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'ws not connected' }));
-        return;
-      }
-      const frame = buildWsSendFrame({
-        workspaceId: config.workspace_id,
-        conversationId,
-        text,
-        msgType,
-        threadId,
-        replyTo,
-      });
-      ws.send(frame);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-      log(`ipc send → conv=${conversationId} type=${msgType || 'text'}`);
-    } catch (e) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
-  });
-});
-
-ipcServer.listen(0, '127.0.0.1', () => {
-  const { port } = ipcServer.address();
-  try {
-    fs.mkdirSync(RUNTIME_DIR, { recursive: true });
-    fs.writeFileSync(BRIDGE_PATH, JSON.stringify({ port, pid: process.pid }));
-  } catch (e) { warn('bridge.json write failed:', e.message); }
-  log(`IPC server on 127.0.0.1:${port}`);
-});
-
-function removeBridgeFile() { try { fs.unlinkSync(BRIDGE_PATH); } catch {} }
-process.on('SIGTERM', () => { removeBridgeFile(); log('SIGTERM, stopping'); ipcServer.close(); ws.stop(); process.exit(0); });
-process.on('SIGINT',  () => { removeBridgeFile(); log('SIGINT, stopping');  ipcServer.close(); ws.stop(); process.exit(0); });
+process.on('SIGTERM', () => { log('SIGTERM, stopping'); ws.stop(); process.exit(0); });
+process.on('SIGINT',  () => { log('SIGINT, stopping');  ws.stop(); process.exit(0); });
 
 log(`starting (ws=${wsBaseUrl}?ticket=..., workspace=${config.workspace_id || '<unset>'}, device=${config.device_id || '<unset>'})`);
 ws.start();

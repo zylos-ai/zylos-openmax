@@ -131,32 +131,3 @@ export function parseMediaPrefix(message) {
   if (!m) return null;
   return { kind: m[1], localPath: m[2].trim() };
 }
-
-/**
- * Build a WebSocket outbound message frame (client → server).
- * Format per cws-comm api-design.md §4.2 "出站消息".
- *
- * @param {object} opts
- * @param {string} opts.workspaceId
- * @param {string} opts.conversationId
- * @param {string} opts.text
- * @param {string} [opts.msgType='text']  MessageType (text/image/file)
- * @param {string} [opts.threadId]        for thread replies
- * @param {string} [opts.replyTo]         reply_to message id
- */
-export function buildWsSendFrame({ workspaceId, conversationId, text, msgType = 'text', threadId, replyTo }) {
-  return {
-    type: 'message',
-    id: `frame_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
-    timestamp: Date.now(),
-    workspace_id: workspaceId || '',
-    payload: {
-      client_msg_id: newClientMsgId(),
-      conversation_id: conversationId,
-      content: { text: text || '', version: 1 },
-      type: msgType,
-      ...(threadId ? { thread_id: threadId } : {}),
-      ...(replyTo  ? { reply_to:  replyTo  } : {}),
-    },
-  };
-}
