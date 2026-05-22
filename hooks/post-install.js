@@ -114,20 +114,78 @@ if (!config.client_id) {
   console.log('  generated client_id', config.client_id);
 }
 
+// ── Helper: register agent against cws-core ────────────────────────────────
+async function registerAgent(coreUrl, username, displayName) {
+  const res = await fetch(`${coreUrl}/auth/register/agent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, display_name: displayName }),
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) {
+    const msg = (data && typeof data === 'object' && (data.detail || data.error || data.message)) || text;
+    throw new Error(`registration failed (${res.status}): ${msg}`);
+  }
+  return data; // { identity_id, api_key }
+}
+
 // 4. Interactive setup (only in TTY mode)
 if (isInteractive) {
   console.log('');
   console.log('========================================');
   console.log('  COCO Workspace — initial setup');
   console.log('========================================');
+
+  // ── cws-core URL (needed for registration) ──────────────────────────────
+  const defaultCoreUrl = config.comm?.core_url || 'http://127.0.0.1:8080';
+  const coreUrlInput = await ask(`  cws-core URL [${defaultCoreUrl}]: `);
+  const coreUrl = (coreUrlInput || defaultCoreUrl).replace(/\/$/, '');
+  if (coreUrl !== defaultCoreUrl) {
+    if (!config.comm) config.comm = {};
+    config.comm.core_url = coreUrl;
+    console.log('  ✓ core_url saved to config.json');
+  }
+
+  // ── Agent registration ──────────────────────────────────────────────────
+  const existingKey = readEnvVar('COCO_AUTH_TOKEN');
+  if (existingKey) {
+    console.log('');
+    console.log('  COCO_AUTH_TOKEN already present — skipping registration.');
+    if (!config.agent) config.agent = {};
+  } else {
+    console.log('');
+    console.log('  Step 1: Register this agent with cws-core');
+    console.log('  (POST /auth/register/agent — no auth required)');
+    console.log('');
+
+    const defaultUsername = `zylos-agent-${crypto.randomUUID().slice(0, 8)}`;
+    const username = (await ask(`  Agent username [${defaultUsername}]: `)) || defaultUsername;
+    const displayName = (await ask('  Agent display name [Zylos Agent]: ')) || 'Zylos Agent';
+
+    console.log(`  Registering as "${username}" at ${coreUrl}...`);
+    try {
+      const { identity_id, api_key } = await registerAgent(coreUrl, username, displayName);
+      updateEnvVar('COCO_AUTH_TOKEN', api_key);
+      if (!config.agent) config.agent = {};
+      config.agent.identity_id = identity_id;
+      console.log('  ✓ api_key saved to ~/zylos/.env as COCO_AUTH_TOKEN');
+      console.log('  ✓ identity_id saved to config.json:', identity_id);
+    } catch (err) {
+      console.error('  ✗ Registration failed:', err.message);
+      console.log('  You can retry later by running this hook again, or set COCO_AUTH_TOKEN manually.');
+    }
+  }
+
+  // ── Workspace ID ────────────────────────────────────────────────────────
   console.log('');
-  console.log('Two values are required to connect this agent to your workspace.');
-  console.log('Both come from the workspace admin console.');
-  console.log('Press Enter to skip a field; you can fill it in later.');
+  console.log('  Step 2: Workspace and organisation IDs');
+  console.log('  (find these in the workspace admin console / org owner invitation)');
   console.log('');
 
   if (!config.workspace_id) {
-    const wsId = await ask('  Workspace ID (e.g. ws_abc123, cws-core scope): ');
+    const wsId = await ask('  Workspace ID (cws-core scope, e.g. ws_abc123): ');
     if (wsId) {
       config.workspace_id = wsId;
       console.log('  ✓ workspace_id saved to config.json');
@@ -139,36 +197,28 @@ if (isInteractive) {
   }
 
   if (!config.org_id) {
-    const orgId = await ask('  Org ID (e.g. org_abc123, cws-kb / cws-as scope): ');
+    const orgId = await ask('  Org ID (from org owner invitation, cws-kb / cws-as scope): ');
     if (orgId) {
       config.org_id = orgId;
       console.log('  ✓ org_id saved to config.json');
     } else {
-      console.log('  ! org_id left empty — KB / AS calls will fail until set');
+      console.log('  ! org_id left empty — token exchange and WS connection will fail until set');
     }
   } else {
     console.log(`  org_id already set (${config.org_id})`);
   }
-
-  const existingKey = readEnvVar('COCO_AUTH_TOKEN');
-  if (!existingKey) {
-    const apiKey = await ask('  Agent API Key (e.g. apikey_xxxxxx): ');
-    if (apiKey) {
-      updateEnvVar('COCO_AUTH_TOKEN', apiKey);
-      console.log('  ✓ api_key saved to ~/zylos/.env as COCO_AUTH_TOKEN');
-    } else {
-      console.log('  ! api_key left empty — service will fail at WS upgrade until COCO_AUTH_TOKEN is set');
-    }
-  } else {
-    console.log('  COCO_AUTH_TOKEN already present in ~/zylos/.env (not overwritten)');
-  }
 } else {
   console.log('');
   console.log('[post-install] non-interactive mode — skipping prompts');
-  console.log('[post-install] before starting the service, set:');
-  console.log(`  - workspace_id    in ${CONFIG_PATH}    (cws-core scope)`);
-  console.log(`  - org_id          in ${CONFIG_PATH}    (cws-kb / cws-as scope)`);
-  console.log('  - COCO_AUTH_TOKEN in ~/zylos/.env');
+  console.log('[post-install] before starting the service, complete these steps:');
+  console.log('  1. Register the agent:');
+  console.log('       POST <core_url>/auth/register/agent');
+  console.log('       Body: { username, display_name }');
+  console.log('       → save api_key to COCO_AUTH_TOKEN in ~/zylos/.env');
+  console.log('       → save identity_id to config.json agent.identity_id');
+  console.log('  2. Set in config.json:');
+  console.log(`       workspace_id, org_id, comm.core_url`);
+  console.log(`     Config path: ${CONFIG_PATH}`);
 }
 
 // 5. Persist config back

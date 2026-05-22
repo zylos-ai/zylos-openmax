@@ -32,6 +32,7 @@
  */
 
 import { loadConfig } from './config.js';
+import { getAccessToken } from './token.js';
 
 let activeApiKey = null;
 let activeBaseUrl = null;
@@ -73,11 +74,17 @@ function resolveOrgId() {
   return cfg.org_id || '';
 }
 
-function resolveToken() {
+async function resolveToken() {
+  // Prefer an explicitly-set override (tests / one-shot CLI invocations).
   if (activeApiKey) return activeApiKey;
-  if (process.env.COCO_AUTH_TOKEN) return process.env.COCO_AUTH_TOKEN;
-  const cfg = loadConfig();
-  return cfg.agent?.api_key || '';
+  // Use the token manager: returns a cached or freshly-refreshed JWT.
+  // Falls back to api_key if token.js cannot reach cws-core (e.g. offline).
+  try {
+    return await getAccessToken();
+  } catch {
+    if (process.env.COCO_AUTH_TOKEN) return process.env.COCO_AUTH_TOKEN;
+    return loadConfig().agent?.api_key || '';
+  }
 }
 
 function resolveCoreHeaders() {
@@ -123,7 +130,7 @@ function buildUrl(baseUrl, path, query) {
 async function doRequest(baseUrl, method, path, { body, query, extraHeaders } = {}) {
   const url = buildUrl(baseUrl, path, query);
   const headers = { Accept: 'application/json', ...(extraHeaders || {}) };
-  const token = resolveToken();
+  const token = await resolveToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 

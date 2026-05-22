@@ -1,33 +1,27 @@
 /**
  * WebSocket connection helpers — cws-comm api-usage-guide §1 + §6.
  *
- * Sequence:
- *   1. WS upgrade against cws-comm with HTTP headers:
- *        Authorization: Bearer <api_key>
+ * Full auth sequence (see docs/auth-flow.md for detail):
+ *   1. api_key → POST /auth/agent/token → JWT access_token + refresh_token
+ *      (handled by src/lib/token.js)
+ *   2. JWT → POST /auth/ws-ticket → one-time ticket (30s TTL)
+ *      (handled by src/lib/token.js + WsClient urlProvider)
+ *   3. WS upgrade: GET ws://host/ws?ticket=<ticket>
  *        X-Workspace-Id: <workspace_id>
- *        X-Device-Id:    <device_id>          (optional but recommended)
- *        X-Client-Version: <app_version>      (optional)
- *      Header injection is handled by `WsClient` in ./ws.js.
- *   2. After WS open, client sends a `connect` text frame conveying
- *      app-layer identity + seq cursor:
- *        {type:"connect", payload:{
- *          token: api_key, client_id, platform, last_seq,
- *          app_version, device_id
- *        }}                                                [buildConnectFrame]
- *   3. Server replies with a `connect_response` frame:
- *        {type:"connect_response", payload:{
- *          session_token, server_time, max_seq, user_id, resume_result?
- *        }}                                                [parseConnectResponse]
- *      The session_token is persisted for diagnostics. We keep using
- *      api_key as the WS-upgrade credential on reconnects (long-lived
- *      and key-based, per §6 agent flow); session_token is not required
- *      for our REST path either (REST uses api_key throughout).
- *   4. resume_result tells the client whether the gap can be filled
- *      inline via missed_messages, or via the SYNC_BATCH flow.
+ *        X-Device-Id:    <device_id>
+ *        (no Authorization header — ticket in URL is the credential)
+ *   4. After WS open, send first text frame (ConnectRequest):
+ *        { type:"connect", payload:{
+ *            token: <JWT access_token>,   ← NOT the api_key
+ *            client_id, platform, last_seq, app_version, device_id
+ *          }}                                             [buildConnectFrame]
+ *   5. Server replies with connect_response:
+ *        { type:"connect_response", payload:{
+ *            session_token, server_time, max_seq, user_id, resume_result?
+ *          }}                                             [parseConnectResponse]
  *
- * Earlier scaffold went via cws-core /auth/ws-ticket; that path is no
- * longer used (the ticket helpers were removed). If you need to talk
- * to a deployment that requires tickets, restore them from VCS history.
+ * On WS close 4003 (session expired): invalidate token cache, reconnect.
+ * WsClient.urlProvider re-fetches a fresh ticket each reconnect attempt.
  */
 
 export function buildConnectFrame({

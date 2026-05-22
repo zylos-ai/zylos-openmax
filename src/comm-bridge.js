@@ -36,6 +36,7 @@ import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint } from './lib/message.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { get, setApiKey, setHeaders, apiPath } from './lib/client.js';
+import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import { saveSession, loadSession, clearSession } from './lib/session.js';
 import {
   buildConnectFrame,
@@ -250,19 +251,22 @@ function processConnectResponse(frame) {
   }
 }
 
-function sendConnectRequest() {
-  // Prefer api_key for handshake (we don't have a session yet)
-  const apiKey =
-    config.agent?.api_key ||
-    process.env.COCO_AUTH_TOKEN ||
-    sessionToken;
-  if (!apiKey) {
-    warn('no api_key/COCO_AUTH_TOKEN — handshake will be rejected');
+async function sendConnectRequest() {
+  // ConnectRequest.token = JWT access_token (not api_key).
+  // By this point urlProvider has already fetched the ws-ticket and
+  // getAccessToken() is cached in token.js, so this is a fast in-memory read.
+  let token;
+  try {
+    token = await getAccessToken(config.org_id);
+  } catch (e) {
+    warn('getAccessToken failed for ConnectRequest, falling back to api_key:', e.message);
+    token = config.agent?.api_key || process.env.COCO_AUTH_TOKEN || '';
   }
+  if (!token) warn('no token for ConnectRequest — handshake will be rejected');
   if (!config.device_id) warn('device_id not set in config');
   if (!config.workspace_id) warn('workspace_id not set in config');
   const frame = buildConnectFrame({
-    token:      apiKey || 'unset',
+    token:      token || 'unset',
     clientId:   config.client_id || config.device_id || 'zylos',
     platform:   config.comm?.platform || 'server',
     lastSeq:    lastSeq,
@@ -351,30 +355,38 @@ if (!wsUrl) {
   process.exit(1);
 }
 
-// api_key is the WS-upgrade credential per api-usage-guide §1 + §6.
-// Lookup order matches client.js token resolution.
-const apiKey =
-  config.agent?.api_key ||
-  process.env.COCO_AUTH_TOKEN ||
-  '';
-if (!apiKey) {
-  warn('no api_key/COCO_AUTH_TOKEN — WS upgrade will be rejected by cws-comm');
+// Warn early if api_key is missing — token.js will fail at exchange time.
+if (!process.env.COCO_AUTH_TOKEN && !config.agent?.api_key) {
+  warn('no api_key/COCO_AUTH_TOKEN — token exchange will fail');
+}
+if (!config.org_id && !process.env.COCO_ORG_ID) {
+  warn('org_id not set — ws-ticket exchange will fail');
 }
 
+// urlProvider: called before every connect attempt.
+// Fetches a fresh one-time WS ticket via:
+//   token.js.getAccessToken() → POST /auth/agent/token or /auth/refresh
+//   token.js.getWsTicket()    → POST /auth/ws-ticket
+// The ticket is appended as ?ticket=<value> to the WS URL.
+// No Authorization header is sent on the WS upgrade — the ticket is auth.
+const wsBaseUrl = wsUrl.replace(/\?.*$/, '');
+
 const ws = new WsClient({
-  url: wsUrl,
-  // WsClient turns this into `Authorization: Bearer <token>` on upgrade.
-  token: apiKey,
-  workspaceId:   config.workspace_id,
-  deviceId:      config.device_id,
-  clientVersion: config.app_version,
-  reconnectMaxMs: config.comm?.reconnect_max_delay,
+  urlProvider: async () => {
+    const ticket = await getWsTicket(config.org_id);
+    return `${wsBaseUrl}?ticket=${encodeURIComponent(ticket)}`;
+  },
+  // No `token` — auth is via ticket in URL, not the Authorization header.
+  workspaceId:         config.workspace_id,
+  deviceId:            config.device_id,
+  clientVersion:       config.app_version,
+  reconnectMaxMs:      config.comm?.reconnect_max_delay,
   heartbeatIntervalMs: config.comm?.heartbeat_interval,
 
   onOpen: () => {
     connected = false;     // becomes true once connect_response arrives
-    log(`ws open: ${wsUrl}`);
-    sendConnectRequest();
+    log('ws open');
+    sendConnectRequest().catch(e => warn('sendConnectRequest failed:', e.message));
   },
 
   onMessage: onFrame,
@@ -383,9 +395,10 @@ const ws = new WsClient({
     connected = false;
     log(`closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
     if (code === 4003) {
-      // Session expired — our reconnect uses api_key again on the next
-      // upgrade, so just clear the cached session state.
-      log('session expired; clearing persisted session');
+      // JWT session expired — invalidate token cache so the next connect
+      // attempt re-exchanges the api_key for a fresh JWT + ticket.
+      log('session expired; invalidating token cache and clearing session');
+      invalidateToken();
       sessionToken = '';
       clearSession();
     }
@@ -394,7 +407,7 @@ const ws = new WsClient({
   onFatal: (code, reason) => {
     connected = false;
     console.error(LOG_PREFIX, `fatal close code=${code} reason="${reason || ''}" — not reconnecting`);
-    if (code === 4002) console.error(LOG_PREFIX, '→ auth failed; check COCO_AUTH_TOKEN / agent.api_key');
+    if (code === 4002) console.error(LOG_PREFIX, '→ auth failed; check COCO_AUTH_TOKEN / org_id');
     if (code === 4005) console.error(LOG_PREFIX, '→ workspace suspended');
     if (code === 4006) console.error(LOG_PREFIX, '→ duplicate connection');
     process.exit(1);
@@ -409,5 +422,5 @@ watchConfig((next) => {
 process.on('SIGTERM', () => { log('SIGTERM, stopping'); ws.stop(); process.exit(0); });
 process.on('SIGINT',  () => { log('SIGINT, stopping');  ws.stop(); process.exit(0); });
 
-log(`starting (ws=${wsUrl}, workspace=${config.workspace_id || '<unset>'}, device=${config.device_id || '<unset>'})`);
+log(`starting (ws=${wsBaseUrl}?ticket=..., workspace=${config.workspace_id || '<unset>'}, device=${config.device_id || '<unset>'})`);
 ws.start();

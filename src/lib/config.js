@@ -61,7 +61,8 @@ export const DEFAULT_CONFIG = {
   agent: {
     id: '',
     participant_id: '',
-    api_key: '',
+    identity_id: '',  // UUID returned by POST /auth/register/agent
+    api_key: '',      // kept for fallback; canonical store is ~/zylos/.env COCO_AUTH_TOKEN
   },
   message: {
     context_messages: 10,
