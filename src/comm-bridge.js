@@ -98,7 +98,9 @@ async function fetchRecentMessages(conversationId, beforeSeq, limit) {
       before_seq: beforeSeq,
       limit:      limit || 10,
     });
-    return Array.isArray(r) ? r : (r?.messages || r?.items || []);
+    // client.js D8 unwrap returns `{ data, pagination }` for paginated lists;
+    // keep the legacy `messages`/`items` fallbacks for any other shape.
+    return Array.isArray(r) ? r : (r?.data || r?.messages || r?.items || []);
   } catch (e) {
     warn('fetchRecentMessages failed:', e.message);
     return [];
