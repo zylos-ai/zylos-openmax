@@ -164,9 +164,16 @@ async function request(method, path, opts = {}) {
     ...opts,
     extraHeaders: { ...resolveCoreHeaders(), ...(opts.extraHeaders || {}) },
   });
-  // cws-core wraps all responses in D8 envelope: { data, request_id, server_time }.
-  // Unwrap so callers receive the payload directly.
+  // cws-core@contract-v2 wraps every response in a D8 envelope:
+  //   - single:     { data, request_id, server_time }
+  //   - paginated:  { data, pagination, request_id, server_time }
+  // Strip request_id / server_time (callers don't use them). For paginated
+  // responses, preserve `pagination` alongside `data` so callers can page
+  // through results. For single responses, unwrap straight to `data`.
   if (result && typeof result === 'object' && 'data' in result && 'request_id' in result) {
+    if ('pagination' in result) {
+      return { data: result.data, pagination: result.pagination };
+    }
     return result.data;
   }
   return result;
