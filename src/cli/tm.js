@@ -12,11 +12,10 @@
  *   node src/cli/tm.js <command> '<json-params>'
  *   node src/cli/tm.js project.create '{"name":"Growth","slug":"growth","leadMemberId":"..."}'
  *
- * Status legend:
- *   ✅  path + method match cws-core@contract-v2; body/query also aligned
- *   ⏳  exists in cws-work HTTP but cws-core@contract-v2 has not added the
- *      forwarding yet — call will 404 today. Path follows the cws-work shape
- *      so it'll Just Work once cws-core ships the forward. Tracked in F3.
+ * All exposed commands are backed by an existing cws-core@contract-v2
+ * forwarding endpoint — there are no placeholder / ⏳ entries anymore. The
+ * earlier ⏳ batch (blueprint fine-grained ops + taskboard.list) was removed
+ * because cws-core does not yet proxy them; re-add when forwarding ships.
  *
  * Pagination convention (contract-v2 PageParams, offset-based):
  *   - User-facing camelCase: page, pageSize, orderBy
@@ -25,7 +24,7 @@
  *     offset paging via {page, page_size} now.)
  */
 
-import { get, post, patch, put, del, apiPath } from '../lib/client.js';
+import { get, post, patch, put, apiPath } from '../lib/client.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -226,51 +225,6 @@ const COMMANDS = {
     { steps: params.steps },
   ),
 
-  // -------------------------------------------------------------------------
-  //  BLUEPRINT — cws-work HTTP has these, but cws-core@contract-v2 has not
-  //  added forwarding yet. Calls will 404 today. Paths follow cws-work's
-  //  /api/... surface (cws-core proxies it under /api/v1/... once it
-  //  ships).  Tracked as F3 in docs/dependency-coverage/cws-tm.md.
-  // -------------------------------------------------------------------------
-
-  // ⏳ PATCH /blueprint-steps/{id}
-  'blueprint.update_step': () => patch(apiPath(`/blueprint-steps/${params.id}`), {
-    description:        params.description,
-    sort_order:         params.sortOrder,
-    required_resources: params.requiredResources,
-  }),
-  // ⏳ DELETE /blueprint-steps/{id}
-  'blueprint.delete_step': () => del(apiPath(`/blueprint-steps/${params.id}`)),
-  // ⏳ PUT /blueprint-steps/{id}/depends-on
-  'blueprint.set_step_depends_on': () => put(apiPath(`/blueprint-steps/${params.id}/depends-on`), {
-    depends_on: params.dependsOn,
-  }),
-  // ⏳ PUT /blueprints/{id}/budget
-  'blueprint.set_estimated_budget': () => put(apiPath(`/blueprints/${params.id}/budget`), {
-    estimated_budget: params.estimatedBudget,
-  }),
-  // ⏳ PUT /blueprints/{id}/notes
-  'blueprint.set_notes': () => put(apiPath(`/blueprints/${params.id}/notes`), {
-    notes: params.notes,
-  }),
-  // ⏳ GET /blueprints/{id}/markdown
-  'blueprint.render_markdown': () => get(apiPath(`/blueprints/${params.id}/markdown`)),
-  // ⏳ POST /blueprints/{id}/submit
-  'blueprint.submit_for_approval': () => post(apiPath(`/blueprints/${params.id}/submit`)),
-  // ⏳ POST /blueprints/amend
-  'blueprint.create_amendment': () => post(apiPath('/blueprints/amend'), { issue_id: params.issueId }),
-
-  // =========================================================================
-  //  TASKBOARD  (⏳ — cws-work has /api/task-board; cws-core not forwarded)
-  // =========================================================================
-
-  'taskboard.list': () => get(apiPath('/task-board'), {
-    workspace_id: params.workspaceId,
-    skill_tags:   params.skillTags,
-    status:       params.status,
-    ...pageParams(params),
-  }),
-
 };
 
 function printUsage() {
@@ -306,23 +260,11 @@ TASK  (✅ list/get/transition/reassign on contract-v2; create uses doubly-neste
   task.transition        {id, targetStatus}                                      # alias: task.status
   task.reassign          {id, newAssigneeId (or 'assigneeId')}
 
-BLUEPRINT  (✅ create / get / list / set_steps on contract-v2;
-            ⏳ rest exist in cws-work HTTP but cws-core has not added forwarding yet)
+BLUEPRINT  (all ✅ on contract-v2)
   blueprint.create                  {issueId, authorAgentId, steps[], estimatedBudget?, notes?}
   blueprint.get                     {id, includeSteps?}
   blueprint.list                    {issueId, page?, pageSize?, orderBy?}
   blueprint.set_steps               {blueprintId (or 'id'), steps[]}             # replaces ALL steps
-  blueprint.update_step             {id, description?, sortOrder?, requiredResources?}     ⏳
-  blueprint.delete_step             {id}                                                    ⏳
-  blueprint.set_step_depends_on     {id, dependsOn}                                         ⏳
-  blueprint.set_estimated_budget    {id, estimatedBudget}                                   ⏳
-  blueprint.set_notes               {id, notes}                                             ⏳
-  blueprint.render_markdown         {id}                                                    ⏳
-  blueprint.submit_for_approval     {id}                                                    ⏳
-  blueprint.create_amendment        {issueId}                                               ⏳
-
-TASKBOARD
-  taskboard.list                    {workspaceId?, skillTags?, status?, page?, pageSize?, orderBy?}  ⏳
 
 Environment:
   COCO_API_URL     cws-core base URL (default: http://127.0.0.1:8080)
