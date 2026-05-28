@@ -163,34 +163,3 @@ export function splitMessage(text, maxLen = 3000) {
   return chunks;
 }
 
-/**
- * Build a WebSocket outbound message frame (client → server).
- * Format per cws-comm api-design.md §4.2 "出站消息".
- *
- * Works for DM, group, and thread conversations — caller must pass the
- * correct conversationId (resolveTargetConversation handles the routing).
- *
- * @param {object} opts
- * @param {string} opts.workspaceId
- * @param {string} opts.conversationId   DM / group / thread conv id
- * @param {string} opts.text
- * @param {string} [opts.msgType='text']
- * @param {string} [opts.threadId]       present only for thread replies
- * @param {string} [opts.replyTo]        reply_to message id
- */
-export function buildWsSendFrame({ workspaceId, conversationId, text, msgType = 'text', threadId, replyTo }) {
-  return {
-    type: 'message',
-    id: `frame_${randomUUID().replace(/-/g, '').slice(0, 12)}`,
-    timestamp: Date.now(),
-    workspace_id: workspaceId || '',
-    payload: {
-      client_msg_id: newClientMsgId(),
-      conversation_id: conversationId,
-      content: { text: text || '', version: 1 },
-      type: msgType,
-      ...(threadId ? { thread_id: threadId } : {}),
-      ...(replyTo  ? { reply_to:  replyTo  } : {}),
-    },
-  };
-}

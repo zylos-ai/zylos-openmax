@@ -35,17 +35,12 @@ dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 
 import { loadConfig, watchConfig } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
-import { formatInboundForC4, formatEndpoint, buildWsSendFrame, splitMessage } from './lib/message.js';
+import { formatInboundForC4, formatEndpoint, splitMessage, looksLikeMarkdown } from './lib/message.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
-import { get, setApiKey, setHeaders, apiPath } from './lib/client.js';
-import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
+import { get, post, setApiKey, setHeaders, apiPath } from './lib/client.js';
+import { newClientMsgId } from './lib/message.js';
+import { getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import { saveSession, loadSession, clearSession } from './lib/session.js';
-import {
-  buildConnectFrame,
-  parseConnectResponse,
-  buildSyncAck,
-  computeClockOffset,
-} from './lib/connect.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'coco-workspace';
@@ -64,16 +59,16 @@ function warn(...a) { console.warn(LOG_PREFIX, ...a); }
 let config = loadConfig();
 const dedupe = createDeduper(config.message?.dedup_ttl || 300000);
 
-let sessionToken = '';
-let userId = '';
-let clockOffset = 0;
 let lastSeq = 0;
-let connected = false;          // WS open AND handshake complete
+let connected = false;          // true once WS upgrade succeeds (ticket auth done)
 
 const conversationCache = new Map();  // id → {type, response_mode, ...}
 
 function agentId() {
-  return userId || config.agent?.id || config.agent?.participant_id || '';
+  // cws-comm authenticates at WS upgrade via ticket; the bridge no longer
+  // exchanges a connect/connect_response handshake that previously seeded
+  // userId. We use the identity_id captured during register-agent.
+  return config.agent?.identity_id || config.agent?.id || '';
 }
 
 function persistSession(extra) {
@@ -110,6 +105,21 @@ async function fetchRecentMessages(conversationId, beforeSeq, limit) {
   }
 }
 
+// cws-comm pushes WS `message` frames with only metadata (id, conv_id, sender,
+// type, seq, timestamp) — see cws-comm/internal/transport/ws/gateway_consumer.go.
+// To get content (text, media_id, etc.) the agent must REST-fetch the full
+// message from cws-core. If the fetch fails (endpoint not yet implemented,
+// permission, etc.) we fall back to the notification fields alone so basic
+// metadata-only handling still works.
+async function fetchMessageDetail(conversationId, messageId) {
+  try {
+    return await get(apiPath(`/conversations/${conversationId}/messages/${messageId}`));
+  } catch (e) {
+    warn(`fetchMessageDetail conv=${conversationId} msg=${messageId} failed:`, e.message);
+    return null;
+  }
+}
+
 function forwardToC4(endpoint, body) {
   return new Promise((resolve, reject) => {
     execFile(
@@ -140,9 +150,15 @@ function shouldHandleMessage(msg, conv) {
 }
 
 async function handleIncomingMessage(payload) {
-  const msg = payload?.payload || payload;
-  if (!msg?.id || !msg.conversation_id) return;
-  if (dedupe(msg.id)) return;
+  const notification = payload?.payload || payload;
+  if (!notification?.id || !notification.conversation_id) return;
+  if (dedupe(notification.id)) return;
+
+  // cws-comm pushes only notification metadata. Fetch full message detail
+  // (content, media, mentions) from cws-core. If the call fails, fall back
+  // to notification fields so we at least record the metadata.
+  const detail = await fetchMessageDetail(notification.conversation_id, notification.id);
+  const msg = { ...notification, ...(detail || {}) };
 
   const conv = await fetchConversation(msg.conversation_id);
   if (conv) conv.id = conv.id || msg.conversation_id;
@@ -204,82 +220,6 @@ async function handleIncomingMessage(payload) {
   }
 }
 
-async function processSyncBatch(payload) {
-  const messages = payload?.messages || [];
-  for (const m of messages) {
-    await handleIncomingMessage({ payload: m });
-  }
-  const lastReceived = messages.length
-    ? messages[messages.length - 1].seq
-    : lastSeq;
-  if (lastReceived > lastSeq) { lastSeq = lastReceived; persistSession(); }
-  try { ws.send(buildSyncAck(lastSeq)); }
-  catch (e) { warn('sync_ack send failed:', e.message); }
-  log(`sync_batch: ${messages.length} msgs, ack last=${lastSeq}`);
-}
-
-function processConnectResponse(frame) {
-  try {
-    const cr = parseConnectResponse(frame);
-    sessionToken = cr.sessionToken;
-    userId = cr.userId || userId;
-    clockOffset = computeClockOffset(cr.serverTime, Date.now());
-    // NOTE: session_token authenticates WS frames on the direct cws-comm
-    // link only. REST goes through cws-core with the agent's api_key —
-    // do not overwrite the REST client's token here.
-    persistSession({
-      session_token: sessionToken,
-      user_id: userId,
-      workspace_id: config.workspace_id,
-      server_time: cr.serverTime,
-      received_at: Date.now(),
-    });
-    connected = true;
-    log(`handshake OK user=${userId} maxSeq=${cr.maxSeq} clockOffset=${clockOffset}ms`);
-
-    // ResumeResult inline path (small gap)
-    if (cr.resume?.success && Array.isArray(cr.resume.missed_messages)) {
-      log(`resume: ${cr.resume.missed_messages.length} missed messages inline`);
-      for (const m of cr.resume.missed_messages) {
-        handleIncomingMessage({ payload: m }).catch(e => warn('resume handler:', e.message));
-      }
-    }
-    if (cr.resume?.new_session_token) {
-      sessionToken = cr.resume.new_session_token;
-      persistSession({ session_token: sessionToken });
-      log('session_token rotated');
-    }
-  } catch (e) {
-    warn('connect_response parse failed:', e.message);
-  }
-}
-
-async function sendConnectRequest() {
-  // ConnectRequest.token = JWT access_token (not api_key).
-  // By this point urlProvider has already fetched the ws-ticket and
-  // getAccessToken() is cached in token.js, so this is a fast in-memory read.
-  let token;
-  try {
-    token = await getAccessToken(config.org_id);
-  } catch (e) {
-    warn('getAccessToken failed for ConnectRequest, falling back to api_key:', e.message);
-    token = config.agent?.api_key || process.env.COCO_AUTH_TOKEN || '';
-  }
-  if (!token) warn('no token for ConnectRequest — handshake will be rejected');
-  if (!config.device_id) warn('device_id not set in config');
-  if (!config.workspace_id) warn('workspace_id not set in config');
-  const frame = buildConnectFrame({
-    token:      token || 'unset',
-    clientId:   config.client_id || config.device_id || 'zylos',
-    platform:   config.comm?.platform || 'server',
-    lastSeq:    lastSeq,
-    appVersion: config.app_version,
-    deviceId:   config.device_id || 'zylos-dev',
-  });
-  try { ws.send(frame); log('sent connect frame'); }
-  catch (e) { warn('connect frame send failed:', e.message); }
-}
-
 // --- WebSocket frame dispatch ---
 
 // Cumulative frame.type counter for protocol-alignment metrics.
@@ -311,45 +251,44 @@ function startFrameMetricTimer() {
   _frameMetricTimer.unref?.();
 }
 
+// Canonical cws-comm WS frame types (see cws-comm/internal/transport/ws/frame.go):
+//   message, message_ack, typing, read_receipt, presence,
+//   system, error, read_state_update
+// cws-comm does NOT push connect_response / sync_* / cross_device_sync /
+// ping / pong text frames; ping/pong is handled at the WS protocol layer
+// by WsClient automatically.
 function onFrame(frame) {
   const type = frame.type;
   recordFrameType(type);
   switch (type) {
-    case 'connect_response':
-    case 'connect-response':
-      processConnectResponse(frame);
-      break;
-
     case 'message':
+      // cws-comm pushes a notification envelope without `content` —
+      // the agent needs to REST-fetch the full message before processing.
+      // TODO(protocol-alignment): implement notification → REST fetch path.
       handleIncomingMessage(frame).catch(e => warn('handleIncomingMessage:', e.message));
       break;
 
-    case 'sync_start':
-      log('sync_start received');
-      break;
-    case 'sync_batch':
-      processSyncBatch(frame.payload || frame).catch(e => warn('processSyncBatch:', e.message));
-      break;
-    case 'sync_complete':
-      log('sync_complete — entering push mode');
+    case 'message_ack':
+      // cws-comm acknowledges an outbound message delivery. For now we just
+      // log; later we could correlate with client_msg_id from POST /messages.
+      log(`message_ack seq=${frame.payload?.seq} msg=${frame.payload?.message_id}`);
       break;
 
-    case 'read_state_update':
-    case 'cross_device_sync':
-    case 'typing':
-    case 'presence':
-    case 'read_receipt':
     case 'system':
-      // not actionable for the Agent yet — would surface to c4 in future
-      break;
-
-    case 'ping':
-    case 'pong':
-      // WsClient handles auto-reply; nothing more to do
+      // cws-comm system events (message.updated/deleted/recalled etc.).
+      // Pass-through log; future: surface specific events to C4.
+      log(`system event=${frame.payload?.event || '<unknown>'} conv=${frame.payload?.conversation_id || '<unknown>'}`);
       break;
 
     case 'error':
       warn('server error frame:', JSON.stringify(frame.payload || {}));
+      break;
+
+    case 'typing':
+    case 'presence':
+    case 'read_receipt':
+    case 'read_state_update':
+      // not actionable for the Agent yet — would surface to C4 in future
       break;
 
     default:
@@ -371,15 +310,13 @@ setHeaders({
   // client.js will pull from config too, but seed explicit values here
 });
 
-// On boot, try to reuse persisted runtime state (warm restart).
-// session_token is NOT seeded into the REST client — REST uses api_key
-// via cws-core. session_token only authenticates WS frames.
+// On boot, reuse persisted last_seq for diagnostic continuity. session_token
+// and user_id are no longer maintained — cws-comm authenticates at WS upgrade
+// via ticket, and the agent's identity comes from config.agent.identity_id.
 const sess = loadSession();
 if (sess) {
-  sessionToken = sess.session_token || '';
-  userId = sess.user_id || '';
   lastSeq = sess.last_seq || 0;
-  log(`warm-restart: loaded user=${userId} lastSeq=${lastSeq}`);
+  log(`warm-restart: loaded lastSeq=${lastSeq}`);
 }
 
 const wsUrl = process.env.COCO_WS_URL || config.comm?.ws_url;
@@ -417,9 +354,10 @@ const ws = new WsClient({
   heartbeatIntervalMs: config.comm?.heartbeat_interval,
 
   onOpen: () => {
-    connected = false;     // becomes true once connect_response arrives
-    log('ws open');
-    sendConnectRequest().catch(e => warn('sendConnectRequest failed:', e.message));
+    // cws-comm: ticket auth happens at HTTP upgrade time, so a successful
+    // ws.open IS the handshake. No connect/connect_response round-trip needed.
+    connected = true;
+    log('ws open — ready');
   },
 
   onMessage: onFrame,
@@ -428,11 +366,10 @@ const ws = new WsClient({
     connected = false;
     log(`closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
     if (code === 4003) {
-      // JWT session expired — invalidate token cache so the next connect
-      // attempt re-exchanges the api_key for a fresh JWT + ticket.
+      // session expired — invalidate token cache so the next connect attempt
+      // re-exchanges the api_key for a fresh JWT + ticket.
       log('session expired; invalidating token cache and clearing session');
       invalidateToken();
-      sessionToken = '';
       clearSession();
     }
   },
@@ -496,25 +433,33 @@ const ipcServer = http.createServer(async (req, res) => {
   if (!conversationId || typeof text !== 'string') {
     return reply(400, { error: 'conversationId and text required' });
   }
-  if (!connected) {
-    return reply(503, { error: 'ws not connected' });
-  }
 
+  // Outbound goes through cws-core (REST). cws-core will forward to cws-comm
+  // (implementation may still be pending — calls may surface as 501/404 from
+  // the server until then; that's the cws-core team's responsibility).
+  // Schema matches scripts/send.js — POST /api/v1/conversations/{id}/messages
+  // with { client_msg_id, content: MessageContent[], reply_to? }.
   const chunks = splitMessage(text);
+  const results = [];
   try {
-    for (const chunk of chunks) {
-      ws.send(buildWsSendFrame({
-        workspaceId: config.workspace_id,
-        conversationId,
-        text:     chunk,
-        threadId: threadId || undefined,
-        replyTo:  chunks.length === 1 ? (replyTo || undefined) : undefined,
-      }));
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const blockType = looksLikeMarkdown(chunk) ? 'markdown' : 'text';
+      const body = {
+        client_msg_id: newClientMsgId(),
+        content:       [{ type: blockType, body: chunk }],
+        // reply_to only set on first chunk to avoid duplicate threading
+        ...(i === 0 && replyTo ? { reply_to: replyTo } : {}),
+      };
+      // eslint-disable-next-line no-await-in-loop
+      const res = await post(apiPath(`/conversations/${conversationId}/messages`), body);
+      results.push(res?.id || res?.message_id || null);
     }
-    log(`ipc→ws conv=${conversationId} chunks=${chunks.length}${threadId ? ' thread' : ''}`);
-    reply(200, { ok: true, chunks: chunks.length });
+    log(`ipc→rest conv=${conversationId} chunks=${chunks.length}${threadId ? ' (threadId ignored — schema TBD)' : ''}`);
+    reply(200, { ok: true, chunks: chunks.length, message_ids: results });
   } catch (e) {
-    reply(500, { error: e.message });
+    warn('ipc /send REST POST failed:', e.message);
+    reply(e.status || 500, { error: e.message, status: e.status });
   }
 });
 
