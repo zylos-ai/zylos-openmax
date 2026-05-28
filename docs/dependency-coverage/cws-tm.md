@@ -20,6 +20,31 @@
 
 ---
 
+## 修复进展(2026-05-28 update)
+
+本文初版描述的协议错位**已经在 `fix/tm-align-with-core-contract-v2` 分支上集中修复**。下文 Coverage Summary 与 Findings 表仍**保留修复前的状态**作为问题排查的历史档案;阅读时请把它们理解为"contract-v2 当时与 `main` 上 tm.js 的 diff",**不再是当前代码的实际形态**。
+
+**修复分支**:[`fix/tm-align-with-core-contract-v2`](https://git.coco.xyz/coco-workspace/zylos-coco-workspace/-/tree/fix/tm-align-with-core-contract-v2)
+
+| Commit | 涵盖范围 | 文件 |
+|---|---|---|
+| `bdc5a7b` `fix(tm): 把 src/cli/tm.js 对齐 cws-core@contract-v2` | **F1 全部 9 个 path 错位** + **F2 全部 11 处 body/query 字段错位** + **F2 分页参数全量切换** + **F3 删 `task.archive` / `task.subtask_create`** + **重命名 `blueprint.add_step` → `blueprint.set_steps`** | `src/cli/tm.js`(+229 / -136) |
+| `7bf54a5` `fix(client): D8 envelope unwrap 保留分页元数据` | **F4 D8 envelope unwrap 增强** —— `request()` 现在区分单条 vs 分页响应:`DataResponse` 直接 unwrap 到 `data`,`PageListResponse` 返回 `{ data, pagination }`(保留分页元信息) | `src/lib/client.js`(+9 / -2)、`src/comm-bridge.js`(+3 / -1) |
+
+**修复后的状态:**
+
+| 类别 | 数量 | 修复状态 |
+|---|---|---|
+| F1 path 错位 | 9 | **全部 ✅ 修复** |
+| F2 body / query 字段错位 | 11 | **全部 ✅ 修复** |
+| F3 cws-core 完全没有 → cws-work 也没的(`task.archive` / `task.subtask_create`)| 2 | **✅ 已从 tm.js 删除** |
+| F3 cws-core 没有但 cws-work 有的(8 blueprint + taskboard)| 9 | ⏳ **保留并标记**,等 cws-core 补 forwarding 即生效 |
+| F4 D8 envelope | — | **✅ 单条 unwrap 已生效(自 `c60c4b0`);分页 metadata 保留已加(`7bf54a5`)** |
+
+剩余 ⏳ 状态(9 个 endpoint)需要 cws-core 那边补 forwarding,客户端不再需要任何改动。
+
+---
+
 ## Coverage Summary
 
 下表 8 列,覆盖所有 35 条依赖。"入参 / 出参"列仅展示关键字段简写(`*` 标记 required;完整字段表见每个接口的"逐项详解"小节)。
