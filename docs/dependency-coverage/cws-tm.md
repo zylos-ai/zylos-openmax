@@ -12,7 +12,7 @@
 服务端来源:
 
 - **cws-core**@`contract-v2` tag:`internal/transport/http/{project,issue,task,blueprint,attempt}.go`
-- 与 cws-as / cws-kb 文档不同的是:**TM 整条链路是 cws-core 主动转发(proxy)给 cws-work 的**,不是直连。所以"是否覆盖"看的是 cws-core 这一层是否定义了 forwarding endpoint(以及 connect-rpc 对应调用),而不是 cws-work 是否实现 —— 后者是另一个问题(见文末 F-historical 的 ⏳ 项)。
+- 与 cws-as / cws-kb 文档不同的是:**TM 整条链路是 cws-core 主动转发(proxy)给 cws-work 的**,不是直连。所以"是否覆盖"看的是 cws-core 这一层是否定义了 forwarding endpoint(以及 connect-rpc 对应调用),而不是 cws-work 是否实现 —— 后者只在 cws-work 已经支持、但 cws-core 还没暴露时才相关(见文末 F-historical F3)。
 
 > 文档生成时间 2026-05-28。**接口描述与参数定义以 cws-core@contract-v2 为准**。cws-core 路由表有变更时需重新生成本文。
 >
@@ -26,18 +26,18 @@
 |---|---|---|
 | `bdc5a7b` `fix(tm): 把 src/cli/tm.js 对齐 cws-core@contract-v2` | F1 全部 9 个 path 错位 + F2 全部 11 处 body/query 字段错位 + F2 分页参数全量切换 + F3 删 `task.archive` / `task.subtask_create` + 重命名 `blueprint.add_step` → `blueprint.set_steps` | `src/cli/tm.js`(+229 / -136)|
 | `7bf54a5` `fix(client): D8 envelope unwrap 保留分页元数据` | F4 D8 envelope unwrap 增强 —— `request()` 现在区分单条 vs 分页响应 | `src/lib/client.js`(+9 / -2)、`src/comm-bridge.js`(+3 / -1)|
+| `123bb46` `fix(tm): 删掉 cws-core@contract-v2 没转发的 9 个 ⏳ 命令` | 删 8 个 cws-work 有但 cws-core 没转发的 blueprint 细粒度命令 + `taskboard.list`,顺手同步 printUsage / docstring / 不再需要的 `del` import | `src/cli/tm.js`(+6 / -64)|
 
-剩 9 个 endpoint(`blueprint.update_step` 等 8 个细粒度 blueprint 操作 + `taskboard.list`)依然 ⏳ —— 它们在 cws-work HTTP 已实现,等 cws-core 补 forwarding 即生效,客户端不再需要任何改动。
+原本暂留的 9 个 endpoint(`blueprint.update_step` 等 8 个细粒度 blueprint 操作 + `taskboard.list`)在 commit `123bb46` 中**已从 tm.js 删除**(cws-core@contract-v2 没有 forwarding,留着只会 404)。等 cws-core 补 forwarding 后再按当时的实际签名加回来。
 
 ---
 
 ## Coverage Summary
 
-下表按域分组,共 **33 条**依赖(原 35 条减去 2 条已删命令)。"入参 / 出参"列只展示关键字段简写(`*` 标记 required;完整字段表见 [逐项详解](#逐项详解))。
+下表按域分组,共 **24 条**依赖(原始 35 条 → 减 2 条 cws-work 也没的 `task.archive` / `task.subtask_create` → 再减 9 条 cws-core 没转发的 blueprint 细粒度 + taskboard)。"入参 / 出参"列只展示关键字段简写(`*` 标记 required;完整字段表见 [逐项详解](#逐项详解))。
 
 > 状态列含义(post-fix):
-> - ✅ — cws-core@contract-v2 有完全对齐的 path + method + body / query;`tm.js` 已对应
-> - ⏳ — cws-work HTTP 已实现,cws-core 还没加 forwarding(调用今天会 404);`tm.js` 保留命令并标 ⏳,等 cws-core 即可
+> - ✅ — cws-core@contract-v2 有完全对齐的 path + method + body / query;`tm.js` 已对应。当前所有保留命令均为此状态。
 
 ### PROJECT(8 条 — 全 ✅)
 
@@ -74,7 +74,7 @@
 | 19 | `task.status`(alias of `task.transition`)| 同上 | ✅ | — | — | — |
 | 20 | `task.reassign` `POST /tasks/{id}/reassign` | `task.go:270` `reassign-task` | ✅ | "Reassigns a task to another member." | path:`task_id*`;body:`new_assignee_id*` | `DataResponse<taskItem>` |
 
-### BLUEPRINT(12 条 — 4 ✅ + 8 ⏳)
+### BLUEPRINT(4 条 — 全 ✅;原 8 个细粒度命令在 commit `123bb46` 中已删除,见 [F3](#f3--cws-coreatcontract-v2-完全没有的-endpoint))
 
 | # | tm.js 命令 | cws-core@contract-v2 | 状态 | 接口描述 | 入参 | 出参 |
 |---|---|---|---|---|---|---|
@@ -82,42 +82,30 @@
 | 22 | `blueprint.get` `GET /blueprints/{id}` | `blueprint.go:112` `get-blueprint` | ✅ | "Returns a blueprint by ID." | path:`blueprint_id*`;query:`include_steps?`(bool) | `DataResponse<blueprintItem>` |
 | 23 | `blueprint.list` `GET /issues/{iid}/blueprints` | `blueprint.go:131` `list-blueprint-versions` | ✅ | "Returns blueprint versions for an issue." | path:`issue_id*`;query:PageParams | `PageListResponse<blueprintItem>` |
 | 24 | `blueprint.set_steps` `PUT /blueprints/{id}/steps` | `blueprint.go:154` `set-blueprint-steps` | ✅ | "Replaces all blueprint steps."(全量替换语义,**不是**追加) | path:`blueprint_id*`;body:`steps[]` | `DataResponse<blueprintItem>` |
-| 25 | `blueprint.update_step` `PATCH /blueprint-steps/{id}` | **不存在** | ⏳ | cws-work `BlueprintService.UpdateStep` 已实现(`blueprint.go:210`),等 cws-core forwarding | — | — |
-| 26 | `blueprint.delete_step` `DELETE /blueprint-steps/{id}` | **不存在** | ⏳ | cws-work `DeleteStep`(`blueprint.go:224`) | — | — |
-| 27 | `blueprint.set_step_depends_on` `PUT /blueprint-steps/{id}/depends-on` | **不存在** | ⏳ | cws-work `SetStepDependsOn`(`blueprint.go:237`)| — | — |
-| 28 | `blueprint.set_estimated_budget` `PUT /blueprints/{id}/budget` | **不存在** | ⏳ | cws-work `SetEstimatedBudget`(`blueprint.go:251`)| — | — |
-| 29 | `blueprint.set_notes` `PUT /blueprints/{id}/notes` | **不存在** | ⏳ | cws-work `SetNotes`(`blueprint.go:265`)| — | — |
-| 30 | `blueprint.render_markdown` `GET /blueprints/{id}/markdown` | **不存在** | ⏳ | cws-work `RenderMarkdown`(`blueprint.go:279`)| — | — |
-| 31 | `blueprint.submit_for_approval` `POST /blueprints/{id}/submit` | **不存在** | ⏳ | cws-work `SubmitForApproval`(`blueprint.go:295`)| — | — |
-| 32 | `blueprint.create_amendment` `POST /blueprints/amend` | **不存在** | ⏳ | cws-work `CreateAmendment`(`blueprint.go:309`)| — | — |
 
-### TASKBOARD(1 条 — ⏳)
+### TASKBOARD
 
-| # | tm.js 命令 | cws-core@contract-v2 | 状态 | 接口描述 | 入参 | 出参 |
-|---|---|---|---|---|---|---|
-| 33 | `taskboard.list` `GET /task-board` | **不存在** | ⏳ | cws-work `TaskService.ListTaskBoard` 已实现(`task.go:211`),等 cws-core forwarding。临时替代:`GET /tasks?claimable=true&agent_skills=...` | — | — |
+原 `taskboard.list` 在 commit `123bb46` 中已删除,cws-core@contract-v2 无对应 forwarding。临时替代:`GET /tasks?claimable=true&agent_skills=...`(`list-tasks` 已支持这俩 query)。
 
 ---
 
 ## 总览统计
 
-| 类别 | 数量 | 占比 |
-|---|---|---|
-| ✅ path + method + body 全对齐 contract-v2 | **24** | 73% |
-| ⏳ cws-work 有但 cws-core 未转发(blueprint 细粒度 + taskboard)| **9** | 27% |
-| **合计** | **33**(原 35 减去已删除的 `task.archive` + `task.subtask_create`)| |
+| 类别 | 数量 |
+|---|---|
+| ✅ path + method + body 全对齐 contract-v2 | **24**(全部)|
+| **合计** | **24**(原 35 → 减 `task.archive` + `task.subtask_create`(2 个 cws-work 也没的)→ 再减 8 个 blueprint 细粒度 + `taskboard.list`(9 个 cws-core 没转发的))|
 
 按域分:
 
-| 域 | 总数 | ✅ | ⏳ |
-|---|---|---|---|
-| Project   | 8 | 8 | 0 |
-| Issue     | 6 | 6 | 0 |
-| Task      | 6 | 6 | 0 |
-| Blueprint | 12 | 4 | 8 |
-| TaskBoard | 1 | 0 | 1 |
+| 域 | 数量 | 全部 ✅ |
+|---|---|---|
+| Project   | 8 | ✅ |
+| Issue     | 6 | ✅ |
+| Task      | 6 | ✅ |
+| Blueprint | 4 | ✅ |
 
-**结论**:Project / Issue / Task 三个域已经完全可用;Blueprint 域 4 个核心操作可用(create / get / list / set_steps),8 个细粒度修改操作(单 step 改/删、budget、notes、markdown、submit、amend)和 TaskBoard 列表都在等 cws-core 补 forwarding。
+**结论**:`src/cli/tm.js` 当前所有命令(24 个)都对齐 cws-core@contract-v2 的 forwarding。Blueprint 域只保留 4 个核心操作(create / get / list / set_steps);8 个细粒度修改(单 step 改/删、budget、notes、markdown、submit、amend)和 TaskBoard 列表都已删除,等 cws-core 后续补 forwarding 时再加回。
 
 ---
 
@@ -385,32 +373,32 @@
 | `blueprint.create` body | `{ issue_id }` | `{ author_agent_id*, steps[]*, estimated_budget?, notes? }` |
 | 分页(所有 list)| `{ page_size, page_token }`(cursor 风格)| `{ page, page_size, order_by }`(offset 风格 PageParams)|
 
-### F3 —— cws-core@contract-v2 完全没有的 endpoint
+### ✅ F3 —— cws-core@contract-v2 完全没有的 endpoint(已全部从 tm.js 删除)
 
-按 cws-work 是否有实现分两类:
+原本 11 个命令在 cws-core@contract-v2 没有 forwarding,按 cws-work 是否有实现分两类,**两类现在都已从 tm.js 删除**。
 
-**✅ 已从 tm.js 删除(cws-work 也没,无意义再保留)—— 2 个**
+**A. cws-work 也没的(`bdc5a7b` 删,无意义再保留)—— 2 个**
 
 | `tm.js` 命令 | 说明 |
 |---|---|
 | `task.archive` | cws-core / cws-work 都没;等价做法是 `task.transition` 到 `cancelled` |
 | `task.subtask_create` | cws-core / cws-work 都没;无 subtask 概念 |
 
-**⏳ 保留并标记(cws-work 已实现,等 cws-core 补 forwarding)—— 9 个**
+**B. cws-work 有但 cws-core 没转发(`123bb46` 删,留着只会 404)—— 9 个**
 
-| `tm.js` 命令 | cws-work 端 | 当前调用结果 |
-|---|---|---|
-| `blueprint.update_step`          | `PATCH /api/blueprint-steps/{id}`(cws-work `blueprint.go:210`) | 404 from cws-core |
-| `blueprint.delete_step`          | `DELETE /api/blueprint-steps/{id}`(`blueprint.go:224`)| 404 |
-| `blueprint.set_step_depends_on`  | `PUT /api/blueprint-steps/{id}/depends-on`(`blueprint.go:237`)| 404 |
-| `blueprint.set_estimated_budget` | `PUT /api/blueprints/{id}/budget`(`blueprint.go:251`)| 404 |
-| `blueprint.set_notes`            | `PUT /api/blueprints/{id}/notes`(`blueprint.go:265`)| 404 |
-| `blueprint.render_markdown`      | `GET /api/blueprints/{id}/markdown`(`blueprint.go:279`)| 404 |
-| `blueprint.submit_for_approval`  | `POST /api/blueprints/{id}/submit`(`blueprint.go:295`)| 404 |
-| `blueprint.create_amendment`     | `POST /api/blueprints/amend`(`blueprint.go:309`)| 404 |
-| `taskboard.list`                 | `GET /api/task-board`(cws-work `task.go:211`)| 404;临时替代 `GET /tasks?claimable=...&agent_skills=...` |
+| `tm.js` 命令 | cws-work 端实现位置(供 cws-core 补 forwarding 时参照) |
+|---|---|
+| `blueprint.update_step`          | `PATCH /api/blueprint-steps/{id}`(cws-work `blueprint.go:210`,RPC `UpdateStep`) |
+| `blueprint.delete_step`          | `DELETE /api/blueprint-steps/{id}`(`blueprint.go:224`,RPC `DeleteStep`) |
+| `blueprint.set_step_depends_on`  | `PUT /api/blueprint-steps/{id}/depends-on`(`blueprint.go:237`,RPC `SetStepDependsOn`) |
+| `blueprint.set_estimated_budget` | `PUT /api/blueprints/{id}/budget`(`blueprint.go:251`,RPC `SetEstimatedBudget`) |
+| `blueprint.set_notes`            | `PUT /api/blueprints/{id}/notes`(`blueprint.go:265`,RPC `SetNotes`) |
+| `blueprint.render_markdown`      | `GET /api/blueprints/{id}/markdown`(`blueprint.go:279`,RPC `RenderMarkdown`) |
+| `blueprint.submit_for_approval`  | `POST /api/blueprints/{id}/submit`(`blueprint.go:295`,RPC `SubmitForApproval`) |
+| `blueprint.create_amendment`     | `POST /api/blueprints/amend`(`blueprint.go:309`,RPC `CreateAmendment`) |
+| `taskboard.list`                 | `GET /api/task-board`(cws-work `task.go:211`,RPC `TaskService.ListTaskBoard`);临时替代 `GET /tasks?claimable=...&agent_skills=...` |
 
-> 注意 cws-work HTTP 用 `/api/...` 前缀,**没有 `v1`**;cws-core 转发后会暴露成 `/api/v1/...`。
+> 注意 cws-work HTTP 用 `/api/...` 前缀,**没有 `v1`**;cws-core 转发时会暴露成 `/api/v1/...`。等 cws-core 加上对应 forwarding endpoint 后,把上面这 9 行按对齐后的 cws-core 签名加回 `tm.js` 即可。
 
 ### ✅ F4 —— D8 envelope unwrap(已修复 in `7bf54a5`)
 
