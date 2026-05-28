@@ -1,158 +1,216 @@
 ---
-name: coco-workspace
-version: 0.1.0
+name: coco-agent
+version: 0.3.0
 description: >-
-  COCO Workspace agent plugin. Wraps cws-core OpenAPI for IM, Tasks, Projects,
-  and (forward-compat) KB/Teams/Blueprints. All file upload/download goes
-  through src/cli/as.js (single source of truth). Lead/Worker lifecycle.
-type: communication
-
-lifecycle:
-  npm: true
-  service:
-    type: pm2
-    name: zylos-coco-workspace
-    entry: src/comm-bridge.js
-  data_dir: ~/zylos/components/coco-workspace
-  hooks:
-    post-install: hooks/post-install.js
-    post-upgrade: hooks/post-upgrade.js
-  preserve:
-    - config.json
-
-upgrade:
-  repo: coco-workspace/zylos-coco-workspace
-  branch: main
-
-config:
-  required:
-    - name: COCO_AUTH_TOKEN
-      description: "Agent authentication token for COCO Workspace API"
-      sensitive: true
+  COCO Workspace Agent Skill (Guided Autonomy)。效率捷径 + 状态机 +
+  行为护栏 + 记忆触发点。首次行为决策时加载。
 ---
 
-# Workspace Skill
+# Agent Skill
 
-## 角色识别
+> 设计规范源：`cws-work/docs/skill-design/agent-skill-spec.md`
+> 范式：Guided Autonomy — 不规定流程步骤，只提供捷径、护栏和触发点。
 
-你在每条消息到达时判断自己的角色：
+## 角色模型
 
-| 消息来源 | 你的角色 | 行为 |
-| --- | --- | --- |
-| 人类通过 IM 发来新意图 | Lead（编排者） | 进入 Lead 生命周期 |
-| Lead Agent 通过 IM 派发 Task | Worker（执行者） | 进入 Worker 生命周期 |
-| 人类对已交付 Issue 的反馈 | Lead（验收阶段） | 继续 Lead 生命周期的验收 phase |
-| Lead 对你的澄清请求的回复 | Worker（继续执行） | 继续 Worker 生命周期 |
+角色由运行时指派关系决定，不是 Agent 固有属性：
 
-## Lead 生命周期
+| 指派关系 | 角色 |
+|---|---|
+| `Issue.leadAgentId = self` | Lead（编排者）|
+| `Task.assigneeId = self` | Worker（执行者）|
+| 两者同时 | Lead 自做 |
 
-```
-接收意图 → 澄清对话（如需） → 上下文组装 → 决策 → 执行 → 交付 → 验收 → 经验沉淀
-```
+同一 Agent 可同时在 Issue A 中当 Lead、Issue B 中当 Worker。
 
-### 接收意图
+**角色边界按 Issue/Task 范围生效，不是 session 级**：
 
-评估信息完备度。目标和范围都清晰 → 跳过澄清。目标模糊 → 必须澄清。
+| 能力 | Lead | Worker |
+|---|---|---|
+| 与人类直接通信 | 是 | 否（通过 Lead 转达）|
+| Issue 操作（创建/流转/关闭）| 是 | 否 |
+| Task 创建/派发 | 是 | 否 |
+| Task 领取/状态流转 | 仅监控 | 是 |
+| Blueprint 操作 | 是 | 否 |
+| KB 写入 | 经验沉淀 | 任务产出（Lead 指定位置）|
 
-### 澄清对话
+Worker 的"不创建 Issue""不与人类通信"仅在该 Worker 角色上下文中生效。同一 Agent 在 Lead 角色中正常行使 Lead 权限。
 
-一次只问一个问题。提供选项。带上你的判断。信息够了就结束。
+## 效率捷径
 
-### 上下文组装
+### 上下文锚定
 
-主动收集系统上下文，不是人类告诉你该读什么，而是你自己知道该找什么。
+收到消息时，按优先级确定属于哪个工作上下文：
 
-优先级：
-1. 必读：项目规范 + 已有材料 → 加载 `references/kb-operations.md`
-2. 应读：历史经验（同类 Issue 的 lessons）→ 加载 `references/tm-operations.md`
-3. 可选：团队成员详情 → 加载 `references/core-operations.md`
+1. **对话历史推断**（零调用）— 上一轮聊的是什么、语义关联、话题切换信号
+2. **记忆中的活跃工作列表**（零调用）— 持久化的 Issue/Task 状态
+3. **本地目录语义匹配**（零调用）— 从缓存的 Project/Issue name+description 匹配
+4. **主动询问人类** — 提供选项让人类选择，不要开放式提问
 
-### 决策
+操作代价越高，锚定置信度要求越高：
 
-两个正交决策：
-- 编排：直接执行 vs Blueprint（单步骤 vs 多步骤）
-- 审批：自动启动 vs 需要人类审批（低风险 vs 高影响）
+- 高（验收、状态流转）→ 不确定就问
+- 中（追加指令）→ 中等置信度可先执行，错了可纠正
+- 低（查询、闲聊）→ 不需要锚定
 
-决策完成后执行 TM 操作 → 加载 `references/tm-operations.md`
+### 参数解析
 
-### 执行
+API 调用需要的 ID，按优先级获取：
 
-- 自做：创建 Issue + Task(assignee=self)，直接执行
-- 派发：创建 Issue + Task(assignee=worker)，通过 IM 通知 Worker
-- Blueprint：创建 Issue + Blueprint + Steps → 审批后实例化为 Task
+1. **人类消息上下文** → 人类给出的 projectId、orgId 等，直接使用，不要重复创建
+2. **自身行为产物** → 本 session 内 API 返回值（创建 Issue 返回的 issueId 等）
+3. **记忆** → 上次已知的 projectId、issueId 等
+4. **本地目录** → 从缓存的 Project/Issue name+description 语义匹配
+5. **API 查询** → project.list、core.agent_list 等
+6. **默认值** → 未指定项目 → Inbox；mode 未指定 → light
+7. **询问人类**
 
-执行中的产出写入 → 加载 `references/kb-operations.md` 或 `references/as-operations.md`
-
-### 交付
-
-通过 IM 发送交付消息：结果摘要 + 产出位置 + 关键发现。
-Issue 状态 → delivered。在 TM Comment 记录交付摘要。
-
-### 验收
-
-识别人类反馈：
-- "好的"、"可以" → accepted → 进入经验沉淀
-- "不对"、"缺了 X" → rejected → 创建新 Task 补充执行
-
-### 经验沉淀
-
-Issue 被 accepted 后，评估是否有值得沉淀的经验（踩坑、被拒收原因、可复用模式）。
-写入 KB → 加载 `references/kb-operations.md`
-
-## Worker 生命周期
+参数依赖树（首次必须按此顺序获取，获取后持久化）：
 
 ```
-接收任务 → 理解上下文 → 请求澄清（如需） → 执行 → 汇报
+core.me → agentId, orgId
+  ├→ project.list → projectId
+  ├→ core.agent_list → assigneeId（派发 Task 时）
+  ├→ issue.create → issueId → task.create → taskId
+  └→ kb.tree_roots → KB 目录结构 → pageId
 ```
 
-### 接收任务
+### 本地目录
 
-收到 Lead 的派发消息后，通过 TM 领取 Task → 加载 `references/tm-operations.md`
+首次需要解析 Project 或 Issue 时，一次性拉取全量：
 
-### 理解上下文
+- `project.list` → 所有项目的 name + description + id
+- `issue.list_in_project` → 各项目活跃 Issue 的 name + description + id
 
-读取 Task 描述 + Lead 指定的 KB 材料 → 加载 `references/kb-operations.md`
+缓存到记忆。后续解析从本地目录语义匹配，不再调 API。
 
-自检：我清楚要产出什么？我有足够的输入？任何一项不确认 → 请求 Lead 澄清。
+- **增量更新**：自己创建 Issue/Project 时追加到本地目录
+- **全量刷新**：匹配不上时，或日常维护时
 
-### 请求澄清
+## 状态机
 
-格式：`[请求澄清] Task {taskId}` + 具体问题 + 当前理解 + 建议
+### Issue 状态
 
-### 执行
+```
+Light 模式: (create) → EXECUTING → DELIVERED → ACCEPTED → ARCHIVED
+                                  ↘ REJECTED → REOPENED → EXECUTING（循环）
 
-在 Lead 指定的范围内工作。产出写入 KB 或上传 AS。
-遇到阻塞立即上报，不要卡住沉默。
+Heavy 模式: (create) → DRAFT → PENDING_APPROVAL → APPROVED → EXECUTING → ...（同上）
+```
 
-### 汇报
+| 状态 | 含义 | Lead 可做 |
+|---|---|---|
+| DRAFT | Heavy 模式刚创建 | 编辑描述、编排 Blueprint、提交审批 |
+| PENDING_APPROVAL | 等待审批 | 等待 |
+| APPROVED | 审批通过 | → EXECUTING |
+| EXECUTING | 执行中 | 创建 Task、监控、交付 |
+| DELIVERED | 已交付 | 等待人类反馈 |
+| ACCEPTED | 人类验收通过 | 经验沉淀 → ARCHIVED |
+| REJECTED | 人类拒收 | → REOPENED（不可直接→EXECUTING）|
+| REOPENED | 重新打开 | → EXECUTING |
+| ARCHIVED | 终态 | — |
 
-完成：`[任务完成] Task {taskId}` + 产出位置 + 摘要
-失败：`[任务失败] Task {taskId}` + 原因 + 已完成部分 + 建议
+### Task 状态
 
-TM 状态流转：attempt → done, task → done
+| 状态 | 含义 | 触发 |
+|---|---|---|
+| PENDING | 已创建未领取 | CreateTask 无 assigneeId |
+| RUNNING | 执行中 | claim / CreateTask 带 assigneeId（自动 claim）|
+| DONE | 完成（终态）| Worker |
+| FAILED | 失败（终态）| Worker |
+| CANCELLED | 取消（终态）| Lead |
 
-## 操作指南索引(Layer 3,按需加载)
+### Attempt 状态
 
-当你需要执行具体的服务操作时,加载对应的操作指南。每份指南都按 ✅(cws-core 已暴露) / ⏳(暂未暴露,调用会 404) 标记了每条命令的状态。
+| 状态 | 含义 | 后续 |
+|---|---|---|
+| RUNNING | 执行中 | claim 自动创建 |
+| DONE | 完成（终态）| Task → DONE |
+| FAILED | 失败（终态，附 failureReason）| Lead 决定是否重试 |
+| BLOCKED | 等待审批（终态）| 审批通过 → 新 Attempt 续作 |
+| CANCELLED | 取消（终态）| — |
 
-| 需要做什么 | 加载 | 当前状态摘要 |
-| --- | --- | --- |
-| 通信(主动发消息、会话管理) | `references/comm-operations.md` | ✅ 收发消息 / 列会话 · ⏳ edit / pin / read / typing / search |
-| 文件上传下载(IM 附件、KB 文件) | `references/as-operations.md` | ⏳ 全部(media 端点未暴露)。仓库**唯一**上传入口 |
-| 任务管理(Issue / Task / Blueprint) | `references/tm-operations.md` | ✅ Project 全套 + Issue/Task 读 · ⏳ 所有写工作流 |
-| 组织信息(成员、Agent、项目) | `references/core-operations.md` | ✅ me/members/agents/projects 读 · ⏳ teams / agent 详情 |
-| KB(知识库) | `references/kb-operations.md` | ⏳ 全部(core 尚无 KB 域) |
+BLOCKED ≠ FAILED：BLOCKED 是主动 suspend 等待审批，审批通过后系统自动新建 Attempt 续作。
 
-接口契约权威源:cws-core OpenAPI(`https://zylos01.jinglever.com/cws-core/openapi.json`)。
-整体接口覆盖对比见 `docs/cws-core-api-gaps.md`。
+### 完成流转顺序
 
-## 实现要点(关键约定)
+从内到外，逐层流转，禁止跳层：
 
-- **认证**:Bearer api_key(env `COCO_AUTH_TOKEN`),所有 REST + WS upgrade 同一把 key
-- **WS 鉴权**:cws-comm api-usage-guide §6 直连模式,header 带 Bearer,首帧 connect frame token = api_key
-- **路径前缀**:默认 `/api/v1`(env `COCO_API_PREFIX` 可覆盖)
-- **文件 IO**:**只用 `src/cli/as.js`**(`uploadMedia` / `getMediaUrl` / `downloadMedia`),不要重复造实现
-- **C4 channel name**:`coco-workspace`(必须跟组件安装目录名一致)
-- **配置存放**:
-  - `~/zylos/components/coco-workspace/config.json` — workspace_id, device_id, client_id
-  - `~/zylos/.env` — COCO_AUTH_TOKEN(敏感凭证)
+```
+attempt.transition → done
+task.transition → done
+issue.transition → delivered
+```
+
+Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下所有 Task 必须在终态。
+
+## 行为护栏
+
+### 常见错误
+
+| 错误 | 正确做法 |
+|---|---|
+| 使用 Claude Code 内置 TaskCreate/TaskUpdate | 所有任务操作走 TM CLI，禁止用平台内置的 task 工具 |
+| 跳过 TM 流程直接执行任务 | 每个需求必须先 Issue → Task → Attempt 推进 |
+| Worker 调 issue.transition | Issue 状态只由 Lead 流转 |
+| 创建 Issue 没有 leadAgentId | Issue 必须有 Lead |
+| REJECTED 直接回 EXECUTING | 必须走 REJECTED → REOPENED → EXECUTING |
+| Heavy 模式跳过 Blueprint 审批 | 必须 submit_for_approval |
+| Worker 自行创建新 Attempt 重试 | 汇报失败，等 Lead 决定 |
+| CreateTask 不带 projectId | 必须传 issueId 或 projectId |
+| 对 ⏳ 命令反复重试 | 404/501 → 降级到对话流 |
+| 人类提供了 Project ID 仍自创 Project | 直接使用人类给出的 ID，不要 project.create 重复创建 |
+| 用 curl/fetch 直接调 TM/KB/AS API | 所有服务操作必须走 CLI，禁止直接 HTTP 调用 |
+| Task done 但 Attempt 仍在 running | 先 attempt.transition → done，再 task.transition → done |
+| 工作做完但 Issue 没有 deliver | 所有 Task done 后必须 issue.transition → delivered |
+| 人类拒收后直接修改产出 | 先 issue.transition → reopened → executing，再新建 Task 重做 |
+
+### API 降级
+
+CLI 命令返回 404 或 501（cws-core 网关暂未接通）时：
+
+1. 在 IM 中告知相关方当前操作暂不支持
+2. 用对话流完成等价动作（人类口头确认代替 API 调用）
+3. 在 IM 消息中保留 Issue/Task ID，便于系统就绪后补录
+4. 不反复重试，不阻塞
+5. 可用的读操作（project.list 等）仍正常调用
+
+### Lead-Worker 契约
+
+**Lead 对 Worker**：完成时通过 IM 汇报且流转 TM 状态；遇阻主动请求澄清；产出位置符合 Lead 指定。
+
+**Worker 对 Lead**：派发时提供清晰描述和关键上下文；澄清请求及时响应；不在执行中途无预警取消 Task。
+
+## 记忆触发点
+
+以下时机，持久化关键信息确保 session 切换后可恢复。不指定存储位置，Agent 根据运行时的记忆系统自行决定。
+
+| 时机 | 持久化内容 |
+|---|---|
+| 首次 `core.me` | agentId、orgId |
+| 首次 `project.list` | 项目目录（name + description + id）|
+| 创建 Issue | issueId、projectId、title、status |
+| 领取 Task | taskId、issueId、title、status |
+| 状态流转 | 更新对应 Issue/Task 的 status |
+| 拉取 Issue 列表 | 更新本地 Issue 目录 |
+| Issue accepted | 评估是否沉淀经验 |
+
+**经验沉淀判断**（任一满足则沉淀，全不满足则跳过）：
+
+- 执行中遇到意外障碍或踩坑
+- 人类拒收过一次或多次
+- 发现了可复用的模式
+
+沉淀位置遵循 KB 命名空间约定：项目决策 → `/projects/{slug}/decisions/`，调研 → `/projects/{slug}/research/`，Agent 经验 → `/agents/{slug}/lessons/`。
+
+## 操作指南索引（Layer 3，按需加载）
+
+加载方式：读取对应文件内容。
+
+| 何时加载 | 操作指南 | 文件路径 |
+|---|---|---|
+| 操作 TM | TM 操作指南 | `references/tm-operations.md` |
+| 操作 KB | KB 操作指南 | `references/kb-operations.md` |
+| 操作 AS | AS 操作指南 | `references/as-operations.md` |
+| 发送 IM | Comm 操作指南 | `references/comm-operations.md` |
+| 查询组织 | Core 操作指南 | `references/core-operations.md` |

@@ -438,8 +438,6 @@ zylos upgrade coco-workspace
 | 项目 | 说明 | 依赖 |
 | --- | --- | --- |
 | WebSocket 消息协议细节 | cws-comm 的 WebSocket 事件格式和认证握手流程 | cws-comm 服务开发进度 |
-| KB API 接口定义 | KB 后端的 HTTP API 路径和参数格式 | KB 服务 API 设计 |
-| AS API 接口定义 | AS 后端的 HTTP API 路径和参数格式 | AS 服务 API 设计 |
 | Agent token 获取流程 | Agent 在 Workspace 中的认证方式和 token 刷新 | 鉴权模型落地 |
 | 离线消息处理 | Agent 重启后如何补全离线期间的消息 | cws-comm 的 sync 协议 |
 | 与 zylos-lark 的共存 | Agent 同时连接外部 IM 和原生 IM 时的消息路由和去重 | C4 bridge 的 channel 隔离机制 |
