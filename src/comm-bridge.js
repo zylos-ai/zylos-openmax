@@ -282,8 +282,38 @@ async function sendConnectRequest() {
 
 // --- WebSocket frame dispatch ---
 
+// Cumulative frame.type counter for protocol-alignment metrics.
+// Used to verify which types cws-comm actually pushes vs which our switch
+// expects but never sees. Dumped every WS_METRIC_INTERVAL_MS to logs.
+const _frameTypeCounts = Object.create(null);
+const WS_METRIC_INTERVAL_MS = 5 * 60 * 1000;
+let _frameMetricTimer = null;
+
+function recordFrameType(type) {
+  const k = type || '(missing-type)';
+  _frameTypeCounts[k] = (_frameTypeCounts[k] || 0) + 1;
+}
+
+function dumpFrameMetrics() {
+  const entries = Object.entries(_frameTypeCounts);
+  if (entries.length === 0) {
+    log('ws frame metric: no frames received in this window');
+    return;
+  }
+  entries.sort((a, b) => b[1] - a[1]);
+  const formatted = entries.map(([t, n]) => `${t}=${n}`).join(' ');
+  log(`ws frame metric (cumulative since boot): ${formatted}`);
+}
+
+function startFrameMetricTimer() {
+  if (_frameMetricTimer) return;
+  _frameMetricTimer = setInterval(dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
+  _frameMetricTimer.unref?.();
+}
+
 function onFrame(frame) {
   const type = frame.type;
+  recordFrameType(type);
   switch (type) {
     case 'connect_response':
     case 'connect-response':
@@ -502,4 +532,5 @@ process.on('SIGTERM', () => { removeBridgeFile(); log('SIGTERM, stopping'); ipcS
 process.on('SIGINT',  () => { removeBridgeFile(); log('SIGINT, stopping');  ipcServer.close(); ws.stop(); process.exit(0); });
 
 log(`starting (ws=${wsBaseUrl}?ticket=..., workspace=${config.workspace_id || '<unset>'}, device=${config.device_id || '<unset>'})`);
+startFrameMetricTimer();
 ws.start();
