@@ -78,7 +78,7 @@ const COMMANDS = {
   ),
 
   // =========================================================================
-  //  ISSUE  (✅ all in contract-v2 — note `issue.get/update/transition/move`
+  //  ISSUE  (✅ all 7 in contract-v2 — note `issue.get/update/transition/move`
   //  use the FLAT path /issues/{id}, not /projects/{pid}/issues/{id})
   // =========================================================================
 
@@ -133,9 +133,18 @@ const COMMANDS = {
     { new_project_id: params.targetProjectId ?? params.newProjectId },
   ),
 
+  // contract-v2 set-issue-acceptance: POST /issues/{id}/acceptance
+  'issue.set_acceptance': () => post(
+    apiPath(`/issues/${params.id}/acceptance`),
+    {
+      accepted:         params.accepted,
+      rejection_reason: params.rejectionReason,
+    },
+  ),
+
   // =========================================================================
-  //  TASK  (✅ list/get/transition/reassign in contract-v2; create uses the
-  //  doubly-nested path /projects/{pid}/issues/{iid}/tasks)
+  //  TASK  (✅ all 7 in contract-v2; create uses the doubly-nested path
+  //  /projects/{pid}/issues/{iid}/tasks)
   // =========================================================================
 
   'task.list': () => get(apiPath('/tasks'), {
@@ -166,6 +175,10 @@ const COMMANDS = {
     },
   ),
 
+  // contract-v2 claim-task: POST /tasks/{id}/claim (no body; principal
+  // from auth header). Auto-creates an attempt server-side.
+  'task.claim': () => post(apiPath(`/tasks/${params.id}/claim`)),
+
   // Path is /transition (not /status); body field is target_status.
   'task.transition': () => post(
     apiPath(`/tasks/${params.id}/transition`),
@@ -184,7 +197,7 @@ const COMMANDS = {
   ),
 
   // =========================================================================
-  //  BLUEPRINT  (contract-v2 only has create / get / list / set-steps —
+  //  BLUEPRINT  (✅ all 4 in contract-v2 — create / get / list / set-steps;
   //  blueprint.create and .list are issue-nested; blueprint.set_steps is
   //  PUT-and-replace, not POST-and-append.)
   // =========================================================================
@@ -225,6 +238,33 @@ const COMMANDS = {
     { steps: params.steps },
   ),
 
+  // =========================================================================
+  //  ATTEMPT  (contract-v2: create / get / list / transition)
+  // =========================================================================
+
+  // contract-v2 create-attempt: POST /tasks/{task_id}/attempts
+  // (attempt_number auto-increments server-side)
+  'attempt.create': () => post(
+    apiPath(`/tasks/${params.taskId}/attempts`),
+  ),
+
+  'attempt.get': () => get(apiPath(`/attempts/${params.id}`)),
+
+  'attempt.list': () => get(
+    apiPath(`/tasks/${params.taskId}/attempts`),
+    pageParams(params),
+  ),
+
+  // contract-v2 transition-attempt: POST /attempts/{id}/transition
+  'attempt.transition': () => post(
+    apiPath(`/attempts/${params.id}/transition`),
+    {
+      target_status:                    params.status ?? params.targetStatus,
+      failure_reason:                   params.failureReason,
+      blocked_on_approval_request_ids:  params.blockedOnApprovalRequestIds,
+    },
+  ),
+
 };
 
 function printUsage() {
@@ -250,13 +290,15 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.update           {id, title?, description?, priority?, dueDate?}
   issue.transition       {id, targetStatus (or 'status'), rejectionReason?}
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
+  issue.set_acceptance   {id, accepted, rejectionReason?}
 
-TASK  (✅ list/get/transition/reassign on contract-v2; create uses doubly-nested path)
+TASK  (all ✅ on contract-v2; create uses doubly-nested path)
   task.list              {projectId?, issueId?, status?, claimable?, agentSkills?,
                           page?, pageSize?, orderBy?}
   task.get               {id}
   task.create            {projectId, issueId, title, description?, assigneeId?,
                           skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}
+  task.claim             {id}                                                    # no body; principal from auth
   task.transition        {id, targetStatus}                                      # alias: task.status
   task.reassign          {id, newAssigneeId (or 'assigneeId')}
 
@@ -265,6 +307,13 @@ BLUEPRINT  (all ✅ on contract-v2)
   blueprint.get                     {id, includeSteps?}
   blueprint.list                    {issueId, page?, pageSize?, orderBy?}
   blueprint.set_steps               {blueprintId (or 'id'), steps[]}             # replaces ALL steps
+
+ATTEMPT  (all ✅ on contract-v2)
+  attempt.create         {taskId}                                                # attempt_number auto-increments
+  attempt.get            {id}
+  attempt.list           {taskId, page?, pageSize?, orderBy?}
+  attempt.transition     {id, targetStatus (or 'status'), failureReason?,
+                          blockedOnApprovalRequestIds?}
 
 Environment:
   COCO_API_URL     cws-core base URL (default: http://127.0.0.1:8080)
