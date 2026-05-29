@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * C4 standard outbound interface — aligned with cws-core OpenAPI
+ * C4 standard outbound interface — directly calls cws-core OpenAPI
  * `POST /api/v1/conversations/{conversation_id}/messages`.
  *
  * Usage:
@@ -18,6 +18,11 @@
  *   [MEDIA:image]/path → upload via as.js → content=[{type:"image", body:<media_id>}]
  *   [MEDIA:file]/path  → upload via as.js → content=[{type:"file",  body:<media_id>}]
  *
+ * Long text is split into ≤3000-char chunks (paragraph → newline → hard) and
+ * sent as sequential POSTs to the same conversation. Each chunk gets its own
+ * client_msg_id so the server de-dupes them independently. `reply_to` is
+ * applied only on the first chunk to avoid duplicate threading.
+ *
  * cws-core SendMessageRequestBody (additionalProperties: false):
  *   { client_msg_id, content: MessageContent[], reply_to? }
  *   MessageContent: { type: string, body: string }
@@ -28,7 +33,6 @@
 
 import dotenv from 'dotenv';
 import path from 'path';
-import fs from 'fs';
 
 dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 
@@ -38,35 +42,9 @@ import {
   looksLikeMarkdown,
   parseMediaPrefix,
   newClientMsgId,
+  splitMessage,
 } from '../src/lib/message.js';
 import { uploadMedia } from '../src/cli/as.js';
-
-const BRIDGE_PATH = path.join(process.env.HOME || '', 'zylos/components/coco-workspace/runtime/bridge.json');
-
-/**
- * Send a text message via comm-bridge's IPC server (→ WebSocket → user).
- * Returns the response on success; returns null if bridge is not running.
- * Throws if bridge is up but rejected the request (e.g. WS disconnected).
- */
-async function tryWsBridge(ep, text) {
-  let info;
-  try { info = JSON.parse(fs.readFileSync(BRIDGE_PATH, 'utf8')); } catch { return null; }
-  try { process.kill(info.pid, 0); } catch { return null; }  // bridge process dead
-
-  const res = await fetch(`http://127.0.0.1:${info.port}/send`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      conversationId: resolveTargetConversation(ep),
-      text,
-      threadId: ep.threadConversationId || undefined,
-      replyTo:  ep.replyTo             || undefined,
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `bridge ${res.status}`);
-  return data;
-}
 
 function usage() {
   console.error('Usage: node scripts/send.js <endpoint> <message>');
@@ -90,23 +68,27 @@ function resolveTargetConversation(ep) {
   return ep.threadConversationId || ep.conversationId;
 }
 
-async function sendText(_unused, ep, text) {
-  // Prefer WS path via comm-bridge IPC (handles DM, group, thread, long msgs).
-  // Falls back to REST if bridge is offline or WS is disconnected.
-  const wsResult = await tryWsBridge(ep, text).catch(() => null);
-  if (wsResult) return wsResult;
-
-  // REST fallback — single request; server-side splitting not guaranteed.
+async function sendText(ep, text) {
   const convId = resolveTargetConversation(ep);
-  const blockType = looksLikeMarkdown(text) ? 'markdown' : 'text';
-  return post(apiPath(`/conversations/${convId}/messages`), {
-    client_msg_id: newClientMsgId(),
-    content:       [{ type: blockType, body: text }],
-    reply_to:      ep.replyTo,
-  });
+  const chunks = splitMessage(text);
+  const results = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const blockType = looksLikeMarkdown(chunk) ? 'markdown' : 'text';
+    const body = {
+      client_msg_id: newClientMsgId(),
+      content:       [{ type: blockType, body: chunk }],
+      // reply_to only on the first chunk to avoid duplicate threading
+      ...(i === 0 && ep.replyTo ? { reply_to: ep.replyTo } : {}),
+    };
+    // eslint-disable-next-line no-await-in-loop
+    const res = await post(apiPath(`/conversations/${convId}/messages`), body);
+    results.push(res?.id || res?.message_id || null);
+  }
+  return { ok: true, chunks: chunks.length, message_ids: results };
 }
 
-async function sendMediaMessage(_unused, ep, kind, localPath) {
+async function sendMediaMessage(ep, kind, localPath) {
   const convId = resolveTargetConversation(ep);
   const mediaType = kind === 'image' ? 'image' : 'file';
   const { mediaId } = await uploadMedia(localPath, {
@@ -138,15 +120,12 @@ async function main() {
     console.error(JSON.stringify({ error: e.message }));
     process.exit(1);
   }
-  // When a thread is targeted, the message belongs to the *root*
-  // conversation_id with thread_id set (cws-comm §5.1 SendMessageRequest).
-  const conversationId = ep.conversationId;
 
   try {
     const media = parseMediaPrefix(message);
     const result = media
-      ? await sendMediaMessage(conversationId, ep, media.kind, media.localPath)
-      : await sendText(conversationId, ep, message);
+      ? await sendMediaMessage(ep, media.kind, media.localPath)
+      : await sendText(ep, message);
     console.log(JSON.stringify(result));
   } catch (e) {
     const payload = { error: e.message };
