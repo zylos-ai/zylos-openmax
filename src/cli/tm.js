@@ -138,6 +138,7 @@ const COMMANDS = {
     apiPath(`/issues/${params.id}/acceptance`),
     {
       accepted:         params.accepted,
+      source:           params.source ?? 'explicit',
       rejection_reason: params.rejectionReason,
     },
   ),
@@ -290,7 +291,7 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.update           {id, title?, description?, priority?, dueDate?}
   issue.transition       {id, targetStatus (or 'status'), rejectionReason?}
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
-  issue.set_acceptance   {id, accepted, rejectionReason?}
+  issue.set_acceptance   {id, accepted, source?, rejectionReason?}        # source: im|explicit (default: explicit)
 
 TASK  (all ✅ on contract-v2; create uses doubly-nested path)
   task.list              {projectId?, issueId?, status?, claimable?, agentSkills?,
