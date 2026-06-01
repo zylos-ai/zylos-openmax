@@ -8,12 +8,13 @@
  *   - top-level `org_id`                        → orgs.default.org_id
  *   - top-level `device_id` / `client_id`
  *     / `app_version`                           → agent.*
- *   - top-level `comm.*`                        → server.*
+ *   - top-level `comm.*`                        → server.* (subset)
  *       comm.core_url   → server.bff_url
- *       comm.kb_url     → server.kb_url
- *       comm.as_url     → server.as_url
  *       comm.ws_url     → server.ws_url
  *       comm.reconnect_max_delay / heartbeat_interval / platform → server.*
+ *       comm.kb_url / comm.as_url               → DROPPED (cws-core is the
+ *                                                  gateway; agent does not
+ *                                                  talk to kb/as directly)
  *   - top-level `agent.identity_id` / `api_key` — preserved (still global)
  *   - new top-level `orgs.<slug>`               — wraps the legacy single-org
  *                                                 settings into `orgs.default`
@@ -57,8 +58,6 @@ if (config.comm) {
   const map = {
     bff_url: m.core_url || m.api_url,
     ws_url:  m.ws_url,
-    kb_url:  m.kb_url,
-    as_url:  m.as_url,
     reconnect_max_delay: m.reconnect_max_delay,
     heartbeat_interval:  m.heartbeat_interval,
     platform: m.platform,
@@ -66,8 +65,20 @@ if (config.comm) {
   for (const [k, v] of Object.entries(map)) {
     if (v !== undefined && config.server[k] === undefined) config.server[k] = v;
   }
-  legacyKeysSeen.push('comm.*');
+  if (m.kb_url !== undefined || m.as_url !== undefined) {
+    legacyKeysSeen.push('comm.kb_url / comm.as_url (dropped — cws-core is the gateway)');
+  }
+  legacyKeysSeen.push('comm.* → server.* (kb/as dropped)');
   delete config.comm;
+}
+
+// Existing v0.4-shape configs that already migrated but kept server.kb_url /
+// server.as_url around: drop them now since they're unused.
+if (config.server) {
+  let strippedKb = false;
+  if (config.server.kb_url !== undefined) { delete config.server.kb_url; strippedKb = true; }
+  if (config.server.as_url !== undefined) { delete config.server.as_url; strippedKb = true; }
+  if (strippedKb) legacyKeysSeen.push('server.kb_url / server.as_url (dropped — unused)');
 }
 
 // ── agent.{device_id, client_id, app_version} ───────────────────────────────

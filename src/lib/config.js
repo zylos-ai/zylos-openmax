@@ -47,10 +47,11 @@ export const DEFAULT_CONFIG = {
   enabled: true,
 
   server: {
-    bff_url: 'http://127.0.0.1:8080',          // cws-core REST + cws-comm IM REST
-    ws_url:  'ws://127.0.0.1:8080/ws',         // cws-comm WebSocket
-    kb_url:  '',                                // optional override; falls back to bff_url
-    as_url:  '',                                // optional override; falls back to bff_url
+    // The agent only talks to two surfaces:
+    //   - cws-core REST     (also handles kb/as forwarding)  → bff_url
+    //   - cws-comm WebSocket (long connection)               → ws_url
+    bff_url: 'http://127.0.0.1:8080',
+    ws_url:  'ws://127.0.0.1:8080/ws',
     reconnect_max_delay: 30000,                 // WS exponential backoff cap, ms
     heartbeat_interval:  30000,                 // WS heartbeat interval, ms
     platform: 'server',

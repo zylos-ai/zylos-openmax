@@ -315,8 +315,9 @@ File attachment (delegates to as.uploadMedia)
   ✅ kb.upload               {filePath, mediaType?, contentType?, description?, nodeId?, pageId?, orgId?}
 
 Environment:
-  COCO_KB_URL        cws-kb base URL (default: comm.kb_url in config)
-  COCO_AUTH_TOKEN    Bearer token (shared with cws-core / cws-as)
+  COCO_API_URL       cws-core base URL (KB routes are gateway-forwarded
+                     through cws-core, not a separate kb service)
+  COCO_AUTH_TOKEN    Bearer token
   COCO_ORG_ID        Org UUID (X-Org-Id scope header + path). Falls back to
                      the single enabled org in config.orgs if exactly one.
 `);

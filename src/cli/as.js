@@ -328,8 +328,9 @@ Commands (all ✅ — cws-as has these wired up)
                 # batch as:// URI → pre-signed URL map (with partial-auth tolerance)
 
 Environment:
-  COCO_AS_URL        cws-as base URL (default: comm.as_url in config)
-  COCO_AUTH_TOKEN    Bearer token (shared with cws-core / cws-kb)
+  COCO_API_URL       cws-core base URL (AS routes are gateway-forwarded
+                     through cws-core, not a separate as service)
+  COCO_AUTH_TOKEN    Bearer token
   COCO_ORG_ID        Org UUID (X-Org-Id scope header). Falls back to the
                      single enabled org in config.orgs if exactly one.
 `);
