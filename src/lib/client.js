@@ -31,7 +31,7 @@
  * and .status carries the HTTP status code.
  */
 
-import { loadConfig } from './config.js';
+import { loadConfig, resolveDefaultOrgId } from './config.js';
 import { getAccessToken } from './token.js';
 
 let activeApiKey = null;
@@ -47,31 +47,35 @@ export const setSessionToken = setApiKey;
 
 // ============================================================================
 //  Base URL / token / header resolution
+//
+//  Config schema v0.4 uses `server.*` (new) instead of `comm.*` (legacy).
+//  We try the new path first and fall back to the legacy path so a config
+//  that hasn't been migrated yet still works.
 // ============================================================================
 
 function resolveBaseUrl() {
   if (activeBaseUrl) return activeBaseUrl;
   if (process.env.COCO_API_URL) return process.env.COCO_API_URL;
   const cfg = loadConfig();
-  return cfg.comm?.core_url || cfg.comm?.api_url || 'http://127.0.0.1:8080';
+  return cfg.server?.bff_url
+      || cfg.comm?.core_url || cfg.comm?.api_url
+      || 'http://127.0.0.1:8080';
 }
 
 function resolveKbBaseUrl() {
   if (process.env.COCO_KB_URL) return process.env.COCO_KB_URL;
   const cfg = loadConfig();
-  return cfg.comm?.kb_url || resolveBaseUrl();
+  return cfg.server?.kb_url || cfg.comm?.kb_url || resolveBaseUrl();
 }
 
 function resolveAsBaseUrl() {
   if (process.env.COCO_AS_URL) return process.env.COCO_AS_URL;
   const cfg = loadConfig();
-  return cfg.comm?.as_url || resolveBaseUrl();
+  return cfg.server?.as_url || cfg.comm?.as_url || resolveBaseUrl();
 }
 
 function resolveOrgId() {
-  if (process.env.COCO_ORG_ID) return process.env.COCO_ORG_ID;
-  const cfg = loadConfig();
-  return cfg.org_id || '';
+  return resolveDefaultOrgId();
 }
 
 async function resolveToken() {
@@ -91,12 +95,12 @@ function resolveCoreHeaders() {
   if (activeHeaders) return activeHeaders;
   const cfg = loadConfig();
   const out = {};
-  const workspaceId = cfg.workspace_id || process.env.COCO_WORKSPACE_ID || '';
-  const deviceId    = cfg.device_id    || process.env.COCO_DEVICE_ID    || '';
-  const version     = cfg.app_version  || process.env.COCO_CLIENT_VERSION || '';
-  if (workspaceId) out['X-Workspace-Id']   = workspaceId;
-  if (deviceId)    out['X-Device-Id']      = deviceId;
-  if (version)     out['X-Client-Version'] = version;
+  // workspace_id was dropped in the v0.4 multi-org refactor; org scoping is
+  // expressed via X-Org-Id (on kb/as) and via per-org WS connections.
+  const deviceId = cfg.agent?.device_id || cfg.device_id || process.env.COCO_DEVICE_ID    || '';
+  const version  = cfg.agent?.app_version || cfg.app_version || process.env.COCO_CLIENT_VERSION || '';
+  if (deviceId) out['X-Device-Id']      = deviceId;
+  if (version)  out['X-Client-Version'] = version;
   return out;
 }
 
@@ -226,7 +230,8 @@ function makeClient(baseUrl, scopeHeaders) {
 /**
  * Service-bound client for cws-kb.
  *
- * @param {string} [orgId]  override the resolved org id (else uses config.org_id / COCO_ORG_ID)
+ * @param {string} [orgId]  override the resolved org id (else uses COCO_ORG_ID,
+ *                          or the single enabled org from config.orgs)
  * @returns {{get,post,patch,put,del,baseUrl,headers}}
  *
  * Example:

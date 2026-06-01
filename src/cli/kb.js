@@ -13,7 +13,9 @@
  *   ✅  cws-kb has the route in code today
  *   ⏳  in cws-kb's api-design / usage-guide but not yet wired in code
  *
- * org_id source: config.org_id or COCO_ORG_ID env (set at install time).
+ * org_id source: COCO_ORG_ID env, or (if exactly one enabled org in config)
+ * that org's org_id, or an explicit orgId param. Callers with multiple orgs
+ * configured MUST pass --org-id or set COCO_ORG_ID.
  *
  * Usage:
  *   node src/cli/kb.js <command> '<json-params>'
@@ -34,7 +36,7 @@ const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 function orgPath(suffix, orgId) {
   const oid = orgId || process.env.COCO_ORG_ID;
   if (!oid && !(kbClient().headers['X-Org-Id'])) {
-    throw new Error('org_id is required (set config.org_id or COCO_ORG_ID)');
+    throw new Error('org_id is required (set COCO_ORG_ID, or have exactly one enabled org in config.orgs)');
   }
   const id = oid || kbClient().headers['X-Org-Id'];
   return `/api/v1/orgs/${id}${suffix}`;
@@ -315,7 +317,8 @@ File attachment (delegates to as.uploadMedia)
 Environment:
   COCO_KB_URL        cws-kb base URL (default: comm.kb_url in config)
   COCO_AUTH_TOKEN    Bearer token (shared with cws-core / cws-as)
-  COCO_ORG_ID        Override config.org_id (X-Org-Id scope header + path)
+  COCO_ORG_ID        Org UUID (X-Org-Id scope header + path). Falls back to
+                     the single enabled org in config.orgs if exactly one.
 `);
 }
 

@@ -168,9 +168,19 @@ export async function abortUpload(artifactId) {
  *   download → Content-Disposition: attachment
  *   preview  → Content-Disposition: inline (for in-browser preview)
  */
-export async function getMediaUrl(artifactId, mode = 'download') {
+export async function getMediaUrl(artifactId, modeOrOrgId = 'download', maybeOrgId) {
   if (!artifactId) throw new Error('getMediaUrl: artifactId is required');
-  const meta = await asClient().get(`/api/v1/artifacts/${artifactId}/download`, { mode });
+  // Back-compat shim: old signature was (artifactId, mode). New callers can pass
+  // (artifactId, orgId) — we detect a uuid-shaped second arg and treat it as orgId.
+  let mode = 'download';
+  let orgId;
+  if (typeof modeOrOrgId === 'string' && /^[0-9a-f-]{32,}$/i.test(modeOrOrgId)) {
+    orgId = modeOrOrgId;
+  } else {
+    mode = modeOrOrgId || 'download';
+    orgId = maybeOrgId;
+  }
+  const meta = await asClient(orgId).get(`/api/v1/artifacts/${artifactId}/download`, { mode });
   const url = meta?.url || meta?.download_url || meta?.data?.url || meta?.data?.download_url;
   if (!url) throw new Error('cws-as /artifacts/{id}/download returned no url');
   return { url, expiresAt: meta?.expires_at || meta?.data?.expires_at };
@@ -320,7 +330,8 @@ Commands (all ✅ — cws-as has these wired up)
 Environment:
   COCO_AS_URL        cws-as base URL (default: comm.as_url in config)
   COCO_AUTH_TOKEN    Bearer token (shared with cws-core / cws-kb)
-  COCO_ORG_ID        Override config.org_id (X-Org-Id scope header)
+  COCO_ORG_ID        Org UUID (X-Org-Id scope header). Falls back to the
+                     single enabled org in config.orgs if exactly one.
 `);
 }
 
