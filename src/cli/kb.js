@@ -1,43 +1,36 @@
 #!/usr/bin/env node
 
 /**
- * KnowledgeBase CLI — talks directly to cws-kb
- * (https://git.coco.xyz/coco-workspace/cws-kb).
+ * KnowledgeBase CLI — cws-core contract-v5 KB surface.
  *
- * Paths and shapes match the live cws-kb code today (routes under
- * /api/v1/orgs/{org_id}/*). The cws-kb api-usage-guide describes a
- * future surface under /api/v1/kb/* with X-Org-Id header; that's
- * forward-looking — we'll migrate when cws-kb's transport flips.
+ * v5 collapsed the KB routes from the old per-org prefix
+ * (`/api/v1/orgs/{org_id}/...`) into two flat namespaces:
  *
- * Status legend:
- *   ✅  cws-kb has the route in code today
- *   ⏳  in cws-kb's api-design / usage-guide but not yet wired in code
+ *   /api/v1/kbs/{kb_id}/tree/...   tree nodes, folders, files, download
+ *   /api/v1/pages/...              pages, content, revisions, trash
+ *   /api/v1/kbs[, /{kb_id}, ...]   KB collection + archive/unarchive
+ *   /api/v1/search/pages           full-text search
  *
- * org_id source: config.org_id or COCO_ORG_ID env (set at install time).
+ * Org scoping is carried by the JWT principal (resolved server-side) and
+ * does not appear in the path or as a header. X-Org-Id is no longer used.
+ *
+ * Most commands therefore require `kbId` instead of `orgId`.
  *
  * Usage:
  *   node src/cli/kb.js <command> '<json-params>'
  *   node src/cli/kb.js kb.search '{"query":"周会纪要","limit":10}'
  */
 
-import { kbClient } from '../lib/client.js';
+import { get, post, patch, put, del, apiPath } from '../lib/client.js';
 import { uploadMedia } from './as.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
-/**
- * Build the org-scoped path prefix once per CLI call. The client also
- * sends X-Org-Id, but cws-kb's current routes consume org_id from the
- * URL — both work.
- */
-function orgPath(suffix, orgId) {
-  const oid = orgId || process.env.COCO_ORG_ID;
-  if (!oid && !(kbClient().headers['X-Org-Id'])) {
-    throw new Error('org_id is required (set config.org_id or COCO_ORG_ID)');
-  }
-  const id = oid || kbClient().headers['X-Org-Id'];
-  return `/api/v1/orgs/${id}${suffix}`;
+function requireKbId() {
+  const id = params.kbId || params.kb_id;
+  if (!id) throw new Error('kbId is required');
+  return id;
 }
 
 const COMMANDS = {
@@ -45,277 +38,267 @@ const COMMANDS = {
   //  KB collection
   // ============================================================================
 
-  // ✅ Initialize an Org's KB (idempotent — used during onboarding)
-  'kb.init': () => kbClient().post('/api/v1/kbs/init', {
-    org_id: params.orgId || params.org_id,
+  // POST /api/v1/kbs/init — initialize the principal org's default KB
+  'kb.init': () => post(apiPath('/kbs/init')),
+
+  // GET  /api/v1/kbs
+  'kb.list': () => get(apiPath('/kbs'), {
+    limit:  params.limit,
+    offset: params.offset,
   }),
 
-  // ✅ List Org's KBs / configurations
-  'kb.list': () => kbClient(params.orgId).get(orgPath('/kbs', params.orgId), {
-    status: params.status,    // active|archived|all
+  // POST /api/v1/kbs   body {name, slug?, description?}
+  'kb.create': () => post(apiPath('/kbs'), {
+    name:        params.name,
+    slug:        params.slug,
+    description: params.description,
   }),
 
-  // ✅ Archive / unarchive (cws-kb uses PUT, not POST)
-  'kb.archive':   () => kbClient(params.orgId).put(orgPath('/kbs/archive', params.orgId)),
-  'kb.unarchive': () => kbClient(params.orgId).put(orgPath('/kbs/unarchive', params.orgId)),
+  // GET    /api/v1/kbs/{kb_id}
+  // PATCH  /api/v1/kbs/{kb_id}    body {name?, description?}
+  // DELETE /api/v1/kbs/{kb_id}
+  'kb.get':    () => get(apiPath(`/kbs/${requireKbId()}`)),
+  'kb.update': () => patch(apiPath(`/kbs/${requireKbId()}`), {
+    name:        params.name,
+    description: params.description,
+  }),
+  'kb.delete': () => del(apiPath(`/kbs/${requireKbId()}`)),
+
+  // POST /api/v1/kbs/{kb_id}/archive | /unarchive
+  'kb.archive':   () => post(apiPath(`/kbs/${requireKbId()}/archive`)),
+  'kb.unarchive': () => post(apiPath(`/kbs/${requireKbId()}/unarchive`)),
 
   // ============================================================================
-  //  Directory tree
+  //  Directory tree (kb-scoped)
   // ============================================================================
 
-  // ✅ Top-level roots (e.g. /shared, /projects, /templates)
-  'kb.tree_roots': () => kbClient(params.orgId).get(orgPath('/tree/roots', params.orgId)),
+  // GET /api/v1/kbs/{kb_id}/tree/roots
+  'kb.tree_roots': () => get(apiPath(`/kbs/${requireKbId()}/tree/roots`)),
 
-  // ✅ Create a folder under the given parent
-  //    (cws-kb only exposes folder via POST /tree/folders — there is no
-  //    GET /tree/folders list endpoint; use tree_roots + node_children to walk.)
-  'kb.folder_create': () => kbClient(params.orgId).post(orgPath('/tree/folders', params.orgId), {
-    parent_id:  params.parentId,
-    name:       params.name || params.title,
-    sort_order: params.sortOrder,
+  // POST /api/v1/kbs/{kb_id}/tree/folders   body {parent_id?, name}
+  'kb.folder_create': () => post(apiPath(`/kbs/${requireKbId()}/tree/folders`), {
+    parent_id: params.parentId,
+    name:      params.name || params.title,
   }),
 
-  // ✅ Single node metadata
-  'kb.node_get': () => kbClient(params.orgId).get(
-    orgPath(`/tree/nodes/${params.nodeId}`, params.orgId),
+  // POST /api/v1/kbs/{kb_id}/tree/files   body {parent_id?, name, artifact_id}
+  // Use after uploadMedia() returns an artifact_id to register the file in the tree.
+  'kb.file_create': () => post(apiPath(`/kbs/${requireKbId()}/tree/files`), {
+    parent_id:   params.parentId,
+    name:        params.name,
+    artifact_id: params.artifactId,
+  }),
+
+  // GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}
+  'kb.node_get': () => get(
+    apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.nodeId}`),
   ),
 
-  // ✅ Ancestor chain (root → node)
-  'kb.node_breadcrumb': () => kbClient(params.orgId).get(
-    orgPath(`/tree/nodes/${params.nodeId}/breadcrumb`, params.orgId),
+  // GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/breadcrumb
+  'kb.node_breadcrumb': () => get(
+    apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.nodeId}/breadcrumb`),
   ),
 
-  // ✅ Direct children of a folder (lazy load)
-  'kb.node_children': () => kbClient(params.orgId).get(
-    orgPath(`/tree/nodes/${params.parentId || params.nodeId}/children`, params.orgId),
-    { page_size: params.pageSize ?? params.limit, page_token: params.pageToken ?? params.cursor },
+  // GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/children
+  'kb.node_children': () => get(
+    apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.parentId || params.nodeId}/children`),
   ),
 
-  // ✅ Move node (PATCH per cws-kb)
-  'kb.node_move': () => kbClient(params.orgId).patch(
-    orgPath(`/tree/nodes/${params.nodeId}/move`, params.orgId),
-    { parent_id: params.parentId, sort_order: params.sortOrder },
+  // POST /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/move   body {parent_id?}
+  'kb.node_move': () => post(
+    apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.nodeId}/move`),
+    { parent_id: params.parentId },
   ),
 
-  // ✅ Rename node (PATCH per cws-kb)
-  'kb.node_rename': () => kbClient(params.orgId).patch(
-    orgPath(`/tree/nodes/${params.nodeId}/rename`, params.orgId),
+  // PATCH /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/rename   body {name}
+  'kb.node_rename': () => patch(
+    apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.nodeId}/rename`),
     { name: params.name || params.title },
   ),
 
-  // ✅ Delete node (soft delete)
-  'kb.node_delete': () => kbClient(params.orgId).del(
-    orgPath(`/tree/nodes/${params.nodeId}`, params.orgId),
+  // DELETE /api/v1/kbs/{kb_id}/tree/nodes/{node_id}
+  'kb.node_delete': () => del(
+    apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.nodeId}`),
+  ),
+
+  // GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/preview
+  'kb.file_preview': () => get(
+    apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.nodeId}/preview`),
+  ),
+
+  // GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/download   ?inline=true
+  'kb.file_download': () => get(
+    apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.nodeId}/download`),
+    { inline: params.inline },
+  ),
+
+  // POST /api/v1/kbs/{kb_id}/tree/files/batch-download   body {node_ids, inline?}
+  'kb.file_batch_download': () => post(
+    apiPath(`/kbs/${requireKbId()}/tree/files/batch-download`),
+    { node_ids: params.nodeIds, inline: params.inline },
   ),
 
   // ============================================================================
-  //  Pages
+  //  Pages (flat — no kb_id in path; resolved by page_id)
   // ============================================================================
 
-  // ✅ List pages
-  'kb.pages': () => kbClient(params.orgId).get(orgPath('/pages', params.orgId), {
-    parent_id:  params.parentId,
-    page_size:  params.pageSize ?? params.limit,
-    page_token: params.pageToken ?? params.cursor,
+  // GET /api/v1/pages   ?cursor=&limit=&offset=
+  'kb.pages': () => get(apiPath('/pages'), {
+    cursor: params.cursor,
+    limit:  params.limit,
+    offset: params.offset,
   }),
 
-  // ✅ Single page metadata
-  'kb.page_get': () => kbClient(params.orgId).get(
-    orgPath(`/pages/${params.pageId}`, params.orgId),
-  ),
+  // GET /api/v1/pages/{page_id}
+  'kb.page_get': () => get(apiPath(`/pages/${params.pageId}`)),
 
-  // ✅ Page content read (body + front_matter)
-  'kb.page_content': () => kbClient(params.orgId).get(
-    orgPath(`/pages/${params.pageId}/content`, params.orgId),
-  ),
-
-  // ✅ Page content write (POST /content — same path, different verb)
-  'kb.page_content_write': () => kbClient(params.orgId).post(
-    orgPath(`/pages/${params.pageId}/content`, params.orgId),
-    {
-      content:          params.content,          // {body, front_matter?}
-      base_revision_id: params.baseRevisionId,
-      commit_message:   params.commitMessage,
-    },
-  ),
-
-  // ✅ Revision list
-  'kb.page_revisions': () => kbClient(params.orgId).get(
-    orgPath(`/pages/${params.pageId}/revisions`, params.orgId),
-    { page_size: params.pageSize ?? params.limit, page_token: params.pageToken ?? params.cursor },
-  ),
-
-  // ✅ Single revision
-  'kb.page_revision': () => kbClient(params.orgId).get(
-    orgPath(`/pages/${params.pageId}/revisions/${params.revisionId}`, params.orgId),
-  ),
-
-  // ✅ Diff between revisions (GET with query params, NOT POST)
-  'kb.page_diff': () => kbClient(params.orgId).get(
-    orgPath(`/pages/${params.pageId}/diff`, params.orgId),
-    { from_revision_id: params.fromRevisionId, to_revision_id: params.toRevisionId },
-  ),
-
-  // ✅ Restore a previous revision (creates new revision with old content)
-  'kb.page_restore': () => kbClient(params.orgId).post(
-    orgPath(`/pages/${params.pageId}/restore-version`, params.orgId),
-    { revision_id: params.revisionId, commit_message: params.commitMessage },
-  ),
-
-  // ✅ Page create — POST /pages
-  'kb.page_create': () => kbClient(params.orgId).post(
-    orgPath('/pages', params.orgId),
-    {
-      title:          params.title,
-      parent_id:      params.parentId,
-      format:         params.format || 'markdown',
-      content:        params.content,             // {body, front_matter?}
-      commit_message: params.commitMessage,
-    },
-  ),
-
-  // ✅ Page metadata update — PATCH /pages/{pid}
-  // For content edits, prefer kb.page_content_write (atomic body+revision).
-  'kb.page_update': () => kbClient(params.orgId).patch(
-    orgPath(`/pages/${params.pageId}`, params.orgId),
-    {
-      title:             params.title,
-      parent_id:         params.parentId,
-      content:           params.content,         // {body, front_matter?}
-      base_revision_id:  params.baseRevisionId,
-      commit_message:    params.commitMessage,
-    },
-  ),
-
-  // ✅ Page delete (soft-delete)
-  'kb.page_delete': () => kbClient(params.orgId).del(
-    orgPath(`/pages/${params.pageId}`, params.orgId),
-  ),
-
-  // ============================================================================
-  //  Search (Meilisearch + NATS event-driven indexing)
-  // ============================================================================
-
-  // ✅ Full-text search across pages
-  'kb.search': () => kbClient(params.orgId).get(
-    orgPath('/search/pages', params.orgId),
-    {
-      query:       params.query || params.q,
-      folder_id:   params.folderId,
-      author_id:   params.authorId,
-      format:      params.format,
-      page_size:   params.pageSize ?? params.limit,
-      page_token:  params.pageToken ?? params.cursor,
-      sync:        params.sync,                  // true → wait for Meilisearch task (Agent flow)
-    },
-  ),
-
-  // ============================================================================
-  //  Cross-resource relations (KB ↔ Project / Issue / etc.)
-  // ============================================================================
-
-  // ✅ List or create a relation
-  'kb.relations_list':   () => kbClient(params.orgId).get(orgPath('/relations', params.orgId), {
-    resource_type: params.resourceType,
-    resource_id:   params.resourceId,
-    target_type:   params.targetType,
-    target_id:     params.targetId,
+  // PATCH /api/v1/pages/{page_id}   body {title?, path?}
+  'kb.page_update': () => patch(apiPath(`/pages/${params.pageId}`), {
+    title: params.title,
+    path:  params.path,
   }),
-  'kb.relations_create': () => kbClient(params.orgId).post(orgPath('/relations', params.orgId), {
-    resource_type: params.resourceType,
-    resource_id:   params.resourceId,
-    target_type:   params.targetType,
-    target_id:     params.targetId,
-    role:          params.role,
+
+  // DELETE /api/v1/pages/{page_id}   — permanent delete (use kb.page_trash for soft)
+  'kb.page_delete': () => del(apiPath(`/pages/${params.pageId}`)),
+
+  // GET /api/v1/pages/{page_id}/content
+  'kb.page_content': () => get(apiPath(`/pages/${params.pageId}/content`)),
+
+  // PUT /api/v1/pages/{page_id}/content
+  //     body {body, message?, base_revision_id?, auto_save?}
+  'kb.page_content_write': () => put(apiPath(`/pages/${params.pageId}/content`), {
+    body:             params.body ?? params.content?.body ?? params.content,
+    message:          params.message || params.commitMessage,
+    base_revision_id: params.baseRevisionId,
+    auto_save:        params.autoSave ?? false,
   }),
-  // ✅ Check if a relation exists (returns boolean / decision)
-  'kb.relations_check':  () => kbClient(params.orgId).get(orgPath('/relations/check', params.orgId), {
-    resource_type: params.resourceType,
-    resource_id:   params.resourceId,
-    target_type:   params.targetType,
-    target_id:     params.targetId,
+
+  // POST /api/v1/pages/{page_id}/trash
+  'kb.page_trash': () => post(apiPath(`/pages/${params.pageId}/trash`)),
+
+  // POST /api/v1/pages/{page_id}/restore
+  'kb.page_restore_trash': () => post(apiPath(`/pages/${params.pageId}/restore`)),
+
+  // POST /api/v1/pages/{page_id}/freeze
+  'kb.page_freeze': () => post(apiPath(`/pages/${params.pageId}/freeze`)),
+
+  // GET /api/v1/pages/{page_id}/references
+  'kb.page_references': () => get(apiPath(`/pages/${params.pageId}/references`)),
+
+  // GET /api/v1/pages/trashed   — list all trashed pages
+  'kb.pages_trashed': () => get(apiPath('/pages/trashed'), {
+    limit:  params.limit,
+    offset: params.offset,
   }),
-  // ✅ Revoke a relation
-  'kb.relations_delete': () => kbClient(params.orgId).del(
-    orgPath('/relations', params.orgId)
-      + '?' + new URLSearchParams({
-        resource_type: params.resourceType || '',
-        resource_id:   params.resourceId   || '',
-        target_type:   params.targetType   || '',
-        target_id:     params.targetId     || '',
-        role:          params.role         || '',
-      }).toString(),
+
+  // GET  /api/v1/pages/{page_id}/revisions
+  // GET  /api/v1/pages/{page_id}/revisions/{revision_id}
+  // GET  /api/v1/pages/{page_id}/revisions/diff   ?from=&to=
+  // POST /api/v1/pages/{page_id}/revisions/{revision_id}/restore
+  'kb.page_revisions': () => get(apiPath(`/pages/${params.pageId}/revisions`), {
+    limit:  params.limit,
+    offset: params.offset,
+  }),
+  'kb.page_revision': () => get(
+    apiPath(`/pages/${params.pageId}/revisions/${params.revisionId}`),
+  ),
+  'kb.page_diff': () => get(apiPath(`/pages/${params.pageId}/revisions/diff`), {
+    from_revision_id: params.fromRevisionId,
+    to_revision_id:   params.toRevisionId,
+  }),
+  'kb.page_restore': () => post(
+    apiPath(`/pages/${params.pageId}/revisions/${params.revisionId}/restore`),
   ),
 
   // ============================================================================
-  //  File attachment to KB — delegates to as.js (single upload pipeline)
+  //  Search (KB pages)
   // ============================================================================
 
-  // ✅ Upload a file via cws-as, then (TODO when wired) attach to a KB node.
-  //    Right now this just goes through as.uploadMedia(), and the caller is
-  //    responsible for referencing the returned mediaId from a page body.
+  // GET /api/v1/search/pages   ?query=&kb_id=&limit=&offset=&sort=
+  'kb.search': () => get(apiPath('/search/pages'), {
+    query:  params.query || params.q,
+    kb_id:  params.kbId,
+    limit:  params.limit,
+    offset: params.offset,
+    sort:   params.sort,
+  }),
+
+  // ============================================================================
+  //  File attachment to KB — uploadMedia(KB mode) returns the tree node
+  // ============================================================================
+
+  // Convenience: uploads a local file into a KB folder. Internally calls
+  // uploadMedia() in KB mode (no conversationId) which posts to
+  //   POST /api/v1/uploads/prepare  → PUT bytes  → POST /uploads/finalize
+  // and returns the resulting tree node.
   'kb.upload': () => {
     if (!params.filePath) throw new Error('filePath is required');
     return uploadMedia(params.filePath, {
-      mediaType:   params.mediaType || 'file',
+      parentId:    params.parentId,
       mimeType:    params.contentType,
-      description: params.description,
-      metadata:    { ...(params.metadata || {}), kb_attach: params.nodeId || params.pageId },
+      filename:    params.filename,
     });
   },
 };
 
 function printUsage() {
-  console.log(`KB CLI — cws-kb operations
+  console.log(`KB CLI — cws-core KB surface (contract-v5)
 
 Usage: node src/cli/kb.js <command> '<json-params>'
 
 KB collection
-  ✅ kb.init                 {orgId?}                                # POST /api/v1/kbs/init
-  ✅ kb.list                 {orgId?, status?}                        # GET  /api/v1/orgs/{orgId}/kbs
-  ✅ kb.archive              {orgId?}                                 # PUT  .../kbs/archive
-  ✅ kb.unarchive            {orgId?}                                 # PUT  .../kbs/unarchive
+  kb.init                  {}                                # POST /kbs/init
+  kb.list                  {limit?, offset?}                 # GET  /kbs
+  kb.create                {name, slug?, description?}       # POST /kbs
+  kb.get                   {kbId}                            # GET  /kbs/{kb_id}
+  kb.update                {kbId, name?, description?}       # PATCH /kbs/{kb_id}
+  kb.delete                {kbId}                            # DELETE /kbs/{kb_id}
+  kb.archive               {kbId}                            # POST /kbs/{kb_id}/archive
+  kb.unarchive             {kbId}                            # POST /kbs/{kb_id}/unarchive
 
-Directory tree
-  ✅ kb.tree_roots           {orgId?}                                 # GET  .../tree/roots
-  ✅ kb.folder_create        {parentId, name, sortOrder?, orgId?}     # POST .../tree/folders
-  ✅ kb.node_get             {nodeId, orgId?}                         # GET  .../tree/nodes/{nid}
-  ✅ kb.node_breadcrumb      {nodeId, orgId?}
-  ✅ kb.node_children        {parentId, orgId?, pageSize?, pageToken?}
-  ✅ kb.node_move            {nodeId, parentId, sortOrder?, orgId?}   # PATCH .../move
-  ✅ kb.node_rename          {nodeId, name, orgId?}                   # PATCH .../rename
-  ✅ kb.node_delete          {nodeId, orgId?}                         # DELETE .../tree/nodes/{nid}
+Directory tree (kb-scoped)
+  kb.tree_roots            {kbId}
+  kb.folder_create         {kbId, name, parentId?}
+  kb.file_create           {kbId, name, artifactId, parentId?}
+  kb.node_get              {kbId, nodeId}
+  kb.node_breadcrumb       {kbId, nodeId}
+  kb.node_children         {kbId, parentId|nodeId}
+  kb.node_move             {kbId, nodeId, parentId?}         # POST .../move
+  kb.node_rename           {kbId, nodeId, name}              # PATCH .../rename
+  kb.node_delete           {kbId, nodeId}
+  kb.file_preview          {kbId, nodeId}
+  kb.file_download         {kbId, nodeId, inline?}
+  kb.file_batch_download   {kbId, nodeIds, inline?}
 
-Pages
-  ✅ kb.pages                {parentId?, orgId?, pageSize?, pageToken?}
-  ✅ kb.page_get             {pageId, orgId?}
-  ✅ kb.page_create          {title, parentId, format?, content:{body, front_matter?}, commitMessage?, orgId?}
-  ✅ kb.page_update          {pageId, title?, parentId?, content?, baseRevisionId, commitMessage?, orgId?}    # PATCH /pages/{pid}
-  ✅ kb.page_delete          {pageId, orgId?}                          # DELETE /pages/{pid}
-  ✅ kb.page_content         {pageId, orgId?}                          # GET  /content
-  ✅ kb.page_content_write   {pageId, content, baseRevisionId, commitMessage?, orgId?}    # POST /content
-  ✅ kb.page_revisions       {pageId, orgId?, pageSize?, pageToken?}
-  ✅ kb.page_revision        {pageId, revisionId, orgId?}
-  ✅ kb.page_diff            {pageId, fromRevisionId, toRevisionId, orgId?}    # GET /diff?from_revision_id=&to_revision_id=
-  ✅ kb.page_restore         {pageId, revisionId, commitMessage?, orgId?}
+Pages (flat)
+  kb.pages                 {cursor?, limit?, offset?}
+  kb.page_get              {pageId}
+  kb.page_update           {pageId, title?, path?}
+  kb.page_delete           {pageId}                          # permanent
+  kb.page_trash            {pageId}                          # soft
+  kb.page_restore_trash    {pageId}                          # un-trash
+  kb.page_freeze           {pageId}
+  kb.page_content          {pageId}
+  kb.page_content_write    {pageId, body, message?, baseRevisionId?, autoSave?}  # PUT
+  kb.page_references       {pageId}
+  kb.pages_trashed         {limit?, offset?}
+  kb.page_revisions        {pageId, limit?, offset?}
+  kb.page_revision         {pageId, revisionId}
+  kb.page_diff             {pageId, fromRevisionId, toRevisionId}
+  kb.page_restore          {pageId, revisionId}              # restore a revision
 
-Search (Meilisearch + NATS)
-  ✅ kb.search               {query, folderId?, authorId?, format?, pageSize?, pageToken?, sync?, orgId?}
-                             # sync=true → wait for index update (Agent write-then-read)
+Search (Meilisearch)
+  kb.search                {query, kbId?, limit?, offset?, sort?}
 
-Relations (ReBAC)
-  ✅ kb.relations_list       {resourceType?, resourceId?, targetType?, targetId?, orgId?}
-  ✅ kb.relations_create     {resourceType, resourceId, targetType, targetId, role, orgId?}
-  ✅ kb.relations_check      {resourceType, resourceId, targetType, targetId, orgId?}
-  ✅ kb.relations_delete     {resourceType, resourceId, targetType, targetId, role?, orgId?}
-
-File attachment (delegates to as.uploadMedia)
-  ✅ kb.upload               {filePath, mediaType?, contentType?, description?, nodeId?, pageId?, orgId?}
+File attachment (uploads to KB tree)
+  kb.upload                {filePath, parentId?, contentType?, filename?}
+                           # POST /uploads/prepare + PUT bytes + POST /uploads/finalize
+                           # → tree node containing the artifact
 
 Environment:
-  COCO_KB_URL        cws-kb base URL (default: comm.kb_url in config)
-  COCO_AUTH_TOKEN    Bearer token (shared with cws-core / cws-as)
-  COCO_ORG_ID        Override config.org_id (X-Org-Id scope header + path)
+  COCO_API_URL       cws-core base URL
+  COCO_AUTH_TOKEN    Bearer token
+  COCO_API_PREFIX    Path prefix override (default: /api/v1)
 `);
 }
 

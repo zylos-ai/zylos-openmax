@@ -26,61 +26,50 @@ const COMMANDS = {
   'core.me': () => get(apiPath('/me')),
 
   // ✅ Members directory.
-  // OpenAPI params: org_id, kind ("human"|"agent"|"all"), status, search, cursor, limit
   'core.member_list': () => get(apiPath('/members'), {
-    org_id: params.orgId,
-    kind:   params.kind || params.type,   // accept legacy `type` alias
-    status: params.status,
-    search: params.search || params.q,    // accept legacy `q` alias
-    cursor: params.cursor,
-    limit:  params.limit,
+    kind:      params.kind || params.type,
+    status:    params.status,
+    search:    params.search || params.q,
+    cursor:    params.cursor,
+    limit:     params.limit,
+    order_by:  params.orderBy,
   }),
-  // ✅ Single member.
   'core.member_get': () => get(apiPath(`/members/${params.memberId}`)),
 
-  // ✅ Project member list — convenient for "who's on this project".
+  // ✅ Project member list
   'core.project_members': () => get(apiPath(`/projects/${params.projectId}/members`)),
 
-  // ⏳ Teams collection — cws-core OpenAPI has no /teams endpoints yet.
-  //    Closest workaround today: filter members by team_id is also NOT in
-  //    /members params, so we cannot fake it. Listed for forward-compat.
-  'core.team_list':    () => get(apiPath('/teams'), {
-    cursor: params.cursor,
-    limit:  params.limit,
+  // ✅ Platform agents — manage agent member lifecycle.
+  // POST /api/v1/platform-agents      body {display_name, ...}
+  // DELETE /api/v1/platform-agents/{member_id}
+  'core.platform_agent_create': () => post(apiPath('/platform-agents'), {
+    display_name: params.displayName || params.name,
+    description:  params.description,
+    metadata:     params.metadata,
   }),
-  'core.team_get':     () => get(apiPath(`/teams/${params.teamId}`), {
-    include: params.include,
-  }),
-  'core.team_members': () => get(apiPath(`/teams/${params.teamId}/members`)),
+  'core.platform_agent_delete': () => del(apiPath(`/platform-agents/${params.memberId}`)),
 
-  // ✅ Agents list. OpenAPI params: page_size, page_token only.
-  'core.agent_list': () => get(apiPath('/agents'), {
-    page_size:  params.pageSize  ?? params.limit,
-    page_token: params.pageToken ?? params.cursor,
-  }),
-
-  // ⏳ core MISSING: single-agent detail / skills / metrics.
-  'core.agent_get':     () => get(apiPath(`/agents/${params.agentId}`)),
-  'core.agent_skills':  () => get(apiPath(`/agents/${params.agentId}/skills`)),
-  'core.agent_metrics': () => get(apiPath(`/agents/${params.agentId}/metrics`)),
-
-  // ✅ Projects list. OpenAPI params: status, page_size, page_token.
+  // ✅ Projects list.
   'core.project_list': () => get(apiPath('/projects'), {
-    status:     params.status,
-    page_size:  params.pageSize  ?? params.limit,
-    page_token: params.pageToken ?? params.cursor,
+    status:    params.status,
+    cursor:    params.cursor,
+    limit:     params.limit,
+    order_by:  params.orderBy,
   }),
 
   // ✅ Organizations.
-  'core.org_list':   () => get(apiPath('/organizations')),
+  'core.org_list':   () => get(apiPath('/organizations'), {
+    order_by: params.orderBy,
+  }),
   'core.org_get':    () => get(apiPath(`/organizations/${params.orgId}`)),
-  // POST /api/v1/organizations  — name (required), slug (required)
   'core.org_create': () => post(apiPath('/organizations'), {
     name: params.name,
     slug: params.slug,
   }),
+  // POST /api/v1/organizations/{org_id}/switch  — swap principal's active org
+  'core.org_switch': () => post(apiPath(`/organizations/${params.orgId}/switch`)),
 
-  // ✅ Roles — GET /api/v1/roles  — scope? (org|system)
+  // ✅ Roles
   'core.role_list': () => get(apiPath('/roles'), { scope: params.scope }),
 
   // ✅ Invitations
@@ -107,47 +96,41 @@ const COMMANDS = {
 };
 
 function printUsage() {
-  console.log(`Core CLI — directory queries on cws-core
+  console.log(`Core CLI — directory queries on cws-core (contract-v5)
 
 Usage: node src/cli/core.js <command> '<json-params>'
 
 Identity
-  ✅ core.me              {}
+  core.me                  {}
 
 Members (humans + agents in one directory)
-  ✅ core.member_list     {orgId?, kind?, status?, search?, cursor?, limit?}
-                          # kind: human|agent|all (legacy alias: type)
-                          # search legacy alias: q
-  ✅ core.member_get      {memberId}
-  ✅ core.project_members {projectId}
+  core.member_list         {kind?, status?, search?, cursor?, limit?, orderBy?}
+                           # kind: human|agent|all (legacy alias: type)
+                           # search legacy alias: q
+  core.member_get          {memberId}
+  core.project_members     {projectId}
 
-Teams
-  ⏳ core.team_list       {cursor?, limit?}                # pending core
-  ⏳ core.team_get        {teamId, include?}               # pending core
-  ⏳ core.team_members    {teamId}                         # pending core
-
-Agents
-  ✅ core.agent_list      {pageSize?, pageToken?}
-  ⏳ core.agent_get       {agentId}                        # pending core
-  ⏳ core.agent_skills    {agentId}                        # pending core
-  ⏳ core.agent_metrics   {agentId}                        # pending core
+Platform agents (lifecycle)
+  core.platform_agent_create  {displayName, description?, metadata?}
+  core.platform_agent_delete  {memberId}
 
 Projects (directory view — workflow ops live in tm.js)
-  ✅ core.project_list    {status?, pageSize?, pageToken?}
+  core.project_list        {status?, cursor?, limit?, orderBy?}
 
 Organizations
-  ✅ core.org_list        {}
-  ✅ core.org_get         {orgId}
-  ✅ core.org_create      {name, slug}
+  core.org_list            {orderBy?}
+  core.org_get             {orgId}
+  core.org_create          {name, slug}
+  core.org_switch          {orgId}      # principal's active org swap
 
 Roles
-  ✅ core.role_list       {scope?}
+  core.role_list           {scope?}
 
 Invitations
-  ✅ core.invitation_create  {orgId, roleId, email?, message?}
-  ✅ core.invitation_list    {orgId, status?, cursor?, limit?}
-  ✅ core.invitation_accept  {invitationId, token?}
-  ✅ core.invitation_revoke  {invitationId}
+  core.invitation_create   {orgId, roleId, email?, message?}
+  core.invitation_list     {orgId, status?, cursor?, limit?}
+  core.invitation_accept   {invitationId, token?}
+  core.invitation_revoke   {invitationId}
 
 Environment:
   COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)
