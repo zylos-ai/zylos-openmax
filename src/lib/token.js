@@ -87,6 +87,10 @@ function tokenFile(orgIdOrEmpty) {
 
 // ── raw HTTP helper (no auth dependency) ─────────────────────────────────────
 
+function rpcLogEnabled() {
+  return process.env.COCO_RPC_LOG !== '0';
+}
+
 async function corePost(endpoint, body, bearerToken) {
   const url = `${resolveCoreUrl()}${endpoint}`;
   const headers = {
@@ -94,6 +98,10 @@ async function corePost(endpoint, body, bearerToken) {
     ...cfAccessHeaders(),
   };
   if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
+
+  if (rpcLogEnabled()) {
+    console.log(`[rpc] → POST ${url} req: ${JSON.stringify(body)}`);
+  }
 
   const res = await fetch(url, {
     method: 'POST',
@@ -103,6 +111,12 @@ async function corePost(endpoint, body, bearerToken) {
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = text; }
+
+  if (rpcLogEnabled()) {
+    const bodyStr = typeof data === 'string' ? data : JSON.stringify(data);
+    const level = res.status >= 400 ? 'warn' : 'log';
+    console[level](`[rpc] ← POST ${url} resp ${res.status}: ${bodyStr}`);
+  }
 
   if (!res.ok) {
     const msg = (data && typeof data === 'object'
@@ -146,7 +160,7 @@ function writeBackMemberId(orgId, jwt) {
     updateConfig((c) => {
       const o = c.orgs?.[slug];
       if (!o) return;
-      if (!o.self) o.self = { name: 'Zylos' };
+      if (!o.self) o.self = { member_id: '', name: '' };
       if (!o.self.member_id) {
         o.self.member_id = memberId;
         console.log(`${LOG} auto-filled orgs.${slug}.self.member_id from JWT claims: ${memberId}`);
