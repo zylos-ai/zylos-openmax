@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-06-02
+
+### Added
+- `SKILL.md` frontmatter now declares the full lifecycle (modeled after
+  `zylos-lark`), so `zylos add coco-workspace` drives the install
+  end-to-end instead of stopping after download + register:
+  - `type: communication`
+  - `lifecycle.npm: true` → triggers `npm install --omit=dev`
+  - `lifecycle.service.{type, name, entry}` → registers
+    `pm2 zylos-coco-workspace` pointing at `src/comm-bridge.js`
+  - `lifecycle.hooks.{post-install, post-upgrade, configure}` → wires
+    the three hooks already in `hooks/`
+  - `lifecycle.preserve: [config.json, logs/, runtime/]` → upgrade-safe
+    fields
+  - `lifecycle.data_dir` → declares the data root path explicitly
+  - `upgrade.{repo, branch}` → `gitlab:coco-workspace/zylos-coco-workspace`
+    on `main` (works with the existing zylos-core local patch that maps
+    `gitlab:` repos to git.coco.xyz tarballs)
+  - `config.required` → five fields (`COCO_BFF_URL`, `COCO_AGENT_TICKET`
+    sensitive, `COCO_AGENT_NAME`, `COCO_ORG_ID`, `COCO_SELF_MEMBER_ID`)
+    that `zylos add` will prompt the operator for.
+
+- New `hooks/configure.js` — receives the prompted values as stdin JSON
+  from `zylos add`, copies them into `process.env`, then delegates to
+  `hooks/post-install.js`. This avoids reintroducing a `.env` round-trip
+  (the canonical store remains `config.json`) while still letting the
+  install flow drive the env-driven non-interactive bootstrap path that
+  was added in v0.2.0.
+
+### Behaviour after this version
+
+```
+zylos add coco-workspace --branch main
+  → download from gitlab
+  → npm install --omit=dev
+  → prompt operator for 5 config fields
+  → run hooks/configure.js (writes config.json via post-install)
+  → run hooks/post-install.js again (idempotent no-op — api_key already
+    set so registration is skipped)
+  → start pm2 zylos-coco-workspace
+```
+
 ## [0.2.4] - 2026-06-02
 
 ### Removed

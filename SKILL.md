@@ -4,6 +4,46 @@ version: 0.3.0
 description: >-
   COCO Workspace Agent Skill (Guided Autonomy)。效率捷径 + 状态机 +
   行为护栏 + 记忆触发点。首次行为决策时加载。
+  Config at ~/zylos/components/coco-workspace/config.json.
+  Service: pm2 zylos-coco-workspace.
+type: communication
+
+lifecycle:
+  npm: true
+  service:
+    type: pm2
+    name: zylos-coco-workspace
+    entry: src/comm-bridge.js
+  data_dir: ~/zylos/components/coco-workspace
+  hooks:
+    post-install: hooks/post-install.js
+    post-upgrade: hooks/post-upgrade.js
+    configure:    hooks/configure.js
+  preserve:
+    - config.json
+    - logs/
+    - runtime/
+
+upgrade:
+  repo: gitlab:coco-workspace/zylos-coco-workspace
+  branch: main
+
+config:
+  required:
+    - name: COCO_BFF_URL
+      description: cws-core HTTP base URL (e.g. http://cws-core:8080)
+    - name: COCO_AGENT_TICKET
+      description: One-time registration ticket from cws-core admin
+      sensitive: true
+    - name: COCO_AGENT_NAME
+      description: Agent display name (e.g. zylos-local)
+    - name: COCO_ORG_ID
+      description: COCO org UUID this agent serves
+    - name: COCO_SELF_MEMBER_ID
+      description: Agent's member_id within that org
+
+dependencies:
+  - comm-bridge
 ---
 
 # Agent Skill
