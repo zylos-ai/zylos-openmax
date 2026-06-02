@@ -5,22 +5,29 @@
  *
  * Two modes, picked by whether stdin is a TTY:
  *
- *   1. Interactive (TTY): prompt operator for the bare minimum — bff_url,
- *      ws_url, then auto-call POST /auth/register/agent (body: {}) to mint
- *      identity_id + api_key and write them into config.json. Finally, a
- *      multi-org loop accepts zero or more org_ids (one per line, blank to
- *      finish). No member_id, no display_name, no access policy is asked —
- *      member_id is auto-filled on first JWT exchange from the JWT claims,
- *      and access policy defaults to dmPolicy=owner / groupPolicy=allowlist.
+ *   1. Interactive (TTY): prompt operator for endpoints, then agent identity
+ *      (BYO or auto-register), then one or more org_ids in a loop.
+ *      - Agent identity step asks three fields (identity_id / api_key /
+ *        member_id). All three non-empty → use them verbatim (skip
+ *        registration). Any blank → auto-register via POST /auth/register/agent
+ *        (body: {}). The BYO member_id, when provided, is applied to the
+ *        first org_id entered in the loop; subsequent orgs auto-fill from
+ *        JWT claims at runtime.
+ *      - Access policy is not asked. It defaults to dmPolicy=owner /
+ *        groupPolicy=allowlist and is edited in config.json afterwards.
  *
- *   2. Non-interactive (no TTY): env-driven bootstrap. Reads a small env
- *      surface and performs the same register + (optional) org seeding.
+ *   2. Non-interactive (no TTY): env-driven bootstrap. Same logic, driven
+ *      by env vars.
  *
  *      Required env vars (non-interactive bootstrap):
  *        - COCO_BFF_URL              cws-core REST base URL
  *      Optional:
  *        - COCO_WS_URL               cws-comm WebSocket URL (derived from BFF if omitted)
  *        - COCO_ORG_IDS              comma-separated list of org UUIDs to seed
+ *      BYO-agent (all three or none — partial set falls back to auto-register):
+ *        - COCO_IDENTITY_ID          existing agent identity_id
+ *        - COCO_API_KEY              existing agent api_key (cwsk_xxx)
+ *        - COCO_MEMBER_ID            agent's member_id within the first org_id
  *
  * Registration failure (any mode) is a HARD FAILURE — the hook exits with
  * code 1 and does NOT write config.json. The operator must re-run after
@@ -113,7 +120,7 @@ async function registerAgent(coreUrl) {
   return d;
 }
 
-function seedOrg(orgId) {
+function seedOrg(orgId, memberId) {
   if (!orgId) return;
   for (const existing of Object.values(config.orgs)) {
     if (existing?.org_id === orgId) {
@@ -122,22 +129,23 @@ function seedOrg(orgId) {
     }
   }
   const slug = `org-${orgId.slice(0, 8)}`;
-  // Full default block. member_id auto-fills from JWT claims at runtime;
-  // owner auto-binds on first DM under dmPolicy=owner. Operator can edit
-  // dmPolicy / groupPolicy / groups after install.
+  // Full default block. When `memberId` is provided (BYO-agent path), seed
+  // self.member_id directly; otherwise it auto-fills from JWT claims at
+  // runtime. Owner auto-binds on first DM under dmPolicy=owner. Operator can
+  // edit dmPolicy / groupPolicy / groups after install.
   config.orgs[slug] = {
     enabled: true,
     org_id:   orgId,
     org_name: '',
     owner: { member_id: '', name: '' },
-    self:  { member_id: '', name: '' },
+    self:  { member_id: memberId || '', name: '' },
     access: {
       dmPolicy:    'owner',
       groupPolicy: 'allowlist',
       groups:      {},
     },
   };
-  console.log(`[install] org "${slug}" seeded (org_id=${orgId})`);
+  console.log(`[install] org "${slug}" seeded (org_id=${orgId}${memberId ? `, self.member_id=${memberId}` : ''})`);
 }
 
 function deriveWsUrl(bffUrl) {
@@ -164,23 +172,57 @@ if (isInteractive) {
   config.server.ws_url  = wsUrl;
   console.log(`[install] endpoints set: bff_url=${bffUrl}  ws_url=${wsUrl}`);
 
-  // Step 2: register agent (skip if already present)
+  // Step 2: agent identity
+  // ─────────────────────────
+  // Two paths:
+  //   A. Bring-your-own (BYO): operator already created this agent elsewhere
+  //      (e.g. via POST /api/v1/platform-agents from the admin UI), and has
+  //      identity_id + api_key + member_id on hand. Paste all three — we skip
+  //      registration and use them verbatim. member_id will be applied to the
+  //      first org_id entered in Step 3 (single-org assumption — the BYO
+  //      member_id is by definition tied to one specific org).
+  //   B. Auto-register: leave any of the three blank, and we POST
+  //      /auth/register/agent to mint a fresh identity. member_id then
+  //      auto-fills from JWT claims when the runtime first connects.
+  //
+  // Idempotency: existing config.agent.api_key short-circuits the entire
+  // step — re-running install never destroys an already-bootstrapped agent.
+  let pendingMemberId = '';
   if (config.agent.api_key) {
-    console.log('[install] agent.api_key already in config — skipping registration');
+    console.log('[install] agent.api_key already in config — skipping agent identity step');
   } else {
-    console.log('[install] registering agent against cws-core (POST /auth/register/agent)');
-    let reg;
-    try {
-      reg = await registerAgent(bffUrl);
-    } catch (err) {
-      console.error('[install] ✗ registration failed:', err.message);
-      console.error('[install] aborting — config.json NOT written. Fix bff_url / network and re-run.');
-      process.exit(1);
+    console.log('');
+    console.log('  Agent identity:');
+    console.log('  (paste all three to bring an existing agent; leave any blank to auto-register)');
+    const userIdentity = await ask('    identity_id [auto-register if blank]: ');
+    const userApiKey   = await ask('    api_key     [auto-register if blank]: ');
+    const userMember   = await ask('    member_id   [auto-register if blank]: ');
+
+    const allProvided = userIdentity && userApiKey && userMember;
+    if (allProvided) {
+      config.agent.identity_id = userIdentity;
+      config.agent.api_key     = userApiKey;
+      pendingMemberId          = userMember;
+      console.log(`[install] using pre-provisioned agent: identity_id=${userIdentity}`);
+      console.log(`[install] member_id=${userMember} will be applied to the first org_id below`);
+    } else {
+      if (userIdentity || userApiKey || userMember) {
+        console.log('[install] not all three fields provided — falling back to auto-register');
+      }
+      console.log('[install] registering agent against cws-core (POST /auth/register/agent)');
+      let reg;
+      try {
+        reg = await registerAgent(bffUrl);
+      } catch (err) {
+        console.error('[install] ✗ registration failed:', err.message);
+        console.error('[install] aborting — config.json NOT written. Fix bff_url / network and re-run.');
+        process.exit(1);
+      }
+      config.agent.identity_id = reg.identity_id;
+      config.agent.api_key     = reg.api_key;
+      console.log(`[install] ✓ registered: identity_id=${reg.identity_id}`);
+      console.log('[install] api_key written to config.json (shown only once by server)');
     }
-    config.agent.identity_id = reg.identity_id;
-    config.agent.api_key     = reg.api_key;
-    console.log(`[install] ✓ registered: identity_id=${reg.identity_id}`);
-    console.log('[install] api_key written to config.json (shown only once by server)');
   }
 
   // Step 3: multi-org loop
@@ -191,14 +233,21 @@ if (isInteractive) {
   while (true) {
     const orgId = await ask(`    org_id [${added === 0 ? 'optional — blank to skip' : 'blank to finish'}]: `);
     if (!orgId) break;
-    seedOrg(orgId);
+    // Apply the BYO member_id to the first org only; subsequent orgs auto-fill
+    // their member_id from JWT claims at runtime.
+    const memberId = (added === 0) ? pendingMemberId : '';
+    seedOrg(orgId, memberId);
+    if (added === 0 && pendingMemberId) pendingMemberId = '';
     added += 1;
   }
   if (added === 0) {
+    if (pendingMemberId) {
+      console.log('[install] WARN: member_id was provided but no org_id was entered — member_id discarded');
+    }
     console.log('[install] no orgs configured — service will start but stay idle until you add an org block to config.json and restart');
   } else {
     console.log(`[install] ${added} org(s) configured`);
-    console.log('[install] member_id and access policy will auto-fill at runtime');
+    console.log('[install] member_id and access policy auto-fill at runtime for orgs without one');
     console.log('[install] (edit config.json to refine dmPolicy / groupPolicy later)');
   }
 } else {
@@ -209,6 +258,9 @@ if (isInteractive) {
     .split(',')
     .map(s => s.trim())
     .filter(Boolean);
+  const envIdentity = process.env.COCO_IDENTITY_ID || '';
+  const envApiKey   = process.env.COCO_API_KEY     || '';
+  const envMember   = process.env.COCO_MEMBER_ID   || '';
 
   if (!envBff) {
     console.error('[install] non-interactive mode: COCO_BFF_URL is required');
@@ -220,9 +272,19 @@ if (isInteractive) {
   config.server.ws_url  = envWs || deriveWsUrl(envBff);
   console.log(`[install] endpoints set: bff_url=${config.server.bff_url}  ws_url=${config.server.ws_url}`);
 
+  let pendingMemberId = '';
   if (config.agent.api_key) {
-    console.log('[install] agent.api_key already in config — skipping registration (idempotent)');
+    console.log('[install] agent.api_key already in config — skipping agent identity step (idempotent)');
+  } else if (envIdentity && envApiKey && envMember) {
+    // BYO path via env: all three present.
+    config.agent.identity_id = envIdentity;
+    config.agent.api_key     = envApiKey;
+    pendingMemberId          = envMember;
+    console.log(`[install] using pre-provisioned agent from env: identity_id=${envIdentity}`);
   } else {
+    if (envIdentity || envApiKey || envMember) {
+      console.log('[install] partial BYO env (COCO_IDENTITY_ID/API_KEY/MEMBER_ID) — falling back to auto-register');
+    }
     console.log('[install] registering agent against cws-core (POST /auth/register/agent)');
     let reg;
     try {
@@ -236,8 +298,17 @@ if (isInteractive) {
     console.log(`[install] ✓ registered: identity_id=${reg.identity_id}`);
   }
 
-  for (const orgId of envOrgIds) seedOrg(orgId);
+  let firstOrg = true;
+  for (const orgId of envOrgIds) {
+    const memberId = (firstOrg && pendingMemberId) ? pendingMemberId : '';
+    seedOrg(orgId, memberId);
+    if (firstOrg && pendingMemberId) pendingMemberId = '';
+    firstOrg = false;
+  }
   if (envOrgIds.length === 0) {
+    if (pendingMemberId) {
+      console.log('[install] WARN: COCO_MEMBER_ID was provided but COCO_ORG_IDS was empty — member_id discarded');
+    }
     console.log('[install] no COCO_ORG_IDS provided — service will idle until orgs are configured');
   }
 }
