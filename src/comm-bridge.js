@@ -27,9 +27,9 @@ import { loadConfig, watchConfig, enabledOrgs, bindOwner } from './lib/config.js
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint } from './lib/message.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
-import { get, apiPath } from './lib/client.js';
+import { get, post, apiPath } from './lib/client.js';
 import { getWsTicket, invalidate as invalidateToken } from './lib/token.js';
-import { loadOrgSession, saveOrgSession, clearOrgSession } from './lib/session.js';
+import { loadOrgSession, saveOrgSession } from './lib/session.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'coco-workspace';
@@ -333,6 +333,68 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
 }
 
 // =============================================================================
+// Disconnect catch-up — pull missed events via POST /api/v1/sync
+// =============================================================================
+
+// Cap a single catch-up sweep to avoid pulling unbounded backlog after a
+// very long outage. If there are more than this many events to catch up,
+// the rest will be pulled on the next reconnect (or the operator can
+// manually invoke `comm.sync` from the CLI).
+const SYNC_PAGE_SIZE  = 100;
+const SYNC_MAX_EVENTS = 2000;
+
+// Per-org guard so a concurrent reconnect doesn't trigger overlapping syncs.
+const _syncInFlight = new Set();
+
+async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
+  if (!sessionRef.last_seq) return;  // first-ever connect → nothing to catch up
+  if (_syncInFlight.has(orgConfig.slug)) {
+    log(`[${orgConfig.slug}] sync already in flight, skipping`);
+    return;
+  }
+  _syncInFlight.add(orgConfig.slug);
+  try {
+    const startSeq = sessionRef.last_seq;
+    let sinceSeq = startSeq;
+    let totalSynced = 0;
+    let hasMore = true;
+
+    while (hasMore && totalSynced < SYNC_MAX_EVENTS) {
+      const res = await post(apiPath('/sync'), {
+        since_seq: sinceSeq,
+        device_id: config.agent?.device_id || '',
+        limit:     SYNC_PAGE_SIZE,
+      });
+      const events = Array.isArray(res?.events) ? res.events : [];
+      hasMore = res?.has_more === true;
+      if (events.length === 0) break;
+
+      for (const ev of events) {
+        if (!ev?.message_id || !ev.conversation_id) continue;
+        await onMessage({
+          id:              String(ev.message_id),
+          conversation_id: ev.conversation_id,
+          seq:             ev.seq,
+          // mark synthetic so it's clear in logs which path produced it
+          _via:            'sync',
+        });
+        if (typeof ev.seq === 'number' && ev.seq > sinceSeq) sinceSeq = ev.seq;
+      }
+      totalSynced += events.length;
+    }
+
+    if (totalSynced > 0) {
+      log(`[${orgConfig.slug}] sync caught up ${totalSynced} event(s) since seq=${startSeq}` +
+          (hasMore && totalSynced >= SYNC_MAX_EVENTS ? ` (hit per-sweep cap, more on next reconnect)` : ''));
+    }
+  } catch (err) {
+    warn(`[${orgConfig.slug}] sync failed: ${err.message} — will retry on next reconnect`);
+  } finally {
+    _syncInFlight.delete(orgConfig.slug);
+  }
+}
+
+// =============================================================================
 // WS pool — one connection per enabled org
 // =============================================================================
 
@@ -359,16 +421,25 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     reconnectMaxMs:      config.server?.reconnect_max_delay,
     heartbeatIntervalMs: config.server?.heartbeat_interval,
 
-    onOpen: () => log(`[${orgConfig.slug}] ws open (org=${orgConfig.org_id})`),
+    onOpen: () => {
+      log(`[${orgConfig.slug}] ws open (org=${orgConfig.org_id})`);
+      // After WS open, pull anything missed since the last persisted seq.
+      // No-op on first-ever connect (last_seq=0). Errors are caught inside
+      // syncMissedEvents — they don't tear down the connection.
+      syncMissedEvents(orgConfig, sessionRef, onMessage);
+    },
 
     onMessage: onFrame,
 
     onClose: (code, reason, willReconnect) => {
       log(`[${orgConfig.slug}] closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
       if (code === 4003) {
-        log(`[${orgConfig.slug}] session expired; invalidating token cache`);
+        // Session expired: drop the cached JWT/ticket so urlProvider mints a
+        // fresh one on the next connect. Keep `last_seq` — the conversation
+        // sequence is independent of the WS session, and we need it so the
+        // post-reconnect sync sweep can catch up.
+        log(`[${orgConfig.slug}] session expired; invalidating token cache (last_seq preserved for sync)`);
         invalidateToken(orgConfig.org_id);
-        clearOrgSession(orgConfig.slug);
       }
     },
 
