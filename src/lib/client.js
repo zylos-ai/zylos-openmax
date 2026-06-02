@@ -21,9 +21,8 @@
  * callers don't have to repeat the X-Org-Id header injection.
  *
  * Token resolution order (per request):
- *   1. setApiKey(t)                  — set explicitly by caller (tests / one-shot CLI)
- *   2. config.agent.api_key          — canonical store
- *   3. process.env.COCO_AUTH_TOKEN   — back-compat override
+ *   1. setApiKey(t)            — set explicitly by caller (tests / one-shot CLI)
+ *   2. config.agent.api_key    — canonical store (no env or .env fallback)
  *
  * On success: returns parsed JSON (or raw text if response is not JSON).
  * On HTTP error: throws Error whose .message is the server's error detail
@@ -73,8 +72,7 @@ async function resolveToken() {
   try {
     return await getAccessToken();
   } catch {
-    const cfg = loadConfig();
-    return cfg.agent?.api_key || process.env.COCO_AUTH_TOKEN || '';
+    return loadConfig().agent?.api_key || '';
   }
 }
 

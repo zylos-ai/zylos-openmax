@@ -129,7 +129,6 @@ the build-time hook vars above:
 
 | Variable | Overrides | Notes |
 |---|---|---|
-| `COCO_AUTH_TOKEN` | `agent.api_key` | Back-compat override only — canonical store is `config.agent.api_key` |
 | `COCO_API_URL` | `server.bff_url` | cws-core REST base URL |
 | `COCO_WS_URL` | `server.ws_url` | cws-comm WebSocket URL |
 | `COCO_API_PREFIX` | `/api/v1` | API path prefix |

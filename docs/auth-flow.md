@@ -30,35 +30,36 @@ Agent 与 COCO Workspace 的交互分为三个阶段：
 
 ## 阶段一：Agent 注册（一次性）
 
-触发时机：`zylos add coco-workspace` 执行 `hooks/post-install.js`，且 `COCO_AUTH_TOKEN` 未设置。
+触发时机：`zylos add coco-workspace` 执行 `hooks/post-install.js`，且 `config.agent.api_key` 未设置。
 
 ```
-POST /auth/register/agent        ← 无需任何认证
+POST /auth/register/agent        ← 用一次性 ticket 认证
 Body: {
   username:     "zylos-agent-xxx",   // 全局唯一，3-39 字符，小写字母数字连字符
-  display_name: "Zylos Agent"
+  display_name: "Zylos Agent",
+  ticket:       "<one-time ticket>"  // 非交互安装从 COCO_AGENT_TICKET 读
 }
 
 Response: {
-  identity_id: "<uuid>",    // agent 的身份 UUID，写入 config.json
-  api_key:     "cwsk_xxx"   // 仅此一次明文返回，写入 ~/zylos/.env COCO_AUTH_TOKEN
+  identity_id: "<uuid>",    // agent 的身份 UUID
+  api_key:     "cwsk_xxx"   // 仅此一次明文返回
 }
 ```
 
 > **注意**：`api_key` 只在注册时返回一次，必须立即保存。之后只能重新注册。
 
-注册完成后 post-install 继续提示：
-- `org_id`：由组织 Owner 发出邀请后获得，写入 `config.json`
-- `workspace_id`：从工作区管理控制台获取，写入 `config.json`
+注册完成后 post-install 写入 `config.json`(单一存储位置,无 `.env` 落地):
+- `agent.identity_id` / `agent.api_key`
+- `orgs.<slug>.org_id` / `self.member_id`(由 `COCO_ORG_ID` / `COCO_SELF_MEMBER_ID` 注入)
 
 **存储位置**
 
 | 值 | 存储位置 |
 |----|---------|
-| `api_key` | `~/zylos/.env` → `COCO_AUTH_TOKEN` |
+| `api_key` | `~/zylos/components/coco-workspace/config.json` → `agent.api_key` |
 | `identity_id` | `~/zylos/components/coco-workspace/config.json` → `agent.identity_id` |
-| `org_id` | `~/zylos/components/coco-workspace/config.json` → `org_id` |
-| `workspace_id` | `~/zylos/components/coco-workspace/config.json` → `workspace_id` |
+| `org_id` | `~/zylos/components/coco-workspace/config.json` → `orgs.<slug>.org_id` |
+| `member_id`(per-org) | `~/zylos/components/coco-workspace/config.json` → `orgs.<slug>.self.member_id` |
 
 ---
 
@@ -249,7 +250,7 @@ scripts/send.js
 |-----------|------|------|
 | `1000/1001` | 正常关闭 | 指数退避重连（1s→2s→…→30s） |
 | `4001` | 心跳超时 | 同上 |
-| `4002` | 认证失败 | **终止**，检查 `COCO_AUTH_TOKEN` / `api_key` |
+| `4002` | 认证失败 | **终止**，检查 `config.agent.api_key` |
 | `4003` | Session 过期 | 清除 token 内存缓存 + session，重新 exchange → ticket → 重连 |
 | `4004` | 限流 | 退避（初始 5s）后重连 |
 | `4005` | 工作区暂停 | **终止** |

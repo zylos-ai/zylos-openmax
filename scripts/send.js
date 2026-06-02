@@ -27,14 +27,9 @@
  *   { client_msg_id, content: MessageContent[], reply_to? }
  *   MessageContent: { type: string, body: string }
  *
- * Auth: Bearer api_key (COCO_AUTH_TOKEN env or config.agent.api_key) plus
+ * Auth: Bearer api_key (canonical store: config.agent.api_key) plus
  *       X-Workspace-Id header (handled by client.js).
  */
-
-import dotenv from 'dotenv';
-import path from 'path';
-
-dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 
 import { post, apiPath } from '../src/lib/client.js';
 import {

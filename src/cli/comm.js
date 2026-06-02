@@ -160,7 +160,6 @@ Sync (WS reconnect catch-up)
 
 Environment:
   COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)
-  COCO_AUTH_TOKEN    Bearer token
   COCO_API_PREFIX    Path prefix override (default: /api/v1)
 `);
 }

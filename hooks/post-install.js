@@ -27,8 +27,7 @@
  *        - COCO_GROUP_POLICY         default 'allowlist'
  *
  * api_key lives **in config.json** (`agent.api_key`). There is no .env
- * dependency. The runtime reads api_key from config.json first; env-var
- * COCO_AUTH_TOKEN remains supported only as a back-compat override.
+ * file involved anywhere in this codebase — neither read nor written.
  *
  * Idempotency: if config.agent.api_key is already set, the bootstrap skips
  * the registration call entirely. Re-running prepare in any mode is safe.
@@ -43,7 +42,6 @@ import { DEFAULT_CONFIG } from '../src/lib/config.js';
 const HOME = process.env.HOME;
 const DATA_DIR    = path.join(HOME, 'zylos/components/coco-workspace');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
-const ENV_PATH    = path.join(HOME, 'zylos/.env');
 
 const isInteractive = process.stdin.isTTY === true;
 
@@ -55,33 +53,6 @@ function ask(question) {
       resolve(answer.trim());
     });
   });
-}
-
-function updateEnvVar(name, value) {
-  let content = '';
-  try { content = fs.readFileSync(ENV_PATH, 'utf8'); } catch {}
-  const lines = content.split('\n');
-  const re = new RegExp(`^\\s*${name}\\s*=`);
-  let found = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (re.test(lines[i])) { lines[i] = `${name}=${value}`; found = true; break; }
-  }
-  if (!found) {
-    while (lines.length && lines[lines.length - 1] === '') lines.pop();
-    lines.push(`${name}=${value}`);
-  }
-  while (lines.length && lines[lines.length - 1] === '') lines.pop();
-  lines.push('');
-  fs.writeFileSync(ENV_PATH, lines.join('\n'), { mode: 0o600 });
-}
-
-function readEnvVar(name) {
-  if (process.env[name]) return process.env[name];
-  let content;
-  try { content = fs.readFileSync(ENV_PATH, 'utf8'); } catch { return ''; }
-  const re = new RegExp(`^\\s*${name}\\s*=\\s*(.*?)\\s*$`, 'm');
-  const m = content.match(re);
-  return m ? m[1].replace(/^["']|["']$/g, '') : '';
 }
 
 console.log('[post-install] zylos-coco-workspace');
@@ -150,7 +121,7 @@ if (isInteractive) {
   config.server.bff_url = bffUrl;
   if (!config.server.ws_url) config.server.ws_url = bffUrl.replace(/^http/, 'ws') + '/ws';
 
-  const existingKey = config.agent?.api_key || readEnvVar('COCO_AUTH_TOKEN');
+  const existingKey = config.agent?.api_key;
   if (existingKey) {
     console.log('');
     console.log('  agent.api_key already present — skipping registration.');

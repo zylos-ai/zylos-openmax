@@ -61,7 +61,7 @@ export const DEFAULT_CONFIG = {
   // orgs it has joined. member_id within each org is per-org (see orgs.*).
   agent: {
     identity_id:  '',                           // returned by POST /auth/register/agent
-    api_key:      '',                           // canonical store: ~/zylos/.env COCO_AUTH_TOKEN
+    api_key:      '',                           // canonical store — populated by post-install hook
     device_id:    '',                           // UUIDv4, generated at install time
     client_id:    '',                           // UUIDv4, generated at install time
     app_version:  '0.1.0',                      // sent as X-Client-Version

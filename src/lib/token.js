@@ -42,12 +42,8 @@ const _stateByOrg = new Map();
 // ── config helpers ────────────────────────────────────────────────────────────
 
 function resolveApiKey() {
-  // config.agent.api_key is the canonical store. COCO_AUTH_TOKEN env var
-  // is honoured only as a back-compat override (set explicitly when an
-  // operator wants to override the baked-in config).
-  const cfg = loadConfig();
-  if (cfg.agent?.api_key) return cfg.agent.api_key;
-  return process.env.COCO_AUTH_TOKEN || '';
+  // Canonical store: config.agent.api_key. No env-var or .env fallback.
+  return loadConfig().agent?.api_key || '';
 }
 
 function resolveCoreUrl() {
@@ -120,7 +116,7 @@ function writeDisk(orgId, state) {
 
 export async function exchange(orgIdArg) {
   const apiKey = resolveApiKey();
-  if (!apiKey) throw new Error('token.exchange: COCO_AUTH_TOKEN / config.agent.api_key not set');
+  if (!apiKey) throw new Error('token.exchange: config.agent.api_key not set');
   const oid = resolveOrgId(orgIdArg);
   if (!oid) throw new Error('token.exchange: org_id required (set COCO_ORG_ID or have exactly one enabled org)');
   const raw = await corePost('/auth/agent/token', { org_id: oid }, apiKey);
