@@ -34,6 +34,12 @@ import { loadOrgSession, saveOrgSession } from './lib/session.js';
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'coco-workspace';
 
+// Hardcoded message defaults (aligned with zylos-lark). `config.message.*`
+// may override either; if absent, these apply. Operator-edited config.json
+// files don't need to mention `message` at all.
+const DEFAULT_CONTEXT_MESSAGES = 5;
+const DEFAULT_DEDUP_TTL_MS     = 5 * 60 * 1000;   // 300_000
+
 const C4_RECEIVE = path.join(
   process.env.HOME || '',
   'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js',
@@ -43,7 +49,7 @@ function log(...a)  { console.log(LOG_PREFIX, ...a); }
 function warn(...a) { console.warn(LOG_PREFIX, ...a); }
 
 let config = loadConfig();
-const dedupe = createDeduper(config.message?.dedup_ttl || 300000);
+const dedupe = createDeduper(config.message?.dedup_ttl ?? DEFAULT_DEDUP_TTL_MS);
 
 // org_id → cached Conversation row (response_mode no longer used for filter
 // but other fields like `type` are still useful)
@@ -228,7 +234,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       const ctx = await fetchRecentMessages(
         msg.conversation_id,
         msg.seq,
-        config.message?.context_messages,
+        config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES,
       );
       recent = ctx.map(m => ({
         senderName: m.sender_display_name || m.senderName || m.sender_id,
