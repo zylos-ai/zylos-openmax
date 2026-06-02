@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-06-02
+
+### Changed
+- `message.context_messages` and `message.dedup_ttl` are no longer part of
+  `DEFAULT_CONFIG`. Defaults are now hardcoded as constants in
+  `src/comm-bridge.js`:
+  - `DEFAULT_CONTEXT_MESSAGES = 5` (was 10; aligned with zylos-lark's
+    `DEFAULT_HISTORY_LIMIT`)
+  - `DEFAULT_DEDUP_TTL_MS = 5 * 60 * 1000` (unchanged; matches lark's
+    `MESSAGE_DEDUP_TTL_MS`)
+
+  Behavior: `config.message.context_messages` / `config.message.dedup_ttl`
+  are still honoured if set, but the `message` block can now be **omitted
+  entirely** from `config.json`. Existing configs that include the block
+  continue to work — values present in config still take precedence over
+  the hardcoded defaults.
+
 ## [0.2.2] - 2026-06-02
 
 ### Added
