@@ -14,10 +14,15 @@
  *     "COCO_WS_URL":      "wss://.../ws"   // optional
  *     // BYO + org seeding are accepted but post-install owns those —
  *     // pass them here too so they're available to either install path:
- *     "COCO_IDENTITY_ID": "...",
- *     "COCO_API_KEY":     "cwsk_...",
- *     "COCO_MEMBER_ID":   "...",
- *     "COCO_ORG_IDS":     "uuid1,uuid2"
+ *     "COCO_IDENTITY_ID":      "...",
+ *     "COCO_API_KEY":          "cwsk_...",
+ *     "COCO_MEMBER_ID":        "...",
+ *     "COCO_ORG_ID":           "<uuid>",
+ *     // Channel-auth-aligned org metadata (matches proto CoCoWorkspaceChannelAuth):
+ *     "COCO_ORG_NAME":         "...",
+ *     "COCO_OWNER_MEMBER_ID":  "...",
+ *     "COCO_OWNER_NAME":       "...",
+ *     "COCO_SELF_NAME":        "..."
  *   }
  *
  * What this hook does:

@@ -1,6 +1,6 @@
 ---
 name: coco-agent
-version: 0.3.3
+version: 0.3.4
 description: >-
   COCO Workspace Agent Skill (Guided Autonomy)。效率捷径 + 状态机 +
   行为护栏 + 记忆触发点。首次行为决策时加载。
@@ -35,15 +35,23 @@ config:
   optional:
     - name: COCO_WS_URL
       description: cws-comm WebSocket URL (derived from BFF if omitted)
-    - name: COCO_ORG_IDS
-      description: Comma-separated COCO org UUIDs this agent should serve (can be added later by editing config.json)
+    - name: COCO_ORG_ID
+      description: COCO org UUID this agent should serve (single — matches proto CoCoWorkspaceChannelAuth; multi-org operators re-run prepare per org)
     - name: COCO_IDENTITY_ID
       description: BYO agent identity_id (skip auto-register; requires COCO_API_KEY + COCO_MEMBER_ID too)
     - name: COCO_API_KEY
       description: BYO agent api_key (cwsk_xxx)
       sensitive: true
     - name: COCO_MEMBER_ID
-      description: BYO agent member_id within the first org_id (applied to orgs[first].self.member_id)
+      description: BYO agent's member_id in COCO_ORG_ID (proto self.member_id)
+    - name: COCO_ORG_NAME
+      description: Display-only org name (proto org_name)
+    - name: COCO_OWNER_MEMBER_ID
+      description: Human owner's member_id (proto owner.member_id; pre-binds dmPolicy=owner)
+    - name: COCO_OWNER_NAME
+      description: Display-only owner name (proto owner.name)
+    - name: COCO_SELF_NAME
+      description: Agent's display name in COCO_ORG_ID (proto self.name)
 
 dependencies:
   - comm-bridge

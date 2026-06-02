@@ -19,15 +19,30 @@
  *   2. Non-interactive (no TTY): env-driven bootstrap. Same logic, driven
  *      by env vars.
  *
- *      Required env vars (non-interactive bootstrap):
- *        - COCO_BFF_URL              cws-core REST base URL
- *      Optional:
- *        - COCO_WS_URL               cws-comm WebSocket URL (derived from BFF if omitted)
- *        - COCO_ORG_IDS              comma-separated list of org UUIDs to seed
- *      BYO-agent (all three or none — partial set falls back to auto-register):
- *        - COCO_IDENTITY_ID          existing agent identity_id
- *        - COCO_API_KEY              existing agent api_key (cwsk_xxx)
- *        - COCO_MEMBER_ID            agent's member_id within the first org_id
+ *      Non-interactive contract maps 1:1 to cws-agent-manager-sdk-go's
+ *      AgentInitialization.CoCoWorkspaceChannelAuth proto — one prepare run
+ *      binds exactly one (agent, org) pair. Runtimes that need multi-org
+ *      run prepare once per org_id (the hook is idempotent: an existing
+ *      api_key short-circuits the identity step, an existing org_id block
+ *      short-circuits that org's seed).
+ *
+ *      Required:
+ *        - COCO_BFF_URL              proto server.bff_url
+ *      Optional — endpoints:
+ *        - COCO_WS_URL               proto server.ws_url (derived from BFF if omitted)
+ *      Optional — org:
+ *        - COCO_ORG_ID               proto org_id
+ *        - COCO_ORG_NAME             proto org_name (display-only)
+ *        - COCO_OWNER_MEMBER_ID      proto owner.member_id (pre-binds dmPolicy=owner)
+ *        - COCO_OWNER_NAME           proto owner.name (display-only)
+ *        - COCO_MEMBER_ID            proto self.member_id (also BYO 3-tuple)
+ *        - COCO_SELF_NAME            proto self.name
+ *      Optional — BYO agent identity (3-tuple, all-or-none; partial set
+ *      falls back to auto-register via POST /auth/register/agent):
+ *        - COCO_IDENTITY_ID          NOT in proto — required to bootstrap
+ *                                    config.agent.identity_id without a fresh register
+ *        - COCO_API_KEY              proto api_key
+ *        - COCO_MEMBER_ID            proto self.member_id
  *
  * Registration failure (any mode) is a HARD FAILURE — the hook exits with
  * code 1 and does NOT write config.json. The operator must re-run after
@@ -120,7 +135,7 @@ async function registerAgent(coreUrl) {
   return d;
 }
 
-function seedOrg(orgId, memberId) {
+function seedOrg(orgId, opts = {}) {
   if (!orgId) return;
   for (const existing of Object.values(config.orgs)) {
     if (existing?.org_id === orgId) {
@@ -128,24 +143,40 @@ function seedOrg(orgId, memberId) {
       return;
     }
   }
+  const {
+    memberId      = '',
+    orgName       = '',
+    ownerMemberId = '',
+    ownerName     = '',
+    selfName      = '',
+  } = opts;
   const slug = `org-${orgId.slice(0, 8)}`;
-  // Full default block. When `memberId` is provided (BYO-agent path), seed
-  // self.member_id directly; otherwise it auto-fills from JWT claims at
-  // runtime. Owner auto-binds on first DM under dmPolicy=owner. Operator can
-  // edit dmPolicy / groupPolicy / groups after install.
+  // Field-for-field aligned with cws-agent-manager-sdk-go's
+  // CoCoWorkspaceChannelAuth proto (server.{bff_url,ws_url} are in `server`,
+  // api_key in agent.api_key, org_id + org_name + owner.{member_id,name} +
+  // self.{member_id,name} here). Empty values are runtime-default-safe:
+  // self.member_id auto-fills from JWT claims on first WS open; owner auto-
+  // binds on first DM under dmPolicy=owner; display names default to ''.
   config.orgs[slug] = {
-    enabled: true,
+    enabled:  true,
     org_id:   orgId,
-    org_name: '',
-    owner: { member_id: '', name: '' },
-    self:  { member_id: memberId || '', name: '' },
+    org_name: orgName,
+    owner:    { member_id: ownerMemberId, name: ownerName },
+    self:     { member_id: memberId,      name: selfName },
     access: {
       dmPolicy:    'owner',
       groupPolicy: 'allowlist',
       groups:      {},
     },
   };
-  console.log(`[install] org "${slug}" seeded (org_id=${orgId}${memberId ? `, self.member_id=${memberId}` : ''})`);
+  const seeded = [];
+  if (orgName)       seeded.push(`org_name=${orgName}`);
+  if (memberId)      seeded.push(`self.member_id=${memberId}`);
+  if (selfName)      seeded.push(`self.name=${selfName}`);
+  if (ownerMemberId) seeded.push(`owner.member_id=${ownerMemberId}`);
+  if (ownerName)     seeded.push(`owner.name=${ownerName}`);
+  const extras = seeded.length ? `, ${seeded.join(', ')}` : '';
+  console.log(`[install] org "${slug}" seeded (org_id=${orgId}${extras})`);
 }
 
 function deriveWsUrl(bffUrl) {
@@ -236,7 +267,7 @@ if (isInteractive) {
     // Apply the BYO member_id to the first org only; subsequent orgs auto-fill
     // their member_id from JWT claims at runtime.
     const memberId = (added === 0) ? pendingMemberId : '';
-    seedOrg(orgId, memberId);
+    seedOrg(orgId, { memberId });
     if (added === 0 && pendingMemberId) pendingMemberId = '';
     added += 1;
   }
@@ -251,16 +282,23 @@ if (isInteractive) {
     console.log('[install] (edit config.json to refine dmPolicy / groupPolicy later)');
   }
 } else {
-  // Non-interactive bootstrap.
-  const envBff = (process.env.COCO_BFF_URL || '').replace(/\/$/, '');
-  const envWs  = process.env.COCO_WS_URL || '';
-  const envOrgIds = (process.env.COCO_ORG_IDS || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
+  // Non-interactive bootstrap. Maps 1:1 to cws-agent-manager-sdk-go's
+  // proto AgentInitialization.CoCoWorkspaceChannelAuth — one prepare run
+  // binds exactly one (agent, org) pair. Operators that need a single
+  // runtime to serve multiple orgs run the hook once per org_id (the
+  // hook is idempotent: existing config.agent.api_key and existing
+  // org_id blocks short-circuit).
+  const envBff      = (process.env.COCO_BFF_URL || '').replace(/\/$/, '');
+  const envWs       = process.env.COCO_WS_URL      || '';
+  const envOrgId    = process.env.COCO_ORG_ID      || '';
   const envIdentity = process.env.COCO_IDENTITY_ID || '';
   const envApiKey   = process.env.COCO_API_KEY     || '';
   const envMember   = process.env.COCO_MEMBER_ID   || '';
+  // Channel-auth-aligned org metadata (matches proto field shape):
+  const envOrgName     = process.env.COCO_ORG_NAME        || '';
+  const envOwnerMember = process.env.COCO_OWNER_MEMBER_ID || '';
+  const envOwnerName   = process.env.COCO_OWNER_NAME      || '';
+  const envSelfName    = process.env.COCO_SELF_NAME       || '';
 
   if (!envBff) {
     console.error('[install] non-interactive mode: COCO_BFF_URL is required');
@@ -298,18 +336,27 @@ if (isInteractive) {
     console.log(`[install] ✓ registered: identity_id=${reg.identity_id}`);
   }
 
-  let firstOrg = true;
-  for (const orgId of envOrgIds) {
-    const memberId = (firstOrg && pendingMemberId) ? pendingMemberId : '';
-    seedOrg(orgId, memberId);
-    if (firstOrg && pendingMemberId) pendingMemberId = '';
-    firstOrg = false;
-  }
-  if (envOrgIds.length === 0) {
-    if (pendingMemberId) {
-      console.log('[install] WARN: COCO_MEMBER_ID was provided but COCO_ORG_IDS was empty — member_id discarded');
+  if (envOrgId) {
+    seedOrg(envOrgId, {
+      memberId:      pendingMemberId,
+      orgName:       envOrgName,
+      ownerMemberId: envOwnerMember,
+      ownerName:     envOwnerName,
+      selfName:      envSelfName,
+    });
+    if (pendingMemberId) pendingMemberId = '';
+  } else {
+    const orphans = [
+      pendingMemberId && 'COCO_MEMBER_ID',
+      envOrgName      && 'COCO_ORG_NAME',
+      envOwnerMember  && 'COCO_OWNER_MEMBER_ID',
+      envOwnerName    && 'COCO_OWNER_NAME',
+      envSelfName     && 'COCO_SELF_NAME',
+    ].filter(Boolean);
+    if (orphans.length) {
+      console.log(`[install] WARN: ${orphans.join(', ')} provided but COCO_ORG_ID was empty — discarded`);
     }
-    console.log('[install] no COCO_ORG_IDS provided — service will idle until orgs are configured');
+    console.log('[install] no COCO_ORG_ID provided — service will idle until orgs are configured');
   }
 }
 
