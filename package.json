@@ -1,6 +1,6 @@
 {
   "name": "zylos-coco-workspace",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "COCO Workspace native communication and service integration",
   "type": "module",
   "main": "src/comm-bridge.js",
@@ -24,7 +24,6 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
     "ws": "^8.18.0"
   }
 }

@@ -302,8 +302,8 @@ CLI 命令列表和使用场景详见各 Layer 3 操作指南（`references/*-op
 所有 CLI 共享 `src/lib/client.js`（HTTP client + 认证）：
 
 - 使用 Node.js 20+ 原生 `fetch`，零外部依赖
-- `COCO_API_URL` 环境变量指定后端基地址
-- `COCO_AUTH_TOKEN` 环境变量提供 Bearer token
+- `COCO_API_URL` 环境变量指定后端基地址(覆盖 `config.server.bff_url`)
+- Bearer token 来源:**`config.agent.api_key`**(由 post-install hook 写入,无 `.env` fallback)
 
 **输出格式**
 
@@ -404,9 +404,10 @@ zylos-coco-workspace/
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `COCO_API_URL` | `http://127.0.0.1:8080` | COCO 后端 API 基地址 |
-| `COCO_AUTH_TOKEN` | — | Agent 认证 token（必须） |
-| `COCO_WS_URL` | `ws://127.0.0.1:8080/ws` | WebSocket 端点（可从 config.json 覆盖） |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | COCO 后端 API 基地址(覆盖 `config.server.bff_url`) |
+| `COCO_WS_URL` | `ws://127.0.0.1:8080/ws` | WebSocket 端点(覆盖 `config.server.ws_url`) |
+
+Agent 认证 token 不走环境变量,放在 `config.agent.api_key` 中(由 post-install hook 写入)。
 
 ## 7. 生命周期管理
 

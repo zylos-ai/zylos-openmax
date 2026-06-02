@@ -297,7 +297,6 @@ File attachment (uploads to KB tree)
 
 Environment:
   COCO_API_URL       cws-core base URL
-  COCO_AUTH_TOKEN    Bearer token
   COCO_API_PREFIX    Path prefix override (default: /api/v1)
 `);
 }

@@ -20,11 +20,8 @@
  * conversation via REST once and cache it for the dedup TTL window.
  */
 
-import dotenv from 'dotenv';
 import path from 'path';
 import { execFile } from 'child_process';
-
-dotenv.config({ path: path.join(process.env.HOME || '', 'zylos/.env') });
 
 import { loadConfig, watchConfig, enabledOrgs, bindOwner } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
@@ -410,7 +407,7 @@ if (!wsUrl) {
 }
 const wsBaseUrl = wsUrl.replace(/\?.*$/, '');
 
-if (!config.agent?.api_key && !process.env.COCO_AUTH_TOKEN) {
+if (!config.agent?.api_key) {
   warn('no config.agent.api_key — token exchange will fail for every org');
 }
 

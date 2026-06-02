@@ -34,7 +34,7 @@ where prepare and runtime are separate phases:
 | Phase | When | UID | Reads | Writes |
 |---|---|---|---|---|
 | **prepare** | once on fresh PVC, plus `ensure`/`upgrade`/`repair`/`retry` modes | root (drops to 1000 for plan commands via `gosu`) | `/opt/zylos-image/*` + `/etc/agent-runtime/prepare/plan.json` | materializes image content + runs operator's prepare plan + writes `/home/zylos/.zylos-control/initialized.json` marker, then locks critical files | 
-| **runtime** | every pod start | uid 1000 `zylos` | marker + `/home/zylos/.env` + `pm2/ecosystem.config.cjs` | starts PM2 + a tmux `claude` session |
+| **runtime** | every pod start | uid 1000 `zylos` | marker + `pm2/ecosystem.config.cjs` | starts PM2 + a tmux `claude` session |
 
 Important consequences for non-interactive install:
 
