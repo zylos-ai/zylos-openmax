@@ -12,17 +12,19 @@
  *                        base URL  : server.bff_url
  *                        scope hdr : X-Org-Id (for kb/as paths)
  *
- * The helpers are organised into:
- *   - get/post/patch/put/del : core endpoints (D8 envelope unwrapped)
- *   - kbClient(orgId)        : pre-bound with X-Org-Id, no envelope unwrap
- *   - asClient(orgId)        : pre-bound with X-Org-Id, no envelope unwrap
+ * Multi-org JWT routing
+ * ---------------------
+ * Every request resolves its bearer token via `getAccessToken(orgId)`. When
+ * the caller threads an `orgId` (kbClient/asClient factories, comm-bridge's
+ * per-org REST helpers `getForOrg`/`postForOrg`/...), that org's cached JWT
+ * is used. When `orgId` is omitted, we fall back to `resolveDefaultOrgId()`
+ * (env COCO_ORG_ID, or the single enabled org). This keeps single-org
+ * deployments and one-shot CLIs working without code changes, while
+ * multi-org deployments get correctly-scoped tokens per request.
  *
- * Both kbClient and asClient hit the same bff_url; the factories exist so
- * callers don't have to repeat the X-Org-Id header injection.
- *
- * Token resolution order (per request):
- *   1. setApiKey(t)            — set explicitly by caller (tests / one-shot CLI)
- *   2. config.agent.api_key    — canonical store (no env or .env fallback)
+ * Cloudflare Access (test env only): every request is also tagged with the
+ * CF-Access-Client-Id / CF-Access-Client-Secret headers from `cf-access.js`.
+ * Delete that import + spread when promoting to production.
  *
  * On success: returns parsed JSON (or raw text if response is not JSON).
  * On HTTP error: throws Error whose .message is the server's error detail
@@ -31,6 +33,7 @@
 
 import { loadConfig, resolveDefaultOrgId } from './config.js';
 import { getAccessToken } from './token.js';
+import { cfAccessHeaders } from './cf-access.js';
 
 let activeApiKey = null;
 let activeBaseUrl = null;
@@ -45,10 +48,6 @@ export const setSessionToken = setApiKey;
 
 // ============================================================================
 //  Base URL / token / header resolution
-//
-//  Config schema v0.4 uses `server.*` (new) instead of `comm.*` (legacy).
-//  We try the new path first and fall back to the legacy path so a config
-//  that hasn't been migrated yet still works.
 // ============================================================================
 
 function resolveBaseUrl() {
@@ -60,17 +59,15 @@ function resolveBaseUrl() {
       || 'http://127.0.0.1:8080';
 }
 
-function resolveOrgId() {
-  return resolveDefaultOrgId();
-}
-
-async function resolveToken() {
+async function resolveToken(orgId) {
   // Prefer an explicitly-set override (tests / one-shot CLI invocations).
   if (activeApiKey) return activeApiKey;
-  // Use the token manager: returns a cached or freshly-refreshed JWT.
-  // Falls back to api_key if token.js cannot reach cws-core (e.g. offline).
+  // Use the token manager: returns a cached or freshly-refreshed JWT for
+  // the given org. Falls back to the raw api_key if token.js cannot reach
+  // cws-core (e.g. offline). Note: the api_key works as a bearer only on
+  // /auth/agent/token — every other endpoint requires a real JWT.
   try {
-    return await getAccessToken();
+    return await getAccessToken(orgId || resolveDefaultOrgId());
   } catch {
     return loadConfig().agent?.api_key || '';
   }
@@ -80,8 +77,6 @@ function resolveCoreHeaders() {
   if (activeHeaders) return activeHeaders;
   const cfg = loadConfig();
   const out = {};
-  // workspace_id was dropped in the v0.4 multi-org refactor; org scoping is
-  // expressed via X-Org-Id (on kb/as) and via per-org WS connections.
   const deviceId = cfg.agent?.device_id || cfg.device_id || process.env.COCO_DEVICE_ID    || '';
   const version  = cfg.agent?.app_version || cfg.app_version || process.env.COCO_CLIENT_VERSION || '';
   if (deviceId) out['X-Device-Id']      = deviceId;
@@ -116,10 +111,14 @@ function buildUrl(baseUrl, path, query) {
 //  Generic request impl (baseUrl + headers injected by caller)
 // ============================================================================
 
-async function doRequest(baseUrl, method, path, { body, query, extraHeaders } = {}) {
+async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId } = {}) {
   const url = buildUrl(baseUrl, path, query);
-  const headers = { Accept: 'application/json', ...(extraHeaders || {}) };
-  const token = await resolveToken();
+  const headers = {
+    Accept: 'application/json',
+    ...cfAccessHeaders(),
+    ...(extraHeaders || {}),
+  };
+  const token = await resolveToken(orgId);
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
@@ -153,12 +152,9 @@ async function request(method, path, opts = {}) {
     ...opts,
     extraHeaders: { ...resolveCoreHeaders(), ...(opts.extraHeaders || {}) },
   });
-  // cws-core@contract-v2 wraps every response in a D8 envelope:
+  // cws-core wraps every response in a D8 envelope:
   //   - single:     { data, request_id, server_time }
   //   - paginated:  { data, pagination, request_id, server_time }
-  // Strip request_id / server_time (callers don't use them). For paginated
-  // responses, preserve `pagination` alongside `data` so callers can page
-  // through results. For single responses, unwrap straight to `data`.
   if (result && typeof result === 'object' && 'data' in result && 'request_id' in result) {
     if ('pagination' in result) {
       return { data: result.data, pagination: result.pagination };
@@ -168,18 +164,27 @@ async function request(method, path, opts = {}) {
   return result;
 }
 
+// Default-org variants (use COCO_ORG_ID env or single-enabled-org).
 export const get   = (path, query) => request('GET',    path, { query });
 export const post  = (path, body)  => request('POST',   path, { body });
 export const patch = (path, body)  => request('PATCH',  path, { body });
 export const put   = (path, body)  => request('PUT',    path, { body });
 export const del   = (path)        => request('DELETE', path);
 
+// Org-aware variants. Use these in any code path that knows which org it's
+// running on (e.g. per-org WS message handlers, multi-org CLI commands).
+// They resolve the JWT against that specific org's cache, so a multi-org
+// agent never accidentally calls cws-core with the wrong org's token.
+export const getForOrg   = (orgId, path, query) => request('GET',    path, { query, orgId });
+export const postForOrg  = (orgId, path, body)  => request('POST',   path, { body,  orgId });
+export const patchForOrg = (orgId, path, body)  => request('PATCH',  path, { body,  orgId });
+export const putForOrg   = (orgId, path, body)  => request('PUT',    path, { body,  orgId });
+export const delForOrg   = (orgId, path)        => request('DELETE', path, { orgId });
+
 /**
  * Prefix a logical path with the cws-core API prefix.
  *
- * cws-core exposes its surface under `/api/v1/*` (per the live OpenAPI
- * at https://zylos01.jinglever.com/cws-core/openapi.json). Override via
- * `COCO_API_PREFIX` to talk to a different deployment.
+ * Override via COCO_API_PREFIX to talk to a different deployment.
  */
 export function apiPath(p) {
   const prefix = process.env.COCO_API_PREFIX ?? '/api/v1';
@@ -188,28 +193,22 @@ export function apiPath(p) {
 
 // ============================================================================
 //  Org-scoped clients for KB and AS routes
-//
-//  cws-core acts as the gateway for cws-kb and cws-as — the agent calls
-//  /api/v1/orgs/{orgId}/* and /api/v1/artifacts/* against bff_url; cws-core
-//  forwards server-side. These factories exist to pre-bind X-Org-Id and to
-//  give callers an interface that doesn't D8-unwrap (KB/AS responses are
-//  not enveloped). The returned client hits the same base URL as the
-//  module-global get/post/... helpers.
 // ============================================================================
 
-function makeClient(baseUrl, scopeHeaders) {
+function makeClient(baseUrl, scopeHeaders, orgId) {
   const wrap = (method) => (path, second) => {
     const opts = method === 'GET' ? { query: second } : { body: second };
-    return doRequest(baseUrl, method, path, { ...opts, extraHeaders: scopeHeaders });
+    return doRequest(baseUrl, method, path, { ...opts, extraHeaders: scopeHeaders, orgId });
   };
   return {
     get:    wrap('GET'),
     post:   wrap('POST'),
     patch:  wrap('PATCH'),
     put:    wrap('PUT'),
-    del:    (path) => doRequest(baseUrl, 'DELETE', path, { extraHeaders: scopeHeaders }),
+    del:    (path) => doRequest(baseUrl, 'DELETE', path, { extraHeaders: scopeHeaders, orgId }),
     baseUrl,
     headers: scopeHeaders,
+    orgId,
   };
 }
 
@@ -218,29 +217,20 @@ function makeClient(baseUrl, scopeHeaders) {
  *
  * @param {string} [orgId]  override the resolved org id (else uses COCO_ORG_ID,
  *                          or the single enabled org from config.orgs)
- * @returns {{get,post,patch,put,del,baseUrl,headers}}
- *
- * Example:
- *   const kb = kbClient();
- *   const tree = await kb.get(`/api/v1/orgs/${kb.headers['X-Org-Id']}/tree/roots`);
  */
 export function kbClient(orgId) {
-  const headers = {};
-  const oid = orgId || resolveOrgId();
-  if (oid) headers['X-Org-Id'] = oid;
-  return makeClient(resolveBaseUrl(), headers);
+  const oid = orgId || resolveDefaultOrgId();
+  const headers = oid ? { 'X-Org-Id': oid } : {};
+  return makeClient(resolveBaseUrl(), headers, oid);
 }
 
 /**
  * Org-scoped client for cws-as routes (forwarded by cws-core gateway).
- *
- * @param {string} [orgId]  override the resolved org id
  */
 export function asClient(orgId) {
-  const headers = {};
-  const oid = orgId || resolveOrgId();
-  if (oid) headers['X-Org-Id'] = oid;
-  return makeClient(resolveBaseUrl(), headers);
+  const oid = orgId || resolveDefaultOrgId();
+  const headers = oid ? { 'X-Org-Id': oid } : {};
+  return makeClient(resolveBaseUrl(), headers, oid);
 }
 
 // ============================================================================
@@ -249,9 +239,8 @@ export function asClient(orgId) {
 
 /**
  * PUT raw bytes to an absolute (typically pre-signed) URL.
- * No Bearer header added — pre-signed URLs carry their own auth.
- *
- *   await putBytes(signedUrl, buf, 'application/pdf', { 'x-amz-server-side-encryption': 'AES256' })
+ * No Bearer / CF Access header added — pre-signed URLs carry their own auth
+ * and target S3 directly, not cws-core via Cloudflare.
  */
 export async function putBytes(url, buf, contentType, extraHeaders = {}) {
   const headers = { 'Content-Type': contentType || 'application/octet-stream', ...extraHeaders };

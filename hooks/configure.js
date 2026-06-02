@@ -4,15 +4,18 @@
  * Configure hook for zylos-coco-workspace.
  *
  * Invoked by `zylos add coco-workspace` after the operator answers the
- * config.required prompts. Receives the collected values as JSON on stdin,
- * shape: { COCO_BFF_URL, COCO_AGENT_TICKET, COCO_AGENT_NAME, COCO_ORG_ID,
- * COCO_SELF_MEMBER_ID, ... }.
+ * config.required prompts. Receives the collected values as JSON on stdin.
+ *
+ * Expected shape (v0.3 — register-agent contract aligned with cws-core):
+ *   {
+ *     "COCO_BFF_URL":  "https://cws-int.coco.xyz",
+ *     "COCO_WS_URL":   "wss://cws-int.coco.xyz/ws",    // optional
+ *     "COCO_ORG_IDS":  "uuid1,uuid2"                    // optional
+ *   }
  *
  * Strategy: copy the values into process.env, then delegate to
- * hooks/post-install.js. post-install's existing env-driven non-interactive
- * branch (see hook header) reads the same vars, registers the agent, and
- * writes config.json. Re-invocation by `zylos add`'s Step 7 is idempotent
- * (post-install short-circuits when config.agent.api_key is already set).
+ * hooks/post-install.js. post-install's non-interactive branch reads the same
+ * vars, registers the agent, and writes config.json.
  *
  * This indirection avoids reintroducing a .env round-trip — the canonical
  * store remains config.json (no .env reads/writes in coco-workspace runtime
@@ -42,6 +45,4 @@ for (const [key, val] of Object.entries(values)) {
   if (val != null && val !== '') process.env[key] = String(val);
 }
 
-// Hand off to the env-driven post-install hook. Use a dynamic import so any
-// errors surface as a normal exception (not a hidden module-load failure).
 await import('./post-install.js');
