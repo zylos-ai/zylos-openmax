@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-06-02
+
+### Breaking
+- **`COCO_ORG_IDS` (plural, comma-separated) replaced by `COCO_ORG_ID`
+  (singular).** The non-interactive install path now binds exactly one
+  (agent, org) pair per prepare run, matching cws-agent-manager-sdk-go's
+  `AgentInitialization.CoCoWorkspaceChannelAuth` proto field shape 1:1.
+  Operators that need a single runtime to serve multiple orgs run the
+  prepare hook once per org_id; the hook is idempotent (existing
+  `config.agent.api_key` and existing `org_id` blocks short-circuit), so
+  re-running is safe. The interactive (`zylos add`) flow keeps its
+  multi-org loop unchanged.
+
+### Added
+- **Channel-auth-aligned org metadata env vars** in the non-interactive
+  install path. An operator with a `CoCoWorkspaceChannelAuth` payload can
+  map every field to env vars 1:1:
+  - `COCO_ORG_NAME`        → proto `org_name`        → `orgs.<slug>.org_name`
+  - `COCO_OWNER_MEMBER_ID` → proto `owner.member_id` → `orgs.<slug>.owner.member_id`
+  - `COCO_OWNER_NAME`      → proto `owner.name`      → `orgs.<slug>.owner.name`
+  - `COCO_SELF_NAME`       → proto `self.name`       → `orgs.<slug>.self.name`
+  All four are optional; absent fields fall through to existing runtime
+  defaults (`owner` auto-binds on first DM under `dmPolicy=owner`,
+  `self.member_id` auto-fills from JWT claims on first WS connect,
+  display names start empty).
+- `seedOrg(orgId, opts)` refactor: takes an options object instead of a
+  positional `memberId` arg so the five org-shape fields stay named.
+
+### Mapping reference
+`proto AgentInitialization.CoCoWorkspaceChannelAuth → env var`:
+
+| proto                       | env var                |
+|---|---|
+| `server.bff_url`            | `COCO_BFF_URL`         |
+| `server.ws_url`             | `COCO_WS_URL`          |
+| `api_key`                   | `COCO_API_KEY`         |
+| `org_id`                    | `COCO_ORG_ID`          |
+| `org_name`                  | `COCO_ORG_NAME`        |
+| `owner.member_id`           | `COCO_OWNER_MEMBER_ID` |
+| `owner.name`                | `COCO_OWNER_NAME`      |
+| `self.member_id`            | `COCO_MEMBER_ID`       |
+| `self.name`                 | `COCO_SELF_NAME`       |
+
+`identity_id` is **not** in the proto; the hook continues to require
+`COCO_IDENTITY_ID` for the BYO path until the proto contract decides
+whether to add it.
+
 ## [0.3.3] - 2026-06-02
 
 ### Fixed
