@@ -410,8 +410,8 @@ if (!wsUrl) {
 }
 const wsBaseUrl = wsUrl.replace(/\?.*$/, '');
 
-if (!process.env.COCO_AUTH_TOKEN && !config.agent?.api_key) {
-  warn('no api_key / COCO_AUTH_TOKEN — token exchange will fail for every org');
+if (!config.agent?.api_key && !process.env.COCO_AUTH_TOKEN) {
+  warn('no config.agent.api_key — token exchange will fail for every org');
 }
 
 const orgs = enabledOrgs();

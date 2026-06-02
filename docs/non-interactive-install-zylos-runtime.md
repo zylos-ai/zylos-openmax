@@ -110,39 +110,56 @@ During prepare, `entrypoint.sh` calls:
 
 - `sync_code` → copies the skill dir into `/home/zylos/.claude/skills/coco-workspace/`
 - `ensure_data_dirs` → creates `/home/zylos/components/coco-workspace/logs/`
-- `run_prepare_plan` → **runs the operator's plan commands** (the
-  injection point for our config)
-- `run_component_hooks "post-install"` → invokes
-  `hooks/post-install.js`, which in non-TTY mode just seeds the
-  skeleton `config.json` and generates UUIDs (no prompts).
+- `run_prepare_plan` → **runs the operator's plan commands** — this is
+  where coco-workspace's own `hooks/post-install.js` runs under the
+  env-driven contract described below
+- `run_component_hooks "post-install"` → would normally re-run the
+  hook, but under our env-driven design the hook is idempotent: it
+  sees `config.agent.api_key` already populated by the prepare plan
+  step and short-circuits to a no-op
 
 The PM2 ecosystem config baked in by `generate-pm2-config.js` already
 picks up `coco-workspace`'s comm-bridge service automatically — no
 operator action needed to register it with PM2.
 
-## Prepare-time: inject config via the operator plan
+## Prepare-time: env-driven bootstrap
 
-Two pieces have to be written into the volume before the first runtime
-start, and both must come from the operator's prepare plan:
+There is **one** file to land on the volume before runtime starts:
+`/home/zylos/components/coco-workspace/config.json`. The agent token
+(`agent.api_key`) lives **inside this file** — there is no `.env`
+file to write, no separate Kubernetes Secret to mount, no out-of-band
+agent-registration step.
 
-1. `/home/zylos/.env` — must contain `COCO_AUTH_TOKEN=<api_key>` (the
-   agent's bearer token, returned by `POST /auth/register/agent` on
-   cws-core).
-2. `/home/zylos/components/coco-workspace/config.json` — populated with
-   `server.*`, `agent.identity_id`, and at least one `orgs.<slug>`
-   block.
+The operator drives this via a single prepare-plan command that
+invokes coco-workspace's own `hooks/post-install.js`. The hook reads
+env vars from `process.env`, calls `POST /auth/register/agent` to
+exchange a one-time ticket for an api_key + identity_id, and writes
+the full `config.json` (including the api_key, the server URLs, and
+the org block).
 
-The `run-prepare-plan.js` runner reads a JSON file at
-`/etc/agent-runtime/prepare/plan.json` and executes its `commands[]`
-array in order. Each command runs as `1000:1000` by default (via
-`gosu`), with `HOME=/home/zylos` exported. Env vars are passed per
-command.
+### Required env vars on the prepare-plan command
+
+| Variable | Purpose |
+|---|---|
+| `COCO_BFF_URL` | cws-core REST base, e.g. `http://cws-core:8080` |
+| `COCO_WS_URL` | cws-comm WebSocket, e.g. `ws://cws-core:8080/ws` (defaults to `bff_url` with `http→ws` if absent) |
+| `COCO_AGENT_TICKET` | one-time registration ticket (consumed by `/auth/register/agent`) |
+| `COCO_AGENT_NAME` | display name for this agent identity |
+| `COCO_ORG_ID` | the COCO org UUID this agent serves |
+| `COCO_SELF_MEMBER_ID` | agent's `member_id` within that org |
+
+### Optional env vars
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `COCO_ORG_NAME` | `default` | display name for the org block |
+| `COCO_ORG_SLUG` | derived from `COCO_ORG_NAME` | config-key slug under `orgs.{}` |
+| `COCO_DM_POLICY` | `owner` | initial DM access policy |
+| `COCO_GROUP_POLICY` | `allowlist` | initial group access policy |
 
 ### Worked example prepare plan
 
-This plan registers the agent (if not already), then writes
-`config.json` and `.env` in one shot. Drop it at
-`/etc/agent-runtime/prepare/plan.json`:
+Drop this at `/etc/agent-runtime/prepare/plan.json`:
 
 ```json
 {
@@ -152,47 +169,23 @@ This plan registers the agent (if not already), then writes
       "name": "persist-claude-credentials",
       "argv": ["node", "/opt/zylos-image/persist-claude-credentials.js"],
       "env": {
-        "ANTHROPIC_API_KEY": "<from k8s secret>",
+        "ANTHROPIC_API_KEY":  "<from prepare job input>",
         "ANTHROPIC_BASE_URL": "<your Anthropic base, if proxied>"
       }
     },
     {
       "name": "init-coco-workspace",
-      "argv": [
-        "bash", "-eu", "-c",
-        "set -euo pipefail; \
-         ENV_FILE=\"$HOME/.env\"; \
-         CONF_DIR=\"$HOME/components/coco-workspace\"; \
-         mkdir -p \"$CONF_DIR\"; \
-         touch \"$ENV_FILE\"; \
-         grep -q '^COCO_AUTH_TOKEN=' \"$ENV_FILE\" || echo \"COCO_AUTH_TOKEN=$COCO_AUTH_TOKEN\" >> \"$ENV_FILE\"; \
-         cat > \"$CONF_DIR/config.json\" <<JSON\n\
-{\n\
-  \"enabled\": true,\n\
-  \"server\": { \"bff_url\": \"$BFF_URL\", \"ws_url\": \"$WS_URL\" },\n\
-  \"agent\":  { \"identity_id\": \"$IDENTITY_ID\", \"api_key\": \"\" },\n\
-  \"orgs\": {\n\
-    \"default\": {\n\
-      \"enabled\": true,\n\
-      \"org_id\":   \"$ORG_ID\",\n\
-      \"org_name\": \"$ORG_NAME\",\n\
-      \"self\":  { \"member_id\": \"$SELF_MEMBER_ID\", \"name\": \"Zylos\" },\n\
-      \"owner\": { \"member_id\": \"\", \"name\": \"\" },\n\
-      \"access\": { \"dmPolicy\": \"owner\", \"groupPolicy\": \"allowlist\", \"groups\": {} }\n\
-    }\n\
-  }\n\
-}\n\
-JSON"
-      ],
+      "argv": ["node", "/home/zylos/.claude/skills/coco-workspace/hooks/post-install.js"],
       "env": {
-        "COCO_AUTH_TOKEN": "<from k8s secret>",
-        "BFF_URL":         "http://cws-core:8080",
-        "WS_URL":          "ws://cws-core:8080/ws",
-        "IDENTITY_ID":     "<from /auth/register/agent>",
-        "ORG_ID":          "<COCO org UUID>",
-        "ORG_NAME":        "default",
-        "SELF_MEMBER_ID":  "<agent's member id in this org>"
-      }
+        "COCO_BFF_URL":         "http://cws-core:8080",
+        "COCO_WS_URL":          "ws://cws-core:8080/ws",
+        "COCO_AGENT_TICKET":    "<one-time ticket from prepare job input>",
+        "COCO_AGENT_NAME":      "<agent display name>",
+        "COCO_ORG_ID":          "<COCO org UUID>",
+        "COCO_SELF_MEMBER_ID":  "<agent's member id in this org>",
+        "COCO_ORG_NAME":        "default"
+      },
+      "runAs": "1000:1000"
     }
   ]
 }
@@ -200,54 +193,40 @@ JSON"
 
 After this plan runs:
 
-- `/home/zylos/.env` has `COCO_AUTH_TOKEN=...` (plus
-  `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` if you kept the first
-  command).
-- `/home/zylos/components/coco-workspace/config.json` has a working
-  single-org block.
-- The post-install hook runs **after** these plan commands (see
-  `materialize_volume` → `run_prepare_plan` → `run_component_hooks
-  "post-install"`), so it sees the seeded config.json and only fills
-  in missing UUID defaults — no destructive overwrite of the
-  operator-supplied org.
+- `/home/zylos/components/coco-workspace/config.json` contains:
+  - `server.bff_url`, `server.ws_url`
+  - `agent.identity_id` (returned by `/auth/register/agent`)
+  - `agent.api_key` (returned by `/auth/register/agent`)
+  - `orgs.<slug>` with `org_id`, `self.member_id`, `owner`, `access`
+- The one-time ticket has been consumed; subsequent prepare runs (in
+  `ensure` / `repair` mode) skip registration because the hook sees
+  `agent.api_key` already populated.
 
-### Notes on the example plan
+### What the hook does (for reference)
 
-- The inline `cat > config.json <<JSON ... JSON` block produces an
-  exact, idempotent overwrite — re-running prepare in `ensure` /
-  `repair` mode rewrites the file. The agent reads
-  `config.json` on each handler call (hot-reload), so this is safe.
-- `agent.api_key` stays empty in `config.json`; the canonical store
-  is `.env`. The runtime reads `COCO_AUTH_TOKEN` from there.
-- `owner.member_id` stays empty so that the next DM under
+1. Reads the required env vars; if any are missing, exits 1.
+2. If `config.agent.api_key` is already set → no-op (idempotent).
+3. Otherwise: `POST {COCO_BFF_URL}/auth/register/agent` with
+   `{username, display_name, ticket}` → returns `{identity_id, api_key}`.
+4. Writes `config.json` with the full populated shape.
+5. The hook does NOT touch `~/.env` or any other file outside the
+   component data dir.
+
+### Notes
+
+- `owner.member_id` is seeded empty so that the next DM under
   `dmPolicy: "owner"` auto-binds the first sender as the owner. The
   bound owner is written back to `config.json` at runtime — that
   write happens under uid 1000, and `config.json` is **not** in the
-  locked-files list, so this works under the locked-prepare regime.
-- To pre-bind a specific owner (e.g. for an unattended fleet), set
-  `owner.member_id` to the human owner's member id in the same JSON
-  template.
-
-### Optional: helper script in coco-workspace
-
-If injecting JSON via inline bash gets unwieldy (more orgs, more
-policy detail), we can add `scripts/persist-config.js` to
-zylos-coco-workspace — analogous to the image's
-`persist-claude-credentials.js`. It would read env vars
-(`COCO_AUTH_TOKEN`, `BFF_URL`, etc., plus a `CWS_ORGS_JSON` blob) and
-write `config.json` + upsert `.env`. The prepare plan command then
-becomes a clean one-liner:
-
-```json
-{
-  "name": "init-coco-workspace",
-  "argv": ["node", "/home/zylos/.claude/skills/coco-workspace/scripts/persist-config.js"],
-  "env": { "COCO_AUTH_TOKEN": "...", "BFF_URL": "...", "CWS_ORGS_JSON": "{...}" }
-}
-```
-
-Not in scope for v1 — included here as a follow-up if the inline
-approach proves brittle.
+  locked-files list, so it works under the locked-prepare regime.
+- To pre-bind a specific owner (e.g. for an unattended fleet), edit
+  `config.json` post-prepare and set `owner.member_id` directly. A
+  future env var (`COCO_OWNER_MEMBER_ID`) can short-circuit the
+  auto-bind if the use case becomes common.
+- Multi-org: the current contract seeds **one** org. To add more,
+  copy the resulting `orgs.<slug>` block under a new key in
+  `config.json` (manual edit). A future `COCO_ORGS_JSON` env var
+  would allow seeding multiple orgs from a single plan command.
 
 ## Runtime-time: nothing to do
 
@@ -290,19 +269,23 @@ node /home/zylos/.claude/skills/coco-workspace/src/cli/comm.js comm.list_convers
 
 ## Summary of operator inputs
 
-What the K8s operator must supply for each agent instance:
+What needs to be supplied per agent instance. The K8s operator does
+not manage Secrets or ConfigMaps for coco-workspace — the prepare-job
+forwards user-supplied values as `command.env` entries on the prepare
+plan, which `run-prepare-plan.js` passes verbatim to `spawnSync`.
 
-| Where | Field | Source |
+| Where | Field | Notes |
 |---|---|---|
 | Image build args | `ZYLOS_BRANCH` | which zylos-core release to bake |
 | Image build args | `CLAUDE_CODE_VERSION` | which Claude Code CLI version to bake |
 | `components.lock.json` | `coco-workspace` entry + version | per-image release pinning |
-| Prepare plan env (per pod) | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | k8s Secret |
-| Prepare plan env (per pod) | `COCO_AUTH_TOKEN` | k8s Secret (from `/auth/register/agent`) |
-| Prepare plan env (per pod) | `BFF_URL`, `WS_URL` | ConfigMap (per environment) |
-| Prepare plan env (per pod) | `IDENTITY_ID`, `ORG_ID`, `SELF_MEMBER_ID` | k8s Secret / ConfigMap (per identity) |
+| Prepare plan `command.env` | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` | Claude credentials (consumed by `persist-claude-credentials.js`) |
+| Prepare plan `command.env` | `COCO_BFF_URL`, `COCO_WS_URL` | cws-core / cws-comm endpoints |
+| Prepare plan `command.env` | `COCO_AGENT_TICKET` | one-time registration ticket (consumed once, then `agent.api_key` is in `config.json`) |
+| Prepare plan `command.env` | `COCO_AGENT_NAME` | agent display name |
+| Prepare plan `command.env` | `COCO_ORG_ID`, `COCO_SELF_MEMBER_ID` | the org this agent serves + its member id there |
 
 Everything coco-workspace-internal — auto-bind logic, group access
 policy, owner state — happens at runtime under uid 1000 and writes
 back to `config.json` in the unlocked component data dir. No further
-operator involvement required.
+operator involvement required after the first successful prepare.

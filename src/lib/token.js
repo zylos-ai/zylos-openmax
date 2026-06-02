@@ -42,9 +42,12 @@ const _stateByOrg = new Map();
 // ── config helpers ────────────────────────────────────────────────────────────
 
 function resolveApiKey() {
-  if (process.env.COCO_AUTH_TOKEN) return process.env.COCO_AUTH_TOKEN;
+  // config.agent.api_key is the canonical store. COCO_AUTH_TOKEN env var
+  // is honoured only as a back-compat override (set explicitly when an
+  // operator wants to override the baked-in config).
   const cfg = loadConfig();
-  return cfg.agent?.api_key || '';
+  if (cfg.agent?.api_key) return cfg.agent.api_key;
+  return process.env.COCO_AUTH_TOKEN || '';
 }
 
 function resolveCoreUrl() {

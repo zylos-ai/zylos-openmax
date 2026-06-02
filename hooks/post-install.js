@@ -3,21 +3,35 @@
 /**
  * Post-install hook for zylos-coco-workspace.
  *
- * Multi-org architecture (v0.4):
- *   - One agent identity (api_key + identity_id) can be a member of N orgs.
- *   - Each enabled org gets its own WebSocket connection + its own policy.
+ * Two modes, picked by whether stdin is a TTY:
  *
- * What this hook does:
- *   1. Create data subdirectories under ~/zylos/components/coco-workspace/
- *   2. Initialize config.json from DEFAULT_CONFIG if missing
- *   3. Generate agent.device_id / agent.client_id (UUIDv4) if not set
- *   4. (TTY only) Register the agent against cws-core, write api_key to .env
- *   5. (TTY only) Prompt for ONE initial org (org_id + member_id) and write
- *      it as `orgs.default`. Operator can add more orgs later by editing
- *      config.json.
+ *   1. Interactive (TTY): prompt operator for BFF URL, agent name, org info;
+ *      register the agent against cws-core; write everything to config.json.
  *
- * The split between config.json (non-secret) and ~/zylos/.env (secret) is
- * preserved: api_key lives only in .env as COCO_AUTH_TOKEN.
+ *   2. Non-interactive (no TTY): env-driven bootstrap. Reads a fixed set of
+ *      env vars; if the required ones are present and config.json doesn't
+ *      already have an api_key, calls POST /auth/register/agent and writes
+ *      the resulting api_key + identity_id + org block into config.json.
+ *
+ *      Required env vars (non-interactive bootstrap):
+ *        - COCO_BFF_URL              cws-core REST base URL
+ *        - COCO_WS_URL               cws-comm WebSocket URL
+ *        - COCO_AGENT_TICKET         one-time registration ticket
+ *        - COCO_AGENT_NAME           agent display name
+ *        - COCO_ORG_ID               COCO org UUID this agent serves
+ *        - COCO_SELF_MEMBER_ID       agent's member id within that org
+ *      Optional:
+ *        - COCO_ORG_NAME             display name (default 'default')
+ *        - COCO_ORG_SLUG             config-key slug (default derived from ORG_NAME)
+ *        - COCO_DM_POLICY            default 'owner'
+ *        - COCO_GROUP_POLICY         default 'allowlist'
+ *
+ * api_key lives **in config.json** (`agent.api_key`). There is no .env
+ * dependency. The runtime reads api_key from config.json first; env-var
+ * COCO_AUTH_TOKEN remains supported only as a back-compat override.
+ *
+ * Idempotency: if config.agent.api_key is already set, the bootstrap skips
+ * the registration call entirely. Re-running prepare in any mode is safe.
  */
 
 import fs from 'fs';
@@ -101,11 +115,13 @@ if (!config.agent.client_id) {
 }
 if (!config.orgs) config.orgs = {};
 
-async function registerAgent(coreUrl, username, displayName) {
-  const res = await fetch(`${coreUrl}/auth/register/agent`, {
+async function registerAgent(coreUrl, username, displayName, ticket) {
+  const body = { username, display_name: displayName };
+  if (ticket) body.ticket = ticket;
+  const res = await fetch(`${coreUrl.replace(/\/$/, '')}/auth/register/agent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, display_name: displayName }),
+    body: JSON.stringify(body),
   });
   const text = await res.text();
   let data;
@@ -115,6 +131,10 @@ async function registerAgent(coreUrl, username, displayName) {
     throw new Error(`registration failed (${res.status}): ${msg}`);
   }
   return data; // { identity_id, api_key }
+}
+
+function deriveSlug(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-|-$/g, '') || 'default';
 }
 
 if (isInteractive) {
@@ -130,10 +150,10 @@ if (isInteractive) {
   config.server.bff_url = bffUrl;
   if (!config.server.ws_url) config.server.ws_url = bffUrl.replace(/^http/, 'ws') + '/ws';
 
-  const existingKey = readEnvVar('COCO_AUTH_TOKEN');
+  const existingKey = config.agent?.api_key || readEnvVar('COCO_AUTH_TOKEN');
   if (existingKey) {
     console.log('');
-    console.log('  COCO_AUTH_TOKEN already present — skipping registration.');
+    console.log('  agent.api_key already present — skipping registration.');
   } else {
     console.log('');
     console.log('  Step 1: Register this agent with cws-core');
@@ -145,13 +165,12 @@ if (isInteractive) {
     console.log(`  Registering as "${username}" at ${bffUrl}...`);
     try {
       const { identity_id, api_key } = await registerAgent(bffUrl, username, displayName);
-      updateEnvVar('COCO_AUTH_TOKEN', api_key);
       config.agent.identity_id = identity_id;
-      console.log('  ✓ api_key saved to ~/zylos/.env as COCO_AUTH_TOKEN');
-      console.log('  ✓ identity_id saved to config.json:', identity_id);
+      config.agent.api_key = api_key;
+      console.log('  ✓ api_key + identity_id saved to config.json');
     } catch (err) {
       console.error('  ✗ Registration failed:', err.message);
-      console.log('  You can retry later or set COCO_AUTH_TOKEN manually.');
+      console.log('  You can retry later or set config.agent.api_key manually.');
     }
   }
 
@@ -202,17 +221,66 @@ if (isInteractive) {
   console.log('      groups:      { "<conv-uuid>": { name, mode, allowFrom } }');
   console.log('    Defaults are dmPolicy=owner (first DMer auto-binds) + groupPolicy=allowlist.');
 } else {
-  console.log('');
-  console.log('[post-install] non-interactive mode — skipping prompts');
-  console.log('[post-install] before starting the service:');
-  console.log('  1. Register the agent:');
-  console.log('       POST <server.bff_url>/auth/register/agent  { username, display_name }');
-  console.log('       → save api_key to COCO_AUTH_TOKEN in ~/zylos/.env');
-  console.log('       → save identity_id to config.json agent.identity_id');
-  console.log('  2. Add at least one org block under `orgs.<slug>` in config.json:');
-  console.log('       { enabled, org_id, org_name, self:{member_id,name}, owner:{member_id,name}, access }');
-  console.log('     See defaults / template comments in src/lib/config.js DEFAULT_CONFIG.');
-  console.log(`     Config path: ${CONFIG_PATH}`);
+  // Non-interactive bootstrap. Reads env vars (typically set by the K8s
+  // prepare-job via the prepare-plan command's `env` field).
+  const envBff       = process.env.COCO_BFF_URL || '';
+  const envWs        = process.env.COCO_WS_URL  || '';
+  const envTicket    = process.env.COCO_AGENT_TICKET || '';
+  const envAgent     = process.env.COCO_AGENT_NAME   || '';
+  const envOrgId     = process.env.COCO_ORG_ID || '';
+  const envSelfId    = process.env.COCO_SELF_MEMBER_ID || '';
+  const envOrgName   = process.env.COCO_ORG_NAME || 'default';
+  const envOrgSlug   = process.env.COCO_ORG_SLUG || deriveSlug(envOrgName);
+  const envDmPolicy  = process.env.COCO_DM_POLICY    || 'owner';
+  const envGroupPol  = process.env.COCO_GROUP_POLICY || 'allowlist';
+
+  const hasRequired = envBff && envTicket && envAgent && envOrgId && envSelfId;
+  const alreadyRegistered = !!config.agent?.api_key;
+
+  if (alreadyRegistered) {
+    console.log('[post-install] agent.api_key already in config.json — skipping registration (idempotent)');
+  } else if (!hasRequired) {
+    console.log('[post-install] non-interactive mode: required env vars missing — skipping bootstrap');
+    console.log('  required: COCO_BFF_URL, COCO_AGENT_TICKET, COCO_AGENT_NAME, COCO_ORG_ID, COCO_SELF_MEMBER_ID');
+    console.log('  the service will fail to start until config.agent.api_key and at least one orgs.<slug> are set');
+  } else {
+    if (!config.server) config.server = {};
+    config.server.bff_url = envBff.replace(/\/$/, '');
+    config.server.ws_url  = envWs || config.server.bff_url.replace(/^http/, 'ws') + '/ws';
+
+    console.log(`[post-install] registering agent "${envAgent}" at ${config.server.bff_url}`);
+    try {
+      const { identity_id, api_key } = await registerAgent(
+        config.server.bff_url, envAgent, envAgent, envTicket,
+      );
+      config.agent.identity_id = identity_id;
+      config.agent.api_key     = api_key;
+      console.log('[post-install] registration ok — api_key + identity_id written to config.json');
+    } catch (err) {
+      console.error('[post-install] registration failed:', err.message);
+      process.exit(1);
+    }
+
+    // Seed the single org block from env. Operator can edit / add more later.
+    if (!config.orgs[envOrgSlug]) {
+      config.orgs[envOrgSlug] = {
+        enabled: true,
+        org_id:   envOrgId,
+        org_name: envOrgName,
+        self:  { member_id: envSelfId, name: envAgent },
+        owner: { member_id: '', name: '' },
+        access: {
+          dmPolicy:    envDmPolicy,
+          dmAllowFrom: [],
+          groupPolicy: envGroupPol,
+          groups:      {},
+        },
+      };
+      console.log(`[post-install] org "${envOrgSlug}" seeded (org_id=${envOrgId}, self.member_id=${envSelfId})`);
+    } else {
+      console.log(`[post-install] org "${envOrgSlug}" already in config — leaving as-is`);
+    }
+  }
 }
 
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');

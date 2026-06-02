@@ -1,91 +1,86 @@
 # Non-interactive install (image baking)
 
 This document covers installing `zylos-coco-workspace` without a TTY —
-e.g. inside a Dockerfile, a k8s init container, or any automated
+inside a Dockerfile, a k8s init container, or any automated
 provisioning pipeline.
 
-The `hooks/post-install.js` script already detects `process.stdin.isTTY`
-and skips all prompts when stdin is not a TTY. The skipped steps
-(agent registration + initial org block) become the operator's
-responsibility, performed either at image-build time or at first boot.
+For the specific `cws-zylos-runtime` Kubernetes image, see also
+[non-interactive-install-zylos-runtime.md](./non-interactive-install-zylos-runtime.md).
 
-## What post-install does in non-TTY mode
+## What `hooks/post-install.js` does in non-TTY mode
 
-1. Creates data directories under `~/zylos/components/coco-workspace/`:
-   `logs/`, `media/`, `runtime/`, `runtime/tokens/`.
+The hook auto-detects `process.stdin.isTTY === false` and switches to
+an **env-driven bootstrap**:
+
+1. Creates data dirs under `~/zylos/components/coco-workspace/`
+   (`logs/`, `media/`, `runtime/`, `runtime/tokens/`).
 2. Seeds `~/zylos/components/coco-workspace/config.json` from
-   `DEFAULT_CONFIG` (only if the file doesn't already exist).
+   `DEFAULT_CONFIG` if it doesn't already exist.
 3. Generates `agent.device_id` and `agent.client_id` (UUIDv4) if not
-   already present.
-4. Prints the manual steps the operator must perform before starting
-   the service:
-   - register the agent with cws-core and stash `api_key` in `.env`
-   - add at least one org block under `orgs.<slug>` in `config.json`.
+   set.
+4. **If required env vars are present**, calls
+   `POST {COCO_BFF_URL}/auth/register/agent` to exchange a one-time
+   ticket for `{identity_id, api_key}`, writes both into
+   `config.json` (under `agent.{identity_id, api_key}`), and seeds
+   one `orgs.<slug>` block from env.
+5. **If required env vars are missing**, logs the gap and exits 0 —
+   the operator can re-run the hook later when env is available.
 
-The hook is idempotent — re-running it on an already-provisioned host
-is safe (no overwrite of existing values).
+Idempotency: if `config.agent.api_key` is already populated, the hook
+short-circuits step 4 entirely. Re-running the hook after a
+successful first run is a no-op.
 
-## Recipe A — bake skeleton, configure at runtime (recommended)
+### Required env vars
 
-Best for general-purpose images that ship to many environments.
+| Variable | Purpose |
+|---|---|
+| `COCO_BFF_URL` | cws-core REST base |
+| `COCO_WS_URL` | cws-comm WebSocket URL (defaults to bff_url with `http→ws` if absent) |
+| `COCO_AGENT_TICKET` | one-time registration ticket |
+| `COCO_AGENT_NAME` | agent display name |
+| `COCO_ORG_ID` | COCO org UUID this agent serves |
+| `COCO_SELF_MEMBER_ID` | agent's `member_id` within that org |
+
+### Optional env vars
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `COCO_ORG_NAME` | `default` | display name for the org block |
+| `COCO_ORG_SLUG` | derived from `COCO_ORG_NAME` | config-key slug under `orgs.{}` |
+| `COCO_DM_POLICY` | `owner` | initial DM access policy |
+| `COCO_GROUP_POLICY` | `allowlist` | initial group access policy |
+
+## Recipe: bake skeleton, configure at first prepare
 
 **At build time** (Dockerfile):
 
 ```dockerfile
 RUN zylos install coco-workspace
-# post-install runs without TTY → only creates dirs + skeleton config
-# Result baked into the image:
-#   ~/zylos/.claude/skills/coco-workspace/  (the package itself)
-#   ~/zylos/components/coco-workspace/config.json  (skeleton)
+# post-install runs without env → only creates dirs + skeleton config + UUIDs
 ```
 
-**At runtime** (`docker run` / k8s `Deployment`):
+**At first start** (k8s prepare-job / docker run with env): provide
+the required env vars, then invoke the hook:
 
-Mount or write these two files before the service starts:
+```bash
+COCO_BFF_URL=...        \
+COCO_WS_URL=...         \
+COCO_AGENT_TICKET=...   \
+COCO_AGENT_NAME=...     \
+COCO_ORG_ID=...         \
+COCO_SELF_MEMBER_ID=... \
+node ~/zylos/.claude/skills/coco-workspace/hooks/post-install.js
+```
 
-1. `~/zylos/.env` — must contain:
-
-   ```bash
-   COCO_AUTH_TOKEN=<api_key returned from /auth/register/agent>
-   ```
-
-   Recommended source: k8s `Secret` mounted as a file, or an env-var
-   sidecar that writes the file on container start.
-
-2. `~/zylos/components/coco-workspace/config.json` — fully populated.
-   See [Minimal config.json](#minimal-configjson) below.
-
-Then start the service:
+The hook self-bootstraps: registers the agent, writes the api_key
+into `config.json`, seeds the org block. After this, the service can
+be started without further configuration:
 
 ```bash
 pm2 start ~/zylos/.claude/skills/coco-workspace/ecosystem.config.cjs
 ```
 
-## Recipe B — bake everything (single-tenant images)
-
-Best when an image is dedicated to one org and the api_key is known
-at build time.
-
-**At build time:**
-
-```dockerfile
-RUN zylos install coco-workspace
-
-# Pre-populate config.json
-COPY config.json ~/zylos/components/coco-workspace/config.json
-
-# Pre-populate .env (consider build-arg + multi-stage build to avoid
-# leaking the api_key into image history)
-RUN --mount=type=secret,id=coco_auth_token \
-    echo "COCO_AUTH_TOKEN=$(cat /run/secrets/coco_auth_token)" >> ~/zylos/.env
-```
-
-Then the image starts with no runtime mounts required.
-
-## Minimal config.json
-
-The smallest config that boots a single-org agent (replace the four
-`<...>` placeholders):
+## Minimal config.json (after env-driven bootstrap)
 
 ```json
 {
@@ -95,15 +90,17 @@ The smallest config that boots a single-org agent (replace the four
     "ws_url":  "ws://cws-core:8080/ws"
   },
   "agent": {
-    "identity_id": "<identity_id from /auth/register/agent>",
-    "api_key": ""
+    "identity_id": "<written by hook>",
+    "api_key":     "<written by hook>",
+    "device_id":   "<generated by hook>",
+    "client_id":   "<generated by hook>"
   },
   "orgs": {
     "default": {
       "enabled": true,
-      "org_id":   "<COCO org UUID>",
-      "org_name": "<display only>",
-      "self":  { "member_id": "<agent's member id in this org>", "name": "Zylos" },
+      "org_id":   "<from COCO_ORG_ID>",
+      "org_name": "<from COCO_ORG_NAME or 'default'>",
+      "self":  { "member_id": "<from COCO_SELF_MEMBER_ID>", "name": "<from COCO_AGENT_NAME>" },
       "owner": { "member_id": "", "name": "" },
       "access": {
         "dmPolicy":    "owner",
@@ -117,55 +114,28 @@ The smallest config that boots a single-org agent (replace the four
 
 Notes:
 
-- `agent.api_key` is intentionally **left empty in config.json** — the
-  canonical store is `~/zylos/.env` as `COCO_AUTH_TOKEN`. The runtime
-  reads from .env first.
+- `agent.api_key` is **in config.json** — the canonical store. There
+  is no `.env` dependency in the new contract.
 - `owner.member_id` empty == not yet bound. The next DM under
-  `dmPolicy: "owner"` will auto-bind that sender as the owner and write
-  the new owner block back to config.json.
-- Add more orgs by copying the `orgs.default` block under a new slug
-  (`orgs.team-alpha`, etc.). Each enabled org gets its own WebSocket
-  connection.
+  `dmPolicy: "owner"` auto-binds that sender and writes the new owner
+  block back to config.json.
+- Add more orgs by copying the resulting `orgs.default` block under a
+  new slug. Each enabled org gets its own WebSocket connection.
 
-## How to obtain `identity_id` + `api_key` at provisioning time
+## Environment-variable overrides (runtime)
 
-For Recipe A (configure at runtime) the operator typically runs this
-once per agent identity, out-of-band:
+These env vars are still honoured at runtime if set, in addition to
+the build-time hook vars above:
 
-```bash
-curl -X POST "$BFF_URL/auth/register/agent" \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"zylos-agent-prod-001","display_name":"Zylos Prod"}'
-
-# →
-# {"identity_id":"...","api_key":"sk-..."}
-```
-
-Stash `identity_id` in a config-management system (Vault / k8s
-ConfigMap / SSM Parameter Store) and `api_key` in a secrets system
-(Vault / k8s Secret / AWS Secrets Manager).
-
-For Recipe B (bake everything) the same call happens during image
-build; the api_key is mounted as a Docker build secret to avoid
-landing in the image's layer history.
-
-## Environment-variable overrides
-
-The runtime honours these env vars (useful for k8s patches / dev
-overrides without rewriting config.json):
-
-| Variable               | Overrides                                | Notes                                      |
-|------------------------|------------------------------------------|--------------------------------------------|
-| `COCO_AUTH_TOKEN`      | `agent.api_key`                          | Canonical store for the api_key            |
-| `COCO_API_URL`         | `server.bff_url`                         | cws-core REST base URL                     |
-| `COCO_WS_URL`          | `server.ws_url`                          | cws-comm WebSocket URL                     |
-| `COCO_API_PREFIX`      | `/api/v1`                                | API path prefix                            |
-| `COCO_DEVICE_ID`       | `agent.device_id`                        | Sent as `X-Device-Id`                      |
-| `COCO_CLIENT_VERSION`  | `agent.app_version`                      | Sent as `X-Client-Version`                 |
-| `COCO_ORG_ID`          | default-org resolution for CLIs          | Used when more than one org is configured  |
-
-`orgs.*` entries themselves have no env-var override — the orgs map
-must be in `config.json`.
+| Variable | Overrides | Notes |
+|---|---|---|
+| `COCO_AUTH_TOKEN` | `agent.api_key` | Back-compat override only — canonical store is `config.agent.api_key` |
+| `COCO_API_URL` | `server.bff_url` | cws-core REST base URL |
+| `COCO_WS_URL` | `server.ws_url` | cws-comm WebSocket URL |
+| `COCO_API_PREFIX` | `/api/v1` | API path prefix |
+| `COCO_DEVICE_ID` | `agent.device_id` | Sent as `X-Device-Id` |
+| `COCO_CLIENT_VERSION` | `agent.app_version` | Sent as `X-Client-Version` |
+| `COCO_ORG_ID` | default-org resolution for CLIs | Used when more than one org is configured |
 
 ## Smoke-test checklist (post-boot)
 
