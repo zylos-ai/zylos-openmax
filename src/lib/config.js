@@ -50,11 +50,13 @@ export const DEFAULT_CONFIG = {
     // The agent only talks to two surfaces:
     //   - cws-core REST     (also handles kb/as forwarding)  → bff_url
     //   - cws-comm WebSocket (long connection)               → ws_url
+    //
+    // Operational knobs (reconnect_max_delay, heartbeat_interval) are NOT
+    // in DEFAULT_CONFIG — their defaults are hardcoded in src/comm-bridge.js
+    // (DEFAULT_WS_RECONNECT_MAX_MS, DEFAULT_WS_HEARTBEAT_MS). Config may
+    // override either. `platform` is no longer present (was never read).
     bff_url: 'http://127.0.0.1:8080',
     ws_url:  'ws://127.0.0.1:8080/ws',
-    reconnect_max_delay: 30000,                 // WS exponential backoff cap, ms
-    heartbeat_interval:  30000,                 // WS heartbeat interval, ms
-    platform: 'server',
   },
 
   // Global agent identity — same api_key authenticates the agent across all
@@ -63,7 +65,6 @@ export const DEFAULT_CONFIG = {
     identity_id:  '',                           // returned by POST /auth/register/agent
     api_key:      '',                           // canonical store — populated by post-install hook
     device_id:    '',                           // UUIDv4, generated at install time
-    client_id:    '',                           // UUIDv4, generated at install time
     app_version:  '0.1.0',                      // sent as X-Client-Version
   },
 
