@@ -1,30 +1,22 @@
 /**
- * WebSocket runtime-state persistence.
+ * WebSocket runtime-state persistence (multi-org).
  *
- * In this architecture REST always uses the agent's api_key (via cws-core),
- * so the cws-comm session_token is NOT a cross-process REST credential.
- * It only authenticates WebSocket frames on the direct cws-comm link.
+ * Each enabled org has its own WS connection and its own `last_seq`. We
+ * persist them as a single file keyed by org slug so warm-restarts can
+ * resume each org's stream without re-syncing the full backlog.
  *
- * We still persist a small amount of runtime state across restarts so a
- * warm-restart can present `last_seq` in its ConnectRequest and avoid
- * re-syncing the full backlog.
- *
- * State is stored as JSON at:
- *   ~/zylos/components/coco-workspace/runtime/session.json
+ * File: ~/zylos/components/coco-workspace/runtime/session.json
  *
  * Schema:
  *   {
- *     user_id:       string,   // own participant id (from connect_response)
- *     workspace_id:  string,
- *     server_time:   number,   // server epoch ms at last handshake
- *     received_at:   number,   // local epoch ms at last handshake
- *     last_seq:      number,   // updated as comm-bridge processes frames
- *     session_token: string    // optional, opaque to other processes; kept
- *                              // only for diagnostic / future WS reuse
+ *     "<orgSlug>": {
+ *       org_id:     string,
+ *       last_seq:   number,
+ *       updated_at: number    // local epoch ms
+ *     }
  *   }
  *
- * Best-effort atomic writes via tmp + rename. Single-writer (comm-bridge),
- * occasional readers (send.js for diagnostics).
+ * Best-effort atomic writes via tmp + rename.
  */
 
 import fs from 'fs';
@@ -34,32 +26,45 @@ const HOME = process.env.HOME || '/tmp';
 const RUNTIME_DIR = path.join(HOME, 'zylos/components/coco-workspace/runtime');
 const SESSION_PATH = path.join(RUNTIME_DIR, 'session.json');
 
-export function loadSession() {
+function readAll() {
   try {
     const raw = fs.readFileSync(SESSION_PATH, 'utf-8');
     return JSON.parse(raw);
   } catch {
-    return null;
+    return {};
   }
 }
 
-export function saveSession(partial) {
+function writeAll(state) {
   fs.mkdirSync(RUNTIME_DIR, { recursive: true });
-  const current = loadSession() || {};
-  const merged = { ...current, ...partial };
   const tmp = `${SESSION_PATH}.tmp.${process.pid}.${Date.now()}`;
   try {
-    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2));
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
     fs.renameSync(tmp, SESSION_PATH);
   } catch (err) {
     try { fs.unlinkSync(tmp); } catch {}
     throw err;
   }
-  return merged;
 }
 
-export function clearSession() {
-  try { fs.unlinkSync(SESSION_PATH); } catch {}
+export function loadOrgSession(orgSlug) {
+  const all = readAll();
+  return all[orgSlug] || null;
+}
+
+export function saveOrgSession(orgSlug, partial) {
+  const all = readAll();
+  const current = all[orgSlug] || {};
+  all[orgSlug] = { ...current, ...partial, updated_at: Date.now() };
+  writeAll(all);
+  return all[orgSlug];
+}
+
+export function clearOrgSession(orgSlug) {
+  const all = readAll();
+  if (!(orgSlug in all)) return;
+  delete all[orgSlug];
+  writeAll(all);
 }
 
 export { SESSION_PATH };

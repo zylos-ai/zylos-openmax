@@ -169,21 +169,33 @@ SKILL.md 写的是"Phase 3 上下文组装时，搜索 KB 获取项目知识"，
 | 消息格式 | Lark 消息结构 → 解析为文本 | COCO Message (JSONB) → 解析为文本 |
 | 会话模型 | Lark p2p / group → endpoint 格式 | COCO Conversation (dm/group/thread) → endpoint 格式 |
 | 发送接口 | send.js → Lark API | send.js → cws-comm API |
-| 访问控制 | owner / whitelist / groupPolicy | COCO ConversationParticipant + responseMode |
+| 访问控制 | dmPolicy / groupPolicy / per-group config | 同 lark：dmPolicy / groupPolicy / per-group config（per-org，多 org 各自独立） |
 | 入口文件 | index.js（单一职责） | comm-bridge.js（通信模块是多个模块之一） |
 
 ### 3.2 入站消息流（Workspace → Agent）
 
+**多 org**：每个在 `config.orgs.*.enabled=true` 的 org 启动一条独立的 WebSocket
+连接。下方流程对每条连接独立执行。
+
 ```
-cws-comm WebSocket 连接
+cws-comm WebSocket 连接（per-org）
     │
     ├─ 事件: message:new
     │   ├─ 解析 conversationId, senderId, content, seq
     │   ├─ 查询 Conversation 类型 (dm/group/thread)
-    │   ├─ responseMode 过滤:
-    │   │   ├─ at_only: 仅处理 @本Agent 的消息
-    │   │   ├─ proactive: 处理全部消息
-    │   │   └─ silent: 跳过
+    │   ├─ 本地 access policy 过滤（与 lark 同款，per-org）：
+    │   │   ├─ self-echo：sender == orgs[slug].self.member_id → skip
+    │   │   ├─ DM：
+    │   │   │   ├─ dmPolicy=open      → accept
+    │   │   │   ├─ dmPolicy=allowlist → 查 dmAllowFrom
+    │   │   │   └─ dmPolicy=owner     → owner.member_id 为空则自动绑定首发 sender；
+    │   │   │                          否则只接 owner.member_id
+    │   │   └─ Group/Thread：
+    │   │       ├─ groupPolicy=disabled → drop
+    │   │       ├─ groupPolicy=allowlist → 查 groups[convId]
+    │   │       ├─ mode=mention → 要求 @本 agent
+    │   │       ├─ mode=smart   → 收全部
+    │   │       └─ allowFrom: ['*']/[] 全员；否则按 member_id 列表过滤
     │   ├─ 构建消息上下文 (recent messages)
     │   └─ 调用 c4-receive → C4 bridge → Agent
     │

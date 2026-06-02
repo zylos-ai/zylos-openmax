@@ -1,25 +1,24 @@
 /**
  * Shared HTTP client for all REST calls.
  *
- * zylos-coco-workspace targets THREE different backend services:
+ * The agent only talks to ONE REST surface: cws-core (server.bff_url).
+ * cws-core acts as the gateway for cws-kb and cws-as — KB/AS routes are
+ * forwarded server-side, not called directly.
  *
- *   - cws-core  → /me, /members, /agents, /projects, /tasks, /issues,
- *                 /conversations, /conversations/{id}/messages
- *                 base URL  : comm.core_url
- *                 scope hdr : X-Workspace-Id
+ *   - cws-core gateway → /me, /members, /agents, /projects, /tasks, /issues,
+ *                        /conversations, /conversations/{id}/messages,
+ *                        /api/v1/kbs/*, /api/v1/orgs/{orgId}/*,
+ *                        /api/v1/artifacts/*
+ *                        base URL  : server.bff_url
+ *                        scope hdr : X-Org-Id (for kb/as paths)
  *
- *   - cws-kb    → /api/v1/kbs/init, /api/v1/orgs/{orgId}/*
- *                 base URL  : comm.kb_url
- *                 scope hdr : X-Org-Id  (also embedded in path today)
+ * The helpers are organised into:
+ *   - get/post/patch/put/del : core endpoints (D8 envelope unwrapped)
+ *   - kbClient(orgId)        : pre-bound with X-Org-Id, no envelope unwrap
+ *   - asClient(orgId)        : pre-bound with X-Org-Id, no envelope unwrap
  *
- *   - cws-as    → /api/v1/artifacts/*
- *                 base URL  : comm.as_url
- *                 scope hdr : X-Org-Id
- *
- * All three share ONE bearer credential — the agent's api_key. The cws-core
- * helpers (get/post/...) preserve the original module-global behavior;
- * cws-kb and cws-as get their own service-bound clients via kbClient() /
- * asClient() factories.
+ * Both kbClient and asClient hit the same bff_url; the factories exist so
+ * callers don't have to repeat the X-Org-Id header injection.
  *
  * Token resolution order (per request):
  *   1. setApiKey(t)                  — set explicitly by caller
@@ -31,7 +30,7 @@
  * and .status carries the HTTP status code.
  */
 
-import { loadConfig } from './config.js';
+import { loadConfig, resolveDefaultOrgId } from './config.js';
 import { getAccessToken } from './token.js';
 
 let activeApiKey = null;
@@ -47,31 +46,23 @@ export const setSessionToken = setApiKey;
 
 // ============================================================================
 //  Base URL / token / header resolution
+//
+//  Config schema v0.4 uses `server.*` (new) instead of `comm.*` (legacy).
+//  We try the new path first and fall back to the legacy path so a config
+//  that hasn't been migrated yet still works.
 // ============================================================================
 
 function resolveBaseUrl() {
   if (activeBaseUrl) return activeBaseUrl;
   if (process.env.COCO_API_URL) return process.env.COCO_API_URL;
   const cfg = loadConfig();
-  return cfg.comm?.core_url || cfg.comm?.api_url || 'http://127.0.0.1:8080';
-}
-
-function resolveKbBaseUrl() {
-  if (process.env.COCO_KB_URL) return process.env.COCO_KB_URL;
-  const cfg = loadConfig();
-  return cfg.comm?.kb_url || resolveBaseUrl();
-}
-
-function resolveAsBaseUrl() {
-  if (process.env.COCO_AS_URL) return process.env.COCO_AS_URL;
-  const cfg = loadConfig();
-  return cfg.comm?.as_url || resolveBaseUrl();
+  return cfg.server?.bff_url
+      || cfg.comm?.core_url || cfg.comm?.api_url
+      || 'http://127.0.0.1:8080';
 }
 
 function resolveOrgId() {
-  if (process.env.COCO_ORG_ID) return process.env.COCO_ORG_ID;
-  const cfg = loadConfig();
-  return cfg.org_id || '';
+  return resolveDefaultOrgId();
 }
 
 async function resolveToken() {
@@ -91,12 +82,12 @@ function resolveCoreHeaders() {
   if (activeHeaders) return activeHeaders;
   const cfg = loadConfig();
   const out = {};
-  const workspaceId = cfg.workspace_id || process.env.COCO_WORKSPACE_ID || '';
-  const deviceId    = cfg.device_id    || process.env.COCO_DEVICE_ID    || '';
-  const version     = cfg.app_version  || process.env.COCO_CLIENT_VERSION || '';
-  if (workspaceId) out['X-Workspace-Id']   = workspaceId;
-  if (deviceId)    out['X-Device-Id']      = deviceId;
-  if (version)     out['X-Client-Version'] = version;
+  // workspace_id was dropped in the v0.4 multi-org refactor; org scoping is
+  // expressed via X-Org-Id (on kb/as) and via per-org WS connections.
+  const deviceId = cfg.agent?.device_id || cfg.device_id || process.env.COCO_DEVICE_ID    || '';
+  const version  = cfg.agent?.app_version || cfg.app_version || process.env.COCO_CLIENT_VERSION || '';
+  if (deviceId) out['X-Device-Id']      = deviceId;
+  if (version)  out['X-Client-Version'] = version;
   return out;
 }
 
@@ -198,13 +189,14 @@ export function apiPath(p) {
 }
 
 // ============================================================================
-//  Service-bound clients (cws-kb, cws-as)
+//  Org-scoped clients for KB and AS routes
 //
-//  Each factory call resolves the service's base URL + X-Org-Id at call
-//  time (so config hot-reload + env override both work). Returned object
-//  has the same {get, post, patch, put, del} surface as the module-global
-//  helpers; no apiPath wrapping (paths are written explicitly because the
-//  KB/AS routes are too varied for a single prefix to be helpful).
+//  cws-core acts as the gateway for cws-kb and cws-as — the agent calls
+//  /api/v1/orgs/{orgId}/* and /api/v1/artifacts/* against bff_url; cws-core
+//  forwards server-side. These factories exist to pre-bind X-Org-Id and to
+//  give callers an interface that doesn't D8-unwrap (KB/AS responses are
+//  not enveloped). The returned client hits the same base URL as the
+//  module-global get/post/... helpers.
 // ============================================================================
 
 function makeClient(baseUrl, scopeHeaders) {
@@ -224,9 +216,10 @@ function makeClient(baseUrl, scopeHeaders) {
 }
 
 /**
- * Service-bound client for cws-kb.
+ * Org-scoped client for cws-kb routes (forwarded by cws-core gateway).
  *
- * @param {string} [orgId]  override the resolved org id (else uses config.org_id / COCO_ORG_ID)
+ * @param {string} [orgId]  override the resolved org id (else uses COCO_ORG_ID,
+ *                          or the single enabled org from config.orgs)
  * @returns {{get,post,patch,put,del,baseUrl,headers}}
  *
  * Example:
@@ -237,11 +230,11 @@ export function kbClient(orgId) {
   const headers = {};
   const oid = orgId || resolveOrgId();
   if (oid) headers['X-Org-Id'] = oid;
-  return makeClient(resolveKbBaseUrl(), headers);
+  return makeClient(resolveBaseUrl(), headers);
 }
 
 /**
- * Service-bound client for cws-as.
+ * Org-scoped client for cws-as routes (forwarded by cws-core gateway).
  *
  * @param {string} [orgId]  override the resolved org id
  */
@@ -249,7 +242,7 @@ export function asClient(orgId) {
   const headers = {};
   const oid = orgId || resolveOrgId();
   if (oid) headers['X-Org-Id'] = oid;
-  return makeClient(resolveAsBaseUrl(), headers);
+  return makeClient(resolveBaseUrl(), headers);
 }
 
 // ============================================================================

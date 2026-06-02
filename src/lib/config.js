@@ -1,5 +1,40 @@
 /**
  * Configuration loader with hot-reload support.
+ *
+ * Schema (v0.4 — multi-org):
+ *
+ *   - One agent identity (`agent.identity_id`, `agent.api_key`) can be a
+ *     member of multiple COCO orgs. Each enabled org gets its own WebSocket
+ *     connection to cws-comm, its own access policy (lark-style dmPolicy /
+ *     groupPolicy / per-group config), and its own owner auto-binding state.
+ *
+ *   - `server.*` holds the cws-core / cws-comm / cws-kb / cws-as endpoints
+ *     and WS connection knobs.
+ *
+ *   - `orgs.<slug>` is a user-chosen key (e.g. "team-alpha"). The slug has
+ *     no meaning to cws-* services; only `orgs.<slug>.org_id` is the real
+ *     COCO org UUID. Slugs make the config human-readable.
+ *
+ * Access control mirrors zylos-lark's model:
+ *
+ *   - dmPolicy: 'open' | 'allowlist' | 'owner'
+ *       open      — anyone can DM
+ *       allowlist — only members listed in dmAllowFrom
+ *       owner     — only the bound owner (first DM auto-binds)
+ *
+ *   - groupPolicy: 'open' | 'allowlist' | 'disabled'
+ *       open      — all groups handled
+ *       allowlist — only groups listed in `groups` map
+ *       disabled  — no group messages handled
+ *
+ *   - groups[convId].mode: 'mention' | 'smart'
+ *       mention — only respond when @-mentioned
+ *       smart   — respond to any message in the group
+ *
+ *   - groups[convId].allowFrom: ['*'] or [member_id, ...]
+ *       ['*']   — all members allowed
+ *       []      — empty == allow all (legacy lark compat)
+ *       [ids]   — only listed members
  */
 
 import fs from 'fs';
@@ -8,62 +43,67 @@ import path from 'path';
 const HOME = process.env.HOME;
 const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json');
 
-/**
- * Default configuration.
- *
- * Architecture (cws-comm api-usage-guide §1 + §6, agent integration):
- *   - REST IM endpoints (POST /api/v1/messages etc.) hit cws-comm directly
- *     with `Authorization: Bearer <api_key>` + `X-Workspace-Id`.
- *   - Non-IM REST (KB/AS/TM/Core directory queries) hit the cws-fe Gateway
- *     under /api/gateway/v1/*; same Bearer + workspace header.
- *   - WebSocket is direct to cws-comm. Per api-usage-guide §6, the WS
- *     upgrade carries `Authorization: Bearer <api_key>` directly; no
- *     ticket pre-fetch is needed. The first `connect` frame echoes the
- *     api_key as `token` (along with client_id, device_id, last_seq).
- *   - Server replies with `connect_response` carrying a `session_token`.
- *     We persist it for diagnostics but keep using api_key on reconnect
- *     (api_key is long-lived; session_token would also work but adds
- *     no value for a server-side agent).
- *
- * Required at install time (post-install hook will prompt):
- *   - workspace_id          (X-Workspace-Id header on every request)
- *   - agent.api_key         (Bearer credential for both REST and WS upgrade;
- *                            post-install writes it to ~/zylos/.env as
- *                            COCO_AUTH_TOKEN, not into this file)
- *
- * Generated at install time:
- *   - device_id, client_id  (UUIDv4, persisted across restarts)
- */
 export const DEFAULT_CONFIG = {
   enabled: true,
-  workspace_id: '',
-  // org_id scopes every cws-kb / cws-as call (X-Org-Id header + path).
-  // Filled at install time; one org per agent install.
-  org_id: '',
-  device_id: '',
-  client_id: '',
-  app_version: '0.1.0',
-  comm: {
-    // cws-core REST + cws-comm IM REST (path-routed):
-    core_url: 'http://127.0.0.1:8080',
-    // cws-kb direct. Defaults same as core_url for single-binary dev;
-    // production usually puts kb behind its own service ingress.
-    kb_url:   'http://127.0.0.1:8080',
-    // cws-as direct.
-    as_url:   'http://127.0.0.1:8080',
-    // WebSocket direct endpoint — cws-comm. Auth: Bearer api_key header
-    // on upgrade (api-usage-guide §1.步骤一 / §6.步骤一). No ws-ticket.
+
+  server: {
+    // The agent only talks to two surfaces:
+    //   - cws-core REST     (also handles kb/as forwarding)  → bff_url
+    //   - cws-comm WebSocket (long connection)               → ws_url
+    bff_url: 'http://127.0.0.1:8080',
     ws_url:  'ws://127.0.0.1:8080/ws',
-    reconnect_max_delay: 30000,
-    heartbeat_interval: 30000,
+    reconnect_max_delay: 30000,                 // WS exponential backoff cap, ms
+    heartbeat_interval:  30000,                 // WS heartbeat interval, ms
     platform: 'server',
   },
+
+  // Global agent identity — same api_key authenticates the agent across all
+  // orgs it has joined. member_id within each org is per-org (see orgs.*).
   agent: {
-    id: '',
-    participant_id: '',
-    identity_id: '',  // UUID returned by POST /auth/register/agent
-    api_key: '',      // kept for fallback; canonical store is ~/zylos/.env COCO_AUTH_TOKEN
+    identity_id:  '',                           // returned by POST /auth/register/agent
+    api_key:      '',                           // canonical store: ~/zylos/.env COCO_AUTH_TOKEN
+    device_id:    '',                           // UUIDv4, generated at install time
+    client_id:    '',                           // UUIDv4, generated at install time
+    app_version:  '0.1.0',                      // sent as X-Client-Version
   },
+
+  // Multi-org map. Empty by default — operator fills in (or post-install
+  // bootstraps a placeholder org block). At runtime, comm-bridge opens one
+  // WebSocket per enabled org.
+  //
+  // The map key (e.g. 'default', 'team-alpha') is a human-readable slug
+  // chosen by the operator. The COCO org UUID lives in `org_id`.
+  //
+  // Per-org block:
+  //   - `self`   : agent's own member identity within THIS org
+  //                (member_id is per-org; the global agent identity is at
+  //                top-level `agent.{identity_id, api_key}`).
+  //   - `owner`  : the bound human owner for this org (set on first DM
+  //                under dmPolicy=owner). An empty `owner.member_id`
+  //                means "not yet bound" — the next sender auto-binds.
+  //   - `access` : lark-style access policy.
+  orgs: {
+    // 'default': {
+    //   enabled:  true,
+    //   org_id:   '',                       // COCO org UUID
+    //   org_name: '',                       // display only
+    //   self:  { member_id: '', name: 'Zylos' },  // agent's member id + display name in this org
+    //   owner: { member_id: '', name: '' },        // bound human owner (empty = unbound)
+    //   access: {
+    //     dmPolicy:    'owner',             // 'open' | 'allowlist' | 'owner'
+    //     dmAllowFrom: [],
+    //     groupPolicy: 'allowlist',         // 'open' | 'allowlist' | 'disabled'
+    //     groups: {
+    //       // '<conv-uuid>': {
+    //       //   name:      '',
+    //       //   mode:      'mention',      // 'mention' | 'smart'
+    //       //   allowFrom: ['*'],
+    //       // }
+    //     },
+    //   },
+    // },
+  },
+
   message: {
     context_messages: 10,
     dedup_ttl: 300000,
@@ -99,6 +139,91 @@ export function loadConfig() {
   return currentConfig;
 }
 
+// =============================================================================
+// Multi-org helpers
+// =============================================================================
+
+/**
+ * Return [{ slug, ...orgConfig }] for every org with `enabled: true`.
+ */
+export function enabledOrgs() {
+  const cfg = loadConfig();
+  const out = [];
+  for (const [slug, org] of Object.entries(cfg.orgs || {})) {
+    if (org?.enabled === false) continue;
+    if (!org?.org_id) continue;
+    out.push({ slug, ...org });
+  }
+  return out;
+}
+
+/**
+ * Find org config by its COCO org UUID. Returns { slug, ...orgConfig } or null.
+ */
+export function getOrgByOrgId(orgId) {
+  if (!orgId) return null;
+  const cfg = loadConfig();
+  for (const [slug, org] of Object.entries(cfg.orgs || {})) {
+    if (org?.org_id === orgId) return { slug, ...org };
+  }
+  return null;
+}
+
+/**
+ * Default org resolver for callers (CLIs, REST clients) that don't pass an
+ * explicit orgId: returns the single enabled org if there's exactly one,
+ * otherwise null. Callers should fall back to COCO_ORG_ID env var or fail.
+ */
+export function resolveDefaultOrgId() {
+  if (process.env.COCO_ORG_ID) return process.env.COCO_ORG_ID;
+  const enabled = enabledOrgs();
+  if (enabled.length === 1) return enabled[0].org_id;
+  return '';
+}
+
+/**
+ * Persist a config mutation to disk. Used by owner auto-bind, etc.
+ * Read-modify-write with last-writer-wins. Bumps currentConfig cache.
+ *
+ * `mutate(config)` should modify `config` in place; the result is what gets
+ * written. Returns the new config object.
+ */
+export function updateConfig(mutate) {
+  const next = JSON.parse(JSON.stringify(loadConfig()));
+  mutate(next);
+  const tmp = `${CONFIG_PATH}.tmp.${process.pid}.${Date.now()}`;
+  fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
+  fs.renameSync(tmp, CONFIG_PATH);
+  currentConfig = next;
+  return next;
+}
+
+/**
+ * Auto-bind the first DM sender as the owner of the given org. No-op if the
+ * org already has an owner bound. Used when dmPolicy='owner' and an unbound
+ * sender DMs the agent for the first time.
+ *
+ * "Bound" is now derived from `owner.member_id` being non-empty — there is
+ * no separate `bound` flag in the schema.
+ */
+export function bindOwner(orgSlug, memberId, displayName) {
+  if (!orgSlug || !memberId) return null;
+  return updateConfig((cfg) => {
+    const org = cfg.orgs?.[orgSlug];
+    if (!org) return;
+    if (org.owner?.member_id) return;
+    org.owner = {
+      member_id: memberId,
+      name: displayName || '',
+    };
+  });
+}
+
+// =============================================================================
+// Hot-reload watcher
+// =============================================================================
+
 export function watchConfig(onChange) {
   let debounce = null;
   let watcher;
@@ -112,9 +237,6 @@ export function watchConfig(onChange) {
       }, 100);
     });
   } catch (err) {
-    // File may not exist yet (e.g. before post-install). The bridge can
-    // still run on DEFAULT_CONFIG; we just skip hot-reload until the
-    // operator creates the file and restarts the service.
     console.warn(`[config] cannot watch ${CONFIG_PATH}: ${err.message} — hot reload disabled`);
     return () => {};
   }
