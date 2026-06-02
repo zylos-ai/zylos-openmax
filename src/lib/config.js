@@ -70,26 +70,33 @@ export const DEFAULT_CONFIG = {
   // Multi-org map. Empty by default — operator fills in (or post-install
   // bootstraps a placeholder org block). At runtime, comm-bridge opens one
   // WebSocket per enabled org.
+  //
+  // The map key (e.g. 'default', 'team-alpha') is a human-readable slug
+  // chosen by the operator. The COCO org UUID lives in `org_id`.
+  //
+  // Per-org block:
+  //   - `self`   : agent's own member identity within THIS org
+  //                (member_id is per-org; the global agent identity is at
+  //                top-level `agent.{identity_id, api_key}`).
+  //   - `owner`  : the bound human owner for this org (set on first DM
+  //                under dmPolicy=owner). An empty `owner.member_id`
+  //                means "not yet bound" — the next sender auto-binds.
+  //   - `access` : lark-style access policy.
   orgs: {
     // 'default': {
-    //   enabled:      true,
-    //   org_id:       '',          // COCO org UUID
-    //   org_name:     '',          // display only
-    //   member_id:    '',          // agent's member id within this org
-    //   display_name: 'Zylos',
-    //   owner: {
-    //     bound:     false,
-    //     member_id: '',
-    //     name:      '',
-    //   },
+    //   enabled:  true,
+    //   org_id:   '',                       // COCO org UUID
+    //   org_name: '',                       // display only
+    //   self:  { member_id: '', name: 'Zylos' },  // agent's member id + display name in this org
+    //   owner: { member_id: '', name: '' },        // bound human owner (empty = unbound)
     //   access: {
-    //     dmPolicy:    'owner',          // 'open' | 'allowlist' | 'owner'
+    //     dmPolicy:    'owner',             // 'open' | 'allowlist' | 'owner'
     //     dmAllowFrom: [],
-    //     groupPolicy: 'allowlist',      // 'open' | 'allowlist' | 'disabled'
+    //     groupPolicy: 'allowlist',         // 'open' | 'allowlist' | 'disabled'
     //     groups: {
     //       // '<conv-uuid>': {
     //       //   name:      '',
-    //       //   mode:      'mention',   // 'mention' | 'smart'
+    //       //   mode:      'mention',      // 'mention' | 'smart'
     //       //   allowFrom: ['*'],
     //       // }
     //     },
@@ -196,15 +203,17 @@ export function updateConfig(mutate) {
  * Auto-bind the first DM sender as the owner of the given org. No-op if the
  * org already has an owner bound. Used when dmPolicy='owner' and an unbound
  * sender DMs the agent for the first time.
+ *
+ * "Bound" is now derived from `owner.member_id` being non-empty — there is
+ * no separate `bound` flag in the schema.
  */
 export function bindOwner(orgSlug, memberId, displayName) {
   if (!orgSlug || !memberId) return null;
   return updateConfig((cfg) => {
     const org = cfg.orgs?.[orgSlug];
     if (!org) return;
-    if (org.owner?.bound) return;
+    if (org.owner?.member_id) return;
     org.owner = {
-      bound: true,
       member_id: memberId,
       name: displayName || '',
     };

@@ -20,9 +20,9 @@
  *                                                 settings into `orgs.default`
  *
  * After migration the operator must:
- *   1. Verify `orgs.default.member_id` (was not in v0.3 schema — set to
- *      the agent's member_id within this org, or run a /me probe).
- *   2. Configure `orgs.default.access` (dmPolicy / groupPolicy / groups{}).
+ *   1. Verify `orgs.<slug>.self.member_id` (was not in v0.3 schema — set
+ *      to the agent's member_id within this org, or run a /me probe).
+ *   2. Configure `orgs.<slug>.access` (dmPolicy / groupPolicy / groups{}).
  *
  * The hook is idempotent: re-running on an already-migrated config is a no-op.
  */
@@ -99,9 +99,8 @@ if (config.org_id) {
       enabled: true,
       org_id: config.org_id,
       org_name: '',
-      member_id: '',                       // ← operator must fill in
-      display_name: 'Zylos',
-      owner: { bound: false, member_id: '', name: '' },
+      self:  { member_id: '', name: 'Zylos' },   // ← operator must fill in member_id
+      owner: { member_id: '', name: '' },        // empty member_id = unbound
       access: {
         dmPolicy:    'owner',
         dmAllowFrom: [],
@@ -112,6 +111,43 @@ if (config.org_id) {
   }
   legacyKeysSeen.push('org_id');
   delete config.org_id;
+}
+
+// ── per-org schema: flat member_id/display_name → self.{member_id,name},
+//                   owner.bound flag → derived from owner.member_id ─────────
+//
+// Earlier v0.4 configs (pre-self refactor) stored the agent's per-org
+// identity flat on the org block and tracked owner-binding via a separate
+// `bound` boolean. The current schema groups identity under `self` and
+// derives bound state from `owner.member_id` being non-empty.
+for (const [slug, org] of Object.entries(config.orgs)) {
+  if (!org || typeof org !== 'object') continue;
+  let touched = false;
+
+  // member_id + display_name → self.{member_id, name}
+  if (org.member_id !== undefined || org.display_name !== undefined) {
+    const memberId = org.member_id || org.self?.member_id || '';
+    const name     = org.display_name || org.self?.name || 'Zylos';
+    org.self = { member_id: memberId, name };
+    delete org.member_id;
+    delete org.display_name;
+    touched = true;
+  } else if (!org.self) {
+    org.self = { member_id: '', name: 'Zylos' };
+    touched = true;
+  }
+
+  // owner.bound → strip (state now derived from owner.member_id)
+  if (org.owner && org.owner.bound !== undefined) {
+    delete org.owner.bound;
+    touched = true;
+  }
+  if (!org.owner) {
+    org.owner = { member_id: '', name: '' };
+    touched = true;
+  }
+
+  if (touched) legacyKeysSeen.push(`orgs.${slug}: member_id/display_name → self.*, owner.bound dropped`);
 }
 
 // ── drop workspace_id entirely ──────────────────────────────────────────────
@@ -144,15 +180,17 @@ if (legacyKeysSeen.length > 0) {
   for (const k of legacyKeysSeen) console.log(`    - ${k}`);
   console.log('');
   console.log('  ⚠ ACTION REQUIRED — edit ' + CONFIG_PATH);
-  console.log('    1. orgs.default.member_id — set to this agent\'s member id within the org');
+  console.log('    1. orgs.<slug>.self.member_id — set to this agent\'s member id within each org');
   console.log('       (look it up via cws-core /me, or call POST /orgs/{org_id}/members/me).');
-  console.log('    2. orgs.default.access — configure the policy:');
+  console.log('    2. orgs.<slug>.access — configure the policy:');
   console.log('       - dmPolicy: "open" | "allowlist" | "owner"');
   console.log('       - dmAllowFrom: [] (used when dmPolicy=allowlist)');
   console.log('       - groupPolicy: "open" | "allowlist" | "disabled"');
   console.log('       - groups: { "<conv-uuid>": { name, mode: "mention"|"smart", allowFrom: ["*"] } }');
   console.log('    3. To add MORE orgs, copy `orgs.default` to `orgs.<slug>`, fill in org_id and');
-  console.log('       member_id for that org. Each enabled org gets its own WebSocket connection.');
+  console.log('       self.member_id for that org. Each enabled org gets its own WebSocket connection.');
+  console.log('    4. orgs.<slug>.owner — set on first DM under dmPolicy=owner (auto-bind);');
+  console.log('       empty owner.member_id == unbound.');
   console.log('');
   console.log('  Service must be restarted after editing:  pm2 restart zylos-coco-workspace');
 } else {

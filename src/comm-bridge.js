@@ -123,8 +123,10 @@ function extractMentions(msg) {
  *                              — pass + caller should auto-bind owner
  */
 function shouldHandleMessage(msg, conv, orgConfig) {
+  const selfMemberId = orgConfig.self?.member_id;
+
   // Skip self-echo: agent's own messages within this org.
-  if (msg.sender_id && msg.sender_id === orgConfig.member_id) {
+  if (msg.sender_id && selfMemberId && msg.sender_id === selfMemberId) {
     return { handle: false, reason: 'self-echo' };
   }
 
@@ -141,9 +143,9 @@ function shouldHandleMessage(msg, conv, orgConfig) {
       if (list.includes(String(senderId))) return { handle: true, reason: 'dm:allowlist' };
       return { handle: false, reason: `dm:allowlist (sender ${senderId} not listed)` };
     }
-    // policy === 'owner'
+    // policy === 'owner' — bound state is derived from owner.member_id
     const owner = orgConfig.owner || {};
-    if (!owner.bound) {
+    if (!owner.member_id) {
       // First DM ever for this org → auto-bind sender as owner and accept.
       return {
         handle: true,
@@ -172,7 +174,7 @@ function shouldHandleMessage(msg, conv, orgConfig) {
   const mode = groupCfg?.mode || 'mention';
   if (mode === 'mention') {
     const mentions = extractMentions(msg);
-    if (!mentions.includes(orgConfig.member_id)) {
+    if (!selfMemberId || !mentions.includes(selfMemberId)) {
       return { handle: false, reason: 'group:mention (not @-ed)' };
     }
   }
@@ -215,7 +217,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       log(`bind owner [${orgConfig.slug}] member_id=${memberId} name="${displayName}"`);
       bindOwner(orgConfig.slug, memberId, displayName);
       // Mutate the captured orgConfig so subsequent decisions see the new owner.
-      orgConfig.owner = { bound: true, member_id: memberId, name: displayName || '' };
+      orgConfig.owner = { member_id: memberId, name: displayName || '' };
     }
 
     if (msg.seq && msg.seq > (sessionRef.last_seq || 0)) {

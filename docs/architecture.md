@@ -184,11 +184,11 @@ cws-comm WebSocket 连接（per-org）
     │   ├─ 解析 conversationId, senderId, content, seq
     │   ├─ 查询 Conversation 类型 (dm/group/thread)
     │   ├─ 本地 access policy 过滤（与 lark 同款，per-org）：
-    │   │   ├─ self-echo：sender == orgs[slug].member_id → skip
+    │   │   ├─ self-echo：sender == orgs[slug].self.member_id → skip
     │   │   ├─ DM：
     │   │   │   ├─ dmPolicy=open      → accept
     │   │   │   ├─ dmPolicy=allowlist → 查 dmAllowFrom
-    │   │   │   └─ dmPolicy=owner     → 未 bound 则自动绑定首发 sender；
+    │   │   │   └─ dmPolicy=owner     → owner.member_id 为空则自动绑定首发 sender；
     │   │   │                          否则只接 owner.member_id
     │   │   └─ Group/Thread：
     │   │       ├─ groupPolicy=disabled → drop

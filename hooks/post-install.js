@@ -172,9 +172,8 @@ if (isInteractive) {
         enabled: true,
         org_id: orgId,
         org_name: orgName,
-        member_id: memberId || '',
-        display_name: displayName,
-        owner: { bound: false, member_id: '', name: '' },
+        self:  { member_id: memberId || '', name: displayName },
+        owner: { member_id: '', name: '' },
         access: {
           dmPolicy:    'owner',
           dmAllowFrom: [],
@@ -184,7 +183,7 @@ if (isInteractive) {
       };
       console.log(`  ✓ org "${slug}" added to config.json`);
       if (!memberId) {
-        console.log(`  ! member_id left blank — service will reject self-echo correctly only after you fill this in`);
+        console.log(`  ! self.member_id left blank — service will reject self-echo correctly only after you fill this in`);
       }
     } else {
       console.log('  ! org_id left empty — no WebSocket will start until you add an org block');
@@ -211,7 +210,7 @@ if (isInteractive) {
   console.log('       → save api_key to COCO_AUTH_TOKEN in ~/zylos/.env');
   console.log('       → save identity_id to config.json agent.identity_id');
   console.log('  2. Add at least one org block under `orgs.<slug>` in config.json:');
-  console.log('       { enabled, org_id, member_id, display_name, owner, access }');
+  console.log('       { enabled, org_id, org_name, self:{member_id,name}, owner:{member_id,name}, access }');
   console.log('     See defaults / template comments in src/lib/config.js DEFAULT_CONFIG.');
   console.log(`     Config path: ${CONFIG_PATH}`);
 }
