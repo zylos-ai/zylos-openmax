@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-06-02
+
+### Fixed
+- **BYO agent prompt never fires under `zylos add`.** The configure hook
+  (`hooks/configure.js`) used to delegate to `hooks/post-install.js` via
+  dynamic import. Because configure runs *before* the TTY-interactive
+  post-install pass, post-install detected `process.stdin.isTTY === false`
+  in that nested call and went down the env-driven non-interactive branch
+  — which auto-registered the agent. By the time the real (TTY-interactive)
+  post-install ran, `config.agent.api_key` was already set, so the idempotency
+  guard short-circuited Step 2 and the v0.3.2 BYO prompt was never asked.
+- The fix narrows `configure.js` to a single responsibility: read the stdin
+  JSON, persist `COCO_BFF_URL` / `COCO_WS_URL` into `config.server.*`, exit.
+  It no longer registers the agent, seeds orgs, or imports post-install.
+  `zylos add`'s subsequent post-install invocation then runs in TTY mode
+  with `config.server.*` pre-filled as defaults and prompts BYO + org_ids
+  as designed in v0.3.2.
+
+### Migration
+- If you upgraded to v0.3.2 and the auto-register fired against your will,
+  your `~/zylos/components/coco-workspace/config.json` already holds the
+  unintended `agent.identity_id` + `api_key`. Two ways to recover:
+  1. Delete config.json and re-run `zylos add coco-workspace`. The BYO
+     prompt will fire correctly under v0.3.3+.
+  2. Manually replace `config.agent.{identity_id, api_key}` with the values
+     from your pre-provisioned agent, then set
+     `orgs.<slug>.self.member_id` to the corresponding member_id.
+
 ## [0.3.2] - 2026-06-02
 
 ### Added
