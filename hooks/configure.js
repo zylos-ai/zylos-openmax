@@ -8,9 +8,13 @@
  *
  * Expected shape (v0.3 — register-agent contract aligned with cws-core):
  *   {
- *     "COCO_BFF_URL":  "https://cws-int.coco.xyz",
- *     "COCO_WS_URL":   "wss://cws-int.coco.xyz/ws",    // optional
- *     "COCO_ORG_IDS":  "uuid1,uuid2"                    // optional
+ *     "COCO_BFF_URL":     "https://cws-int.coco.xyz",
+ *     "COCO_WS_URL":      "wss://cws-int.coco.xyz/ws",    // optional
+ *     "COCO_ORG_IDS":     "uuid1,uuid2",                   // optional
+ *     // BYO-agent (all three or none):
+ *     "COCO_IDENTITY_ID": "...",                           // optional
+ *     "COCO_API_KEY":     "cwsk_...",                      // optional
+ *     "COCO_MEMBER_ID":   "..."                            // optional
  *   }
  *
  * Strategy: copy the values into process.env, then delegate to

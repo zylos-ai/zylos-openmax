@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-06-02
+
+### Added
+- **Bring-your-own (BYO) agent identity at install.** Step 2 of the install
+  flow now asks three fields up front — `identity_id`, `api_key`,
+  `member_id`. If all three are non-empty the install uses them verbatim
+  and skips `POST /auth/register/agent` entirely. Any blank field falls
+  back to the existing auto-register flow.
+  - **Why:** when an agent was pre-provisioned elsewhere (e.g. via
+    `POST /api/v1/platform-agents` from an admin UI), the operator already
+    has these three IDs. Forcing a re-register would burn a second identity.
+  - The provided `member_id` is applied to the **first** org_id entered in
+    the loop (`orgs[first].self.member_id`), since a BYO member_id is by
+    definition tied to one specific org. Subsequent orgs auto-fill their
+    member_id from JWT claims at runtime as before.
+  - Non-interactive (env-driven) path picks up `COCO_IDENTITY_ID`,
+    `COCO_API_KEY`, `COCO_MEMBER_ID` with the same all-three-or-none gate.
+  - Idempotency preserved: an existing `config.agent.api_key` still
+    short-circuits the whole step.
+
+### Changed
+- `SKILL.md` `config.optional` adds the three BYO env vars (api_key marked
+  `sensitive: true`).
+
 ## [0.3.1] - 2026-06-02
 
 ### Added
