@@ -40,6 +40,11 @@ const CHANNEL = 'coco-workspace';
 const DEFAULT_CONTEXT_MESSAGES = 5;
 const DEFAULT_DEDUP_TTL_MS     = 5 * 60 * 1000;   // 300_000
 
+// Hardcoded WS operational defaults. `config.server.{reconnect_max_delay,
+// heartbeat_interval}` may override either; if absent, these apply.
+const DEFAULT_WS_RECONNECT_MAX_MS = 30 * 1000;    // 30_000
+const DEFAULT_WS_HEARTBEAT_MS     = 30 * 1000;    // 30_000
+
 const C4_RECEIVE = path.join(
   process.env.HOME || '',
   'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js',
@@ -424,8 +429,8 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     },
     deviceId:            config.agent?.device_id,
     clientVersion:       config.agent?.app_version,
-    reconnectMaxMs:      config.server?.reconnect_max_delay,
-    heartbeatIntervalMs: config.server?.heartbeat_interval,
+    reconnectMaxMs:      config.server?.reconnect_max_delay ?? DEFAULT_WS_RECONNECT_MAX_MS,
+    heartbeatIntervalMs: config.server?.heartbeat_interval  ?? DEFAULT_WS_HEARTBEAT_MS,
 
     onOpen: () => {
       log(`[${orgConfig.slug}] ws open (org=${orgConfig.org_id})`);

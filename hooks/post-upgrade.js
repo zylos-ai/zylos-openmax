@@ -6,12 +6,13 @@
  * Handles the v0.3 → v0.4 (multi-org) schema migration:
  *   - top-level `workspace_id`                  → DROPPED
  *   - top-level `org_id`                        → orgs.default.org_id
- *   - top-level `device_id` / `client_id`
- *     / `app_version`                           → agent.*
+ *   - top-level `device_id` / `app_version`     → agent.*
+ *   - top-level `client_id` (any location)      → DROPPED (dead field)
  *   - top-level `comm.*`                        → server.* (subset)
  *       comm.core_url   → server.bff_url
  *       comm.ws_url     → server.ws_url
- *       comm.reconnect_max_delay / heartbeat_interval / platform → server.*
+ *       comm.reconnect_max_delay / heartbeat_interval → server.*
+ *       comm.platform                           → DROPPED (dead field)
  *       comm.kb_url / comm.as_url               → DROPPED (cws-core is the
  *                                                  gateway; agent does not
  *                                                  talk to kb/as directly)
@@ -60,7 +61,8 @@ if (config.comm) {
     ws_url:  m.ws_url,
     reconnect_max_delay: m.reconnect_max_delay,
     heartbeat_interval:  m.heartbeat_interval,
-    platform: m.platform,
+    // m.platform intentionally not migrated — `server.platform` was never
+    // read by runtime code; it's a dead field.
   };
   for (const [k, v] of Object.entries(map)) {
     if (v !== undefined && config.server[k] === undefined) config.server[k] = v;
@@ -68,8 +70,17 @@ if (config.comm) {
   if (m.kb_url !== undefined || m.as_url !== undefined) {
     legacyKeysSeen.push('comm.kb_url / comm.as_url (dropped — cws-core is the gateway)');
   }
+  if (m.platform !== undefined) {
+    legacyKeysSeen.push('comm.platform (dropped — never read by runtime)');
+  }
   legacyKeysSeen.push('comm.* → server.* (kb/as dropped)');
   delete config.comm;
+}
+
+// Strip server.platform if a previous migration carried it over — it's dead.
+if (config.server && config.server.platform !== undefined) {
+  delete config.server.platform;
+  legacyKeysSeen.push('server.platform (dropped — never read by runtime)');
 }
 
 // Existing v0.4-shape configs that already migrated but kept server.kb_url /
@@ -81,14 +92,26 @@ if (config.server) {
   if (strippedKb) legacyKeysSeen.push('server.kb_url / server.as_url (dropped — unused)');
 }
 
-// ── agent.{device_id, client_id, app_version} ───────────────────────────────
+// ── agent.{device_id, app_version} ──────────────────────────────────────────
+// Hoist legacy top-level fields under `agent.*` (where the runtime now reads).
+// `client_id` used to be hoisted too; the field is dead and is stripped below.
 if (!config.agent) config.agent = {};
-for (const k of ['device_id', 'client_id', 'app_version']) {
+for (const k of ['device_id', 'app_version']) {
   if (config[k] !== undefined) {
     if (config.agent[k] === undefined) config.agent[k] = config[k];
     legacyKeysSeen.push(k);
     delete config[k];
   }
+}
+// Top-level client_id (very old): drop.
+if (config.client_id !== undefined) {
+  delete config.client_id;
+  legacyKeysSeen.push('client_id (top-level dropped — never read by runtime)');
+}
+// agent.client_id (any prior version): drop.
+if (config.agent.client_id !== undefined) {
+  delete config.agent.client_id;
+  legacyKeysSeen.push('agent.client_id (dropped — never read by runtime)');
 }
 
 // ── orgs.default from legacy top-level org_id ───────────────────────────────

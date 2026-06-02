@@ -80,10 +80,6 @@ if (!config.agent.device_id) {
   config.agent.device_id = crypto.randomUUID();
   console.log('  generated agent.device_id', config.agent.device_id);
 }
-if (!config.agent.client_id) {
-  config.agent.client_id = crypto.randomUUID();
-  console.log('  generated agent.client_id', config.agent.client_id);
-}
 if (!config.orgs) config.orgs = {};
 
 async function registerAgent(coreUrl, username, displayName, ticket) {
