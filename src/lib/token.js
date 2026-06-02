@@ -5,44 +5,67 @@
  *
  *   exchange:   POST /auth/agent/token
  *               Authorization: Bearer <api_key>  (cwsk_xxx)
- *               Body: { org_id }
+ *               Body: { org_id? }                 (empty body == identity-only JWT)
  *               → { access_token, access_token_expires_at,
  *                   refresh_token, refresh_token_expires_at }
  *
  *   refresh:    POST /auth/refresh
  *               Authorization: Bearer <access_token>
- *               Body: { refresh_token, org_id }
+ *               Body: { refresh_token, org_id? }
  *               → rotated token pair
  *
  *   wsTicket:   POST /auth/ws-ticket
  *               Authorization: Bearer <access_token>
- *               Body: { org_id }
+ *               Body: { org_id }   (server requires org-scoped JWT)
  *               → { ticket, expires_at }  (30s TTL, one-time)
  *
  * Per-org caching: access_tokens are bound to a specific org_id, so we
- * cache state in a Map keyed by org_id. Disk persistence likewise lives at
- *   runtime/tokens/<org_id>.json
+ * cache state in a Map keyed by org_id (or '' for identity-only). Disk
+ * persistence likewise lives at runtime/tokens/<org_id|_identity>.json.
+ *
+ * Inflight Promise dedup: concurrent callers asking for the same org's JWT
+ * share a single in-flight HTTP request — important on boot when N orgs spin
+ * up at once and again when a CLI fan-outs several calls before the cache
+ * is warm.
+ *
+ * Side-effect on first exchange: when org-scoped JWT comes back, we decode
+ * the `member_id` claim and write it back into `config.orgs[slug].self.member_id`
+ * if that field is empty. This lets interactive install skip asking the
+ * operator for member_id — the agent learns its own identity from cws-core.
  *
  * No dependency on client.js — uses raw fetch to avoid circular imports.
  */
 
 import fs from 'fs';
 import path from 'path';
-import { loadConfig, resolveDefaultOrgId } from './config.js';
+import { loadConfig, resolveDefaultOrgId, updateConfig } from './config.js';
+import { cfAccessHeaders } from './cf-access.js';
 
 const HOME = process.env.HOME || '/tmp';
 const TOKEN_DIR = path.join(HOME, 'zylos/components/coco-workspace/runtime/tokens');
 const REFRESH_MARGIN_MS = 60_000;   // refresh when <60 s remain on access_token
 
+const LOG = '[token]';
+
 // ── per-org in-memory cache ──────────────────────────────────────────────────
 const _stateByOrg = new Map();
 // Each value: { access_token, access_token_expires_at (ms),
-//               refresh_token, refresh_token_expires_at (ms) }
+//               refresh_token, refresh_token_expires_at (ms),
+//               member_id? (decoded from claims) }
+
+// ── inflight Promise dedup (per cache key) ──────────────────────────────────
+const _inflight = new Map();  // key → Promise
+
+function withInflight(key, factory) {
+  if (_inflight.has(key)) return _inflight.get(key);
+  const p = factory().finally(() => _inflight.delete(key));
+  _inflight.set(key, p);
+  return p;
+}
 
 // ── config helpers ────────────────────────────────────────────────────────────
 
 function resolveApiKey() {
-  // Canonical store: config.agent.api_key. No env-var or .env fallback.
   return loadConfig().agent?.api_key || '';
 }
 
@@ -57,15 +80,19 @@ function resolveOrgId(orgId) {
   return resolveDefaultOrgId();
 }
 
-function tokenFile(orgId) {
-  return path.join(TOKEN_DIR, `${orgId}.json`);
+function tokenFile(orgIdOrEmpty) {
+  const safe = orgIdOrEmpty ? orgIdOrEmpty : '_identity';
+  return path.join(TOKEN_DIR, `${safe}.json`);
 }
 
 // ── raw HTTP helper (no auth dependency) ─────────────────────────────────────
 
 async function corePost(endpoint, body, bearerToken) {
   const url = `${resolveCoreUrl()}${endpoint}`;
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = {
+    'Content-Type': 'application/json',
+    ...cfAccessHeaders(),
+  };
   if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
 
   const res = await fetch(url, {
@@ -94,72 +121,128 @@ function toMs(val) {
   return new Date(val).getTime() || 0;
 }
 
+// ── JWT claim decoding (no signature check — for member_id extraction only) ─
+
+function decodeJwtClaims(jwt) {
+  try {
+    const parts = jwt.split('.');
+    if (parts.length !== 3) return null;
+    const payload = Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+    return JSON.parse(payload);
+  } catch {
+    return null;
+  }
+}
+
+function writeBackMemberId(orgId, jwt) {
+  if (!orgId || !jwt) return;
+  const claims = decodeJwtClaims(jwt);
+  const memberId = claims?.member_id || claims?.mid;
+  if (!memberId) return;
+  const cfg = loadConfig();
+  for (const [slug, org] of Object.entries(cfg.orgs || {})) {
+    if (org?.org_id !== orgId) continue;
+    if (org.self?.member_id) return;       // already set, leave it
+    updateConfig((c) => {
+      const o = c.orgs?.[slug];
+      if (!o) return;
+      if (!o.self) o.self = { name: 'Zylos' };
+      if (!o.self.member_id) {
+        o.self.member_id = memberId;
+        console.log(`${LOG} auto-filled orgs.${slug}.self.member_id from JWT claims: ${memberId}`);
+      }
+    });
+    return;
+  }
+}
+
 // ── disk persistence (per-org) ───────────────────────────────────────────────
 
-function readDisk(orgId) {
-  try { return JSON.parse(fs.readFileSync(tokenFile(orgId), 'utf-8')); }
+function readDisk(orgIdOrEmpty) {
+  try { return JSON.parse(fs.readFileSync(tokenFile(orgIdOrEmpty), 'utf-8')); }
   catch { return null; }
 }
 
-function writeDisk(orgId, state) {
+function writeDisk(orgIdOrEmpty, state) {
   try {
     fs.mkdirSync(TOKEN_DIR, { recursive: true });
-    const tmp = `${tokenFile(orgId)}.tmp.${process.pid}.${Date.now()}`;
+    const tmp = `${tokenFile(orgIdOrEmpty)}.tmp.${process.pid}.${Date.now()}`;
     fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-    fs.renameSync(tmp, tokenFile(orgId));
+    fs.renameSync(tmp, tokenFile(orgIdOrEmpty));
   } catch (e) {
-    console.warn(`[token] writeDisk(${orgId}) failed:`, e.message);
+    console.warn(`${LOG} writeDisk(${orgIdOrEmpty || '_identity'}) failed:`, e.message);
   }
 }
 
 // ── public API ────────────────────────────────────────────────────────────────
 
+/**
+ * Exchange api_key for a fresh JWT pair. Pass orgId='' (or omit) for an
+ * identity-only JWT (no org context). Pass a real orgId for an org-scoped
+ * JWT (server validates active membership; 401 if missing).
+ */
 export async function exchange(orgIdArg) {
-  const apiKey = resolveApiKey();
-  if (!apiKey) throw new Error('token.exchange: config.agent.api_key not set');
-  const oid = resolveOrgId(orgIdArg);
-  if (!oid) throw new Error('token.exchange: org_id required (set COCO_ORG_ID or have exactly one enabled org)');
-  const raw = await corePost('/auth/agent/token', { org_id: oid }, apiKey);
-  // cws-core wraps auth responses in D8 envelope: { data: {...}, request_id, server_time }
-  const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
-  const state = {
-    access_token:             d.access_token,
-    access_token_expires_at:  toMs(d.access_token_expires_at),
-    refresh_token:            d.refresh_token,
-    refresh_token_expires_at: toMs(d.refresh_token_expires_at),
-  };
-  _stateByOrg.set(oid, state);
-  writeDisk(oid, state);
-  return state.access_token;
-}
-
-export async function refresh(orgIdArg) {
-  const oid = resolveOrgId(orgIdArg);
-  if (!oid) throw new Error('token.refresh: org_id required');
-  let s = _stateByOrg.get(oid) || readDisk(oid);
-  if (!s?.refresh_token) return exchange(oid);
-  try {
-    const body = { refresh_token: s.refresh_token, org_id: oid };
-    const raw = await corePost('/auth/refresh', body, s.access_token);
+  const oid = orgIdArg || '';                  // '' == identity-only
+  return withInflight(`exchange:${oid}`, async () => {
+    const apiKey = resolveApiKey();
+    if (!apiKey) throw new Error('token.exchange: config.agent.api_key not set');
+    const body = oid ? { org_id: oid } : {};
+    console.log(`${LOG} exchange org=${oid || '(identity-only)'}`);
+    const raw = await corePost('/auth/agent/token', body, apiKey);
     const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
     const state = {
       access_token:             d.access_token,
       access_token_expires_at:  toMs(d.access_token_expires_at),
-      refresh_token:            d.refresh_token ?? s.refresh_token,
-      refresh_token_expires_at: toMs(d.refresh_token_expires_at) || s.refresh_token_expires_at,
+      refresh_token:            d.refresh_token,
+      refresh_token_expires_at: toMs(d.refresh_token_expires_at),
     };
     _stateByOrg.set(oid, state);
     writeDisk(oid, state);
+    if (oid) writeBackMemberId(oid, state.access_token);
+    console.log(`${LOG} exchange ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
     return state.access_token;
-  } catch (err) {
-    console.warn(`[token] refresh(${oid}) failed, re-exchanging with api_key:`, err.message);
-    return exchange(oid);
-  }
+  });
 }
 
+export async function refresh(orgIdArg) {
+  const oid = orgIdArg || '';
+  return withInflight(`refresh:${oid}`, async () => {
+    let s = _stateByOrg.get(oid) || readDisk(oid);
+    if (!s?.refresh_token) return exchange(oid);
+    try {
+      const body = oid ? { refresh_token: s.refresh_token, org_id: oid }
+                       : { refresh_token: s.refresh_token };
+      console.log(`${LOG} refresh org=${oid || '(identity-only)'}`);
+      const raw = await corePost('/auth/refresh', body, s.access_token);
+      const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
+      const state = {
+        access_token:             d.access_token,
+        access_token_expires_at:  toMs(d.access_token_expires_at),
+        refresh_token:            d.refresh_token ?? s.refresh_token,
+        refresh_token_expires_at: toMs(d.refresh_token_expires_at) || s.refresh_token_expires_at,
+      };
+      _stateByOrg.set(oid, state);
+      writeDisk(oid, state);
+      if (oid) writeBackMemberId(oid, state.access_token);
+      console.log(`${LOG} refresh ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
+      return state.access_token;
+    } catch (err) {
+      console.warn(`${LOG} refresh(${oid || '_identity'}) failed, re-exchanging with api_key:`, err.message);
+      return exchange(oid);
+    }
+  });
+}
+
+/**
+ * Return a valid access token for the given org (or identity-only when orgId
+ * is empty). Uses the cache when possible; falls through to refresh/exchange.
+ *
+ * IMPORTANT: callers that need an org-scoped JWT (e.g. before ws-ticket) must
+ * pass a non-empty orgId. Callers that explicitly want identity-only (e.g.
+ * org-create flow) should pass '' or omit.
+ */
 export async function getAccessToken(orgIdArg) {
-  const oid = resolveOrgId(orgIdArg);
-  if (!oid) throw new Error('token.getAccessToken: org_id required (set COCO_ORG_ID or have exactly one enabled org)');
+  const oid = orgIdArg || '';
   let s = _stateByOrg.get(oid);
   if (!s) {
     s = readDisk(oid);
@@ -175,11 +258,13 @@ export async function getAccessToken(orgIdArg) {
 
 export async function getWsTicket(orgIdArg) {
   const oid = resolveOrgId(orgIdArg);
-  if (!oid) throw new Error('token.getWsTicket: org_id required');
+  if (!oid) throw new Error('token.getWsTicket: org_id required (no default org configured)');
   const accessToken = await getAccessToken(oid);
+  console.log(`${LOG} ws-ticket org=${oid}`);
   const raw = await corePost('/auth/ws-ticket', { org_id: oid }, accessToken);
   const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
   if (!d.ticket) throw new Error('token.getWsTicket: server returned no ticket');
+  console.log(`${LOG} ws-ticket ok org=${oid}`);
   return d.ticket;
 }
 
@@ -188,9 +273,9 @@ export async function getWsTicket(orgIdArg) {
  * If no orgId is passed, clears the entire cache.
  */
 export function invalidate(orgIdArg) {
-  if (!orgIdArg) {
+  if (orgIdArg === undefined) {
     _stateByOrg.clear();
     return;
   }
-  _stateByOrg.delete(orgIdArg);
+  _stateByOrg.delete(orgIdArg || '');
 }

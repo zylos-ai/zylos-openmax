@@ -27,8 +27,8 @@ import { loadConfig, watchConfig, enabledOrgs, bindOwner } from './lib/config.js
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint } from './lib/message.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
-import { get, post, apiPath } from './lib/client.js';
-import { getWsTicket, invalidate as invalidateToken } from './lib/token.js';
+import { getForOrg, postForOrg, apiPath } from './lib/client.js';
+import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import { loadOrgSession, saveOrgSession } from './lib/session.js';
 
 const LOG_PREFIX = '[comm-bridge]';
@@ -64,10 +64,10 @@ const conversationCache = new Map();
 // REST helpers
 // =============================================================================
 
-async function fetchConversation(conversationId) {
+async function fetchConversation(orgId, conversationId) {
   if (conversationCache.has(conversationId)) return conversationCache.get(conversationId);
   try {
-    const conv = await get(apiPath(`/conversations/${conversationId}`));
+    const conv = await getForOrg(orgId, apiPath(`/conversations/${conversationId}`));
     conversationCache.set(conversationId, conv);
     return conv;
   } catch (e) {
@@ -76,9 +76,9 @@ async function fetchConversation(conversationId) {
   }
 }
 
-async function fetchRecentMessages(conversationId, beforeSeq, limit) {
+async function fetchRecentMessages(orgId, conversationId, beforeSeq, limit) {
   try {
-    const r = await get(apiPath(`/conversations/${conversationId}/messages`), {
+    const r = await getForOrg(orgId, apiPath(`/conversations/${conversationId}/messages`), {
       before_seq: beforeSeq,
       limit:      limit || 10,
     });
@@ -89,9 +89,9 @@ async function fetchRecentMessages(conversationId, beforeSeq, limit) {
   }
 }
 
-async function fetchMessageDetail(conversationId, messageId) {
+async function fetchMessageDetail(orgId, conversationId, messageId) {
   try {
-    return await get(apiPath(`/conversations/${conversationId}/messages/${messageId}`));
+    return await getForOrg(orgId, apiPath(`/conversations/${conversationId}/messages/${messageId}`));
   } catch (e) {
     warn(`fetchMessageDetail conv=${conversationId} msg=${messageId} failed:`, e.message);
     return null;
@@ -209,9 +209,9 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     if (!notification?.id || !notification.conversation_id) return;
     if (dedupe(notification.id)) return;
 
-    const detail = await fetchMessageDetail(notification.conversation_id, notification.id);
+    const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
     const msg = { ...notification, ...(detail || {}) };
-    const conv = await fetchConversation(msg.conversation_id);
+    const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);
     if (conv) conv.id = conv.id || msg.conversation_id;
 
     const decision = shouldHandleMessage(msg, conv || {}, orgConfig);
@@ -237,6 +237,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     const convType = conv?.type || (msg.thread_id ? 'thread' : 'dm');
     if (convType !== 'dm') {
       const ctx = await fetchRecentMessages(
+        orgConfig.org_id,
         msg.conversation_id,
         msg.seq,
         config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES,
@@ -371,7 +372,7 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
     let hasMore = true;
 
     while (hasMore && totalSynced < SYNC_MAX_EVENTS) {
-      const res = await post(apiPath('/sync'), {
+      const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
         since_seq: sinceSeq,
         device_id: config.agent?.device_id || '',
         limit:     SYNC_PAGE_SIZE,
@@ -412,6 +413,20 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
 const wsClients = [];
 let liveOrgCount = 0;
 
+async function bootstrapOrgToken(orgConfig) {
+  // Mint a JWT eagerly so token.exchange's member_id write-back lands before
+  // the first WS open (and thus before the first inbound message hits the
+  // self-echo / @-mention filter). Errors here are non-fatal — the WS
+  // urlProvider will retry through its own backoff loop.
+  log(`[bootstrap] org=${orgConfig.slug} (${orgConfig.org_id}) acquiring JWT…`);
+  try {
+    await getAccessToken(orgConfig.org_id);
+    log(`[bootstrap] org=${orgConfig.slug} JWT ready`);
+  } catch (err) {
+    warn(`[bootstrap] org=${orgConfig.slug} JWT acquire failed: ${err.message} — WS will retry`);
+  }
+}
+
 function startOrgWs(orgConfig, wsBaseUrl) {
   const session = loadOrgSession(orgConfig.slug) || {};
   const sessionRef = { last_seq: session.last_seq || 0 };
@@ -424,7 +439,9 @@ function startOrgWs(orgConfig, wsBaseUrl) {
 
   const ws = new WsClient({
     urlProvider: async () => {
+      log(`[ticket] org=${orgConfig.slug} requesting ws-ticket`);
       const ticket = await getWsTicket(orgConfig.org_id);
+      log(`[ticket] org=${orgConfig.slug} got ws-ticket, connecting…`);
       return `${wsBaseUrl}?ticket=${encodeURIComponent(ticket)}`;
     },
     deviceId:            config.agent?.device_id,
@@ -433,7 +450,7 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     heartbeatIntervalMs: config.server?.heartbeat_interval  ?? DEFAULT_WS_HEARTBEAT_MS,
 
     onOpen: () => {
-      log(`[${orgConfig.slug}] ws open (org=${orgConfig.org_id})`);
+      log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
       // After WS open, pull anything missed since the last persisted seq.
       // No-op on first-ever connect (last_seq=0). Errors are caught inside
       // syncMissedEvents — they don't tear down the connection.
@@ -502,9 +519,15 @@ if (orgs.length === 0) {
   setInterval(() => {}, 1 << 30).unref?.();
 } else {
   log(`booting WS pool: ${orgs.length} org(s) enabled`);
-  for (const orgConfig of orgs) {
-    startOrgWs(orgConfig, wsBaseUrl);
-  }
+  // Pre-mint each org's JWT in parallel so member_id write-back happens
+  // before the WS handler hits the first message. Each WS still has its own
+  // urlProvider retry loop, so a failed bootstrap doesn't prevent startup.
+  (async () => {
+    await Promise.allSettled(orgs.map(bootstrapOrgToken));
+    for (const orgConfig of orgs) {
+      startOrgWs(orgConfig, wsBaseUrl);
+    }
+  })();
 }
 
 watchConfig((next) => {

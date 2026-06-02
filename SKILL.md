@@ -32,15 +32,11 @@ config:
   required:
     - name: COCO_BFF_URL
       description: cws-core HTTP base URL (e.g. http://cws-core:8080)
-    - name: COCO_AGENT_TICKET
-      description: One-time registration ticket from cws-core admin
-      sensitive: true
-    - name: COCO_AGENT_NAME
-      description: Agent display name (e.g. zylos-local)
-    - name: COCO_ORG_ID
-      description: COCO org UUID this agent serves
-    - name: COCO_SELF_MEMBER_ID
-      description: Agent's member_id within that org
+  optional:
+    - name: COCO_WS_URL
+      description: cws-comm WebSocket URL (derived from BFF if omitted)
+    - name: COCO_ORG_IDS
+      description: Comma-separated COCO org UUIDs this agent should serve (can be added later by editing config.json)
 
 dependencies:
   - comm-bridge

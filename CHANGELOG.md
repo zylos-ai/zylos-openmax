@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-02
+
+### Breaking
+- **register-agent contract aligned with current cws-core.** Previously the
+  install hook sent `{ username, display_name }` to
+  `POST /auth/register/agent`; cws-core now rejects those fields (HTTP 422)
+  and the body must be empty `{}`. Old install transcripts have been failing
+  since the cws-core auth refactor; this MR fixes the call.
+- **Install prompt surface trimmed to the bare minimum.** Interactive install
+  now asks only for `bff_url`, `ws_url`, then one or more `org_id`s in a
+  loop. `username`, `display_name`, `member_id`, and per-org access policy
+  are no longer asked at install time. `member_id` is auto-filled from JWT
+  claims on first `/auth/agent/token` exchange; access policy defaults to
+  `dmPolicy=owner` + `groupPolicy=allowlist` and can be edited in
+  config.json afterwards.
+- **`config.required` schema for `zylos add`** trimmed from five fields to
+  one required (`COCO_BFF_URL`) plus two optional (`COCO_WS_URL`,
+  `COCO_ORG_IDS` comma-separated). The legacy env vars
+  (`COCO_AGENT_TICKET`, `COCO_AGENT_NAME`, `COCO_ORG_ID`,
+  `COCO_SELF_MEMBER_ID`) are no longer read.
+
+### Added
+- **Multi-org JWT routing across the entire REST surface.** Previously
+  `client.js` resolved the bearer token via `getAccessToken()` with no
+  `orgId`, so multi-org agents fell back to the single-enabled-org or
+  `COCO_ORG_ID` env var heuristic and could end up calling cws-core with the
+  wrong org's JWT. New `getForOrg / postForOrg / patchForOrg / putForOrg /
+  delForOrg` variants thread `orgId` straight through `doRequest` into
+  `getAccessToken(orgId)`. `kbClient(orgId)` and `asClient(orgId)` also pass
+  the org down, so every call from the per-org WS handlers, the CLIs, and
+  the comm-bridge sync sweep uses that org's cached JWT.
+- **JWT claim auto-fill for `self.member_id`.** When `token.exchange` returns
+  an org-scoped JWT, the `member_id` claim is decoded and written back into
+  `config.orgs[slug].self.member_id` if that field was empty. This lets
+  interactive install stay one-shot and lets first-time agents respond to
+  `@mentions` from the very first message after their JWT is minted.
+- **Inflight Promise dedup** in `token.js` (per cache key: exchange / refresh
+  / per-org). Concurrent boot of N orgs no longer fans out N parallel
+  `/auth/agent/token` calls; the second-through-Nth caller awaits the
+  first's Promise.
+- **Identity-only JWT support** (`/auth/agent/token` body `{}`) — needed
+  before an agent is in any org, e.g. to call `POST /api/v1/organizations`.
+  `exchange('')` and `getAccessToken('')` mint and cache an identity-only
+  JWT at `runtime/tokens/_identity.json`.
+- **Bootstrap pre-mint.** `comm-bridge.js` now eagerly calls
+  `getAccessToken(org_id)` for every enabled org before the first WS
+  handshake, so `self.member_id` write-back lands before any inbound message
+  hits the self-echo / @-mention filter. Failures are non-fatal — the WS
+  urlProvider retries through the usual backoff loop.
+- **Structured bootstrap logs** with `[install] / [bootstrap] / [token] /
+  [ticket] / [ws]` prefixes; visible via `pm2 logs zylos-coco-workspace`.
+
+### Changed
+- Registration failure during install is now a **hard failure** (exit 1,
+  config.json not written). Old behavior was to print a warning and let the
+  operator retry by editing config.json — that left half-bootstrapped
+  configs on disk.
+- `token.invalidate()` distinguishes "clear all" (no arg) from "clear this
+  org" (explicit org id, `''` for identity-only).
+
+### Temporary — remove before production
+- **`src/lib/cf-access.js`** hard-codes the `CF-Access-Client-Id` /
+  `CF-Access-Client-Secret` service-token pair for `cws-int.coco.xyz`. Every
+  outbound REST call (`client.js`, `token.js`, install hook fetch) and the
+  WebSocket handshake (`ws.js`) spread `cfAccessHeaders()`. Production
+  release MUST delete `cf-access.js` and the four import/spread sites it's
+  referenced from.
+
 ## [0.2.5] - 2026-06-02
 
 ### Added

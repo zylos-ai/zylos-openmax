@@ -33,6 +33,7 @@
  */
 
 import WebSocket from 'ws';
+import { cfAccessHeaders } from './cf-access.js';
 
 const RECONNECT_BASE_MS = 1000;
 const FRAME_GRACE_MS = 5000;
@@ -127,7 +128,7 @@ export class WsClient {
       return;
     }
 
-    const headers = {};
+    const headers = { ...cfAccessHeaders() };
     if (this.token)         headers.Authorization      = `Bearer ${this.token}`;
     if (this.workspaceId)   headers['X-Workspace-Id']  = this.workspaceId;
     if (this.deviceId)      headers['X-Device-Id']     = this.deviceId;
