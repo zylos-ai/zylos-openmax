@@ -111,6 +111,29 @@ function buildUrl(baseUrl, path, query) {
 //  Generic request impl (baseUrl + headers injected by caller)
 // ============================================================================
 
+// Verbose RPC logging — when COCO_RPC_LOG !== '0', every REST call dumps
+// method + url + request body + response status + response body to stdout.
+// Tagged `[rpc]` for grep-friendliness in pm2 logs. Default ON (test env).
+function rpcLogEnabled() {
+  return process.env.COCO_RPC_LOG !== '0';
+}
+
+function logRpcRequest(method, url, body, orgId) {
+  if (!rpcLogEnabled()) return;
+  const tag = orgId ? `org=${orgId}` : '';
+  const bodyStr = body === undefined ? '(no body)' : JSON.stringify(body);
+  console.log(`[rpc] → ${method} ${url} ${tag} req: ${bodyStr}`);
+}
+
+function logRpcResponse(method, url, status, data) {
+  if (!rpcLogEnabled()) return;
+  let bodyStr;
+  try { bodyStr = typeof data === 'string' ? data : JSON.stringify(data); }
+  catch { bodyStr = String(data); }
+  const level = status >= 400 ? 'warn' : 'log';
+  console[level](`[rpc] ← ${method} ${url} resp ${status}: ${bodyStr}`);
+}
+
 async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId } = {}) {
   const url = buildUrl(baseUrl, path, query);
   const headers = {
@@ -122,6 +145,8 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
   if (token) headers.Authorization = `Bearer ${token}`;
   if (body !== undefined) headers['Content-Type'] = 'application/json';
 
+  logRpcRequest(method, url, body, orgId);
+
   const res = await fetch(url, {
     method,
     headers,
@@ -131,6 +156,8 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
   const text = await res.text();
   let data;
   try { data = JSON.parse(text); } catch { data = text; }
+
+  logRpcResponse(method, url, res.status, data);
 
   if (!res.ok) {
     const message =

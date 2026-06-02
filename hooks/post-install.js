@@ -115,25 +115,24 @@ async function registerAgent(coreUrl) {
 
 function seedOrg(orgId) {
   if (!orgId) return;
-  // Skip if any existing org block already holds this org_id.
   for (const existing of Object.values(config.orgs)) {
     if (existing?.org_id === orgId) {
       console.log(`[install] org ${orgId} already in config — skipping`);
       return;
     }
   }
-  // Generate a stable slug — we use a short prefix of the org_id so the key
-  // is deterministic but human-distinguishable from other entries.
   const slug = `org-${orgId.slice(0, 8)}`;
+  // Full default block. member_id auto-fills from JWT claims at runtime;
+  // owner auto-binds on first DM under dmPolicy=owner. Operator can edit
+  // dmPolicy / groupPolicy / groups after install.
   config.orgs[slug] = {
     enabled: true,
-    org_id: orgId,
+    org_id:   orgId,
     org_name: '',
-    self:  { member_id: '', name: 'Zylos' },     // member_id auto-filled at runtime
     owner: { member_id: '', name: '' },
+    self:  { member_id: '', name: '' },
     access: {
       dmPolicy:    'owner',
-      dmAllowFrom: [],
       groupPolicy: 'allowlist',
       groups:      {},
     },

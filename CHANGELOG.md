@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-02
+
+### Added
+- **Verbose RPC logging.** `client.js` and `token.js` now print every
+  outbound REST call as `[rpc] → METHOD url req: {...}` /
+  `[rpc] ← METHOD url resp <status>: {...}`. Enabled by default in the test
+  env; set `COCO_RPC_LOG=0` to silence (intended for production once Cloudflare
+  Access plumbing is removed). 4xx/5xx responses log at `warn` level.
+
+### Changed
+- **Install seed: full default `orgs.<slug>` block.** Confirms the contract
+  promised in v0.3.0 docs — when interactive install accepts an org_id, the
+  written block now matches the layout operators are expected to edit
+  manually:
+  ```json
+  {
+    "enabled": true,
+    "org_id":   "",
+    "org_name": "",
+    "owner": { "member_id": "", "name": "" },
+    "self":  { "member_id": "", "name": "" },
+    "access": {
+      "dmPolicy":    "owner",
+      "groupPolicy": "allowlist",
+      "groups":      {}
+    }
+  }
+  ```
+  `dmAllowFrom` is no longer pre-seeded (runtime falls back to `[]` via the
+  `access.dmAllowFrom || []` guard in `shouldHandleMessage`); `self.name`
+  starts empty instead of `"Zylos"` so it doesn't leak a placeholder if the
+  operator never edits it.
+- `token.js` member_id write-back now seeds `self` as
+  `{ member_id: '', name: '' }` (was `{ name: 'Zylos' }`) when the field
+  is missing, matching the new install shape.
+
 ## [0.3.0] - 2026-06-02
 
 ### Breaking
