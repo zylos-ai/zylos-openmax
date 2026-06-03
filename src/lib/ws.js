@@ -155,6 +155,23 @@ export class WsClient {
       this.onMessage(frame);
     });
 
+    // WS protocol-level control frames. The npm `ws` lib auto-replies to
+    // server Pings with Pongs (no action needed here), but it does NOT fire
+    // the 'message' event for control frames — so without these listeners
+    // `lastFrameAt` would stay at the open timestamp even while heartbeats
+    // are flowing, and the frame watchdog would kill a perfectly healthy
+    // connection. cws-comm uses WS-level Ping/Pong (see
+    // cws-comm internal/transport/ws/conn.go RunPingLoop), so this matters.
+    this.ws.on('ping', () => {
+      this.lastFrameAt = Date.now();
+      // One-line debug trace so we can verify server-side ping cadence in
+      // pm2 logs. Cheap (default cws-comm PingInterval is 30s).
+      console.log('[ws] ping received');
+    });
+    this.ws.on('pong', () => {
+      this.lastFrameAt = Date.now();
+    });
+
     this.ws.on('close', (code, reasonBuf) => {
       this._clearTimers();
       const reason = reasonBuf?.toString?.() || '';

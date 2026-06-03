@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-06-03
+
+### Fixed
+- **Frame watchdog killed healthy WebSocket connections at ~90s.**
+  `src/lib/ws.js` only refreshed `lastFrameAt` inside the `'message'`
+  event handler, which fires for data frames only. cws-comm sends
+  WebSocket protocol-level **Ping** control frames every 30s
+  (`internal/transport/ws/conn.go` `RunPingLoop`), and the npm `ws`
+  library auto-replies with Pong frames — but those control frames fire
+  the `'ping'` / `'pong'` events, NOT `'message'`. So even on a perfectly
+  healthy connection the watchdog saw "no frames received within the
+  65 s window" at its third 30 s tick and called `ws.terminate()`,
+  producing a misleading abnormal-close cycle (code 1006).
+  - Subscribed `ws.on('ping')` and `ws.on('pong')` to also refresh
+    `lastFrameAt`.
+  - Added a single-line `[ws] ping received` debug trace so server-side
+    Ping cadence is visible in `pm2 logs` (cheap — cws-comm default
+    `PingInterval` is 30 s).
+- This is independent of MR !27 (0.3.5 ws_url derivation fix). If !27
+  lands first, this version will need to be re-numbered.
+
+### Note on the watchdog log
+The pre-fix message
+`[ws] no frames received within watchdog window, terminating`
+referred to data frames only, despite saying "frames" generally. The
+behavior is the same in this version; only the trigger condition is
+corrected.
+
 ## [0.3.4] - 2026-06-02
 
 ### Breaking
