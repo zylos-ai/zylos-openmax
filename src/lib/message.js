@@ -84,7 +84,8 @@ function formatContextLine(m) {
  * @returns {string}
  */
 export function formatInboundForC4(conv, sender, current, recent = []) {
-  const type = VALID_TYPES.has(conv.type) ? conv.type : 'dm';
+  const rawType = (conv.type || '').toLowerCase();
+  const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
   const tag = TYPE_TAG[type];
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
   const content = current?.content ?? '';

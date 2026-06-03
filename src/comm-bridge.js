@@ -138,7 +138,7 @@ function shouldHandleMessage(msg, conv, orgConfig) {
     return { handle: false, reason: 'self-echo' };
   }
 
-  const convType = conv?.type || (msg.thread_id ? 'thread' : 'dm');
+  const convType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
   const access = orgConfig.access || {};
   const senderId = msg.sender_id;
   const senderName = msg.sender_display_name || msg.sender?.display_name || '';
@@ -206,8 +206,15 @@ function shouldHandleMessage(msg, conv, orgConfig) {
 function makeOrgMessageHandler(orgConfig, sessionRef) {
   return async function handleIncomingMessage(payload) {
     const notification = payload?.payload || payload;
-    if (!notification?.id || !notification.conversation_id) return;
-    if (dedupe(notification.id)) return;
+    const notifId = notification?.id;
+    const notifConv = notification?.conversation_id;
+    const notifSender = notification?.sender_id;
+    log(`[ws] [${orgConfig.slug}] message frame: id=${notifId || '<missing>'} conv=${notifConv || '<missing>'} sender=${notifSender || '?'}`);
+    if (!notifId || !notifConv) return;
+    if (dedupe(notifId)) {
+      log(`[ws] [${orgConfig.slug}] msg=${notifId} duplicate, skipping`);
+      return;
+    }
 
     const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
     const msg = { ...notification, ...(detail || {}) };
@@ -234,7 +241,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     }
 
     let recent = [];
-    const convType = conv?.type || (msg.thread_id ? 'thread' : 'dm');
+    const convType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
     if (convType !== 'dm') {
       const ctx = await fetchRecentMessages(
         orgConfig.org_id,
