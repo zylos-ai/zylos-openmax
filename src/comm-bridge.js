@@ -262,23 +262,46 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       );
       recent = ctx.map(m => ({
         senderName: m.sender_display_name || m.senderName || m.sender_id,
-        content:    m.content?.text || m.content_text || (typeof m.content === 'string' ? m.content : ''),
+        // list-messages returns a flat string in `m.content` (the canonical
+        // top-level fallback_text); get-message instead returns a structured
+        // object at `m.content.body.text`. Cover both for forward-compat.
+        content:    m.content?.body?.text
+                 || (typeof m.content === 'string' ? m.content : '')
+                 || m.content_text
+                 || '',
       }));
     }
 
+    // After `msg = { ...notification, ...detail }`, where detail is the
+    // get-message response unwrapped from D8 envelope:
+    //   msg.message  → { id, content: <string>, type, sender_id, seq, ... }
+    //   msg.content  → { content_type, body: { text, ... }, attachments: [] }
+    // Older bridge code assumed msg.content was a flat object with `.text`
+    // and `.media_id`, which silently produced empty content under the
+    // current cws-core schema.
+    const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
+    const text =
+        structured.body?.text
+     || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+     || (typeof msg.content === 'string' ? msg.content : '')
+     || '';
+
     let mediaLocalPath;
-    const content = msg.content || {};
-    const mediaId = content.media_id;
+    const firstAttachment = Array.isArray(structured.attachments) ? structured.attachments[0] : null;
+    // attachment shape per cws-core: {artifact_id, file_name, content_type, size_bytes}
+    const mediaId = firstAttachment?.artifact_id || structured.media_id; // structured.media_id kept as legacy fallback
+    const mediaFileName = firstAttachment?.file_name || structured.filename;
     if (mediaId) {
       try {
         const { url } = await getMediaUrl(mediaId, orgConfig.org_id);
-        if (url) mediaLocalPath = await downloadMedia(url, content.filename || mediaId);
+        if (url) mediaLocalPath = await downloadMedia(url, mediaFileName || mediaId);
       } catch (e) {
         warn('media fetch failed:', e.message);
       }
     }
 
     const senderName = msg.sender_display_name || msg.sender?.display_name || msg.sender_id;
+    const msgType = (msg.type || msg.message?.type || '').toLowerCase();
     const endpoint = formatEndpoint({
       type: convType,
       conversationId: msg.conversation_id,
@@ -289,8 +312,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       { type: convType, id: msg.conversation_id },
       { displayName: senderName },
       {
-        content: content.text || (typeof msg.content === 'string' ? msg.content : ''),
-        type: msg.type === 'image' ? 'image' : (mediaId ? 'file' : 'text'),
+        content: text,
+        type: msgType === 'image' || msgType === 'agent_card' ? 'image' : (mediaId ? 'file' : 'text'),
         mediaLocalPath,
       },
       recent,
