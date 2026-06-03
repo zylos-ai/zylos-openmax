@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-06-03
+
+### Fixed
+- **Outbound `scripts/send.js` was POSTing the old `MessageContent[]` array
+  body, which cws-core now rejects with HTTP 422.** cws-core's current
+  `sendMessageRequest` (see `internal/transport/http/message.go`) takes a
+  single `content` object plus a top-level `type` enum:
+
+  ```
+  { client_msg_id, type, content: {content_type, body, attachments}, parent_id? }
+  ```
+
+  v0.3.8 and earlier sent:
+
+  ```
+  { client_msg_id, content: [{type, body}], reply_to? }
+  ```
+
+  Rewrote `sendText` and `sendMediaMessage` to the new schema:
+  - text and markdown → `type: 'AGENT_TEXT'`,
+    `content: { content_type: 'text'|'markdown', body: { text }, attachments: [] }`
+  - image and file → `type: 'IMAGE'|'FILE'`, `content.attachments` array
+    with `{artifact_id, file_name, content_type, size_bytes}` (mediaId
+    from cws-as upload IS the artifact_id; mediaId stays as the
+    short-name in the bridge but maps onto attachments)
+  - reply target field renamed `reply_to` → `parent_id` to match
+    cws-core's `ParentID *string` field
+
+- **Inbound message content arrived empty in the C4 envelope** because
+  the bridge read `msg.content.text`, but after spreading the
+  get-message detail into `msg`, `msg.content` is the structured
+  `{content_type, body, attachments}` object — the actual text is at
+  `msg.content.body.text` (or, as a string shortcut, at
+  `msg.message.content`). `formatInboundForC4` therefore got an empty
+  string and Claude saw `said: ` with no body. Bridge now extracts text
+  via:
+
+  ```
+  msg.content?.body?.text
+    || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+    || (typeof msg.content === 'string' ? msg.content : '')
+    || ''
+  ```
+
+  and pulls the media reference from `msg.content.attachments[0]`
+  (`artifact_id` / `file_name`) instead of the legacy `media_id` /
+  `filename` flat fields. Legacy fallbacks are kept so older payload
+  shapes still parse.
+
+- **`fetchRecentMessages` context lines** had the same blind spot; they
+  now also read `m.content.body.text` before falling back to
+  `typeof m.content === 'string' ? m.content : ''`.
+
 ## [0.3.8] - 2026-06-03
 
 ### Fixed

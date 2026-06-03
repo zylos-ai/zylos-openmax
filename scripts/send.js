@@ -23,9 +23,13 @@
  * client_msg_id so the server de-dupes them independently. `reply_to` is
  * applied only on the first chunk to avoid duplicate threading.
  *
- * cws-core SendMessageRequestBody (additionalProperties: false):
- *   { client_msg_id, content: MessageContent[], reply_to? }
- *   MessageContent: { type: string, body: string }
+ * cws-core SendMessageRequestBody (current schema, per
+ * internal/transport/http/message.go:sendMessageRequest):
+ *   { client_msg_id, type, content: MessageContentItem, parent_id?,
+ *     thread_id?, ttl?, metadata? }
+ *   type: enum UNSPECIFIED|TEXT|IMAGE|FILE|AUDIO|VIDEO|SYSTEM|AGENT_TEXT|
+ *     AGENT_STRUCTURED|AGENT_CARD|AGENT_STREAM
+ *   MessageContentItem: { content_type, body: object, attachments: [] }
  *
  * Auth: Bearer api_key (canonical store: config.agent.api_key) plus
  *       X-Workspace-Id header (handled by client.js).
@@ -69,12 +73,22 @@ async function sendText(ep, text) {
   const results = [];
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
-    const blockType = looksLikeMarkdown(chunk) ? 'markdown' : 'text';
+    const contentType = looksLikeMarkdown(chunk) ? 'markdown' : 'text';
+    // cws-core SendMessageRequest body (current schema):
+    //   { client_msg_id, type, content: {content_type, body, attachments}, parent_id? }
+    // type is the message-level enum (AGENT_TEXT for agent outbound text /
+    // markdown); content.content_type is the body serialization
+    // ('text' | 'markdown' | ...). attachments is required (may be empty).
     const body = {
       client_msg_id: newClientMsgId(),
-      content:       [{ type: blockType, body: chunk }],
-      // reply_to only on the first chunk to avoid duplicate threading
-      ...(i === 0 && ep.replyTo ? { reply_to: ep.replyTo } : {}),
+      type:          'AGENT_TEXT',
+      content: {
+        content_type: contentType,
+        body:         { text: chunk },
+        attachments:  [],
+      },
+      // parent_id only on the first chunk to avoid duplicate threading
+      ...(i === 0 && ep.replyTo ? { parent_id: ep.replyTo } : {}),
     };
     // eslint-disable-next-line no-await-in-loop
     const res = await post(apiPath(`/conversations/${convId}/messages`), body);
@@ -85,19 +99,29 @@ async function sendText(ep, text) {
 
 async function sendMediaMessage(ep, kind, localPath) {
   const convId = resolveTargetConversation(ep);
-  const mediaType = kind === 'image' ? 'image' : 'file';
-  const { mediaId } = await uploadMedia(localPath, {
+  const messageType = kind === 'image' ? 'IMAGE' : 'FILE';
+  const contentType = kind === 'image' ? 'image' : 'file';
+  const { mediaId, fileName, contentType: mediaContentType, sizeBytes } = await uploadMedia(localPath, {
     conversationId: convId,
-    mediaType,
+    mediaType: contentType,
   });
-  // Per cws-core MessageContent {type, body}, body is a string. For media
-  // we encode the reference as JSON so the server (or upstream cws-comm)
-  // can resolve to bytes via the media_id. TODO: confirm the agreed
-  // encoding once cws-core exposes a media-attached message schema.
+  // Media references go in `attachments`, not the body. cws-core's
+  // attachmentItem expects {artifact_id, file_name, content_type, size_bytes};
+  // `mediaId` returned from cws-as upload is the canonical artifact_id.
   return post(apiPath(`/conversations/${convId}/messages`), {
     client_msg_id: newClientMsgId(),
-    content:       [{ type: mediaType, body: JSON.stringify({ media_id: mediaId }) }],
-    reply_to:      ep.replyTo,
+    type:          messageType,
+    content: {
+      content_type: contentType,
+      body:         {},
+      attachments: [{
+        artifact_id:  mediaId,
+        file_name:    fileName || '',
+        content_type: mediaContentType || '',
+        size_bytes:   sizeBytes || 0,
+      }],
+    },
+    ...(ep.replyTo ? { parent_id: ep.replyTo } : {}),
   });
 }
 
