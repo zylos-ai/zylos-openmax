@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-06-03
+
+### Fixed
+- **DMs were misrouted into the group/thread branch of `shouldHandleMessage`
+  because of a case mismatch.** cws-core's HTTP API returns conversation
+  type as an uppercase enum (`DM` / `GROUP` / `STRAT` / `BROADCAST` /
+  `BRIDGE`, per `internal/transport/http/cwscomm_models.go`), but
+  `src/comm-bridge.js` and `src/lib/message.js` compared against the
+  lowercase wire values `'dm'` / `'group'` / `'thread'`. As a result a real
+  DM with `conv.type === "DM"` fell through to the group branch and was
+  dropped by `groupPolicy: "allowlist"` with an empty `groups{}`, surfacing
+  as `drop ...: group:allowlist (<conv> not in groups{})` in the bridge
+  log even when the inbound message was a 1-on-1 DM with the owner.
+  - `shouldHandleMessage` and the late `convType` recompute in
+    `handleIncomingMessage` now both normalize `conv?.type` to lowercase
+    before classification.
+  - `formatInboundForC4` likewise lowercases before checking
+    `VALID_TYPES`, so the C4 envelope tag (`[COCO DM]` / `[COCO GROUP]` /
+    `[COCO THREAD]`) reflects the actual conversation type.
+
+### Added
+- **Log every inbound WS message frame** at the entry of
+  `handleIncomingMessage`, before dedupe / fetch. Previously only the
+  REST `GET /messages/{id}` follow-up call left a trace, which made it
+  hard to see whether a WS push had actually arrived. New format:
+  ```
+  [ws] [<org-slug>] message frame: id=<id> conv=<conv_id> sender=<sender_id>
+  ```
+  Duplicate-suppressed frames now also log
+  `[ws] [<org-slug>] msg=<id> duplicate, skipping` instead of silently
+  returning, so a noisy retry loop is visible in the log instead of
+  appearing as a missing push.
+
 ## [0.3.6] - 2026-06-03
 
 ### Fixed
