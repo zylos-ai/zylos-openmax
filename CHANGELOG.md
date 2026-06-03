@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-06-03
+
+### Fixed
+- **`ws_url` was sticky across re-installs.** Both `hooks/configure.js`
+  and `hooks/post-install.js` only auto-derived `ws_url` from the
+  (possibly new) `bff_url` when the existing `config.server.ws_url` was
+  empty. A previous install's `DEFAULT_CONFIG` seed
+  (`ws://127.0.0.1:8080/ws`) therefore survived after the operator
+  pointed `bff_url` at a real cws-core, and the runtime kept trying to
+  connect to localhost.
+  - `configure.js` now re-derives `ws_url` from `bff_url` unconditionally
+    when the operator did not supply `COCO_WS_URL`. Explicit
+    `COCO_WS_URL` is still honored verbatim for the case where cws-comm
+    is on a different host.
+  - `post-install.js` Step 1 default now comes from the freshly entered
+    `bff_url`, not from the stale `config.server.ws_url`. Operators can
+    still override at the prompt.
+
 ## [0.3.5] - 2026-06-03
 
 ### Fixed
@@ -25,15 +43,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added a single-line `[ws] ping received` debug trace so server-side
     Ping cadence is visible in `pm2 logs` (cheap — cws-comm default
     `PingInterval` is 30 s).
-- This is independent of MR !27 (0.3.5 ws_url derivation fix). If !27
-  lands first, this version will need to be re-numbered.
-
-### Note on the watchdog log
-The pre-fix message
-`[ws] no frames received within watchdog window, terminating`
-referred to data frames only, despite saying "frames" generally. The
-behavior is the same in this version; only the trigger condition is
-corrected.
 
 ## [0.3.4] - 2026-06-02
 

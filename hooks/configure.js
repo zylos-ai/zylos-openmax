@@ -87,9 +87,17 @@ const bff = (values.COCO_BFF_URL || '').replace(/\/$/, '');
 const ws  = values.COCO_WS_URL || '';
 
 if (bff) config.server.bff_url = bff;
-if (ws)  config.server.ws_url  = ws;
-if (!config.server.ws_url && config.server.bff_url) {
-  config.server.ws_url = config.server.bff_url.replace(/^http/, 'ws') + '/ws';
+if (ws) {
+  // Operator explicitly supplied a ws_url — honor it verbatim.
+  config.server.ws_url = ws;
+} else if (bff) {
+  // bff_url was updated but ws_url wasn't supplied. Re-derive ws_url from
+  // the new bff_url unconditionally, ignoring any stale value already in
+  // config.json. Otherwise a previous install's DEFAULT_CONFIG seed
+  // (`ws://127.0.0.1:8080/ws`) lingers on disk after the operator points
+  // bff_url at a real cws-core, and the runtime keeps trying to connect
+  // to localhost.
+  config.server.ws_url = bff.replace(/^http/, 'ws') + '/ws';
 }
 
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
