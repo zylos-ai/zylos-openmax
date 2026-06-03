@@ -99,10 +99,21 @@ async function fetchMessageDetail(orgId, conversationId, messageId) {
 }
 
 function forwardToC4(endpoint, body) {
+  // c4-receive.js only accepts named flags (--channel / --endpoint / --content
+  // / --json); the old positional invocation form
+  // `node c4-receive.js <channel> <endpoint> <body>` now rejects with
+  // "Unexpected argument: <channel>". execFile passes the array as argv
+  // directly, so no shell-escape is needed for content.
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
-      [C4_RECEIVE, CHANNEL, endpoint, body],
+      [
+        C4_RECEIVE,
+        '--channel', CHANNEL,
+        '--endpoint', endpoint,
+        '--json',
+        '--content', body,
+      ],
       { timeout: 30000 },
       (err, stdout, stderr) => {
         if (err) reject(new Error(stderr || err.message));

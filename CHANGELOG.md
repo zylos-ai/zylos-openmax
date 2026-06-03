@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-06-03
+
+### Fixed
+- **`forwardToC4` was calling `c4-receive.js` with positional args
+  (`<channel> <endpoint> <body>`), which `c4-receive.js` now rejects with
+  `Error: Unexpected argument: coco-workspace`.** The comm-bridge interface
+  switched to named flags (`--channel` / `--endpoint` / `--content` /
+  `--json`) and zylos-telegram / zylos-lark already use the new form;
+  zylos-coco-workspace never followed. The breakage was masked until
+  v0.3.7 because the case-sensitivity bug in `shouldHandleMessage` was
+  dropping every inbound DM before it ever reached the C4 forward step.
+  - Switched `forwardToC4` to the named-flag form
+    (`--channel <slug> --endpoint <endpoint> --json --content <body>`).
+  - `execFile` passes argv array directly, so `body` is forwarded
+    verbatim with no shell escaping required.
+  - `--json` matches what telegram/lark already do, paving the way for
+    parsing structured rejection responses in a future change.
+
 ## [0.3.7] - 2026-06-03
 
 ### Fixed
