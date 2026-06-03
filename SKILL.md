@@ -1,6 +1,6 @@
 ---
 name: coco-agent
-version: 0.3.5
+version: 0.3.6
 description: >-
   COCO Workspace Agent Skill (Guided Autonomy)。效率捷径 + 状态机 +
   行为护栏 + 记忆触发点。首次行为决策时加载。

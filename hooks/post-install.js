@@ -194,7 +194,12 @@ if (isInteractive) {
   const bffInput = await ask(`  cws-core REST URL (bff_url) [${defaultBff}]: `);
   const bffUrl = (bffInput || defaultBff).replace(/\/$/, '');
 
-  const defaultWs = config.server?.ws_url || deriveWsUrl(bffUrl);
+  // Default ws_url to the value derived from the (possibly just-updated)
+  // bff_url, NOT to whatever is in config.server.ws_url. That way an old
+  // install's seeded `ws://127.0.0.1:8080/ws` doesn't silently survive when
+  // bff_url changes to a real cws-core URL. Operator can still override
+  // explicitly if cws-comm is on a different host than cws-core.
+  const defaultWs = deriveWsUrl(bffUrl);
   const wsInput = await ask(`  cws-comm WebSocket URL (ws_url) [${defaultWs}]: `);
   const wsUrl = wsInput || defaultWs;
 
