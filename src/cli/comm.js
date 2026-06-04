@@ -35,26 +35,60 @@ function ensureClientMsgId(id) {
 }
 
 /**
- * Normalize caller-supplied content into cws-core's MessageContent[] shape:
- *   - string                                  → [{type:"text"|"markdown", body}]
- *   - {text, markdown?}                       → [{type:"text"|"markdown", body:text}]
- *   - {type, body}                            → [{type, body}]   (pre-built block)
- *   - [{type, body}, ...]                     → passthrough
+ * Build the cws-core v5 send-message body from caller input.
+ *
+ * cws-core schema (sendMessageRequest):
+ *   {
+ *     client_msg_id: "...",
+ *     type: "TEXT" | "MARKDOWN" | "AGENT_TEXT" | "IMAGE" | "FILE" | "AGENT_STRUCTURED" | ...,
+ *     content: {
+ *       content_type: "text" | "markdown" | "image" | "file" | ...,
+ *       body: { text, ... } | {},
+ *       attachments: [{artifact_id, file_name, content_type, size_bytes}, ...]
+ *     }
+ *   }
+ *
+ * Caller can pass:
+ *   - string                                            → text/markdown auto-detect
+ *   - {text} | {body}                                   → text/markdown auto-detect
+ *   - {content_type, body, attachments?}                → pass-through (advanced)
+ *   - already-built object with top-level type+content  → returned as-is
  */
-function normalizeContent(c) {
-  if (c == null) return [{ type: 'text', body: '' }];
-  if (typeof c === 'string') {
-    return [{ type: looksLikeMarkdown(c) ? 'markdown' : 'text', body: c }];
+function buildSendBody(params) {
+  // Allow advanced caller to override completely
+  if (params.body && params.body.content && params.body.type) {
+    return {
+      client_msg_id: ensureClientMsgId(params.clientMsgId || params.clientMessageId),
+      ...params.body,
+      ...(params.replyTo ? { parent_id: params.replyTo } : {}),
+    };
   }
-  if (Array.isArray(c)) return c;
-  if (typeof c === 'object' && c.body != null && c.type != null) return [c];
-  // Legacy envelope {text, format?, markdown?}
-  if (typeof c === 'object' && (c.text != null || c.body != null)) {
-    const body = c.body ?? c.text ?? '';
-    const type = c.type || (c.markdown || c.format === 'markdown' ? 'markdown' : 'text');
-    return [{ type, body }];
+  const c = params.content;
+  let msgType = params.type;
+  let contentType, body, attachments;
+  if (c && typeof c === 'object' && c.content_type) {
+    // pre-built content object
+    contentType = c.content_type;
+    body        = c.body ?? {};
+    attachments = c.attachments ?? [];
+    if (!msgType) msgType = contentType === 'image' ? 'IMAGE'
+                       : contentType === 'file' ? 'FILE'
+                       : 'AGENT_TEXT';
+  } else {
+    const text = (typeof c === 'string') ? c
+              : (c && typeof c === 'object') ? (c.text ?? c.body ?? '')
+              : '';
+    contentType = looksLikeMarkdown(text) ? 'markdown' : 'text';
+    body        = { text: String(text) };
+    attachments = [];
+    if (!msgType) msgType = 'AGENT_TEXT';
   }
-  return [{ type: 'text', body: String(c) }];
+  return {
+    client_msg_id: ensureClientMsgId(params.clientMsgId || params.clientMessageId),
+    type:          msgType,
+    content:       { content_type: contentType, body, attachments },
+    ...(params.replyTo ? { parent_id: params.replyTo } : {}),
+  };
 }
 
 const COMMANDS = {
@@ -92,11 +126,9 @@ const COMMANDS = {
   }),
 
   // ✅ POST /api/v1/conversations/{id}/messages
-  'comm.send': () => post(apiPath(`/conversations/${params.conversationId}/messages`), {
-    client_msg_id: ensureClientMsgId(params.clientMsgId || params.clientMessageId),
-    content:       normalizeContent(params.content),
-    reply_to:      params.replyTo,
-  }),
+  //   body: {client_msg_id, type, content:{content_type, body, attachments}, parent_id?}
+  //   See buildSendBody() for the schema details.
+  'comm.send': () => post(apiPath(`/conversations/${params.conversationId}/messages`), buildSendBody(params)),
 
   // ✅ GET /api/v1/conversations/{id}/messages/{msg_id}
   'comm.get_message': () => get(
