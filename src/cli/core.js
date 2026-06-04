@@ -73,16 +73,16 @@ const COMMANDS = {
   'core.role_list': () => get(apiPath('/roles'), { scope: params.scope }),
 
   // ✅ Invitations
-  // POST /api/v1/invitations — org_id (required), email?, role_id (required), message?
+  // POST /api/v1/invitations — body {email?, role_id, message?}
+  //   org_id is resolved server-side from the caller's JWT — do NOT send it.
   'core.invitation_create': () => post(apiPath('/invitations'), {
-    org_id:  params.orgId,
     email:   params.email,
     role_id: params.roleId,
     message: params.message,
   }),
-  // GET /api/v1/invitations — org_id (required), status?, cursor?, limit?
+  // GET /api/v1/invitations — query {status?, cursor?, limit?}
+  //   org_id is resolved server-side from the caller's JWT — do NOT send it.
   'core.invitation_list': () => get(apiPath('/invitations'), {
-    org_id: params.orgId,
     status: params.status,
     cursor: params.cursor,
     limit:  params.limit,
@@ -127,8 +127,8 @@ Roles
   core.role_list           {scope?}
 
 Invitations
-  core.invitation_create   {orgId, roleId, email?, message?}
-  core.invitation_list     {orgId, status?, cursor?, limit?}
+  core.invitation_create   {roleId, email?, message?}
+  core.invitation_list     {status?, cursor?, limit?}
   core.invitation_accept   {invitationId, token?}
   core.invitation_revoke   {invitationId}
 
