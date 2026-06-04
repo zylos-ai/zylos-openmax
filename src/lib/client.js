@@ -111,27 +111,66 @@ function buildUrl(baseUrl, path, query) {
 //  Generic request impl (baseUrl + headers injected by caller)
 // ============================================================================
 
-// Verbose RPC logging — when COCO_RPC_LOG !== '0', every REST call dumps
-// method + url + request body + response status + response body to stdout.
-// Tagged `[rpc]` for grep-friendliness in pm2 logs. Default ON (test env).
-function rpcLogEnabled() {
+// Verbose RPC logging
+// -------------------
+// Two independent sinks:
+//
+//   1) stdout — controlled by COCO_RPC_LOG. Default ON; set to '0' to silence
+//      stdout (smoke tests do this so test client output stays clean).
+//
+//   2) file   — controlled by COCO_RPC_LOG_FILE. When set to a path, every
+//      RPC line is also appended there (best-effort, sync append, JSON-line
+//      friendly). This is **independent of COCO_RPC_LOG** — file logging
+//      stays on even when stdout is silenced, which is the integration-phase
+//      ask: smoke tests run with stdout off but we still want full traces
+//      on disk for post-mortem. Set to empty string or unset to disable.
+//
+// Tagged `[rpc]` for grep-friendliness.
+
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+
+function rpcLogStdoutEnabled() {
   return process.env.COCO_RPC_LOG !== '0';
+}
+function rpcLogFilePath() {
+  const p = process.env.COCO_RPC_LOG_FILE;
+  return p && p.length > 0 ? p : null;
+}
+
+let _rpcLogFileEnsured = false;
+function ensureRpcLogDir(filePath) {
+  if (_rpcLogFileEnsured) return;
+  try { mkdirSync(dirname(filePath), { recursive: true }); } catch {}
+  _rpcLogFileEnsured = true;
+}
+function appendRpcLine(line) {
+  const filePath = rpcLogFilePath();
+  if (!filePath) return;
+  try {
+    ensureRpcLogDir(filePath);
+    appendFileSync(filePath, `${new Date().toISOString()} ${line}\n`);
+  } catch { /* best-effort: don't crash RPCs on disk errors */ }
 }
 
 function logRpcRequest(method, url, body, orgId) {
-  if (!rpcLogEnabled()) return;
   const tag = orgId ? `org=${orgId}` : '';
   const bodyStr = body === undefined ? '(no body)' : JSON.stringify(body);
-  console.log(`[rpc] → ${method} ${url} ${tag} req: ${bodyStr}`);
+  const line = `[rpc] → ${method} ${url} ${tag} req: ${bodyStr}`;
+  if (rpcLogStdoutEnabled()) console.log(line);
+  appendRpcLine(line);
 }
 
 function logRpcResponse(method, url, status, data) {
-  if (!rpcLogEnabled()) return;
   let bodyStr;
   try { bodyStr = typeof data === 'string' ? data : JSON.stringify(data); }
   catch { bodyStr = String(data); }
-  const level = status >= 400 ? 'warn' : 'log';
-  console[level](`[rpc] ← ${method} ${url} resp ${status}: ${bodyStr}`);
+  const line = `[rpc] ← ${method} ${url} resp ${status}: ${bodyStr}`;
+  if (rpcLogStdoutEnabled()) {
+    const level = status >= 400 ? 'warn' : 'log';
+    console[level](line);
+  }
+  appendRpcLine(line);
 }
 
 async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId } = {}) {

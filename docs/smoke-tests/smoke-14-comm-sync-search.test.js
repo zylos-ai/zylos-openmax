@@ -111,7 +111,7 @@ const nums = (r1.text.match(/\d+/g) || []);
 assertTrue(nums.length >= 3, `4. round1 含 ≥ 3 个数字(漏的事件数 / 会话数 / 搜到数) (got ${nums.length})`);
 
 // 旁路:sync from 0 with this deviceId
-const sync0 = await comm('comm.sync', { sinceSeq: 0, deviceId, limit: 200 });
+const sync0 = await comm('comm.sync', { sinceSeq: 0, deviceId, limit: 100 });
 const events = sync0.events || sync0.items || [];
 const hasMore = sync0.has_more ?? sync0.hasMore;
 assertTrue(Array.isArray(events) && typeof hasMore === 'boolean',

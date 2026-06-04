@@ -205,7 +205,7 @@ try {
 assertTrue(assertion12, `12. delete 后 page_get 行为符合预期`);
 
 try {
-  const activePages = unwrapList(await kb('kb.pages', { limit: 200 }));
+  const activePages = unwrapList(await kb('kb.pages', { limit: 100 }));
   assertion13 = !activePages.some(p => p.id === pageId);
   if (assertion13) ok(`13. kb.pages 不含 pageId`);
   else die(`13. kb.pages 仍含 pageId — 删除未生效`);

@@ -86,9 +86,30 @@ function tokenFile(orgIdOrEmpty) {
 }
 
 // ── raw HTTP helper (no auth dependency) ─────────────────────────────────────
+// RPC logging mirrors client.js: stdout controlled by COCO_RPC_LOG (default ON,
+// '0' = off), file sink controlled by COCO_RPC_LOG_FILE (independent of
+// stdout).
 
-function rpcLogEnabled() {
+function rpcLogStdoutEnabled() {
   return process.env.COCO_RPC_LOG !== '0';
+}
+function rpcLogFilePath() {
+  const p = process.env.COCO_RPC_LOG_FILE;
+  return p && p.length > 0 ? p : null;
+}
+let _rpcLogFileEnsured = false;
+function ensureRpcLogDir(filePath) {
+  if (_rpcLogFileEnsured) return;
+  try { fs.mkdirSync(path.dirname(filePath), { recursive: true }); } catch {}
+  _rpcLogFileEnsured = true;
+}
+function appendRpcLine(line) {
+  const filePath = rpcLogFilePath();
+  if (!filePath) return;
+  try {
+    ensureRpcLogDir(filePath);
+    fs.appendFileSync(filePath, `${new Date().toISOString()} ${line}\n`);
+  } catch { /* best-effort */ }
 }
 
 async function corePost(endpoint, body, bearerToken) {
@@ -99,8 +120,10 @@ async function corePost(endpoint, body, bearerToken) {
   };
   if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
 
-  if (rpcLogEnabled()) {
-    console.log(`[rpc] → POST ${url} req: ${JSON.stringify(body)}`);
+  {
+    const line = `[rpc] → POST ${url} req: ${JSON.stringify(body)}`;
+    if (rpcLogStdoutEnabled()) console.log(line);
+    appendRpcLine(line);
   }
 
   const res = await fetch(url, {
@@ -112,10 +135,14 @@ async function corePost(endpoint, body, bearerToken) {
   let data;
   try { data = JSON.parse(text); } catch { data = text; }
 
-  if (rpcLogEnabled()) {
+  {
     const bodyStr = typeof data === 'string' ? data : JSON.stringify(data);
-    const level = res.status >= 400 ? 'warn' : 'log';
-    console[level](`[rpc] ← POST ${url} resp ${res.status}: ${bodyStr}`);
+    const line = `[rpc] ← POST ${url} resp ${res.status}: ${bodyStr}`;
+    if (rpcLogStdoutEnabled()) {
+      const level = res.status >= 400 ? 'warn' : 'log';
+      console[level](line);
+    }
+    appendRpcLine(line);
   }
 
   if (!res.ok) {
