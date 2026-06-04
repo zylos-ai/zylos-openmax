@@ -205,14 +205,19 @@ const COMMANDS = {
 
   // contract-v2 create-blueprint:
   //   POST /api/v1/issues/{issue_id}/blueprints
-  //   body: { author_agent_id*, steps[]*, estimated_budget?, notes? }
+  //   body: { steps[]*, estimated_budget?, notes? }
   // where each step is { temp_id, description, required_resources?,
   //                     depends_on_temp_ids? }.
-  // tm.js historically just took { issue_id }; we now require author/steps too.
+  //
+  // NOTE: cws-core's createBlueprintRequest body does NOT accept
+  // `author_agent_id` — the server derives it from the auth principal
+  // (data.author_agent_id in the response surfaces it). Sending
+  // author_agent_id returns 422 "unexpected property". Keep
+  // `authorAgentId` as a tm.js param for backward compat / readability
+  // but do not forward to the body.
   'blueprint.create': () => post(
     apiPath(`/issues/${params.issueId}/blueprints`),
     {
-      author_agent_id:  params.authorAgentId,
       steps:            params.steps,
       estimated_budget: params.estimatedBudget,
       notes:            params.notes,
