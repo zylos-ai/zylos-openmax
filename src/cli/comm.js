@@ -66,14 +66,18 @@ const COMMANDS = {
     include_archived: params.includeArchived,
   }),
 
-  // ✅ POST /api/v1/conversations/dm   body {participant_id}
-  // ✅ POST /api/v1/conversations/groups  body {title, member_ids}
+  // ✅ POST /api/v1/conversations/dm    body {peer_member_id}
+  // ✅ POST /api/v1/conversations/groups body {name, member_ids, description?, avatar_media_id?, metadata?}
+  //   cws-core derives org_id and caller member_id from the JWT — do NOT send them.
   'comm.create_dm':    () => post(apiPath('/conversations/dm'), {
-    participant_id: params.participantId,
+    peer_member_id: params.peerMemberId || params.participantId || params.peerId,
   }),
   'comm.create_group': () => post(apiPath('/conversations/groups'), {
-    title:      params.title,
-    member_ids: params.memberIds || params.participantIds,
+    name:             params.name || params.title,
+    member_ids:       params.memberIds || params.participantIds,
+    description:      params.description,
+    avatar_media_id:  params.avatarMediaId,
+    metadata:         params.metadata,
   }),
 
   // ✅ GET /api/v1/conversations/{id}
@@ -137,8 +141,8 @@ Usage: node src/cli/comm.js <command> '<json-params>'
 
 Conversations
   comm.list_conversations   {cursor?, limit?, includeArchived?}
-  comm.create_dm            {participantId}                          # POST /conversations/dm
-  comm.create_group         {title, memberIds}                       # POST /conversations/groups
+  comm.create_dm            {peerMemberId}                           # POST /conversations/dm
+  comm.create_group         {name, memberIds, description?}          # POST /conversations/groups
   comm.get_conversation     {conversationId}
 
 Messages
