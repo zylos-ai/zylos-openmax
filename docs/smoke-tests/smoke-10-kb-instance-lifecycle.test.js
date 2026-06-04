@@ -9,7 +9,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { sendInstruction, log, ok, warn, die, assertEq, assertTrue } from './lib/runner.js';
+import { sendInstruction, log, ok, die, assertEq, assertTrue } from './lib/runner.js';
 const execp = promisify(execFile);
 
 const REQUIRED = ['COCO_API_URL', 'TEST_USER_TOKEN', 'TEST_CONV_ID', 'TEST_AGENT_ID'];
@@ -122,9 +122,16 @@ assertTrue(status0 === 'active' || !newKb.archived, `8. new KB status == active 
 
 // 找新建的 page(roots → children walk)
 const roots = unwrapList(await kb('kb.tree_roots', { kbId: newKbId }));
+// Tree node id (`id`) and page id (`page_id`) are distinct UUIDs even for a
+// page node — node_breadcrumb later needs the tree node id, not the page id.
 let foundPageId = null;
+let foundNodeId = null;
 for (const r of roots) {
-  if (r.node_type === 'page' && (r.name || '').includes(NS)) { foundPageId = r.page_id || r.pageId; break; }
+  if (r.node_type === 'page' && (r.name || '').includes(NS)) {
+    foundPageId = r.page_id || r.pageId;
+    foundNodeId = r.id;
+    break;
+  }
 }
 if (!foundPageId) {
   // 也可能在某个 folder 下
@@ -132,12 +139,16 @@ if (!foundPageId) {
     if (r.node_type === 'folder') {
       const kids = unwrapList(await kb('kb.node_children', { kbId: newKbId, nodeId: r.id }));
       const p = kids.find(n => n.node_type === 'page' && (n.name || '').includes(NS));
-      if (p) { foundPageId = p.page_id || p.pageId; break; }
+      if (p) {
+        foundPageId = p.page_id || p.pageId;
+        foundNodeId = p.id;
+        break;
+      }
     }
   }
 }
 assertTrue(foundPageId, `(pre-2) 在 KB 树里找到新 page`);
-log(`   pageId=${foundPageId}`);
+log(`   pageId=${foundPageId}  nodeId=${foundNodeId}`);
 
 // ---------- Round 2 ----------
 log('[Round 2] 改 page metadata + freeze + breadcrumb');
@@ -167,14 +178,8 @@ assertTrue(/重命名|renamed/i.test(pg2.title || ''),
 assertTrue((pg2.path || '').includes('smoke10-renamed'),
     `9b. page.path 含 smoke10-renamed (got "${pg2.path}")`);
 
-try {
-  const crumb = await kb('kb.node_breadcrumb', { kbId: newKbId, nodeId: foundPageId });
-  assertTrue(unwrapList(crumb).length >= 1, `10. node_breadcrumb 返 ≥ 1 段`);
-} catch (e) {
-  // 可能 node id 不直接是 page id, 试 page 所在的 tree node id
-  warn(`10. node_breadcrumb 抛: ${e.message.slice(0,100)}; warn-only`);
-  ok(`10. (warn-only: breadcrumb 抛错可能因为 nodeId vs pageId 区分)`);
-}
+const crumb = await kb('kb.node_breadcrumb', { kbId: newKbId, nodeId: foundNodeId });
+assertTrue(unwrapList(crumb).length >= 1, `10. node_breadcrumb 返 ≥ 1 段`);
 
 // ---------- Round 3 ----------
 log('[Round 3] archive → unarchive → delete');
