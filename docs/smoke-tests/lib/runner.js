@@ -294,3 +294,12 @@ export function assertIn(value, allowed, label) {
   if (allowed.includes(value)) { ok(`${label} ∈ ${JSON.stringify(allowed)} (got ${JSON.stringify(value)})`); return; }
   die(`${label}: expected one of ${JSON.stringify(allowed)}, got ${JSON.stringify(value)}`);
 }
+
+// cws-core Go transport serializes nullable pointer fields with `omitempty`,
+// so a null value is omitted from the JSON envelope and JS sees `undefined`,
+// not `null`. Use assertNullish for fields that are semantically "absent"
+// (e.g. light issue current_blueprint_id, light task blueprint_step_id).
+export function assertNullish(value, label) {
+  if (value == null) { ok(`${label} = ${JSON.stringify(value)}`); return; }
+  die(`${label}: expected null/undefined, got ${JSON.stringify(value)}`);
+}

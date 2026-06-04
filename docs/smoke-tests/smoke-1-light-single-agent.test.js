@@ -14,7 +14,7 @@
 
 import {
   runSmokeCase, tm, listTasks, listAttempts,
-  assertEq, assertTrue, log,
+  assertEq, assertTrue, assertNullish, log,
 } from './lib/runner.js';
 
 const TITLE = `Smoke1-${Date.now()}`;
@@ -61,7 +61,7 @@ await runSmokeCase({
     assertEq(issue.priority,              'low',            '3. issue.priority');
     assertEq(issue.status,                'accepted',       '4. issue.status');
     assertEq(issue.lead_agent_id,         env.TEST_AGENT_ID,'5. issue.lead_agent_id');
-    assertEq(issue.current_blueprint_id,  null,             '6. issue.current_blueprint_id');
+    assertNullish(issue.current_blueprint_id,               '6. issue.current_blueprint_id');
     assertEq(issue.acceptance_source,     'explicit',       '7. issue.acceptance_source');
 
     // 8-11. Task
@@ -70,7 +70,7 @@ await runSmokeCase({
     const task = tasks[0];
     assertEq(task.status,             'done',           '9.  task.status');
     assertEq(task.assignee_id,        env.TEST_AGENT_ID,'10. task.assignee_id');
-    assertEq(task.blueprint_step_id,  null,             '11. task.blueprint_step_id');
+    assertNullish(task.blueprint_step_id,             '11. task.blueprint_step_id');
 
     // 12-14. Attempt
     const attempts = await listAttempts(task.id);
