@@ -1,166 +1,84 @@
-# Smoke 10 — KB 实例生命周期(纯脚本驱动)
+# Smoke 10 — KB 实例生命周期(NL 驱动)
 
-> **验证目标**:把 **KB 实例本身**(不是 KB 里的 page / folder)的 CRUD +
-> 归档/恢复 + page metadata 边缘命令一次性覆盖一遍。Smoke 5/6 覆盖了
-> KB 里的 tree + page 内容,本 Smoke 补齐 KB **容器层面**的生命周期。
+> **验证目标**:用户用自然语言让 agent 从"建 KB → 写一页 → 改 metadata →
+> 归档 → 恢复 → 删"完整走一遍 KB 容器层面的生命周期。这是 Smoke 5/6 之外
+> KB 容器层的端到端验证。
 >
 > 覆盖 **kb.js**:
->   `kb.init`、`kb.list`、`kb.create`、`kb.get`、`kb.update`、
->   `kb.archive`、`kb.unarchive`、`kb.delete`、
+>   `kb.create / get / update / archive / unarchive / delete / list / init`、
+>   `kb.folder_create / file_create(可选)`、
 >   `kb.page_update`(metadata: title/path)、`kb.page_freeze`、
 >   `kb.page_references`、`kb.node_breadcrumb`
->
-> 不覆盖(留给其他 smoke):
-> - page content / revision / search — Smoke 5/6
-> - file_create / upload / preview / download — Smoke 11
-> - page trash/restore 全链 — Smoke 12
 
 ---
 
-## 1. 架构
+## 1. NL 文本
+
+### Round 1 — 建 KB + 写一页
 
 ```
-TEST CLIENT (smoke-10-kb-instance-lifecycle.test.js)
-    │
-    ├─ Phase 1: kb.list 拿默认 KB(应已 init)+ kb.init 幂等性
-    ├─ Phase 2: kb.create 一个新 KB X(`Smoke10-<TS>`) → kb.get / kb.update
-    ├─ Phase 3: 在 X 里建 folder + page,用来挂后面的 metadata 测
-    ├─ Phase 4: page_update(改 title / path)+ page_freeze + page_references
-    │            + node_breadcrumb
-    ├─ Phase 5: kb.archive(X) → kb.list 看 X 不在 active → kb.unarchive(X) →
-    │            kb.list 看 X 又回 active
-    └─ Phase 6: kb.delete(X) → kb.get(X) 期待 4xx(已删)
+我想新建一个独立 KB 做 Smoke10-<TS> 实验:
+1. 新建一个 KB 叫 "Smoke10-<TS>",描述写"KB 实例生命周期实验"
+2. 在这个新 KB 的根目录下建一页测试笔记,标题 "Smoke10-<TS> 测试笔记",
+   内容写 "# Smoke10\n初版内容,一会儿要改名挪路径再冻结"
+
+建完一行报 kbId + pageId。
 ```
 
----
+### Round 2 — 改 page metadata + 冻结 + breadcrumb
 
-## 2. 前置 / Env
+```
+那个 Smoke10-<TS> 测试笔记:
+- 标题改成 "Smoke10-<TS> 测试笔记(已重命名)"
+- path 改成 "/smoke10-renamed"
+- 改完冻结这一页(以后不让人改了)
 
-跟 Smoke 8/9 一致:
-- `TEST_USER_TOKEN`(user 身份;`/kbs` POST 需要 org-owner / org-admin)
-- `TEST_AGENT_ID`(可选,本 smoke 不用)
-- `TEST_PROJECT_ID`(可选,本 smoke 不用)
-
-需要的额外能力:
-- caller 在 org 里有 org-owner 角色(KB 实例 CRUD 需要)。我们这边的 user `gavin-test-002` 是 org-owner,满足。
-
----
-
-## 3. 流程细节
-
-### Phase 1 — 默认 KB
-
-```js
-kb.list { limit: 50 }
-// assert: data 数组里至少 1 个 default KB
-
-// 幂等性:再 init 一次,期待 200(返已存在的 default KB id) 或专属错误码
-kb.init {}
-// 不强约束 status code,记下 response
+最后给我看下这个 page 在 KB 树里的 breadcrumb 路径,顺便列下有没有 references。
 ```
 
-### Phase 2 — kb.create / get / update
+### Round 3 — archive → unarchive → delete
 
-```js
-kb.create { name: `Smoke10-<TS>`, slug: `smoke10-<ts>`, description: 'KB 实例测试' }
-// 取 newKbId
-kb.get { kbId: newKbId }
-// assert: name 对得上,visibility / status / is_default 都返回了
-
-kb.update { kbId: newKbId, description: 'updated description' }
-kb.get { kbId: newKbId }
-// assert: description 含 'updated description'
 ```
+Smoke10-<TS> 这个 KB 实验做完了,操作三步:
+1. 先归档(走 archive)
+2. 等会发现还需要看,unarchive 恢复
+3. 真不用了,delete 永久删
 
-### Phase 3 — 建 folder + page 作 metadata 测试载体
-
-```js
-kb.folder_create { kbId: newKbId, name: `Smoke10-<TS>/notes` }
-// 取 folderId
-
-// page 直接 POST /api/v1/kbs/{kb_id}/pages(CLI 没暴露 page_create,
-// 沿用 Smoke 5/6 那条 fetch path)
-POST /api/v1/kbs/{newKbId}/pages
-  { title: `Smoke10-<TS> page`, format: 'markdown',
-    body: '# Smoke10\n初版内容', parent_id: folderId }
-// 取 pageId
-```
-
-### Phase 4 — page metadata 边缘
-
-```js
-kb.page_update { pageId, title: `Smoke10-<TS> page (renamed)`, path: '/renamed-path' }
-kb.page_get   { pageId }
-// assert: title 含 '(renamed)', path 含 '/renamed-path'
-
-kb.page_freeze { pageId }
-// assert: 2xx (或 status 字段含 frozen)
-// 二次写应被拒;本 smoke 不深测,只看 freeze 本身的 200
-
-kb.page_references { pageId }
-// assert: 返列表(可能是空)
-
-kb.node_breadcrumb { kbId: newKbId, nodeId: pageId }
-// assert: 返路径(数组,至少含 page 自身;或者含 folder + page)
-```
-
-### Phase 5 — archive / unarchive
-
-```js
-kb.archive { kbId: newKbId }
-kb.list { status:'archived', limit: 50 }
-// assert: newKbId 在结果里
-kb.list { status:'active',   limit: 50 }
-// assert: newKbId 不在结果里
-
-kb.unarchive { kbId: newKbId }
-kb.list { status:'active',   limit: 50 }
-// assert: newKbId 回到 active
-```
-
-### Phase 6 — delete
-
-```js
-kb.delete { kbId: newKbId }
-// 后续 kb.get 期待 4xx
-try { kb.get { kbId: newKbId } } catch (e) { ok }
+每一步操作完一行简单日志,最后确认这个 KB 已经删了(get 应该 4xx 或显示 deleted)。
 ```
 
 ---
 
-## 4. 断言表(15)
+## 2. 断言表(12)
 
-| # | Phase | 断言 |
+### 卡片体(6)
+
+| # | 来自轮 | 断言 |
 |---|---|---|
-| 1 | 1 | kb.list 返 ≥ 1 个 KB(默认 KB 存在) |
-| 2 | 1 | kb.init 不抛(幂等) |
-| 3 | 2 | kb.create 返 uuid kbId,name 对得上 |
-| 4 | 2 | kb.get(new) 返完整结构,name + visibility + status 都在 |
-| 5 | 2 | kb.update 后 kb.get description 含 'updated description' |
-| 6 | 3 | folder_create + 页面 create 都 2xx + 返 id |
-| 7 | 4 | page_update 后 title 含 '(renamed)' |
-| 8 | 4 | page_update 后 path 含 '/renamed-path' |
-| 9 | 4 | page_freeze 返 2xx |
-| 10 | 4 | page_references 返 2xx(数组,可空) |
-| 11 | 4 | node_breadcrumb 返数组 ≥ 1 |
-| 12 | 5 | archive 后 kb.list(active) 不含 newKbId |
-| 13 | 5 | archive 后 kb.list(archived) 含 newKbId |
-| 14 | 5 | unarchive 后 kb.list(active) 含 newKbId |
-| 15 | 6 | delete 后 kb.get(newKbId) 抛 4xx |
+| 1 | 1 | round1 在 120s 内到,含 kbId + pageId(≥ 2 uuid) |
+| 2 | 1 | round1 表达 "KB 已建" + "笔记已建" 语义 |
+| 3 | 2 | round2 在 90s 内到,含 "重命名" / "renamed" + "冻结" / "freeze" |
+| 4 | 2 | round2 包含 breadcrumb 路径语义 |
+| 5 | 3 | round3 在 120s 内到,含 "归档" + "恢复" + "删" |
+| 6 | 3 | round3 表达 KB 已删除 |
+
+### 旁路(6)
+
+| # | 阶段 | 断言 |
+|---|---|---|
+| 7 | round1 | kb.list 含 new KB,name 含 `Smoke10-<TS>` |
+| 8 | round1 | kb.get(new) status == active |
+| 9 | round2 | page_get title 含 "重命名" 或 "renamed",path 含 "smoke10-renamed" |
+| 10 | round2 | kb.page_get 拿得到 page;kb.node_breadcrumb 调通 |
+| 11 | round3 | kb.list 中要么找不到 new KB,要么 status='deleted' / archived 之外的 |
+| 12 | round3 | kb.get(new) 抛 4xx 或返 deleted 状态 |
 
 ---
 
-## 5. 已知/相关 bug 留观
-
-- 不出意外仍踩 #190 派生写哑火(page_count 不会跟着 page_create 自增),本 smoke **不验证 page_count**,把它留给 #190 单独的活体复现。
-- `kb.delete` 是硬删还是软删?如果是软删 + 还能 kb.list(status='deleted')`,断言 15 要相应调整;实测时若 kb.get 返 200 而非 4xx,留 request_id 单独提一笔。
-
----
-
-## 6. 跑法
+## 3. 跑法
 
 ```bash
 node docs/smoke-tests/smoke-10-kb-instance-lifecycle.test.js
 ```
 
-预期 5-10 秒。
+预期 4-6 分钟。

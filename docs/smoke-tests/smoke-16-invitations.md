@@ -1,70 +1,68 @@
-# Smoke 16 — Invitations 邀请链(纯脚本驱动)
+# Smoke 16 — Invitations(NL 驱动)
 
-> **验证目标**:覆盖 core.js 的 invitation 4 条命令——**create / list / accept / revoke**。
-> gavin 确认**不走邮件 token 链路**,可直接用 invitation_id 调 accept。
+> **验证目标**:用户用自然语言让 agent 邀请一个新同事入 org,然后再发
+> 一条邀请又改主意撤回。覆盖 invitation 4 条命令的真实用户场景。
 >
 > 覆盖 **core.js**:`core.invitation_create`、`core.invitation_list`、
 >   `core.invitation_accept`、`core.invitation_revoke`
+>
+> 不走邮件 token,通过 invitation_id 直接 accept(gavin 已确认无需邮件)。
 
 ---
 
-## 1. 架构
+## 1. 前置:provision USER3 identity-only
+
+test client 先 register `gavin-test-004@example.com`(409/422 也 OK,已存在),
+identity-only login 拿 user3 token,这部分**不**在 NL 里。
+然后 NL 让 agent 发邀请,test client 用 user3 token 调 accept 完成入组。
+
+---
+
+## 2. NL 文本
+
+### Round 1 — 发邀请
 
 ```
-TEST CLIENT (smoke-16-invitations.test.js)
-    │
-    ├─ Phase 0: provision USER3 (gavin-test-004) 用于"被邀请"
-    │            - try /auth/register
-    │            - identity-only login(不带 org_id)
-    ├─ Phase 1: USER1 调 core.invitation_create
-    │            { orgId: USER1_ORG_ID, roleId: 'org-member', email: USER3_EMAIL }
-    ├─ Phase 2: USER1 调 core.invitation_list(orgId)
-    │            → 列表里能看到刚发的邀请
-    ├─ Phase 3: USER3 调 core.invitation_accept(invitationId)
-    │            → USER3 现在是 org member
-    ├─ Phase 4: USER1 调 core.member_list → USER3 在列表里
-    ├─ Phase 5: USER1 发第二条 invitation 给虚构邮箱 → revoke 它
-    │            → invitation_list 再查,刚 revoke 那条 status=revoked/cancelled
+我想邀请一个新同事 gavin-test-004@example.com 加入我们 org 当 org-member,
+帮我发一条邀请,附言写 "${NS} 入组测试"。
+
+发完报 invitation id。
+```
+
+### Round 2 — 错发邀请 + 撤回
+
+```
+顺便测一下撤回流程:再发一条邀请到一个写错的邮箱
+"smoke16-revoked-<TS>@example.com",同样 org-member 角色。
+发完之后我立马反悔,把这条撤回(invitation_revoke)。
+
+撤回完拉一下 invitation_list,告诉我刚才那条的状态变成什么了。
 ```
 
 ---
 
-## 2. 前置 / Env
+## 3. 断言表(8)
 
-- `TEST_USER_TOKEN`(USER1, org-owner)
-- 新自动 provision:USER3 邮箱 `gavin-test-004@example.com`(避免和 Smoke 13 的 USER2 撞)
+### 卡片体(4)
 
----
-
-## 3. 断言表(10)
-
-| # | Phase | 断言 |
+| # | 来自轮 | 断言 |
 |---|---|---|
-| 1 | 0 | USER3 register status ∈ {200,201,409,422} |
-| 2 | 0 | USER3 identity-only login 拿到 access_token |
-| 3 | 1 | invitation_create 返 id |
-| 4 | 1 | invitation 含 email == USER3_EMAIL,role 字段 |
-| 5 | 2 | invitation_list 含刚发的 id |
-| 6 | 3 | USER3 invitation_accept 返 2xx |
-| 7 | 4 | USER1 member_list 含 USER3 的 member_id |
-| 8 | 5 | 第二条 invitation_create 返 id(给虚构邮箱) |
-| 9 | 5 | invitation_revoke 返 2xx |
-| 10 | 5 | revoke 后 invitation_list 里那条 status ∈ {revoked, cancelled, expired} |
+| 1 | 1 | round1 在 90s 内到,含 invitation id(uuid) |
+| 2 | 1 | 含 "邀请已发" / "已邀请" / "created" 语义 |
+| 3 | 2 | round2 在 90s 内到,含 "撤回" / "revoke" + 状态名 |
+| 4 | 2 | round2 含 "revoked" / "cancelled" / "expired" 任一 |
+
+### 旁路(4)
+
+| # | 阶段 | 断言 |
+|---|---|---|
+| 5 | round1 | invitation_list 含 USER3 邀请,status='pending' |
+| 6 | round1 | test client 用 USER3 token POST /invitations/{id}/accept 返 2xx |
+| 7 | round1 | core.member_list 现在含 USER3(identity match) |
+| 8 | round2 | invitation_list 里那条 revoked invitation status ∈ {revoked, cancelled, expired} |
 
 ---
 
-## 4. 设计要点
+## 4. 跑法
 
-- gavin 已确认**无需邮件 token**;accept 直接用 invitation_id
-- USER3 register 失败(已存在)算 OK,**幂等设计**
-- 第二条 invitation 故意给虚构邮箱(`smoke16-revoked-<TS>@example.com`),不会被 accept,只用来测 revoke 路径
-
----
-
-## 5. 跑法
-
-```bash
-node docs/smoke-tests/smoke-16-invitations.test.js
-```
-
-预期 5-10 秒。
+预期 3-5 分钟(含 USER3 provision)。

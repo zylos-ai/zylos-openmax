@@ -1,60 +1,54 @@
-# Smoke 15 — Identity + Role + Org Switch(纯脚本驱动)
+# Smoke 15 — 身份/角色/Org Switch(NL 驱动)
 
-> **验证目标**:覆盖 core.js 里**身份/角色目录**类命令——`core.member_get`
-> (按 id 取单条 member)、`core.role_list`(列 org 内可分配角色)、
-> `core.org_switch`(切当前 principal 的 active org)。
+> **验证目标**:用户用自然语言问 agent "我是谁 / 这组织里有谁 / 能分配
+> 哪些角色 / 把活跃 org 切到 X" —— 跟 Smoke 7 的 directory 简报同款套路,
+> 但聚焦 identity + roles + org_switch。
 >
-> 覆盖 **core.js**:`core.member_get`、`core.role_list`、`core.org_switch`
+> 覆盖 **core.js**:`core.me`、`core.member_get`、`core.role_list`、
+>   `core.org_switch`(本 smoke 用同 org no-op 验证调用面)
 >
-> 不覆盖(gavin 不允许 / 别的 smoke 负责):
-> - `core.platform_agent_create / delete`(gavin 已说**不允许**)
-> - `core.org_list / org_create`(Smoke 17 负责)
-> - `core.invitation_*`(Smoke 16 负责)
+> 不覆盖(gavin 排除):`core.platform_agent_create / delete`
 
 ---
 
-## 1. 架构
+## 1. NL 文本
 
 ```
-TEST CLIENT (smoke-15-identity-and-roles.test.js)
-    │
-    ├─ Phase 1: core.me 拿到 self member_id
-    ├─ Phase 2: core.member_list 拿 ≥ 1 个 member
-    ├─ Phase 3: core.member_get(self) + core.member_get(other,如果有)
-    ├─ Phase 4: core.role_list(scope='org') → 返 role 列表(含 org-owner / org-member)
-    └─ Phase 5: core.org_switch(self 当前 org) → 等价 no-op,验证 2xx 不抛
-                (真正的 cross-org switch 留给 Smoke 17,因为本 smoke 不创建第二个 org)
+帮我盘一下我的身份和这个组织的角色情况:
+1. 我是谁(返 member_id + role + display name + kind)
+2. 这组织里有多少 member(列前 3 个的 name + kind),挑一个不是我的 member 去 get 一下,
+   把那个 member 的字段告诉我
+3. 这个 org 里有哪些角色可以分配(role_list,scope=org)
+4. 把活跃 org 切到我当前这个 org(同 org 是 no-op,但需要走通 org_switch),
+   切完再 me 一次确认 org_id 还是原来这个
+
+整理成一条结构化简报。
 ```
 
 ---
 
-## 2. 前置 / Env
+## 2. 断言表(8)
 
-跟 Smoke 8/9 一致。
+### 卡片体(4)
 
----
-
-## 3. 断言表(10)
-
-| # | Phase | 断言 |
+| # | 来自轮 | 断言 |
 |---|---|---|
-| 1 | 1 | core.me 返 member_id + org_id |
-| 2 | 2 | core.member_list 返 ≥ 1 (self 至少) |
-| 3 | 3 | core.member_get(self.member_id) 返同一个 member 且 id 对得上 |
-| 4 | 3 | member 含 kind(human/agent)+ status 字段 |
-| 5 | 3 | 如果 member_list 里有 other(非 self),member_get(other) 也返 2xx |
-| 6 | 4 | core.role_list 返数组 ≥ 1 |
-| 7 | 4 | role 含 id + slug/name + scope 字段 |
-| 8 | 4 | role 列表里能找到 org-owner / org-member 任一(标签匹配宽松) |
-| 9 | 5 | core.org_switch(self 当前 org) 返 2xx |
-| 10 | 5 | switch 后 core.me 仍返同一个 org_id |
+| 1 | 1 | round1 在 120s 内到,含 member_id(uuid)+ role |
+| 2 | 1 | 含 member 列表语义 + 另一个 member 详情 |
+| 3 | 1 | 含 role / 角色 列表 |
+| 4 | 1 | 含 org_switch 已切完 / no-op 语义 |
+
+### 旁路(4)
+
+| # | 阶段 | 断言 |
+|---|---|---|
+| 5 | round1 | core.me 返 member_id + org_id |
+| 6 | round1 | core.member_list ≥ 1 |
+| 7 | round1 | core.role_list 数组含 owner/member/admin slugs 任一 |
+| 8 | round1 | 切完后 core.me.org_id 不变 |
 
 ---
 
-## 4. 跑法
+## 3. 跑法
 
-```bash
-node docs/smoke-tests/smoke-15-identity-and-roles.test.js
-```
-
-预期 2-4 秒。
+预期 2-3 分钟。

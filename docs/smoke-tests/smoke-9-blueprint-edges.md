@@ -1,166 +1,105 @@
-# Smoke 9 — Blueprint 工作流边缘(纯脚本驱动)
+# Smoke 9 — Blueprint 编排调整 + Worker claim(NL 驱动)
 
-> **验证目标**:补齐 Smoke 2 没覆盖的 blueprint / task.list 多 filter /
-> attempt 链路边缘。重点是 **`blueprint.set_steps` 整组替换**、
-> **`task.list` 用 worker-side filter(`claimable + agentSkills`)** 发现
-> 待领任务、以及 **`attempt.list` / `attempt.get`** 在 worker claim 链路里
-> 的可观测性。
+> **验证目标**:用户用自然语言让 agent 起一个 heavy issue + 初版 blueprint,
+> 看完觉得步骤可以合并,要求 agent 改 blueprint(整组替换),然后用
+> worker claim 模式跑第一步到 done。验证 agent 会自主用
+> `blueprint.set_steps / task.list(claimable+skillTags) / attempt.list 链`
+> 的完整边缘。
+>
+> 双层断言。
 >
 > 覆盖 **tm.js**:
 >   `blueprint.create`、`blueprint.get(includeSteps)`、`blueprint.list`、
->   **`blueprint.set_steps`**、`task.list`(claimable=true + agentSkills 过滤)、
+>   **`blueprint.set_steps`**、`task.list(claimable + agentSkills)`、
 >   `task.claim`、`attempt.list`、`attempt.get`、`attempt.transition`、
 >   `task.transition`、`issue.transition`
->
-> 跟 Smoke 2 的区别:
-> - Smoke 2 是 **NL 驱动**,验证 agent 能自主跑通 worker claim 模式
-> - Smoke 9 是 **脚本驱动**,把 worker 发现+attempt 可观测性的 CLI
->   表面拉直一次,不依赖 agent autonomy
 
 ---
 
 ## 1. 架构
 
 ```
-TEST CLIENT (smoke-9-blueprint-edges.test.js)
-    │
-    ├─ Phase 1: 起 heavy issue + 初版 3-step blueprint
-    ├─ Phase 2: blueprint.set_steps 整组替换 → 新 2 step
-    ├─ Phase 3: issue.transition → executing
-    ├─ Phase 4: 在新 step1 上 task.create(no assignee, skillTags=[research])
-    ├─ Phase 5: task.list 用 worker filter(claimable=true + agentSkills=[research])
-    │            → 确认 T 在结果里
-    ├─ Phase 6: task.claim → attempt 自动生成 → attempt.list ≥ 1
-    │            → attempt.get(first) 校验字段
-    ├─ Phase 7: attempt.transition done → task.transition done
-    └─ Phase 8: blueprint.list(issueId) → 确认 1 个 active blueprint
-                + blueprint.get(includeSteps=true) 校验 step 数 == 2
+[Round 1] NL: 起 heavy issue + 3 步 blueprint(采集/建模/写报告)
+[Round 2] NL: 合并前两步成 1 步,blueprint 变 2 步
+[Round 3] NL: 用 worker claim 模式跑第一步到 done(不指定 assignee)
 ```
 
 ---
 
-## 2. 前置 / Env
+## 2. NL 文本
 
-跟 Smoke 8 一致(`TEST_USER_TOKEN` / `TEST_AGENT_ID` / `TEST_PROJECT_ID`)。
-不需要 `TEST_CONV_ID` / `TEST_DEFAULT_KB_ID`。
+### Round 1
 
----
+```
+我想做个 Smoke9-<TS> 的竞品调研项目,你帮我:
+1. 在 Smoke Suite 项目下开个 heavy issue,标题 "Smoke9-<TS> 竞品定价对比",
+   优先级 medium,你做 lead,描述 "采 5 家竞品定价然后输出对比报告"
+2. blueprint 先排 3 步:s1 "采 5 家竞品定价页"、
+   s2 "建立定价对比模型"(depends on s1)、
+   s3 "写分析报告"(depends on s2)
 
-## 3. 关键流程细节
-
-### Phase 1 — 初版 3-step blueprint
-
-```js
-issue.create   { mode:'heavy', priority:'medium', leadAgentId, title:'Smoke9-<TS> issue' }
-blueprint.create { issueId, authorAgentId, steps:[
-  { title:'collect',  description:'采 5 个对手定价',    estimatedBudget: { ... }? },
-  { title:'model',    description:'建对比模型',         dependsOn:[<s1.id>] },
-  { title:'writeup',  description:'写分析报告',         dependsOn:[<s2.id>] },
-] }
-blueprint.get { id, includeSteps:true }  // assert steps.length == 3
+建完一行报 issue id + blueprint id + 3 个 step 的 id。
 ```
 
-### Phase 2 — set_steps 整组替换
+### Round 2
 
-新 step list 故意减到 2 条(模拟 PM 改了计划):
+```
+看完 blueprint 我觉得 s1 + s2 太碎,合并起来一个人能搞定。改成 2 步:
+- 新 s1 "采集 + 建模合并"
+- s2 "写分析报告"(depends on 新 s1)
 
-```js
-blueprint.set_steps { blueprintId, steps:[
-  { title:'merged_research', description:'采 + 建模合并' },
-  { title:'writeup',          description:'写报告', dependsOn:[<new s1.id>] },
-] }
-blueprint.get { id, includeSteps:true }  // assert steps.length == 2,且 title 跟新组对得上
+改完 blueprint.get 一下确认现在只剩 2 步。
 ```
 
-### Phase 4 — task.create 不带 assignee
+### Round 3
 
-```js
-task.create {
-  projectId, issueId, blueprintStepId: <new s1.id>,
-  title:'Smoke9-<TS> claim task',
-  skillTags:['research'],
-  // 不传 assigneeId → pending,等 claim
-}
 ```
+ok 推到 executing 状态。新 s1 那一步用 worker claim 模式:
+- 建 task 不指定 assignee,skillTags 加 ["research"]
+- 你自己以 worker 身份接(模拟有 research 技能的 agent)
+- 接完跑到 done(attempt + task 都 done)
 
-### Phase 5 — task.list 用 worker filter
-
-```js
-task.list {
-  issueId,
-  claimable: true,
-  agentSkills: ['research'],
-}
-// assert 结果含 T.id;
-// 再跑一次 agentSkills=['unrelated-skill'] → 结果不含 T.id(filter 真生效)
-```
-
-### Phase 6 — claim + attempt 链
-
-```js
-task.claim { id: T.id }                  // 期待 status: running
-attempt.list { taskId: T.id }            // ≥ 1
-attempt.get { id: attempts[0].id }       // taskId == T.id,status 在 {running, in_progress}
-```
-
-### Phase 7 — 收尾状态机
-
-```js
-attempt.transition { id: attempts[0].id, targetStatus:'done' }
-task.transition    { id: T.id,           targetStatus:'done' }
-```
-
-(为了把 attempt-task 状态机闭环到 done,但不要求一定把 issue 推到 delivered;留个不全闭环边缘验证 issue.transition 不强求)
-
-### Phase 8 — 收集校验
-
-```js
-blueprint.list { issueId }               // 至少 1 个 blueprint
-blueprint.get  { id, includeSteps:true } // steps.length == 2
+最后给我汇报 attempt id 跟最终 status。
 ```
 
 ---
 
-## 4. 断言表(15)
+## 3. 断言表(12)
 
-| # | Phase | 断言 |
+### 卡片体(6)
+
+| # | 来自轮 | 断言 |
 |---|---|---|
-| 1 | 1 | issue.create heavy 返 id |
-| 2 | 1 | blueprint.create 返 id + 3 steps |
-| 3 | 1 | blueprint.get(includeSteps=true) → steps.length == 3 |
-| 4 | 2 | blueprint.set_steps 返 2xx |
-| 5 | 2 | blueprint.get 之后 steps.length == 2 |
-| 6 | 2 | 新 step titles 含 `merged_research` + `writeup` |
-| 7 | 3 | issue.transition 到 executing 返 2xx |
-| 8 | 4 | task.create(no assignee, skillTags=['research']) 返 id,status=pending |
-| 9 | 5 | task.list(claimable=true, agentSkills=['research']) 含 T.id |
-| 10 | 5 | task.list(claimable=true, agentSkills=['unrelated-skill']) 不含 T.id |
-| 11 | 6 | task.claim 后 task.status == running |
-| 12 | 6 | attempt.list ≥ 1 |
-| 13 | 6 | attempt.get(first).taskId == T.id |
-| 14 | 7 | attempt.transition + task.transition done 链 都 2xx |
-| 15 | 8 | blueprint.list 返 ≥ 1 个 active blueprint(对应同一 issue) |
+| 1 | 1 | round1 回复在 120s 内到达,含 issue + blueprint + ≥ 3 uuid |
+| 2 | 1 | 回复表达"3 步已建"语义,含 "采" / "模型" / "报告" |
+| 3 | 2 | round2 回复在 90s 内到达,含"2 步"+"合并"语义 |
+| 4 | 2 | 回复明确说当前 step 数 == 2 |
+| 5 | 3 | round3 回复在 120s 内到达,含 "worker" 或 "claim" 或 "已接" |
+| 6 | 3 | 回复表达 attempt + task 已 done |
+
+### 旁路(6)
+
+| # | 阶段 | 断言 |
+|---|---|---|
+| 7 | round1 | blueprint.get(includeSteps) → steps.length == 3 |
+| 8 | round2 | blueprint.get(includeSteps) → steps.length == 2 |
+| 9 | round2 | step titles 至少有 1 个包含 "合并" / "采" / "merged" |
+| 10 | round3 | task.list(issueId, claimable=false) 含 1 个 task,status ∈ {done, running} |
+| 11 | round3 | attempt.list(taskId) ≥ 1,首条 attempt.status == done |
+| 12 | round3 | issue.status == executing 或 delivered |
 
 ---
 
-## 5. 已知/相关 bug 留观
+## 4. 已知 bug 留观
 
-- assertion 11 之前 Smoke 2 踩过 `task.claim` leave `assignee_id` 不设的 bug(参 state.md)。Smoke 9 也会复测;如果踩到,本 Smoke 在此 fail 留 request_id,不绕过。
-- assertion 12-13 attempt 链路同样是 cws-work 状态机的潜在弱点;失败留 request_id。
-- assertion 4 `blueprint.set_steps` 是新覆盖路径,如果踩到 4xx/5xx,**直接 fail**,这是 Smoke 9 的首要价值点。
+- Smoke 2 之前踩过 `task.claim` 不设 `assignee_id` 的 bug(参 state.md);如果重现,断言 10 任务 status 可能停在 pending → fail。
 
 ---
 
-## 6. 跑法 + 设计要点
+## 5. 跑法
 
 ```bash
 node docs/smoke-tests/smoke-9-blueprint-edges.test.js
 ```
 
-预期 6-12 秒内跑完(15 条 REST 串行)。
-
-设计:
-- 不动 KB / AS / comm
-- 不走 NL —— blueprint 编排 + worker 发现 + attempt 可观测性都不需要 NL
-- attempt.transition 用 `done` 而非 `failed`,留 happy-path
-- `set_steps` 是核心新覆盖,前后两次 blueprint.get 对比 step 数 + title 是主要约束
+预期 4-7 分钟。

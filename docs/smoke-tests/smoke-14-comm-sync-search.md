@@ -1,70 +1,56 @@
-# Smoke 14 — Comm Sync + Search(纯脚本驱动)
+# Smoke 14 — Comm Sync + Search(混合驱动)
 
-> **验证目标**:覆盖 comm.js 里**剩下的两条非交互命令**——`comm.sync`(离线
-> 追平,WS 重连时关键)和 `comm.search`(就是 `kb.search` 的同源 alias,
-> 走 `/search/pages`)。这是为了把 comm.js 13 条命令全部点亮。
+> **验证目标**:覆盖 comm.js 里剩下的 `comm.sync` 和 `comm.search`。
+> sync 是诊断向(离线追平),NL 包装成"我离线一会儿,补一下漏掉的消息"
+> 这种实际场景;search 是真正用户语义"帮我搜一下 'Smoke' 相关的页面"。
 >
-> 覆盖 **comm.js**:`comm.sync`、`comm.search`
-> 顺带覆盖 `comm.list_conversations`(verifies pagination + includeArchived flag)
->
-> 不深测 search 命中率(那是 cws-kb #190 的事)——本 smoke 只验证响应
-> shape 跟 spec 对齐。
+> 覆盖 **comm.js**:`comm.sync`、`comm.search`、`comm.list_conversations`
+> (includeArchived flag)
 
 ---
 
-## 1. 架构
+## 1. NL 文本
+
+### Round 1 — 离线追平 + 搜索
 
 ```
-TEST CLIENT (smoke-14-comm-sync-search.test.js)
-    │
-    ├─ Phase 1: comm.list_conversations(includeArchived=false / true)
-    │            → 都返 2xx + 数组结构
-    ├─ Phase 2: comm.sync(sinceSeq=0, deviceId=<uuid>, limit=200)
-    │            → 返 {events[], next_cursor, has_more}
-    │            - events 是 envelope,只含 message_id+seq+timestamp,不含 body
-    │            - 检查 envelope shape + has_more 字段
-    ├─ Phase 3: comm.sync(sinceSeq=巨大数, deviceId=<uuid>) → 空集 + has_more=false
-    └─ Phase 4: comm.search(query='Smoke', limit=5) → 返 shape 对齐
-                  (data[], pagination{total_count}) 即可,不强约束 ≥1 命中
+我刚才电脑挂起了一段时间没看 IM。帮我:
+1. 从 seq=0 开始把所有会话事件都补一下,看下离线期间漏了多少条
+   (用 comm.sync 这条 CLI,deviceId 随便用一个 uuid 就行)
+2. 列下当前所有会话(包括归档的也算上)
+3. 帮我搜一下 KB 里跟 "Smoke" 相关的页面,大概有多少
+
+3 项做完一行简报:漏了几条 / 总共多少会话 / 搜到几页。
 ```
 
 ---
 
-## 2. 前置 / Env
+## 2. 断言表(8)
 
-跟 Smoke 8 一致。不需要新 fixture。
+### 卡片体(4)
 
----
-
-## 3. 断言表(10)
-
-| # | Phase | 断言 |
+| # | 来自轮 | 断言 |
 |---|---|---|
-| 1 | 1 | comm.list_conversations(includeArchived=false) 返数组 |
-| 2 | 1 | comm.list_conversations(includeArchived=true) 返数组 ≥ false 的长度 |
-| 3 | 1 | 至少包含一个 conversation 含 id+type 字段 |
-| 4 | 2 | comm.sync(sinceSeq=0) 返 events 字段(数组) |
-| 5 | 2 | 每个 event 含 conversation_id + message_id + seq + timestamp |
-| 6 | 2 | has_more 是 boolean |
-| 7 | 3 | comm.sync(sinceSeq=99999999) 返 events.length == 0 |
-| 8 | 3 | has_more == false |
-| 9 | 4 | comm.search(query='Smoke') 返 data 数组 + pagination.total_count(integer) |
-| 10 | 4 | search 同时支持 kbId 限定:`{query, kbId: <TEST_DEFAULT_KB_ID>}` 也返 200 |
+| 1 | 1 | round1 在 90s 内到,含 "漏了" / "事件" / "条" 任一 |
+| 2 | 1 | 含 "会话" 数报数 |
+| 3 | 1 | 含 "搜到" 或 "条" / "页面" 关于搜索结果数 |
+| 4 | 1 | 3 个数字简报齐全 |
+
+### 旁路(4)
+
+| # | 阶段 | 断言 |
+|---|---|---|
+| 5 | round1 | comm.sync(sinceSeq=0, deviceId=<uuid>) 返 events 数组(可空可有)+ has_more boolean |
+| 6 | round1 | comm.list_conversations(includeArchived=true) 长度 ≥ comm.list_conversations(false) |
+| 7 | round1 | comm.search({query: "Smoke"}) 返 data 数组 + pagination.total_count integer |
+| 8 | round1 | comm.sync(sinceSeq=99999999) → events 空 + has_more false |
 
 ---
 
-## 4. 设计要点
-
-- sync 的 envelope 模型(只返 seq+id,不返 body)在 #190 #189 排查里都用过,本 smoke 把它的 shape 固化下来防止回归
-- search 不强约束 ≥ 1 命中,因为 #190 漏索引时永远 0 命中——但 shape 一致 OK
-- comm.list_conversations includeArchived 的差值能旁证归档逻辑没烂
-
----
-
-## 5. 跑法
+## 3. 跑法
 
 ```bash
 node docs/smoke-tests/smoke-14-comm-sync-search.test.js
 ```
 
-预期 2-5 秒。
+预期 2-3 分钟。

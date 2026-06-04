@@ -1,118 +1,134 @@
 #!/usr/bin/env node
 /**
- * Smoke 15 — Identity + Role + Org Switch(纯脚本驱动)
+ * Smoke 15 — 身份 / 角色 / Org Switch(NL 驱动)
  *
- * 见 smoke-15-identity-and-roles.md spec。10 断言。
+ * 见 smoke-15-identity-and-roles.md。1 轮 NL + 8 断言。
  */
 
 import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { log, ok, warn, die, assertEq, assertTrue } from './lib/runner.js';
-
+import { sendInstruction, log, ok, warn, die, assertEq, assertTrue } from './lib/runner.js';
 const execp = promisify(execFile);
 
-const REQUIRED = ['COCO_API_URL', 'TEST_USER_TOKEN'];
+const REQUIRED = ['COCO_API_URL', 'TEST_USER_TOKEN', 'TEST_CONV_ID', 'TEST_AGENT_ID'];
 for (const k of REQUIRED) {
   if (!process.env[k]) { console.error(`✗ Missing env: ${k}`); process.exit(2); }
 }
-process.env.COCO_AUTH_TOKEN = process.env.COCO_AUTH_TOKEN || process.env.TEST_USER_TOKEN;
-process.env.COCO_RPC_LOG = process.env.COCO_RPC_LOG || '0';
-
-const CORE_CLI = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/core.js');
-async function core(cmd, params = {}) {
-  const { stdout } = await execp('node', [CORE_CLI, cmd, JSON.stringify(params)],
-    { env: process.env, maxBuffer: 8*1024*1024 });
-  const r = JSON.parse(stdout);
-  return r.data ?? r;
-}
-const unwrap = (r) => Array.isArray(r) ? r : (r.items || r.data || r.results || []);
+const env = {
+  COCO_API_URL:            process.env.COCO_API_URL.replace(/\/+$/, ''),
+  TEST_USER_TOKEN:         process.env.TEST_USER_TOKEN,
+  TEST_CONV_ID:            process.env.TEST_CONV_ID,
+  TEST_AGENT_ID:           process.env.TEST_AGENT_ID,
+  COCO_AUTH_TOKEN:         process.env.COCO_AUTH_TOKEN || process.env.TEST_USER_TOKEN,
+  CF_ACCESS_CLIENT_ID:     process.env.CF_ACCESS_CLIENT_ID     || '',
+  CF_ACCESS_CLIENT_SECRET: process.env.CF_ACCESS_CLIENT_SECRET || '',
+};
+process.env.COCO_AUTH_TOKEN = env.COCO_AUTH_TOKEN;
+process.env.COCO_RPC_LOG = '0';
 
 const TS = Date.now();
 const NS = `Smoke15-${TS}`;
+const unwrapList = (r) => Array.isArray(r) ? r : (r.items || r.data || r.results || []);
+const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
-log(`=== Smoke 15: Identity + Role + Org Switch ===  ns=${NS}`);
+const CORE_CLI = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/core.js');
+async function core(cmd, p = {}) {
+  const { stdout } = await execp('node', [CORE_CLI, cmd, JSON.stringify(p)], { env: process.env, maxBuffer: 8*1024*1024 });
+  const r = JSON.parse(stdout); return r.data ?? r;
+}
 
-// ---------------------------------------------------------------------------
-// Phase 1 — core.me
-// ---------------------------------------------------------------------------
+function headers() {
+  const h = { Authorization: `Bearer ${env.TEST_USER_TOKEN}`, 'Content-Type': 'application/json' };
+  if (env.CF_ACCESS_CLIENT_ID)     h['CF-Access-Client-Id']     = env.CF_ACCESS_CLIENT_ID;
+  if (env.CF_ACCESS_CLIENT_SECRET) h['CF-Access-Client-Secret'] = env.CF_ACCESS_CLIENT_SECRET;
+  return h;
+}
+async function listAgentMessagesAfter(seq) {
+  const res = await fetch(`${env.COCO_API_URL}/api/v1/conversations/${env.TEST_CONV_ID}/messages?limit=50`, { headers: headers() });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return unwrapList(await res.json()).filter(m => {
+    const k = (m.sender_type || m.sender_kind || m.type || '').toUpperCase();
+    return k.includes('AGENT');
+  }).filter(m => Number(m.seq || 0) > seq).sort((a,b) => Number(a.seq) - Number(b.seq));
+}
+function extractText(msg) {
+  const c = msg.content;
+  if (typeof c === 'string') return c;
+  if (!c) return '';
+  if (typeof c.text === 'string') return c.text;
+  if (c.body && typeof c.body.text === 'string') return c.body.text;
+  return '';
+}
+async function waitForCard({ label, sinceSeq, matchAny = [], maxMs }) {
+  const startedAt = Date.now();
+  const seen = [];
+  while (Date.now() - startedAt < maxMs) {
+    try {
+      const msgs = await listAgentMessagesAfter(sinceSeq);
+      for (const m of msgs) {
+        const text = extractText(m);
+        seen.push({ seq: m.seq, preview: text.slice(0, 120) });
+        if (matchAny.length === 0 || matchAny.some(p => text.includes(p))) return { msg: m, text };
+      }
+    } catch (e) { log(`  · poll err: ${e.message}`); }
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  console.error(`✗ timeout waiting for ${label} (${maxMs}ms)`);
+  for (const s of seen.slice(-8)) console.error(`    seq=${s.seq}  ${s.preview}`);
+  process.exit(1);
+}
+async function currentSeq() {
+  const res = await fetch(`${env.COCO_API_URL}/api/v1/conversations/${env.TEST_CONV_ID}/messages?limit=1`, { headers: headers() });
+  const arr = unwrapList(await res.json());
+  return arr.length ? Math.max(...arr.map(m => Number(m.seq || 0))) : 0;
+}
 
-log('[Phase 1] core.me');
+log(`=== Smoke 15 (NL): 身份 / 角色 / Org Switch ===  ${NS}`);
+let cursor = await currentSeq();
 
+const NL1 = `帮我盘一下我的身份和这个组织的角色情况:
+1. 我是谁(返 member_id + role + display name + kind)
+2. 这组织里有多少 member(列前 3 个的 name + kind),挑一个不是我的 member 去 get 一下,
+   把那个 member 的字段告诉我
+3. 这个 org 里有哪些角色可以分配(role_list,scope=org)
+4. 把活跃 org 切到我当前这个 org(同 org 是 no-op,但需要走通 org_switch),
+   切完再 me 一次确认 org_id 还是原来这个
+
+整理成一条结构化简报。`;
+await sendInstruction(env, NL1);
+
+const r1 = await waitForCard({
+  label: 'round1', sinceSeq: cursor,
+  matchAny: ['member', '角色', 'role', 'org_id', 'kind'],
+  maxMs: 120 * 1000,
+});
+
+const uuids = r1.text.match(new RegExp(UUID_RE.source, 'gi')) || [];
+assertTrue(uuids.length >= 1, `1. round1 含 member_id (uuid)`);
+assertTrue(/member|成员/.test(r1.text), `2. round1 含 member 列表 / 详情`);
+assertTrue(/role|角色/i.test(r1.text), `3. round1 含 role / 角色`);
+assertTrue(/切|switch|no-op|不变|相同/i.test(r1.text), `4. round1 含 切 / no-op 语义`);
+
+// 旁路
 const me = await core('core.me');
-const selfMemberId = me.member_id || me.memberId;
-const selfOrgId    = me.org_id    || me.orgId;
-assertTrue(selfMemberId && selfOrgId, `1. core.me 返 member_id + org_id`);
-log(`   self member=${selfMemberId} org=${selfOrgId}`);
+assertTrue((me.member_id || me.memberId) && (me.org_id || me.orgId),
+    `5. core.me 返 member_id + org_id`);
 
-// ---------------------------------------------------------------------------
-// Phase 2 — member_list
-// ---------------------------------------------------------------------------
+const members = unwrapList(await core('core.member_list', { limit: 20 }));
+assertTrue(members.length >= 1, `6. core.member_list ≥ 1`);
 
-log('[Phase 2] member_list');
-
-const members = unwrap(await core('core.member_list', { limit: 50 }));
-assertTrue(members.length >= 1, `2. member_list ≥ 1 (got ${members.length})`);
-
-// ---------------------------------------------------------------------------
-// Phase 3 — member_get
-// ---------------------------------------------------------------------------
-
-log('[Phase 3] member_get(self)');
-
-const selfFetched = await core('core.member_get', { memberId: selfMemberId });
-assertEq(selfFetched.id || selfFetched.memberId, selfMemberId,
-    `3. member_get(self.member_id) id 对得上`);
-assertTrue((selfFetched.kind || selfFetched.type) && (selfFetched.status !== undefined),
-    `4. member 含 kind + status`);
-
-const others = members.filter(m => (m.id || m.memberId) !== selfMemberId);
-if (others.length > 0) {
-  const other = others[0];
-  const otherFetched = await core('core.member_get', { memberId: other.id || other.memberId });
-  assertEq(otherFetched.id || otherFetched.memberId, other.id || other.memberId,
-      `5. member_get(other) 返 2xx + id 对得上`);
-} else {
-  warn(`5. member_list 里没有 other(只有 self),跳过`);
-  ok(`5. (skipped: no other members)`);
-}
-
-// ---------------------------------------------------------------------------
-// Phase 4 — role_list
-// ---------------------------------------------------------------------------
-
-log('[Phase 4] role_list');
-
-const roles = unwrap(await core('core.role_list', { scope: 'org' }));
-assertTrue(roles.length >= 1, `6. role_list ≥ 1 (got ${roles.length})`);
-const r0 = roles[0];
-assertTrue(r0 && (r0.id || r0.slug || r0.name) && (r0.scope !== undefined || r0.kind !== undefined),
-    `7. role 含 id/slug/name + scope/kind`);
-const roleSlugs = roles.map(r => (r.slug || r.name || r.id || '').toLowerCase());
-assertTrue(roleSlugs.some(s => s.includes('owner') || s.includes('member') || s.includes('admin')),
-    `8. role 列表含 owner/member/admin 任一 (got ${roleSlugs.join(',').slice(0,160)})`);
-
-// ---------------------------------------------------------------------------
-// Phase 5 — org_switch (no-op same-org)
-// ---------------------------------------------------------------------------
-
-log('[Phase 5] org_switch (no-op)');
-
-try {
-  await core('core.org_switch', { orgId: selfOrgId });
-  ok(`9. org_switch(self org) 返 2xx`);
-} catch (e) {
-  die(`9. org_switch 抛错: ${e.message}`);
-}
+const roles = unwrapList(await core('core.role_list', { scope: 'org' }));
+const slugs = roles.map(r => (r.slug || r.name || r.id || '').toLowerCase());
+assertTrue(slugs.some(s => /owner|member|admin/.test(s)),
+    `7. role_list 含 owner/member/admin (got ${slugs.slice(0,5).join(',')})`);
 
 const meAfter = await core('core.me');
-const orgAfter = meAfter.org_id || meAfter.orgId;
-assertEq(orgAfter, selfOrgId, `10. switch 后 core.me.org_id 不变`);
-
-// ---------------------------------------------------------------------------
+assertEq(meAfter.org_id || meAfter.orgId, me.org_id || me.orgId,
+    `8. 切完后 core.me.org_id 不变`);
 
 log('');
-log(`✅ Smoke 15 PASS (10 / 10)`);
-log(`   self member=${selfMemberId} org=${selfOrgId}`);
-log(`   member_list=${members.length}  role_list=${roles.length}`);
+log(`✅ Smoke 15 (NL) PASS (8 / 8)`);
+log(`   member=${me.member_id || me.memberId} org=${me.org_id || me.orgId}`);
+log(`   member_list=${members.length} role_list=${roles.length}`);

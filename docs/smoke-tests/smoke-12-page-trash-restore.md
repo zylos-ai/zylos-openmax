@@ -1,134 +1,86 @@
-# Smoke 12 — Page Trash / Restore 全链(纯脚本驱动)
+# Smoke 12 — Page Trash / Restore 全链(NL 驱动)
 
-> **验证目标**:把 page 软删/列回/恢复/永久删 + 旧版本还原这条完整链路
-> 一次性扫一遍。Smoke 5/6 触碰了 page_create / page_delete 终端动作,
-> 但 trash 中间态 + revision restore 都没专门覆盖。
+> **验证目标**:用户用自然语言走"建 page → 多版本编辑 → 回滚到初版 →
+> 软删 → 从回收站恢复 → 永久删"完整 page 生命周期。覆盖 trash
+> 中间态 + revision restore(回到旧版本)两条容易漏的链路。
 >
 > 覆盖 **kb.js**:
->   `kb.page_trash`(soft delete)、`kb.pages_trashed`(列回收站)、
->   `kb.page_restore_trash`(un-trash)、`kb.page_delete`(永久删),
->   **`kb.page_restore`(restore 一个**旧 revision**到当前 head,跟 `page_restore_trash` 不同!)**
->
-> 跟 Smoke 6 区别:Smoke 6 用 `page_revisions / page_diff`,本 smoke
-> 在 revision 列表里取一个旧版,跑 `page_restore` 让 head 回到旧版。
+>   `kb.page_create`(via POST)、`kb.page_content_write`、
+>   `kb.page_revisions`、`kb.page_revision`、**`kb.page_restore`** (revision restore)、
+>   `kb.page_trash`、`kb.pages_trashed`、`kb.page_restore_trash`、`kb.page_delete`
 
 ---
 
-## 1. 架构
+## 1. NL 文本
+
+### Round 1 — 建 page + 3 个版本
 
 ```
-TEST CLIENT (smoke-12-page-trash-restore.test.js)
-    │
-    ├─ Phase 1: 建 page,写 3 个 revision(初版 + 2 次 content_write)
-    ├─ Phase 2: kb.page_revisions → 取 oldest(初版) revision id
-    ├─ Phase 3: kb.page_restore(pageId, oldestRevisionId)
-    │            → page.body 回到初版内容
-    ├─ Phase 4: kb.page_trash → page 进回收站
-    ├─ Phase 5: kb.pages_trashed → list 含 pageId
-    ├─ Phase 6: kb.page_restore_trash → page 复活
-    ├─ Phase 7: kb.page_get → 200 + status active
-    └─ Phase 8: kb.page_delete → 永久删 → page_get 期 4xx
+帮我起一份 Smoke12-<TS> 的工作笔记,放在默认知识库根目录下。
+
+分 3 次写入:
+1. 初版:body 写 "Smoke12-<TS> INIT 这是初版,只有这一段"
+2. 第二版:在 body 后面追加一段 "—— V2 追加段"
+3. 第三版:在 body 后面再追加 "—— V3 再追加一段"
+
+每次写入都过一次 content_write(让 revision 序号递增)。
+建完报 pageId,并告诉我当前总共有几个 revision。
 ```
 
----
+### Round 2 — 回滚到初版
 
-## 2. 前置 / Env
+```
+我想把这页回滚回**最初**那个版本,只剩 "Smoke12-<TS> INIT 这是初版,只有这一段"。
+用 page_restore(revisionId) 来做,不要 content_write 重写。
 
-跟 Smoke 6 一致(`TEST_USER_TOKEN` + `TEST_DEFAULT_KB_ID` + CF Access)。
-不需要 NL / 不需要 `TEST_CONV_ID`。
-
----
-
-## 3. 流程细节
-
-### Phase 1 — 建 page + 3 revision
-
-```js
-// 初版(revision 1)
-POST /kbs/{TEST_DEFAULT_KB_ID}/pages
-  { title:'Smoke12-<TS>', format:'markdown', body:'INIT body' }
-→ pageId
-
-// revision 2
-kb.page_content_write { pageId, body:'V2 body', message:'add v2' }
-// revision 3
-kb.page_content_write { pageId, body:'V3 body', message:'add v3' }
+回滚完拉一下 page_content 给我看下确认。
 ```
 
-### Phase 2 — 取 revisions
+### Round 3 — trash → restore_trash → delete
 
-```js
-kb.page_revisions { pageId, limit: 50 }
-// 假设按时间倒序(newest first):revs[0] = v3, revs[last] = v1
-const oldest = revs[revs.length - 1]   // 初版
 ```
+这一页现在状态有点乱,你帮我处理:
+1. 先丢回收站(page_trash)
+2. 列下回收站确认这条记录在里面
+3. 等等我又想找回来,从回收站恢复(page_restore_trash)
+4. 现在真不用了,永久删掉(page_delete)
 
-### Phase 3 — page_restore(restore old revision)
-
-```js
-kb.page_restore { pageId, revisionId: oldest.id }
-const c = kb.page_content { pageId }
-// assert: c.body 含 'INIT body'
-```
-
-注意:有的实现会在 `page_restore` 时**新建一个 revision**(把旧版复制为新 head),
-所以 revisions 数量可能 +1。本 smoke **不**强约束 revisions 数,只看 head body。
-
-### Phase 4-7 — trash → restore_trash
-
-```js
-kb.page_trash { pageId }
-const trashList = kb.pages_trashed { limit: 50 }
-// assert: trashList 含 pageId
-kb.page_restore_trash { pageId }
-const pg = kb.page_get { pageId }
-// assert: 200 + status 在 {active, ok}
-```
-
-### Phase 8 — 永久删
-
-```js
-kb.page_delete { pageId }
-try { kb.page_get { pageId } } catch (e) { ok }
+每步一行日志,最后确认 page_get 拿不到了。
 ```
 
 ---
 
-## 4. 断言表(12)
+## 2. 断言表(13)
 
-| # | Phase | 断言 |
+### 卡片体(6)
+
+| # | 来自轮 | 断言 |
 |---|---|---|
-| 1 | 1 | page POST 返 pageId(uuid) |
-| 2 | 1 | 2 次 content_write 都 2xx |
-| 3 | 2 | page_revisions 返 ≥ 3 条(初版 + v2 + v3) |
-| 4 | 3 | page_restore(oldest) 返 2xx |
-| 5 | 3 | restore 后 page_content.body 含 'INIT body'(回到初版) |
-| 6 | 4 | page_trash 返 2xx |
-| 7 | 5 | pages_trashed 含 pageId |
-| 8 | 5 | pages_trashed 不在 active 列表(`kb.pages` 不含 pageId)** |
-| 9 | 6 | page_restore_trash 返 2xx |
-| 10 | 7 | restore_trash 后 page_get 返 2xx + status 含 active/ok |
-| 11 | 8 | page_delete 返 2xx |
-| 12 | 8 | page_delete 后 page_get 抛 4xx |
+| 1 | 1 | round1 在 150s 内到,含 pageId(uuid)+ revision 数报数 |
+| 2 | 1 | round1 提到的 revision 数 ≥ 3 |
+| 3 | 2 | round2 在 90s 内到,含 "回滚 / 初版 / V1 / INIT" 任一 |
+| 4 | 2 | round2 表达回滚后内容已是初版 |
+| 5 | 3 | round3 在 120s 内到,含 "回收站" + "恢复" + "永久" / "删" |
+| 6 | 3 | round3 表达 page 已删除拿不到 |
 
-** 断言 8 受 `kb.pages` 502 bug 影响(如果 cws-int 还没修),探到 5xx 算 warn-only,
-   不 fail;只要 pages_trashed 含 pageId 即可视为 trash 进入回收站。
+### 旁路(7)
 
----
-
-## 5. 已知/相关 bug 留观
-
-- **#190 派生写哑火**也会影响这里:每次 page_restore / trash / restore_trash 都应该写 revision +
-  更新 `last_modified_at`。本 smoke 不检查 last_modified,但日志记下来留 #190 顺带验证。
-- 假设 `kb.page_delete` 是**硬删**(可见 page_get 4xx);如果实际是软删 + status='deleted',
-  断言 12 改成"page_get 返 200 + status==deleted"——这种情况下记 warn 并继续,留待 cws-kb 团队确认。
+| # | 阶段 | 断言 |
+|---|---|---|
+| 7 | round1 | page_revisions ≥ 3 |
+| 8 | round1 | page_content.body 含 "V3" |
+| 9 | round2 | page_content.body 只含 "INIT",不含 "V2" / "V3" |
+| 10 | round3 | (trash 之后)pages_trashed 含 pageId |
+| 11 | round3 | (restore_trash 之后)page_get 返 200 + status active |
+| 12 | round3 | (delete 之后)page_get 抛 4xx 或 status=='deleted' |
+| 13 | round3 | (delete 之后)kb.pages 不含 pageId(或 502 路径 warn-only) |
 
 ---
 
-## 6. 跑法
+## 3. 跑法
 
 ```bash
 node docs/smoke-tests/smoke-12-page-trash-restore.test.js
 ```
 
-预期 4-8 秒。
+预期 5-8 分钟。
