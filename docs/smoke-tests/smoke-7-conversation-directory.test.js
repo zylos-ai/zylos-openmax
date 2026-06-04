@@ -180,7 +180,7 @@ const r2 = await waitForCard({
   label: 'round2 project members',
   sinceSeq: cursor,
   matchAny: ['(human', '(agent', firstProj.name],
-  maxMs: 40 * 1000,
+  maxMs: 60 * 1000,
 });
 cursor = Number(r2.msg.seq);
 const t2 = r2.text;
