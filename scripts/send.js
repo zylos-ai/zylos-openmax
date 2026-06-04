@@ -101,13 +101,18 @@ async function sendMediaMessage(ep, kind, localPath) {
   const convId = resolveTargetConversation(ep);
   const messageType = kind === 'image' ? 'IMAGE' : 'FILE';
   const contentType = kind === 'image' ? 'image' : 'file';
-  const { mediaId, fileName, contentType: mediaContentType, sizeBytes } = await uploadMedia(localPath, {
+  // IM-mode finalize returns BOTH `mediaId` and `artifactId` as *distinct* UUIDs:
+  //   - `mediaId`    : cws-comm-internal media reference (lives on the message)
+  //   - `artifactId` : cws-as artifact id (the actual blob in storage)
+  // The chat message's `attachments[].artifact_id` field must hold the
+  // cws-as id so that any consumer (FE / agent) can `as.resolve` it to a
+  // download URL. Using `mediaId` instead yields a "image loading…" forever
+  // placeholder because cws-as has no record of that id. See group thread
+  // 2026-06-04 22:24 HKT for the cross-agent investigation.
+  const { mediaId, artifactId, fileName, contentType: mediaContentType, sizeBytes } = await uploadMedia(localPath, {
     conversationId: convId,
     mediaType: contentType,
   });
-  // Media references go in `attachments`, not the body. cws-core's
-  // attachmentItem expects {artifact_id, file_name, content_type, size_bytes};
-  // `mediaId` returned from cws-as upload is the canonical artifact_id.
   return post(apiPath(`/conversations/${convId}/messages`), {
     client_msg_id: newClientMsgId(),
     type:          messageType,
@@ -115,7 +120,7 @@ async function sendMediaMessage(ep, kind, localPath) {
       content_type: contentType,
       body:         {},
       attachments: [{
-        artifact_id:  mediaId,
+        artifact_id:  artifactId || mediaId,    // prefer the cws-as artifact id; fall back to media id only for backward-compat
         file_name:    fileName || '',
         content_type: mediaContentType || '',
         size_bytes:   sizeBytes || 0,

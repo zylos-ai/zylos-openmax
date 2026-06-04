@@ -104,10 +104,10 @@ const me = await core('core.me');
 const USER1_ORG_ID = me.org_id || me.orgId;
 assertTrue(USER1_ORG_ID, `pre. USER1 org_id 拿到`);
 
-// register
+// register (cws-core /auth/register schema: {email, password, token_delivery} — no display_name)
 const reg = await fetch(`${env.COCO_API_URL}/auth/register`, {
   method: 'POST', headers: commonHeaders(),
-  body: JSON.stringify({ email: USER2_EMAIL, password: USER2_PASS, display_name: 'GavinTest003' }),
+  body: JSON.stringify({ email: USER2_EMAIL, password: USER2_PASS, token_delivery: 'body' }),
 });
 if (![200, 201, 409, 422].includes(reg.status)) {
   warn(`USER2 register HTTP ${reg.status}`);
@@ -132,16 +132,25 @@ let user2Token, USER2_MEMBER_ID;
     user2Token = ((await lr2.json()).data ?? {}).access_token || '';
     if (!user2Token) die('USER2 identity login 失败');
 
-    // USER1 邀请
-    const inv = await core('core.invitation_create', { orgId: USER1_ORG_ID, roleId: 'org-member', email: USER2_EMAIL });
+    // USER1 邀请 (cws-core takes role_id as UUID, org_id from JWT — MR !40)
+    // org-member role uuid is well-known builtin: 00000000-0000-0000-0000-000000000003
+    const ORG_MEMBER_ROLE_ID = '00000000-0000-0000-0000-000000000003';
+    const inv = await core('core.invitation_create', { roleId: ORG_MEMBER_ROLE_ID, email: USER2_EMAIL });
     const invId = inv.id || inv.invitation_id;
+    const invToken = inv.token;
     if (!invId) die(`invitation_create 没返 id: ${JSON.stringify(inv).slice(0,200)}`);
 
-    // USER2 accept
+    // USER2 accept (cws-core /api/v1/invitations/{id}/accept requires display_name;
+    // pass invitation token explicitly for token-based acceptance instead of
+    // relying on principal-email matching, which has been flaky).
     const acp = await fetch(`${env.COCO_API_URL}/api/v1/invitations/${invId}/accept`, {
-      method: 'POST', headers: commonHeaders(user2Token), body: JSON.stringify({}),
+      method: 'POST', headers: commonHeaders(user2Token),
+      body: JSON.stringify({ display_name: 'GavinTest003', token: invToken }),
     });
-    if (!acp.ok) die(`USER2 accept HTTP ${acp.status}`);
+    if (!acp.ok) {
+      const t = await acp.text().catch(() => '');
+      die(`USER2 accept HTTP ${acp.status}: ${t.slice(0,200)}`);
+    }
 
     // re-login org-scoped
     const lr3 = await fetch(`${env.COCO_API_URL}/auth/login`, {
@@ -183,8 +192,15 @@ assertTrue(r1.text.includes(`${NS} 项目同步`),
     `2. round1 含 群标题 ${NS} 项目同步`);
 
 // 旁路:list_conversations 含新 group
+// cws-core list-conversations returns items wrapped as {conversation: {id, type, name?, ...}, ...}.
+// Group title lives at `item.conversation.name`; DMs have no name. Normalize.
 const convs = unwrapList(await comm('comm.list_conversations', { limit: 100 }));
-const group = convs.find(c => (c.title || '').includes(`${NS} 项目同步`));
+const groupItem = convs.find(c => {
+  const conv = c.conversation || c;
+  const name = conv.name || conv.title || '';
+  return name.includes(`${NS} 项目同步`);
+});
+const group = groupItem ? (groupItem.conversation || groupItem) : null;
 assertTrue(group && group.id, `6. comm.list_conversations 含新 group`);
 log(`   groupId=${group.id}`);
 
