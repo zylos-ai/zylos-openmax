@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`COCO_RPC_LOG_FILE` env var** — append every RPC request/response line to a
+  file, independent of the stdout sink (`COCO_RPC_LOG`). Use case: in
+  integration phase we run smoke tests with `COCO_RPC_LOG=0` to keep the test
+  client output readable, but still want full RPC traces on disk for
+  post-mortem. Set `COCO_RPC_LOG_FILE=<path>` to enable file logging; unset or
+  empty disables it. Format: `<ISO-timestamp> [rpc] → <method> <url> req: ...`
+  / `[rpc] ← <method> <url> resp <status>: ...`. Wired in both
+  `src/lib/client.js` (REST traffic) and `src/lib/token.js` (auth handshake).
+  Best-effort: disk errors are swallowed silently so RPCs never fail because
+  the log file is unwritable.
+
 ## [0.3.9] - 2026-06-03
 
 ### Fixed

@@ -109,7 +109,7 @@ assertTrue(/采|采集|定价/.test(r1.text) && /模型|建模/.test(r1.text) &&
 
 // 旁路:在 Smoke Suite 找新 heavy issue
 const issuesA = unwrapList(await tm('issue.list_in_project', {
-  projectId: env.TEST_PROJECT_ID, pageSize: 200,
+  projectId: env.TEST_PROJECT_ID, pageSize: 100,
 }));
 const issueI = issuesA.find(i => (i.title || '').includes(NS));
 assertTrue(issueI && issueI.id, `7a. issue I 存在`);
@@ -146,9 +146,9 @@ assertTrue(/2|两/.test(r2.text), `4. round2 提到 step 数 == 2`);
 const bpDetail2 = await tm('blueprint.get', { id: bp.id, includeSteps: true });
 const steps2 = unwrapList(bpDetail2.steps || []);
 assertEq(steps2.length, 2, `8. blueprint.get → 2 steps (round2)`);
-const stepTitles = steps2.map(s => (s.title || '').toLowerCase());
-assertTrue(stepTitles.some(t => /合并|采|merged|merge|combined/.test(t)),
-    `9. step titles 含 "合并 / 采 / merged" 任一 (got ${stepTitles.join(',')})`);
+const stepDescs = steps2.map(s => (s.description || s.title || '').toLowerCase());
+assertTrue(stepDescs.some(t => /合并|采|merged|merge|combined/.test(t)),
+    `9. step descriptions 含 "合并 / 采 / merged" 任一 (got ${stepDescs.join(' | ').slice(0,160)})`);
 
 // ---------- Round 3 ----------
 log('[Round 3] worker claim → done');

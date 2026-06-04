@@ -116,13 +116,13 @@ assertTrue(uuids.length >= 1, `1. round1 回复含至少 1 个 uuid (got ${uuids
 assertTrue(/已建|建好|建完|建立|创建/.test(r1.text), `2. round1 表达"已建"语义`);
 
 // 旁路:project B by name + issue in A + task in I
-const allProjs = unwrapList(await tm('project.list', { pageSize: 200 }));
+const allProjs = unwrapList(await tm('project.list', { pageSize: 100 }));
 const projB = allProjs.find(p => (p.name || '').includes(`${NS}/move-target`));
 assertTrue(projB && projB.id, `8. project B (${NS}/move-target) 存在`);
 log(`   projB.id=${projB.id}`);
 
 const issuesA = unwrapList(await tm('issue.list_in_project', {
-  projectId: env.TEST_PROJECT_ID, pageSize: 200,
+  projectId: env.TEST_PROJECT_ID, pageSize: 100,
 }));
 const issueI = issuesA.find(i => (i.title || '').includes(NS));
 assertTrue(issueI && issueI.id, `9a. issue I 在 Smoke Suite 项目里`);

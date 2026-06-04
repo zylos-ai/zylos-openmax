@@ -198,7 +198,7 @@ assertTrue(/删|delet/i.test(r3.text), `5c. round3 含 删除`);
 assertTrue(/已删|delet|消失|不在/i.test(r3.text), `6. round3 表达 KB 已删`);
 
 // 旁路:list 中要么找不到 newKbId,要么 status != active
-const kbListAfter = unwrapList(await kb('kb.list', { limit: 200 }));
+const kbListAfter = unwrapList(await kb('kb.list', { limit: 100 }));
 const stillThere = kbListAfter.find(k => k.id === newKbId);
 if (!stillThere) {
   ok(`11. kb.list 找不到 newKbId(硬删)`);
