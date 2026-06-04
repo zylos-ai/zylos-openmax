@@ -91,15 +91,32 @@ async function currentSeq() {
 log(`=== Smoke 16 (NL): Invitations ===  ${NS}`);
 
 // ---------- 前置:provision USER3 identity-only ----------
+// USER3 email is timestamped per run so each smoke execution gets a
+// fresh identity. cws-core's /invitations/{id}/accept hits a PG
+// unique-constraint 500 ("duplicate key value violates unique constraint
+// idx_members_org_identity_active") when a user is already an active
+// member of the org — i.e. re-running with a fixed email after the
+// first successful accept makes the next run 500 on round1#6.
+// File a cws-core ticket: that path should return 4xx (409/422) with a
+// semantic body, not a raw PG error / 500. Until then, isolate each
+// run by timestamping.
 log('[前置] provision USER3');
-const USER3_EMAIL = 'gavin-test-004@example.com';
+const USER3_EMAIL = `gavin-test-004-${TS}@example.com`;
 const USER3_PASS  = 'TestPass123!';
 const me = await core('core.me');
 const ORG_ID = me.org_id || me.orgId;
 
+// cws-core /auth/register schema:
+//   - REQUIRED: email, password, token_delivery
+//   - REJECTS: display_name (the user's display_name is set elsewhere —
+//     identity create derives it from email locally, member create can
+//     override per-org). Sending display_name 422s as unexpected property.
+// Re-registration of an existing email returns an error (422 or 409 with
+// "already exists") which we deliberately ignore: the subsequent
+// identity-only login below is the actual reachability check.
 await fetch(`${env.COCO_API_URL}/auth/register`, {
   method: 'POST', headers: commonHeaders(),
-  body: JSON.stringify({ email: USER3_EMAIL, password: USER3_PASS, display_name: 'GavinTest004' }),
+  body: JSON.stringify({ email: USER3_EMAIL, password: USER3_PASS, token_delivery: 'body' }),
 });
 
 const lr = await fetch(`${env.COCO_API_URL}/auth/login`, {
@@ -118,7 +135,8 @@ log('[Round 1] 发邀请给 USER3');
 const NL1 = `我想邀请一个新同事 ${USER3_EMAIL} 加入我们 org 当 org-member,
 帮我发一条邀请,附言写 "${NS} 入组测试"。
 
-发完报 invitation id。`;
+发完报 invitation id 和 token(两行,格式
+\`invitation_id: <uuid>\` 和 \`token: <string>\`)。`;
 await sendInstruction(env, NL1);
 const r1 = await waitForCard({
   label: 'round1', sinceSeq: cursor,
@@ -131,19 +149,38 @@ const uuids1 = r1.text.match(new RegExp(UUID_RE.source, 'gi')) || [];
 assertTrue(uuids1.length >= 1, `1. round1 含 invitation id`);
 assertTrue(/已发|已邀请|created|发送|sent/i.test(r1.text), `2. round1 含 已发 / created`);
 
-// 旁路:invitation_list 含 USER3
+// 旁路:invitation_list 含 USER3 邀请 status=pending.
+// Field name is `invitation_id` (no `id` alias on the list endpoint — they
+// look interchangeable on /invitations/{id}/{create,accept,delete}, but
+// the list response uses the longer form).
 const invList1 = unwrapList(await core('core.invitation_list', { orgId: ORG_ID, limit: 50 }));
 const user3Inv = invList1.find(i =>
   ((i.email || '').toLowerCase() === USER3_EMAIL.toLowerCase()) &&
   (i.status || '').toLowerCase() === 'pending'
 );
-assertTrue(user3Inv && (user3Inv.id || user3Inv.invitation_id),
+assertTrue(user3Inv && (user3Inv.invitation_id || user3Inv.id),
     `5. invitation_list 含 USER3 邀请 status=pending`);
-const invId = user3Inv.id || user3Inv.invitation_id;
+const invId = user3Inv.invitation_id || user3Inv.id;
 
-// USER3 accept
+// USER3 accept.
+// cws-core /invitations/{id}/accept body schema (2026-06-04):
+//   { token, display_name }       ← both required
+// Empty body returns 422 "expected required property display_name"; a
+// body with display_name only but no token returns 401 "invalid
+// credentials" (principal-email matching fallback is gated off — token
+// is now the only acceptance path). The token is secret and isn't
+// returned by /invitations list, so the runner extracts it from the
+// agent's NL1 reply text (instructed to report token in a `token: <str>`
+// line).
+const tokenMatch = r1.text.match(/\btoken[:\s]*[`'"“”]?([A-Za-z0-9_\-]{32,})/);
+const invToken = tokenMatch ? tokenMatch[1] : null;
+if (!invToken || invToken.length < 32) {
+  die(`round1 reply lacked a parseable invitation token (need \`token: <str>\` for /accept body)\n  text: ${r1.text.slice(0,500)}`);
+}
+
 const acpRes = await fetch(`${env.COCO_API_URL}/api/v1/invitations/${invId}/accept`, {
-  method: 'POST', headers: commonHeaders(user3Token), body: JSON.stringify({}),
+  method: 'POST', headers: commonHeaders(user3Token),
+  body: JSON.stringify({ token: invToken, display_name: 'GavinTest004' }),
 });
 assertTrue(acpRes.ok, `6. USER3 invitation_accept 返 2xx (got ${acpRes.status})`);
 log(`   USER3 已 accept invitation ${invId}`);

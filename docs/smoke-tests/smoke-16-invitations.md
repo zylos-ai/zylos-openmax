@@ -6,15 +6,23 @@
 > 覆盖 **core.js**:`core.invitation_create`、`core.invitation_list`、
 >   `core.invitation_accept`、`core.invitation_revoke`
 >
-> 不走邮件 token,通过 invitation_id 直接 accept(gavin 已确认无需邮件)。
+> cws-core `/invitations/{id}/accept` 当前 schema 要求 body 含
+> `{token, display_name}`(2026-06-04 实测,纯 invitation_id 路径
+> 422 / 401)。test client 从 agent round1 回复里抓 token + id 用于旁路 accept。
 
 ---
 
 ## 1. 前置:provision USER3 identity-only
 
-test client 先 register `gavin-test-004@example.com`(409/422 也 OK,已存在),
-identity-only login 拿 user3 token,这部分**不**在 NL 里。
-然后 NL 让 agent 发邀请,test client 用 user3 token 调 accept 完成入组。
+test client 先 register `gavin-test-004-<TS>@example.com`(每次跑 TS 不同,
+保证全新身份;若已存在则 409/422 也 OK),identity-only login 拿 user3
+token,这部分**不**在 NL 里。然后 NL 让 agent 发邀请,test client 用
+user3 token 调 accept 完成入组。
+
+> **为什么 timestamp**:cws-core 当前 `/invitations/{id}/accept` 在用户
+> 已是 active member 时返 500(PG 唯一索引 `idx_members_org_identity_active`
+> 直接打穿);应当 409/422 返语义错误。固定邮件第二次跑就 500,所以
+> 每次用全新 email 隔离。bug 单独追踪。
 
 ---
 
@@ -23,11 +31,14 @@ identity-only login 拿 user3 token,这部分**不**在 NL 里。
 ### Round 1 — 发邀请
 
 ```
-我想邀请一个新同事 gavin-test-004@example.com 加入我们 org 当 org-member,
+我想邀请一个新同事 gavin-test-004-<TS>@example.com 加入我们 org 当 org-member,
 帮我发一条邀请,附言写 "${NS} 入组测试"。
 
-发完报 invitation id。
+发完报 invitation id 和 token(两行,格式
+`invitation_id: <uuid>` 和 `token: <string>`)。
 ```
+
+(`<TS>` 是 Date.now() ms,test client 每次跑随 NS 一起变。)
 
 ### Round 2 — 错发邀请 + 撤回
 
