@@ -62,6 +62,10 @@ function resolveBaseUrl() {
 async function resolveToken(orgId) {
   // Prefer an explicitly-set override (tests / one-shot CLI invocations).
   if (activeApiKey) return activeApiKey;
+  // Allow an env-supplied bearer to override the cached agent JWT — useful
+  // for "act as user" one-shot ops (e.g. running an admin-only command from
+  // the agent runtime by minting a user JWT first). Never persisted.
+  if (process.env.COCO_USER_TOKEN) return process.env.COCO_USER_TOKEN;
   // Use the token manager: returns a cached or freshly-refreshed JWT for
   // the given org. Falls back to the raw api_key if token.js cannot reach
   // cws-core (e.g. offline). Note: the api_key works as a bearer only on
