@@ -157,6 +157,17 @@ const COMMANDS = {
     offset: params.offset,
   }),
 
+  // POST /api/v1/kbs/{kb_id}/pages
+  //     body {title, format, body, parent_id?, message?}
+  //     format: "markdown" | "plain_text"
+  'kb.page_create': () => post(apiPath(`/kbs/${requireKbId()}/pages`), {
+    title:     params.title,
+    format:    params.format || 'markdown',
+    body:      params.body ?? params.content?.body ?? params.content ?? '',
+    parent_id: params.parentId,
+    message:   params.message || params.commitMessage,
+  }),
+
   // GET /api/v1/pages/{page_id}
   'kb.page_get': () => get(apiPath(`/pages/${params.pageId}`)),
 
@@ -280,6 +291,7 @@ Directory tree (kb-scoped)
 
 Pages (flat)
   kb.pages                 {cursor?, limit?, offset?}
+  kb.page_create           {kbId, title, format?, body?, parentId?, message?}    # POST /kbs/{kb_id}/pages   format=markdown|plain_text (default markdown)
   kb.page_get              {pageId}
   kb.page_update           {pageId, title?, path?}
   kb.page_delete           {pageId}                          # permanent
