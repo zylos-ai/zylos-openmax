@@ -31,6 +31,7 @@
 | **15** | "我是谁 / 列 member / 列角色 / 切活跃 org" | core.me + member_get + role_list + org_switch | [md](./smoke-15-identity-and-roles.md) | [test.js](./smoke-15-identity-and-roles.test.js) |
 | **16** | "邀请 USER3 入组;再邀请一个错邮箱然后撤回" | invitation_create / list / accept(by id) / revoke | [md](./smoke-16-invitations.md) | [test.js](./smoke-16-invitations.test.js) |
 | **17** | "新建测试 org,切过去看看,切回原 org" | org_list + org_create + org_switch + project_list | [md](./smoke-17-multi-org.md) | [test.js](./smoke-17-multi-org.test.js) |
+| **18** | "把本地图片作为附件发到我们 DM 里" | **as.upload(IM 模式)** + comm.send(attachments) + as.download/resolve(旁路)| [md](./smoke-18-im-file-attachment.md) | [test.js](./smoke-18-im-file-attachment.test.js) |
 
 每条 smoke 都用 `sendInstruction` 触发 agent、`waitForCard` 等卡片体短语、再用 test client 直接调对应 CLI 旁路验证终态。**不强约束 agent 调了哪条 CLI**——只验证用户期望的结果到位。
 
