@@ -309,11 +309,21 @@ export function asClient(orgId) {
 
 /**
  * PUT raw bytes to an absolute (typically pre-signed) URL.
- * No Bearer / CF Access header added — pre-signed URLs carry their own auth
- * and target S3 directly, not cws-core via Cloudflare.
+ *
+ * Pre-signed URLs carry their own AWS SigV4 auth in the query string, so we
+ * don't add a Bearer token. We DO inject `CF-Access-Client-*` headers on
+ * every outbound request — the cws-int gateway fronts both the API and the
+ * artifact storage (`cws-int.coco.xyz/cws-artifacts/*`) through the same
+ * Cloudflare Access zone, and any request without service-token headers
+ * gets 302'd to the login page. Sending CF headers to a pure third-party
+ * S3/MinIO endpoint is harmless (the headers are ignored).
  */
 export async function putBytes(url, buf, contentType, extraHeaders = {}) {
-  const headers = { 'Content-Type': contentType || 'application/octet-stream', ...extraHeaders };
+  const headers = {
+    'Content-Type': contentType || 'application/octet-stream',
+    ...cfAccessHeaders(),
+    ...extraHeaders,
+  };
   const res = await fetch(url, { method: 'PUT', headers, body: buf });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
@@ -326,10 +336,10 @@ export async function putBytes(url, buf, contentType, extraHeaders = {}) {
 
 /**
  * GET raw bytes from an absolute URL. Used to follow pre-signed download
- * URLs returned by cws-as.
+ * URLs returned by cws-as. Mirrors `putBytes` re: CF Access injection.
  */
 export async function getBytes(url) {
-  const res = await fetch(url);
+  const res = await fetch(url, { headers: cfAccessHeaders() });
   if (!res.ok) throw new Error(`GET ${res.status}: ${res.statusText}`);
   return Buffer.from(await res.arrayBuffer());
 }
