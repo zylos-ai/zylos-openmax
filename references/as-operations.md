@@ -9,9 +9,38 @@ CLI 位置:`src/cli/as.js`
 >
 > 所有跟二进制字节有关的事情都走这里,不要再写第二份。
 
-状态:✅ cws-as 已暴露每个端点。本 CLI 直连 cws-as(不走 cws-core BFF)。
-Base URL:`config.comm.as_url`(env `COCO_AS_URL` 可覆盖)
-真实端点以 cws-as 仓库为准:`https://git.coco.xyz/coco-workspace/cws-as`
+状态:✅ v5 路径全部走 cws-core BFF(`/api/v1/...`),底层 cws-core 再 connect-RPC 到 cws-as。
+Base URL:`COCO_API_URL`(走 cws-int gateway,跟 cws-core/kb/comm 同一个 zone,自动注入 CF Access headers)。
+真实端点以 cws-core BFF 为准:`https://git.coco.xyz/coco-workspace/cws-core/internal/transport/http/upload*.go` + cws-as 仓库 `https://git.coco.xyz/coco-workspace/cws-as`。
+
+---
+
+## ⚠ 上传走哪条路径?IM 还是 KB?
+
+**`as.upload` 是 双模 入口,根据有没有 `conversationId` 决定走哪条服务端路径。选错了会失败。**
+
+| 你的目的 | 走 IM 上传 还是 KB 上传 | 怎么调 CLI |
+|---|---|---|
+| **聊天 / 会话里发图、发文件**(用户给 agent / agent 给用户)| **IM 上传** | `as.upload {filePath, conversationId, mediaType:"image"/"file"}` —— **必须带 conversationId** |
+| **归档资料到 KB**(项目交付物、研究笔记附件)| **KB 上传** | `kb.upload {kbId, filePath, parentId?}` 或 `as.upload {filePath, parentId?}` —— **不带 conversationId** |
+| Agent 出站发媒体消息(`scripts/send.js [MEDIA:image]/path`)| **IM 上传**(send.js 内部自动选)| 直接 `c4-send.js coco-workspace "[COCO DM]/<conv>" "[MEDIA:image]/path"` |
+
+### 服务端路径对照
+
+| 模式 | prepare 端点 | finalize 端点 | 返回字段 |
+|---|---|---|---|
+| **IM** | `POST /api/v1/conversations/{cid}/uploads/prepare` | `POST /api/v1/conversations/uploads/finalize` | `{media_id, artifact_id, ...}` — 给 `comm.send`/`send.js` 的 attachments 用 |
+| **KB** | `POST /api/v1/uploads/prepare`(body 带 `parent_id`)| `POST /api/v1/uploads/finalize` | `{node_id, artifact_id, tree_node, ...}` — KB 树里直接出现一个 file 节点 |
+
+### 选错了会怎样
+
+- **要发会话却没带 conversationId** → CLI 走 KB 路径,文件挂到 KB 根目录,**不会出现在对话框里**,接收方完全看不到。
+- **要归档到 KB 却带了 conversationId** → CLI 走 IM 路径,artifact 跟某条会话挂上但**不在 KB 树里**,KB 检索 / kb.search 都找不到。
+- **两种路径的 artifact_id 字段位置不同**,把 IM `media_id` 当成 KB `node_id` 塞回 KB 操作(比如想用 `kb.file_create artifactId=...`)会失败。
+
+⚠️ 这条规则跟 cws-comm/cws-kb 后端架构强相关:IM 路径下 artifact 跟 `conversation_id` 绑,KB 路径下 artifact 跟 `org_id` + `kb_id` 绑。决定走哪条**只能由调用方在 prepare 阶段定**,后期想换得重传。
+
+---
 
 ## cws-as 三步上传(每次 `as.upload` 都走这条)
 
@@ -46,7 +75,7 @@ Base URL:`config.comm.as_url`(env `COCO_AS_URL` 可覆盖)
 
 | 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ✅ | `as.upload` | `{filePath, mediaType?, contentType?, description?, metadata?}` | 3-step(上面那条) |
+| ✅ | `as.upload` | `{filePath, conversationId?, parentId?, mediaType?, contentType?, filename?}` | 3-step(上面那条);`conversationId` → IM,无 → KB(见上面"上传走哪条路径"那节)|
 | ✅ | `as.list` | `{pageSize?, pageToken?, mime?, status?, producer?}` | `GET /api/v1/artifacts` |
 | ✅ | `as.get` | `{artifactId}` | `GET /api/v1/artifacts/{id}` |
 | ✅ | `as.update` | `{artifactId, name?, description?, metadata?}` | `PATCH /api/v1/artifacts/{id}` |
@@ -64,10 +93,13 @@ Base URL:`config.comm.as_url`(env `COCO_AS_URL` 可覆盖)
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `filePath` | string | **必填**,本地绝对路径 |
+| `conversationId` | uuid | **设这个 → IM 上传**(会话附件)。返回里有 `mediaId` 给 `comm.send` attachments 用 |
+| `parentId` | uuid | 仅 KB 上传时用,KB 树里某 folder 节点 id;不传则挂 KB 根 |
 | `mediaType` | `image\|video\|audio\|voice\|file\|sticker` | 默认 `file`;影响 MIME 自动推断 |
 | `contentType` | string | 显式 MIME(覆盖 mediaType 推断) |
-| `description` | string | 描述文字,落到 artifact metadata |
-| `metadata` | object | 自由结构 metadata,服务端原样存 |
+| `filename` | string | 覆盖默认文件名(默认取 filePath basename) |
+
+**`conversationId` 跟 `parentId` 互斥**:IM 路径不接受 parent_id,KB 路径不接受 conversation_id。同时传只有 `conversationId` 生效(走 IM)。
 
 返回:
 

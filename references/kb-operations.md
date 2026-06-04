@@ -136,13 +136,17 @@ Org(组织,scope 单位)
 
 用例:把一个 Project 关到一个 KB folder("项目交付物归档到这"),后续 `kb.search` 可以按 `folder_id` 限定到这个 folder。
 
-### 文件附件
+### 文件附件(KB 上传专用)
 
 | 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ✅ | `kb.upload` | `{filePath, mediaType?, contentType?, description?, nodeId?, pageId?, orgId?}` | 委托给 `as.uploadMedia()` |
+| ✅ | `kb.upload` | `{kbId, filePath, parentId?, contentType?, filename?}` | 委托给 `as.uploadMedia()`(KB 模式)→ 三步:`POST /api/v1/uploads/prepare` + 预签名 PUT + `POST /api/v1/uploads/finalize` |
 
-`kb.upload` **不调 KB 私有 multipart 端点**,统一走 `as.uploadMedia()`(cws-as 3-step:create artifact + PUT + finalize)。返回的 `mediaId` / `artifactId` 可以塞到 Page body 里(比如 markdown 里写 `![](as://org_x/art_y)`),配合 `kb.relations_create` 把这个 artifact 跟当前页面挂上。
+`kb.upload` 等价于 `as.upload {filePath, parentId?, ...}` 不带 conversationId 的 KB 模式语糖,**会在 KB 树里出现一个 file 节点**(返回里有 `nodeId` + `treeNode`),后续可以 `kb.node_get` / `kb.file_preview` / `kb.file_download` 操作它。
+
+**不要用 `kb.upload` 发会话附件**:会话/DM 里的图片或文件要走 **IM 上传**(`as.upload` 带 `conversationId`,详见 [as-operations.md](./as-operations.md) 顶部那节"上传走哪条路径"),否则文件挂到 KB 但接收方对话框里看不到。
+
+返回的 `mediaId` / `artifactId` 也可以塞到 Page body 里(比如 markdown 里写 `![](artifact://<id>)`),配合 `kb.relations_create` 把这个 artifact 跟当前页面挂上。
 
 ## 典型流程
 
