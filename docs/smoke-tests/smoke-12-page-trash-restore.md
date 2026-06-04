@@ -36,17 +36,22 @@
 回滚完拉一下 page_content 给我看下确认。
 ```
 
-### Round 3 — trash → restore_trash → delete
+### Round 3 — trash → list → restore_trash → trash again → permanent delete
 
 ```
 这一页现在状态有点乱,你帮我处理:
 1. 先丢回收站(page_trash)
 2. 列下回收站确认这条记录在里面
-3. 等等我又想找回来,从回收站恢复(page_restore_trash)
-4. 现在真不用了,永久删掉(page_delete)
+3. 等等我又想找回来,从回收站恢复(page_restore_trash),恢复完确认一下 page 又是 active 了
+4. 真不用了,这次走永久删:
+   - 先 page_trash(因为 page_delete 只能删 trashed 状态的 page,这是 cws-kb 的语义保护)
+   - 然后 page_delete 永久删
+5. 最后确认 page_get 拿不到了(4xx 或不存在)
 
-每步一行日志,最后确认 page_get 拿不到了。
+每步一行日志。
 ```
+
+> 备注:cws-kb `PermanentDeletePage` 的语义约束是"只能永久删已在回收站的 page"——active page 直接 page_delete 会返 404(见 cws-kb#193,推荐修法是改返 422/409 + 有语义的 detail,但语义保护本身保留)。本 spec 顺势把 round 3 的流程改成对 cws-kb 语义友好的形式:restore_trash 之后想真删一定要再走一次 trash。
 
 ---
 
