@@ -9,13 +9,35 @@
 
 ## 用例清单
 
-| 用例 | 验证维度 | 对照设计 | 文档 | 脚本 |
-|---|---|---|---|---|
-| **Smoke 1** | Light 单 Agent 全生命周期(基线)| Smoke 1 | [smoke-1-light-single-agent.md](./smoke-1-light-single-agent.md) | [.test.js](./smoke-1-light-single-agent.test.js) |
-| **Smoke 2** | Heavy + Blueprint + Worker claim + KB | Smoke 2 | [smoke-2-heavy-blueprint-worker.md](./smoke-2-heavy-blueprint-worker.md) | [.test.js](./smoke-2-heavy-blueprint-worker.test.js) |
-| **Smoke 3** | Heavy 拒收 → reopened → 返工 → 再交付 | Smoke 3 | [smoke-3-rejection-rework.md](./smoke-3-rejection-rework.md) | [.test.js](./smoke-3-rejection-rework.test.js) |
+### 一线 — NL 驱动(agent 自主决策)
 
-Smoke 1 / 2 是 **happy path**(全部预期成功),Smoke 3 是**状态机边界**(故意拒收 + 验证非法转移被拒绝)。失败重试 / 异常路径属于后续 Smoke 系列,不在本目录内。
+| 用例 | 验证维度 | 文档 | 脚本 |
+|---|---|---|---|
+| **Smoke 0** | 最小闭环:auth/login → me → project CRUD | [md](./smoke-0-project-create.md) | [test.js](./smoke-0-project-create.test.js) |
+| **Smoke 1** | Light 单 Agent 全生命周期(基线)| [md](./smoke-1-light-single-agent.md) | [test.js](./smoke-1-light-single-agent.test.js) |
+| **Smoke 2** | Heavy + Blueprint + Worker claim + KB | [md](./smoke-2-heavy-blueprint-worker.md) | [test.js](./smoke-2-heavy-blueprint-worker.test.js) |
+| **Smoke 3** | Heavy 拒收 → reopened → 返工 → 再交付 | [md](./smoke-3-rejection-rework.md) | [test.js](./smoke-3-rejection-rework.test.js) |
+| **Smoke 4** | 5 卡片简单研究任务对话流 | [md](./smoke-4-simple-task-conversation.md) | [test.js](./smoke-4-simple-task-conversation.test.js) |
+| **Smoke 5** | KB 研究工作区(folder + page + search)| [md](./smoke-5-kb-tree-and-files.md) | [test.js](./smoke-5-kb-tree-and-files.test.js) |
+| **Smoke 6** | 多轮编辑 + revision diff | [md](./smoke-6-page-revisions.md) | [test.js](./smoke-6-page-revisions.test.js) |
+| **Smoke 7** | 组织态势简报(directory 类) | [md](./smoke-7-conversation-directory.md) | [test.js](./smoke-7-conversation-directory.test.js) |
+
+### 二线 — 纯脚本驱动(CLI 表面覆盖,无 agent 自主)
+
+| 用例 | 主要 CLI 覆盖 | 文档 | 脚本 |
+|---|---|---|---|
+| **Smoke 8** | tm.js 元数据 + 边缘:project.update/restore/members、issue.update/move_project、task.reassign | [md](./smoke-8-tm-metadata-edges.md) | [test.js](./smoke-8-tm-metadata-edges.test.js) |
+| **Smoke 9** | blueprint.set_steps + task.list worker filter + attempt.list/get | [md](./smoke-9-blueprint-edges.md) | [test.js](./smoke-9-blueprint-edges.test.js) |
+| **Smoke 10** | KB 实例生命周期(kb.create/get/update/archive/unarchive/delete + page metadata) | [md](./smoke-10-kb-instance-lifecycle.md) | [test.js](./smoke-10-kb-instance-lifecycle.test.js) |
+| **Smoke 11** | **as.js 全部** + kb 文件向(upload / preview / download / batch / file_create) | [md](./smoke-11-as-kb-files.md) | [test.js](./smoke-11-as-kb-files.test.js) |
+| **Smoke 12** | page trash → 回收站 → un-trash → permanent delete + 旧 revision restore | [md](./smoke-12-page-trash-restore.md) | [test.js](./smoke-12-page-trash-restore.test.js) |
+| **Smoke 13** | comm 会话生命周期:create_dm/group + send + get_messages + mark_read + delete_message | [md](./smoke-13-comm-conversations.md) | [test.js](./smoke-13-comm-conversations.test.js) |
+| **Smoke 14** | comm.sync + comm.search shape + list_conversations(includeArchived) | [md](./smoke-14-comm-sync-search.md) | [test.js](./smoke-14-comm-sync-search.test.js) |
+| **Smoke 15** | core.member_get + role_list + org_switch(同 org no-op) | [md](./smoke-15-identity-and-roles.md) | [test.js](./smoke-15-identity-and-roles.test.js) |
+| **Smoke 16** | invitation_create/list/accept/revoke(用 invitation_id,无邮件) | [md](./smoke-16-invitations.md) | [test.js](./smoke-16-invitations.test.js) |
+| **Smoke 17** | org_list + org_create + org_switch + project_list 跟着切 | [md](./smoke-17-multi-org.md) | [test.js](./smoke-17-multi-org.test.js) |
+
+一线(0-7)是 happy/反例路径 + agent NL 自主决策;二线(8-17)把 CLI 表面**全部点亮**,不依赖 agent runtime/会话推送,跑得快、断言密、bug 信号清。
 
 ---
 
