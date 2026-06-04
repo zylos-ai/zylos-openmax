@@ -47,20 +47,28 @@ const COMMANDS = {
     offset: params.offset,
   }),
 
-  // POST /api/v1/kbs   body {name, slug?, description?}
+  // POST /api/v1/kbs   body {name, visibility, description?, icon?}
+  //   visibility: "open" | "closed" | "private"  (required by cws-core)
+  //   slug is NOT accepted by cws-core — server derives it from name.
   'kb.create': () => post(apiPath('/kbs'), {
     name:        params.name,
-    slug:        params.slug,
+    visibility:  params.visibility || 'closed',
     description: params.description,
+    icon:        params.icon,
   }),
 
   // GET    /api/v1/kbs/{kb_id}
-  // PATCH  /api/v1/kbs/{kb_id}    body {name?, description?}
+  // PATCH  /api/v1/kbs/{kb_id}    body {name?, description?, set_description?,
+  //                                      visibility?, icon?, set_icon?}
   // DELETE /api/v1/kbs/{kb_id}
   'kb.get':    () => get(apiPath(`/kbs/${requireKbId()}`)),
   'kb.update': () => patch(apiPath(`/kbs/${requireKbId()}`), {
-    name:        params.name,
-    description: params.description,
+    name:            params.name,
+    description:     params.description,
+    set_description: params.setDescription,
+    visibility:      params.visibility,
+    icon:            params.icon,
+    set_icon:        params.setIcon,
   }),
   'kb.delete': () => del(apiPath(`/kbs/${requireKbId()}`)),
 
@@ -249,9 +257,9 @@ Usage: node src/cli/kb.js <command> '<json-params>'
 KB collection
   kb.init                  {}                                # POST /kbs/init
   kb.list                  {limit?, offset?}                 # GET  /kbs
-  kb.create                {name, slug?, description?}       # POST /kbs
+  kb.create                {name, visibility?, description?, icon?}    # POST /kbs   visibility=open|closed|private (default closed)
   kb.get                   {kbId}                            # GET  /kbs/{kb_id}
-  kb.update                {kbId, name?, description?}       # PATCH /kbs/{kb_id}
+  kb.update                {kbId, name?, description?, setDescription?, visibility?, icon?, setIcon?}    # PATCH /kbs/{kb_id}
   kb.delete                {kbId}                            # DELETE /kbs/{kb_id}
   kb.archive               {kbId}                            # POST /kbs/{kb_id}/archive
   kb.unarchive             {kbId}                            # POST /kbs/{kb_id}/unarchive
