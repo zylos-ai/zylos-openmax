@@ -128,7 +128,19 @@ const meAfter = await core('core.me');
 assertEq(meAfter.org_id || meAfter.orgId, me.org_id || me.orgId,
     `8. 切完后 core.me.org_id 不变`);
 
+// 9. Direct backing call: org_switch must actually 200 with a fresh token
+// envelope. Catches the silent-400 regression where the CLI sends no body
+// (root-caused 2026-06-04) — that path leaves assertion 8 green because
+// org_id "stayed the same" purely because nothing happened server-side.
+const switched = await core('core.org_switch', { orgId: me.org_id || me.orgId });
+assertTrue(
+  (switched.org_id || switched.orgId) === (me.org_id || me.orgId) &&
+  typeof (switched.access_token || switched.accessToken) === 'string' &&
+  (switched.access_token || switched.accessToken).length > 0,
+  `9. core.org_switch 真切:resp.org_id == 入参 + access_token 非空 string`,
+);
+
 log('');
-log(`✅ Smoke 15 (NL) PASS (8 / 8)`);
+log(`✅ Smoke 15 (NL) PASS (9 / 9)`);
 log(`   member=${me.member_id || me.memberId} org=${me.org_id || me.orgId}`);
 log(`   member_list=${members.length} role_list=${roles.length}`);
