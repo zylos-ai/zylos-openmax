@@ -27,7 +27,7 @@
 
 ---
 
-## 2. 断言表(8)
+## 2. 断言表(9)
 
 ### 卡片体(4)
 
@@ -38,7 +38,7 @@
 | 3 | 1 | 含 role / 角色 列表 |
 | 4 | 1 | 含 org_switch 已切完 / no-op 语义 |
 
-### 旁路(4)
+### 旁路(5)
 
 | # | 阶段 | 断言 |
 |---|---|---|
@@ -46,6 +46,7 @@
 | 6 | round1 | core.member_list ≥ 1 |
 | 7 | round1 | core.role_list 数组含 owner/member/admin slugs 任一 |
 | 8 | round1 | 切完后 core.me.org_id 不变 |
+| 9 | round1 | 旁路直接调 core.org_switch(目标 = 当前 org)真的返了 200 信封:`org_id` 与入参一致 + `access_token` 是非空 string —— 防止 CLI 静默 400 / 无 body 时被断言 8 漏过(2026-06-04 root-caused 过一次) |
 
 ---
 

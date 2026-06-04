@@ -66,8 +66,13 @@ const COMMANDS = {
     name: params.name,
     slug: params.slug,
   }),
-  // POST /api/v1/organizations/{org_id}/switch  — swap principal's active org
-  'core.org_switch': () => post(apiPath(`/organizations/${params.orgId}/switch`)),
+  // POST /api/v1/organizations/{org_id}/switch  — swap principal's active org.
+  // Server requires a body to be present (empty `{}` is fine; any
+  // additional property is rejected as `unexpected property` 422 — the
+  // request schema is closed). Returns a fresh `access_token` scoped to
+  // the target org (used by callers that need to act under the new org
+  // context immediately).
+  'core.org_switch': () => post(apiPath(`/organizations/${params.orgId}/switch`), {}),
 
   // ✅ Roles
   'core.role_list': () => get(apiPath('/roles'), { scope: params.scope }),
@@ -121,7 +126,7 @@ Organizations
   core.org_list            {orderBy?}
   core.org_get             {orgId}
   core.org_create          {name, slug}
-  core.org_switch          {orgId}      # principal's active org swap
+  core.org_switch          {orgId}      # principal's active org swap — returns new access_token scoped to target org
 
 Roles
   core.role_list           {scope?}
