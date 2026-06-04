@@ -149,14 +149,17 @@ assertTrue(body2.includes('INIT') && !body2.includes('V2') && !body2.includes('V
     `9. page_content.body 只含 INIT,不含 V2/V3 (got "${body2.slice(0,80)}")`);
 
 // ---------- Round 3 ----------
-log('[Round 3] trash → restore_trash → delete');
+log('[Round 3] trash → list → restore_trash → trash again → permanent delete');
 const NL3 = `这一页现在状态有点乱,你帮我处理:
 1. 先丢回收站(page_trash)
 2. 列下回收站确认这条记录在里面
-3. 等等我又想找回来,从回收站恢复(page_restore_trash)
-4. 现在真不用了,永久删掉(page_delete)
+3. 等等我又想找回来,从回收站恢复(page_restore_trash),恢复完确认一下 page 又是 active 了
+4. 真不用了,这次走永久删:
+   - 先 page_trash(因为 page_delete 只能删 trashed 状态的 page,这是 cws-kb 的语义保护)
+   - 然后 page_delete 永久删
+5. 最后确认 page_get 拿不到了(4xx 或不存在)
 
-每步一行日志,最后确认 page_get 拿不到了。`;
+每步一行日志。`;
 await sendInstruction(env, NL3);
 const r3 = await waitForCard({
   label: 'round3', sinceSeq: cursor,
