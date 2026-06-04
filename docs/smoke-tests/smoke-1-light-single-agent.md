@@ -124,7 +124,8 @@ node docs/smoke-tests/smoke-1-light-single-agent.test.js
 
 | # | 字段 | 期望 | 来源 |
 |---|---|---|---|
-| 1 | `firstObservedStatus` | `"executing"` | Light 关键行为 —— **跳过 draft** |
+| 1a | `statusTrace` | 不含 `"draft"` | Light 关键行为 —— **跳过 draft**(否定断言,避开 sub-second 跑完时的 poll 竞态) |
+| 1b | `firstObservedStatus` | 不等于 `"draft"` | 冗余兜底 |
 | 2 | `issue.mode` | `"light"` | 指令约束 |
 | 3 | `issue.priority` | `"low"` | 指令约束 |
 | 4 | `issue.status` | `"accepted"` | 流转终点 |

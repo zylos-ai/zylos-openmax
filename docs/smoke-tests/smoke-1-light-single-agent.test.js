@@ -14,7 +14,7 @@
 
 import {
   runSmokeCase, tm, listTasks, listAttempts,
-  assertEq, assertTrue, log,
+  assertEq, assertTrue, assertNullish, log,
 } from './lib/runner.js';
 
 const TITLE = `Smoke1-${Date.now()}`;
@@ -38,19 +38,30 @@ await runSmokeCase({
   name: 'Smoke 1: Light 单 Agent 全生命周期',
   instruction,
   predicate: (i) => typeof i.title === 'string' && i.title.includes(TITLE),
-  assertions: async ({ env, issue, firstObservedStatus }) => {
-    // 1. Light mode 跳过 draft —— 我们第一次观测到的状态应该是 executing
-    //    (注意:如果 agent 跑得飞快,poll 3s 可能错过 draft,但 light 路径
-    //     设计上根本不进 draft;这条断言用 firstObservedStatus 而不是 trace
-    //     首元素,效果一样)
-    assertEq(firstObservedStatus, 'executing', '1. firstObservedStatus (light 跳过 draft)');
+  assertions: async ({ env, issue, firstObservedStatus, statusTrace }) => {
+    // 1. Light mode 必须**不进 draft**。
+    //    旧实现用 `firstObservedStatus === "executing"`,但当 agent 全套 7 步
+    //    (issue.create → task.create → attempts → transitions → set_acceptance)
+    //    在亚秒级跑完时,test 的 poll 永远会在 accepted 时才第一次拉到 issue,
+    //    导致 firstObservedStatus="accepted" 而 assertion 误判失败。
+    //
+    //    实测 2026-06-03:tm.js 调用 ~50ms × 7 = <1s,而 poll 即便缩到 1s
+    //    也不一定能在 executing 期间命中。
+    //
+    //    正确的"light 跳过 draft"语义是 **statusTrace 不含 "draft"**(否定
+    //    断言;agent 不论快慢,只要它没经过 draft,statusTrace 里就不会出现
+    //    这个值)。同时也校验 firstObservedStatus 不是 draft 作为冗余兜底。
+    assertTrue(!statusTrace.some(s => s.status === 'draft'),
+        `1a. statusTrace 不含 "draft" (got: ${JSON.stringify(statusTrace.map(s => s.status))})`);
+    assertTrue(firstObservedStatus !== 'draft',
+        `1b. firstObservedStatus ≠ "draft" (got: ${JSON.stringify(firstObservedStatus)})`);
 
     // 2-7. Issue 字段
     assertEq(issue.mode,                  'light',          '2. issue.mode');
     assertEq(issue.priority,              'low',            '3. issue.priority');
     assertEq(issue.status,                'accepted',       '4. issue.status');
     assertEq(issue.lead_agent_id,         env.TEST_AGENT_ID,'5. issue.lead_agent_id');
-    assertEq(issue.current_blueprint_id,  null,             '6. issue.current_blueprint_id');
+    assertNullish(issue.current_blueprint_id,               '6. issue.current_blueprint_id');
     assertEq(issue.acceptance_source,     'explicit',       '7. issue.acceptance_source');
 
     // 8-11. Task
@@ -59,7 +70,7 @@ await runSmokeCase({
     const task = tasks[0];
     assertEq(task.status,             'done',           '9.  task.status');
     assertEq(task.assignee_id,        env.TEST_AGENT_ID,'10. task.assignee_id');
-    assertEq(task.blueprint_step_id,  null,             '11. task.blueprint_step_id');
+    assertNullish(task.blueprint_step_id,             '11. task.blueprint_step_id');
 
     // 12-14. Attempt
     const attempts = await listAttempts(task.id);

@@ -98,8 +98,15 @@ function resolveTmCli() {
 const TM_CLI = resolveTmCli();
 
 export async function tm(cmd, params = {}) {
+  // Force COCO_RPC_LOG=0 for the spawned tm.js. The installed v0.3.9 client
+  // library defaults to writing every REST call as `[rpc] → ...` /
+  // `[rpc] ← ...` on stdout — those lines prepend the JSON response and
+  // break JSON.parse here. Leave any caller-provided override alone.
+  const env = process.env.COCO_RPC_LOG === undefined
+    ? { ...process.env, COCO_RPC_LOG: '0' }
+    : process.env;
   const { stdout } = await exec('node', [TM_CLI, cmd, JSON.stringify(params)], {
-    env: process.env,
+    env,
     cwd: path.dirname(path.dirname(TM_CLI)), // skill dir or repo root
     maxBuffer: 4 * 1024 * 1024,
   });
@@ -178,7 +185,11 @@ export async function sendInstruction(env, instructionText, opts = {}) {
 // =============================================================================
 
 const DEFAULT_MAX_WAIT_MS = 10 * 60 * 1000;
-const DEFAULT_POLL_MS     = 3000;
+// Default poll interval — 1s gives a reasonable chance to observe short-lived
+// intermediate states (e.g. executing → delivered → accepted for a Light
+// issue executed in sub-second wall time) without spamming the gateway.
+// Callers can still tighten further via opts.pollMs.
+const DEFAULT_POLL_MS     = 1000;
 
 export async function waitForCompletion(env, predicate, opts = {}) {
   const {
@@ -282,4 +293,13 @@ export function assertTrue(cond, label) {
 export function assertIn(value, allowed, label) {
   if (allowed.includes(value)) { ok(`${label} ∈ ${JSON.stringify(allowed)} (got ${JSON.stringify(value)})`); return; }
   die(`${label}: expected one of ${JSON.stringify(allowed)}, got ${JSON.stringify(value)}`);
+}
+
+// cws-core Go transport serializes nullable pointer fields with `omitempty`,
+// so a null value is omitted from the JSON envelope and JS sees `undefined`,
+// not `null`. Use assertNullish for fields that are semantically "absent"
+// (e.g. light issue current_blueprint_id, light task blueprint_step_id).
+export function assertNullish(value, label) {
+  if (value == null) { ok(`${label} = ${JSON.stringify(value)}`); return; }
+  die(`${label}: expected null/undefined, got ${JSON.stringify(value)}`);
 }
