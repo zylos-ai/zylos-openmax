@@ -63,13 +63,18 @@ Org(组织,scope 单位)
 | ✅ | `kb.page_get` | `{pageId, orgId?}` | `GET /pages/{pageId}` |
 | ✅ | `kb.page_create` | `{title, parentId, format?, content:{body, front_matter?}, commitMessage?, orgId?}` | `POST /pages` |
 | ✅ | `kb.page_update` | `{pageId, title?, parentId?, content?, baseRevisionId, commitMessage?, orgId?}` | `PATCH /pages/{pageId}` |
-| ✅ | `kb.page_delete` | `{pageId, orgId?}` | `DELETE /pages/{pageId}` |
+| ✅ | `kb.page_delete` | `{pageId, orgId?}` | `DELETE /pages/{pageId}` — **permanent delete; page MUST be in `trashed` state first** |
 | ✅ | `kb.page_content` | `{pageId, orgId?}` | `GET /pages/{pageId}/content` |
 | ✅ | `kb.page_content_write` | `{pageId, content:{body, front_matter?}, baseRevisionId, commitMessage?, orgId?}` | `POST /pages/{pageId}/content` |
 | ✅ | `kb.page_revisions` | `{pageId, orgId?, pageSize?, pageToken?}` | `GET /pages/{pageId}/revisions` |
 | ✅ | `kb.page_revision` | `{pageId, revisionId, orgId?}` | `GET /pages/{pageId}/revisions/{revId}` |
 | ✅ | `kb.page_diff` | `{pageId, fromRevisionId, toRevisionId, orgId?}` | `GET /pages/{pageId}/diff?from_revision_id=&to_revision_id=` |
-| ✅ | `kb.page_restore` | `{pageId, revisionId, commitMessage?, orgId?}` | `POST /pages/{pageId}/restore-version` |
+| ✅ | `kb.page_restore` | `{pageId, revisionId, commitMessage?, orgId?}` | `POST /pages/{pageId}/restore-version` — restore page **content** to a prior revision (NOT trash-restore) |
+| ✅ | `kb.page_trash` | `{pageId, orgId?}` | `POST /pages/{pageId}/trash` — soft-delete, sets status=`trashed`, shows up in `kb.pages_trashed` |
+| ✅ | `kb.page_restore_trash` | `{pageId, orgId?}` | `POST /pages/{pageId}/restore` — un-trash, restores to status=`active` |
+| ✅ | `kb.pages_trashed` | `{limit?, offset?, orgId?}` | `GET /pages/trashed` — list trashed pages |
+| ✅ | `kb.page_freeze` | `{pageId, orgId?}` | `POST /pages/{pageId}/freeze` — mark page read-only (write rejected) |
+| ✅ | `kb.page_references` | `{pageId, orgId?}` | `GET /pages/{pageId}/references` — list places referencing this page |
 
 页面 ID 形态:`pg-{uuid}`。Revision 是每页自增整数从 1 起。
 
@@ -79,6 +84,18 @@ Org(组织,scope 单位)
 - `kb.page_content_write`(`POST /pages/{pid}/content`):**只**改内容主体,语义更专,适合 Agent 后续大段编辑
 
 两者都支持乐观并发:先 `kb.page_get` 拿 `revision_id`,写时把它当 `baseRevisionId` 传过去,服务端若发现不一致返回 409 + 当前 revision_id,客户端重读后合并再写。
+
+**两个 "restore" 不是一回事,Agent 经常搞错**:
+
+- `kb.page_restore`(`POST /pages/{pid}/restore-version`):**回滚到一个旧 revision**,page 的 status 不变。用于"撤销最近 N 次编辑"。
+- `kb.page_restore_trash`(`POST /pages/{pid}/restore`):**从回收站恢复**,把 status 从 `trashed` 改回 `active`。跟 revision 无关。
+- 路径相似但语义不同,**别看名字猜**——遇到 "restore" 先弄清楚是 trash-restore 还是 revision-restore。
+
+**三态保护链:trash → permanent_delete**:
+
+- `kb.page_delete` 是**永久删**(物理删),不可恢复,所以 cws-kb 强制要求 page 已经在 `trashed` 状态:必须先 `kb.page_trash` 把 page 丢进回收站,再 `kb.page_delete`。
+- 直接对 `active` page 调 `kb.page_delete`,cws-kb 会返 404(语义不太诚实,这是 cws-kb#193;但语义保护本身保留,不要绕)。
+- 完整流程:`page_create → ... → page_trash → page_delete`。如果中间想撤销,用 `page_restore_trash` 把它捞回来,**再删时还得先 trash 一次**。
 
 ### 搜索 ⭐
 
