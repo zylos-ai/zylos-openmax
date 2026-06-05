@@ -89,10 +89,10 @@ function resolveTmCli() {
   if (process.env.COCO_TM_CLI) return process.env.COCO_TM_CLI;
   const installed = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/tm.js');
   if (fs.existsSync(installed)) return installed;
-  // fallback to repo-local (this file lives at docs/smoke-tests/lib/runner.js,
-  // so REPO_ROOT is three levels up)
+  // fallback to repo-local (this file lives at
+  // docs/smoke-tests/single-agent/lib/runner.js, so REPO_ROOT is four levels up)
   const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(here, '../../..', 'src/cli/tm.js');
+  return path.resolve(here, '../../../..', 'src/cli/tm.js');
 }
 
 const TM_CLI = resolveTmCli();
