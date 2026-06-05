@@ -83,8 +83,11 @@ else
     rm -f "$REG_TMP"
     exit 1
   fi
-  IDENTITY_ID="$(python3 -c "import json; d=json.load(open('$REG_TMP')); print((d.get('data') or d).get('identity_id',''))")"
-  API_KEY="$(python3 -c   "import json; d=json.load(open('$REG_TMP')); print((d.get('data') or d).get('api_key',''))")"
+  # `|| echo ""` guards against a malformed/empty register response — without it
+  # python3 errors would propagate via set -e and kill the script silently before
+  # the explicit "missing identity_id/api_key" error below could print.
+  IDENTITY_ID="$(python3 -c "import json; d=json.load(open('$REG_TMP')); print((d.get('data') or d).get('identity_id',''))" 2>/dev/null || echo "")"
+  API_KEY="$(python3 -c   "import json; d=json.load(open('$REG_TMP')); print((d.get('data') or d).get('api_key',''))"   2>/dev/null || echo "")"
   rm -f "$REG_TMP"
   [[ -z "$IDENTITY_ID" || -z "$API_KEY" ]] && { echo "✗ register: missing identity_id/api_key in response"; exit 1; }
   echo "[init] ✓ registered: identity_id=$IDENTITY_ID  api_key=(written to config)"

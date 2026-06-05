@@ -50,7 +50,9 @@ echo "  ✓ node $(node --version), npm $(npm --version), pm2 $(pm2 --version | 
 
 GL_TOKEN="${GITLAB_TOKEN:-${ZYLOS_GITLAB_TOKEN:-}}"
 if [[ -z "$GL_TOKEN" && -f ~/zylos/.env ]]; then
-  GL_TOKEN="$(grep -E '^(GITLAB_TOKEN|ZYLOS_GITLAB_TOKEN)=' ~/zylos/.env | head -1 | cut -d= -f2-)"
+  # `|| true` so a missing GITLAB_TOKEN line in .env doesn't trip pipefail+set-e
+  # and silently kill the script before the explicit "not set" error below.
+  GL_TOKEN="$(grep -E '^(GITLAB_TOKEN|ZYLOS_GITLAB_TOKEN)=' ~/zylos/.env 2>/dev/null | head -1 | cut -d= -f2- || true)"
 fi
 [[ -z "$GL_TOKEN" ]] && { echo "  ✗ GITLAB_TOKEN not set (env or ~/zylos/.env)"; exit 1; }
 echo "  ✓ GITLAB_TOKEN found (len ${#GL_TOKEN})"
