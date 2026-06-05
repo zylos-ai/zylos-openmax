@@ -92,9 +92,13 @@ const COMMANDS = {
     cursor: params.cursor,
     limit:  params.limit,
   }),
-  // POST /api/v1/invitations/{invitation_id}/accept — token? (in body)
+  // POST /api/v1/invitations/{invitation_id}/accept
+  // Server requires BOTH `token` AND `display_name` since the contract
+  // tightened in Smoke 16 work. CLI forwards both; callers can pass
+  // either `displayName` (camel) or `display_name` (snake).
   'core.invitation_accept': () => post(apiPath(`/invitations/${params.invitationId}/accept`), {
-    token: params.token,
+    token:        params.token,
+    display_name: params.display_name ?? params.displayName,
   }),
   // DELETE /api/v1/invitations/{invitation_id}
   'core.invitation_revoke': () => del(apiPath(`/invitations/${params.invitationId}`)),
@@ -134,7 +138,7 @@ Roles
 Invitations
   core.invitation_create   {roleId, email?, message?}
   core.invitation_list     {status?, cursor?, limit?}
-  core.invitation_accept   {invitationId, token?}
+  core.invitation_accept   {invitationId, token, displayName (or 'display_name')}
   core.invitation_revoke   {invitationId}
 
 Environment:
