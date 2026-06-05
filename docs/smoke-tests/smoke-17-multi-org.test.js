@@ -114,12 +114,16 @@ assertTrue(/切到|切回|switch/i.test(r1.text), `2. round1 含 切到/切回/s
 const nums = r1.text.match(/\d+/g) || [];
 assertTrue(nums.length >= 2, `3. round1 含 ≥ 2 个数字(原 / 新 项目数)`);
 
-// 旁路:org_list ≥ 2
+// 旁路:org_list ≥ 2.
+// list endpoint returns `org_id` (not `id`); prefer that, fall back to
+// `id` if cws-core ever standardizes. Same drift pattern fixed in
+// smoke-16 for invitation_list.
 const orgs = unwrapList(await core('core.org_list', {}));
 assertTrue(orgs.length >= 2, `4. core.org_list ≥ 2 (got ${orgs.length})`);
 const newOrg = orgs.find(o => (o.name || '').includes(NS));
-assertTrue(newOrg && newOrg.id, `5. 新 org name 含 ${NS} (找到 id=${newOrg && newOrg.id})`);
-log(`   newOrgId = ${newOrg.id}`);
+const newOrgId = newOrg && (newOrg.org_id || newOrg.id);
+assertTrue(newOrg && newOrgId, `5. 新 org name 含 ${NS} (找到 id=${newOrgId})`);
+log(`   newOrgId = ${newOrgId}`);
 
 // 最终态:me.org_id == ORG_ID
 const meAfter = await core('core.me');

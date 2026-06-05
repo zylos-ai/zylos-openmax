@@ -62,9 +62,17 @@ const COMMANDS = {
     order_by: params.orderBy,
   }),
   'core.org_get':    () => get(apiPath(`/organizations/${params.orgId}`)),
+  // POST /api/v1/organizations  — create a new org and become its owner.
+  // Server requires {name, slug, display_name}: display_name is the
+  // caller's display name *within the new org* (the caller is auto-added
+  // as org-owner member, and that membership row needs a display_name).
+  // Response includes a fresh `access_token` already scoped to the new
+  // org's `member_id`, so callers can immediately act in the new context
+  // without a separate `org_switch`.
   'core.org_create': () => post(apiPath('/organizations'), {
     name: params.name,
     slug: params.slug,
+    display_name: params.displayName || params.display_name,
   }),
   // POST /api/v1/organizations/{org_id}/switch  — swap principal's active org.
   // Server requires a body to be present (empty `{}` is fine; any
@@ -125,7 +133,7 @@ Projects (directory view — workflow ops live in tm.js)
 Organizations
   core.org_list            {orderBy?}
   core.org_get             {orgId}
-  core.org_create          {name, slug}
+  core.org_create          {name, slug, displayName}  # creates org + auto-becomes org-owner; returns access_token scoped to new org
   core.org_switch          {orgId}      # principal's active org swap — returns new access_token scoped to target org
 
 Roles
