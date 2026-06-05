@@ -113,9 +113,13 @@ const COMMANDS = {
   ),
 
   // POST /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/move   body {parent_id?}
+  // Accept `parentId` (canonical) or `newParentId` (common-mistake alias —
+  // earlier specs / call-sites used it; passing only `newParentId` would
+  // otherwise silently no-op since the server treats missing parent_id as
+  // "keep current parent", surfaced during Smoke 5 on 2026-06-05).
   'kb.node_move': () => post(
     apiPath(`/kbs/${requireKbId()}/tree/nodes/${params.nodeId}/move`),
-    { parent_id: params.parentId },
+    { parent_id: params.parentId ?? params.newParentId },
   ),
 
   // PATCH /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/rename   body {name}
@@ -160,11 +164,15 @@ const COMMANDS = {
   // POST /api/v1/kbs/{kb_id}/pages
   //     body {title, format, body, parent_id?, message?}
   //     format: "markdown" | "plain_text"
+  // Accept `parentId` (canonical) or `parentNodeId` (common-mistake alias —
+  // callers naturally reach for "node id" since the parent is a tree node;
+  // passing only `parentNodeId` would otherwise silently land the page at
+  // the KB root, surfaced during Smoke 5 round 1 on 2026-06-05).
   'kb.page_create': () => post(apiPath(`/kbs/${requireKbId()}/pages`), {
     title:     params.title,
     format:    params.format || 'markdown',
     body:      params.body ?? params.content?.body ?? params.content ?? '',
-    parent_id: params.parentId,
+    parent_id: params.parentId ?? params.parentNodeId,
     message:   params.message || params.commitMessage,
   }),
 
@@ -212,7 +220,11 @@ const COMMANDS = {
 
   // GET  /api/v1/pages/{page_id}/revisions
   // GET  /api/v1/pages/{page_id}/revisions/{revision_id}
-  // GET  /api/v1/pages/{page_id}/revisions/diff   ?from=&to=
+  // GET  /api/v1/pages/{page_id}/revisions/diff   ?from_revision=&to_revision=
+  //   NOTE: server expects `from_revision` / `to_revision` WITHOUT the
+  //   `_id` suffix (verified 2026-06-05 — earlier CLI sent
+  //   `from_revision_id` / `to_revision_id` which 422'd as missing
+  //   required query parameter, Smoke 6 #14 root blocker).
   // POST /api/v1/pages/{page_id}/revisions/{revision_id}/restore
   'kb.page_revisions': () => get(apiPath(`/pages/${params.pageId}/revisions`), {
     limit:  params.limit,
@@ -222,8 +234,8 @@ const COMMANDS = {
     apiPath(`/pages/${params.pageId}/revisions/${params.revisionId}`),
   ),
   'kb.page_diff': () => get(apiPath(`/pages/${params.pageId}/revisions/diff`), {
-    from_revision_id: params.fromRevisionId,
-    to_revision_id:   params.toRevisionId,
+    from_revision: params.fromRevisionId ?? params.fromRevision,
+    to_revision:   params.toRevisionId   ?? params.toRevision,
   }),
   'kb.page_restore': () => post(
     apiPath(`/pages/${params.pageId}/revisions/${params.revisionId}/restore`),
@@ -304,7 +316,7 @@ Pages (flat)
   kb.pages_trashed         {limit?, offset?}
   kb.page_revisions        {pageId, limit?, offset?}
   kb.page_revision         {pageId, revisionId}
-  kb.page_diff             {pageId, fromRevisionId, toRevisionId}
+  kb.page_diff             {pageId, fromRevisionId|fromRevision, toRevisionId|toRevision}  # server query: from_revision / to_revision (no _id suffix)
   kb.page_restore          {pageId, revisionId}              # restore a revision
 
 Search (Meilisearch)
