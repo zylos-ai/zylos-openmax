@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # init-coco-workspace.sh
-# Reads env vars and writes ~/zylos/components/coco-workspace/config.json,
-# then starts the pm2 service. Reentrant: re-running with new env vars
-# updates the matching fields without losing existing org blocks.
+# Reads env vars and writes ~/zylos/components/coco-workspace/config.json.
+# Reentrant: re-running with new env vars updates the matching fields
+# without losing existing org blocks. Does not start the pm2 service —
+# run `pm2 start <skill>/ecosystem.config.cjs` afterwards.
 #
 # Required env:
 #   COCO_BFF_URL                 e.g. https://cws-int.coco.xyz
