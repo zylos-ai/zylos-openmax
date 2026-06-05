@@ -25,9 +25,16 @@
 # Optional flags:
 #   COCO_SKIP_REGISTER=1         skip auto-register even if BYO triplet incomplete
 #                                (script exits 1 instead — useful in CI for fail-fast)
-#   COCO_START_PM2=0             don't start pm2 at end (default starts)
 
 set -euo pipefail
+
+# -------- Cloudflare Access service-token (test env, baked-in) --------
+# 🚧 TEMPORARY — mirrors src/lib/cf-access.js. Delete this block (and the
+# corresponding skill file) before the first production release. These values
+# only let traffic through the Cloudflare Access gate; they are NOT an
+# authentication credential against cws-core itself.
+CF_ACCESS_CLIENT_ID='8483714fd6b1872b80adf01d3ecccebd.access'
+CF_ACCESS_CLIENT_SECRET='05dc9acd129c60b0a9eb6f4f9e32f3e451036674b2039ad74326949e8d0802f2'
 
 DATA_DIR="$HOME/zylos/components/coco-workspace"
 SKILL_DIR="$HOME/zylos/.claude/skills/coco-workspace"
@@ -35,9 +42,8 @@ CONFIG="$DATA_DIR/config.json"
 mkdir -p "$DATA_DIR"
 
 # -------- prereqs --------
-[[ -d "$SKILL_DIR" ]] || { echo "✗ skill not installed at $SKILL_DIR (run install-coco-workspace.sh first)"; exit 1; }
+[[ -d "$SKILL_DIR" ]] || { echo "✗ skill not installed at $SKILL_DIR (install zylos-coco-workspace first)"; exit 1; }
 command -v node >/dev/null || { echo "✗ node not on PATH"; exit 1; }
-command -v pm2  >/dev/null || { echo "✗ pm2 not on PATH"; exit 1; }
 
 # -------- required env --------
 [[ -z "${COCO_BFF_URL:-}" ]] && { echo "✗ COCO_BFF_URL is required"; exit 1; }
@@ -75,8 +81,8 @@ else
   HTTP_CODE="$(curl -sS -o "$REG_TMP" -w '%{http_code}' \
     -X POST "$BFF_URL/auth/register/agent" \
     -H 'Content-Type: application/json' \
-    ${CF_ACCESS_CLIENT_ID:+-H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID"} \
-    ${CF_ACCESS_CLIENT_SECRET:+-H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"} \
+    -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+    -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
     -d '{}')" || HTTP_CODE="000"
   if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
     echo "✗ register failed (HTTP $HTTP_CODE): $(cat "$REG_TMP" | head -c 300)"
@@ -141,23 +147,8 @@ os.chmod(p, 0o600)
 print(f"  ✓ config.json written ({len(cfg.get('orgs', {}))} org block(s))")
 PY
 
-# -------- start pm2 service --------
-if [[ "${COCO_START_PM2:-1}" == "1" ]]; then
-  echo "[init] starting pm2 service"
-  # If already running, restart to pick up new config; otherwise fresh start
-  if pm2 describe zylos-coco-workspace >/dev/null 2>&1; then
-    pm2 restart zylos-coco-workspace --update-env
-  else
-    pm2 start "$SKILL_DIR/ecosystem.config.cjs"
-  fi
-  pm2 save >/dev/null 2>&1 || true
-  echo "  ✓ pm2 service zylos-coco-workspace running"
-else
-  echo "[init] COCO_START_PM2=0 — skipping pm2 start"
-  echo "       (run later:  pm2 start $SKILL_DIR/ecosystem.config.cjs)"
-fi
-
 echo
-echo "Done. Check:"
+echo "Done. Config written to $CONFIG"
+echo "Start the service manually when ready:"
+echo "  pm2 start $SKILL_DIR/ecosystem.config.cjs"
 echo "  pm2 logs zylos-coco-workspace --lines 30"
-echo "  cat $CONFIG"
