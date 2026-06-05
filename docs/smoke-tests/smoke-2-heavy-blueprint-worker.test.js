@@ -83,8 +83,10 @@ await runSmokeCase({
   opts: { maxWaitMs: 10 * 60 * 1000 },
   assertions: async ({ env, issue, firstObservedStatus, statusTrace }) => {
     // ----- Issue (1-7) -----
-    // 1. heavy 应该经过 draft;但 agent 跑得快可能让 3s poll 错过,接受两者
-    assertIn(firstObservedStatus, ['draft', 'executing'], '1.  firstObservedStatus (heavy 路径)');
+    // 1. heavy 路径在 MR !118 之后是 draft → pending_approval → approved →
+    // executing(走 blueprint.submit_for_approval 把 issue.current_blueprint_id
+    // 写进去,#6 那条断言才能过)。1s poll 抓得到哪个中间态都算合法。
+    assertIn(firstObservedStatus, ['draft', 'pending_approval', 'executing'], '1.  firstObservedStatus (heavy 路径)');
     assertEq(issue.mode,             'heavy',             '2.  issue.mode');
     assertEq(issue.priority,         'medium',            '3.  issue.priority');
     assertEq(issue.status,           'accepted',          '4.  issue.status');

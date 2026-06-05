@@ -185,8 +185,12 @@ const r2 = await waitForCard({
 cursor = Number(r2.msg.seq);
 
 assertTrue(r2.text.includes('writeup'), '6. round2 回复含 "writeup"');
+// `.+` 不跨行,在 JS regex 里只匹配同一行;agent 自然回复常用多行 ASCII tree
+// 表达层级(writeup 在某行,research 在另一行),用 `[\s\S]` 显式允许跨行,
+// 这里只检查 agent 反映出了"writeup 包含 research"的事实。底层验证(实际
+// 父子关系)在下面 assertion 15(`research.parent_id == writeup.id`)上 backing。
 const hasNesting = r2.text.includes('writeup/research')
-                || /writeup.+research|writeup.+→.+research|writeup.+下.+research/.test(r2.text);
+                || /writeup[\s\S]*?research/.test(r2.text);
 assertTrue(hasNesting, '7. round2 回复反映出 writeup/research 新层级');
 ok('5. round2 回复已到达');
 

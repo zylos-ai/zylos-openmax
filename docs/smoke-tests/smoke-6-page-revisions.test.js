@@ -115,8 +115,17 @@ const uuidMatch = r1.text.match(UUID_RE);
 assertTrue(uuidMatch, `1. round1 回复含 pageId (uuid)`);
 const pageId = uuidMatch[0];
 log(`   captured pageId = ${pageId}`);
-assertTrue(/点A|A[:\s].*KV cache|cache 压缩/.test(r1.text) && /点B|speculative/.test(r1.text) && /点C|flash attention/.test(r1.text),
-    '2. 回复表达初版 A/B/C 三点已写');
+// 接受两种回复风格:
+//   (a) 逐点复读 — 命中三个关键词(原来的检查)
+//   (b) 汇总 — agent 提到"3 点 / 三点 / 3 points"已写
+// 实际的内容落地由下面 assertion 11(page body 含 点A+B+C)backing 验证,
+// 这里只检查 agent 在回复里确认了写入动作完成。
+const hasAllThree = /点A|A[:\s].*KV cache|cache 压缩/.test(r1.text)
+                 && /点B|speculative/.test(r1.text)
+                 && /点C|flash attention/.test(r1.text);
+const hasSummary  = /3\s*点|三\s*点|3\s*points|all three|三个要点/i.test(r1.text);
+assertTrue(hasAllThree || hasSummary,
+    '2. 回复表达初版三点已写(逐条 OR 汇总,page 内容由 assertion 11 backing)');
 
 // Backing
 const pg = await kb('kb.page_get', { pageId });
