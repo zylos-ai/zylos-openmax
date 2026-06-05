@@ -244,6 +244,17 @@ const COMMANDS = {
     { steps: params.steps },
   ),
 
+  // Added 2026-06-05 (cws-core MR !118 / issue #77): BFF proxy to
+  // cws-work BlueprintService.SubmitForApproval. After this returns 200
+  // the parent issue's `current_blueprint_id` points at the submitted
+  // blueprint and issue.status advances `draft → pending_approval` —
+  // the previously-missing transition that left Smoke 2 #6 / Smoke 3
+  // phase 2 forever stuck.
+  'blueprint.submit_for_approval': () => post(
+    apiPath(`/blueprints/${params.blueprintId ?? params.id}/submit-for-approval`),
+    {},
+  ),
+
   // =========================================================================
   //  ATTEMPT  (contract-v2: create / get / list / transition)
   // =========================================================================
@@ -313,6 +324,7 @@ BLUEPRINT  (all ✅ on contract-v2)
   blueprint.get                     {id, includeSteps?}
   blueprint.list                    {issueId, page?, pageSize?, orderBy?}
   blueprint.set_steps               {blueprintId (or 'id'), steps[]}             # replaces ALL steps
+  blueprint.submit_for_approval     {blueprintId (or 'id')}                       # attaches blueprint to issue; advances issue draft→pending_approval
 
 ATTEMPT  (all ✅ on contract-v2)
   attempt.create         {taskId}                                                # attempt_number auto-increments
