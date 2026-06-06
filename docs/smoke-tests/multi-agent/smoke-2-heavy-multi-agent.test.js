@@ -1,236 +1,164 @@
 #!/usr/bin/env node
 /**
- * Smoke 2 (multi-agent) — Heavy issue with cross-actor task claim.
+ * Smoke 2 (multi-agent, NL) — Heavy + cross-actor Worker
  *
- * Spec: ./smoke-2-heavy-multi-agent.md
- * Design source: cws-deploy/docs/smoke-test-design.md § "Smoke 2: Heavy 多 Agent 编排"
+ * See same-directory smoke-2-heavy-multi-agent.md for full spec.
  *
- * Unlike the single-agent smoke 2 (under ../single-agent/), this version
- * actually exercises two distinct member JWTs end-to-end:
+ * Three NL turns to two agent runtimes:
+ *   Phase 1: NL → LEAD   build heavy issue + 3-step blueprint, approve, exec, drop unassigned task
+ *   Phase 2: NL → WORKER perceive claimable task, claim, write KB, complete
+ *   Phase 3: NL → LEAD   finish step 2 + 3 yourself, deliver + accept
  *
- *   - LEAD  = the test owner (env.TEST_USER_TOKEN, an org-owner human acting
- *             through the lead agent). Creates issue / blueprint /
- *             dispatches step 1 as a claimable task.
- *   - WORKER = a freshly-provisioned org-member with its own JWT. Claims and
- *             executes step 1.
+ * Server-side polling verifies:
+ *   - heavy + blueprint + approval lifecycle (assertions 1-7)
+ *   - cross-actor assignee for step 1 (assertions 8-11)
+ *   - LEAD self-assigned step 2 + 3 (12-13)
+ *   - issue closure (14-15)
+ *   - WORKER JWT can read step 1/2 + KB page (visibility, 16-18)
  *
- * The interesting assertions are the cross-actor ones that the single-agent
- * version cannot verify:
- *
- *   - task created by LEAD has assignee_id = null + status = pending
- *   - WORKER's task.claim sets assignee_id to WORKER's member_id, NOT
- *     LEAD's member_id and NOT the lead agent's member_id
- *   - the auto-created attempt's assignee_id == WORKER's member_id
- *   - LEAD can still read + transition the task afterwards (visibility ok)
- *
- * Test client orchestrates everything via direct CLI/API calls — no NL, no
- * Claude runtime in the loop. The multi-agent smoke design is "verify the
- * server's authz + assignment semantics", not "re-validate agent NL".
+ * Exits non-zero on any assertion failure or NL timeout.
  */
 
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import {
-  loadEnv, bearerFetch, callApi, provisionMember,
-  log, ok, warn, die, assertEq, assertTrue, assertNot, summary,
+  loadEnv, sendInstruction, waitForIssue, waitForTaskAssignee,
+  tm, listTasks, listAttempts, getWorkerJwt,
+  assertEq, assertTrue, assertNot, log, summary,
 } from './lib/runner.js';
-const execp = promisify(execFile);
+
+const TS = Date.now();
+const TITLE = `SmokeM2-${TS}`;
+const KB_PAGE_TITLE = `Smoke2 W-${TS} 调研结果`;
 
 const env = loadEnv();
-const NS = `Smoke2MA-${Date.now()}`;
-log(`=== Smoke 2 (multi-agent): Heavy + cross-actor Worker claim ===  ns=${NS}`);
 
-// -----------------------------------------------------------------------------
-// Phase 0 — Provision the WORKER
-// -----------------------------------------------------------------------------
-log('[Phase 0] Provision WORKER (fresh user → invite → accept → org-scoped login)');
-const worker = await provisionMember(env, { rolePrefix: 'org-member', label: 'worker' });
-ok(`worker provisioned  member_id=${worker.memberId}  email=${worker.email}`);
+log(`=== Smoke 2 multi-agent NL: cross-actor heavy + worker ===`);
+log(`   TITLE = ${TITLE}`);
+log(`   LEAD   conv=${env.lead.conv_id}    agent=${env.lead.agent_id}`);
+log(`   WORKER conv=${env.worker.conv_id}  agent=${env.worker.agent_id}`);
 
-// Sanity: LEAD and WORKER are different members
-const me = await callApi(env, 'GET', '/api/v1/me', { token: env.TEST_USER_TOKEN });
-const leadMemberId = me.member_id;
-assertNot(leadMemberId === worker.memberId,
-    `0a. lead.member_id (${leadMemberId.slice(0,8)}) ≠ worker.member_id (${worker.memberId.slice(0,8)})`);
+// ============================================================================
+// Phase 1 — NL → LEAD: build heavy + blueprint + approve + executing + step-1 task
+// ============================================================================
 
-// -----------------------------------------------------------------------------
-// Phase 1 — LEAD creates a heavy issue
-// -----------------------------------------------------------------------------
-log('[Phase 1] LEAD creates heavy issue');
-const issue = await callApi(env, 'POST', `/api/v1/projects/${env.TEST_PROJECT_ID}/issues`, {
-  token: env.TEST_USER_TOKEN,
-  body: {
-    title:         `${NS} 竞品定价分析`,
-    description:   '对比 5 个竞品的定价层级,输出分析报告',
-    mode:          'heavy',
-    priority:      'medium',
-    lead_agent_id: env.TEST_AGENT_ID,
-  },
-});
-ok(`issue created  id=${issue.id}  status=${issue.status}`);
-assertEq(issue.status, 'draft',                 '1. issue.status = draft');
-assertEq(issue.mode,   'heavy',                 '2. issue.mode = heavy');
-assertEq(issue.lead_agent_id, env.TEST_AGENT_ID,'3. issue.lead_agent_id = TEST_AGENT_ID');
+log('');
+log('[Phase 1] 给 LEAD 发自然语言 (排活)');
+await sendInstruction(env, `\
+建一个 heavy issue,标题严格写成 "${TITLE}",描述写 "smoke 2 cross-actor 测试 heavy + worker 协作",priority=medium,你做 Lead。然后给它做一份 3 步的 blueprint:第 1 步「调研竞品定价层级」、第 2 步「整理对比模型」(依赖第 1 步)、第 3 步「输出分析报告」(依赖第 2 步)。蓝图提交评审,然后批准它,把 issue 推到 executing。再为第 1 步生成一个 task,不要指定承接人 — 让别人来认领。
 
-// -----------------------------------------------------------------------------
-// Phase 2 — LEAD creates a 3-step blueprint with DAG
-// -----------------------------------------------------------------------------
-log('[Phase 2] LEAD creates blueprint with 3 steps (DAG s1 → s2 → s3)');
-const bp = await callApi(env, 'POST', `/api/v1/issues/${issue.id}/blueprints`, {
-  token: env.TEST_USER_TOKEN,
-  body: {
-    steps: [
-      { temp_id: 's1', description: `${NS} 采集 5 个竞品的定价页面数据` },
-      { temp_id: 's2', description: `${NS} 建立定价对比模型`, depends_on_temp_ids: ['s1'] },
-      { temp_id: 's3', description: `${NS} 撰写定价分析报告`, depends_on_temp_ids: ['s2'] },
-    ],
-  },
-});
-const bpFull = await callApi(env, 'GET', `/api/v1/blueprints/${bp.id}?include_steps=true`, {
-  token: env.TEST_USER_TOKEN,
-});
-const steps = (bpFull.steps || []).sort((a, b) => a.sort_order - b.sort_order);
-assertEq(steps.length, 3, '4. blueprint has 3 steps');
-const [s1, s2, s3] = steps;
-assertTrue((s2.depends_on || []).includes(s1.id), '5a. s2 depends_on s1');
-assertTrue((s3.depends_on || []).includes(s2.id), '5b. s3 depends_on s2');
+全部走完之后用一行把 issueId 告诉我。`, { to: 'lead' });
 
-// -----------------------------------------------------------------------------
-// Phase 3 — LEAD walks the issue past the approval gate (post-MR !118 path)
-// -----------------------------------------------------------------------------
-log('[Phase 3] LEAD submits blueprint for approval, then transitions to executing');
-const submit = await callApi(env, 'POST', `/api/v1/blueprints/${bp.id}/submit-for-approval`, {
-  token: env.TEST_USER_TOKEN, body: {},
-});
-const issueAfterSubmit = await callApi(env, 'GET', `/api/v1/issues/${issue.id}`, {
-  token: env.TEST_USER_TOKEN,
-});
-assertEq(issueAfterSubmit.status, 'pending_approval', '6a. issue.status = pending_approval after submit');
-assertEq(issueAfterSubmit.current_blueprint_id, bp.id, '6b. issue.current_blueprint_id is set');
+const phase1 = await waitForIssue(env,
+  i => typeof i.title === 'string' && i.title.includes(TITLE),
+  { targetStatus: 'executing', actor: 'lead', label: 'phase1-lead' });
+const ISSUE = phase1.issue;
+log(`Phase 1 done: issueId=${ISSUE.id}, statusTrace=${phase1.statusTrace.map(s => s.status).join(' → ')}`);
 
-await callApi(env, 'POST', `/api/v1/issues/${issue.id}/transition`, {
-  token: env.TEST_USER_TOKEN, body: { target_status: 'approved' },
-});
-const issueAfterApproved = await callApi(env, 'POST', `/api/v1/issues/${issue.id}/transition`, {
-  token: env.TEST_USER_TOKEN, body: { target_status: 'executing' },
-});
-assertEq(issueAfterApproved.status, 'executing', '7. issue.status = executing');
+// ============================================================================
+// Phase 2 — NL → WORKER: perceive + claim + KB write + complete
+// ============================================================================
 
-// -----------------------------------------------------------------------------
-// Phase 4 — LEAD dispatches step 1 as an unassigned, claimable task
-// -----------------------------------------------------------------------------
-log('[Phase 4] LEAD creates step1 task with no assignee (Worker claim mode)');
-const task1 = await callApi(env, 'POST',
-  `/api/v1/projects/${env.TEST_PROJECT_ID}/issues/${issue.id}/tasks`, {
-    token: env.TEST_USER_TOKEN,
-    body: {
-      title:             `${NS} step1`,
-      description:       '由 Worker claim 执行',
-      blueprint_step_id: s1.id,
-      skill_tags:        ['research'],
-    },
-  });
-ok(`step1 task created  id=${task1.id}  status=${task1.status}  assignee=${task1.assignee_id ?? 'null'}`);
-assertEq(task1.status, 'pending', '8. unassigned task starts pending');
-assertTrue(task1.assignee_id == null || task1.assignee_id === '',
-    '9. unassigned task has no assignee_id');
+log('');
+log('[Phase 2] 给 WORKER 发自然语言 (认领 + 干活)');
+await sendInstruction(env, `\
+看看现在你们 org 里有没有可以认领的 task,有就挑一个领走。领到之后做实际工作:在 KB 里建一篇标题为 "${KB_PAGE_TITLE}" 的页面,正文随便写几句调研结论。然后把这次尝试和任务都标完成。
 
-// -----------------------------------------------------------------------------
-// Phase 5 — WORKER claims the task (cross-actor)
-// -----------------------------------------------------------------------------
-log('[Phase 5] WORKER claims step1 using its own JWT');
-const claim = await callApi(env, 'POST', `/api/v1/tasks/${task1.id}/claim`, {
-  token: worker.jwt, body: {},
-});
-const claimedTask = claim.task || claim;
-const claimedAttempt = claim.attempt;
-ok(`worker claim result: task.status=${claimedTask.status}  task.assignee=${claimedTask.assignee_id?.slice(0,8)}  attempt.assignee=${claimedAttempt?.assignee_id?.slice(0,8)}`);
-assertEq(claimedTask.status, 'running', '10. task.status = running after worker claim');
-assertEq(claimedTask.assignee_id, worker.memberId,
-    '11. task.assignee_id == WORKER.member_id (cross-actor assignment took)');
-assertNot(claimedTask.assignee_id === leadMemberId,
-    '11b. task.assignee_id ≠ LEAD.member_id');
-assertNot(claimedTask.assignee_id === env.TEST_AGENT_ID,
-    '11c. task.assignee_id ≠ lead AGENT.member_id (worker is the actor, not the lead agent)');
-assertTrue(claimedAttempt && claimedAttempt.id, '12a. attempt auto-created');
-assertEq(claimedAttempt?.assignee_id, worker.memberId,
-    '12b. attempt.assignee_id == WORKER.member_id');
-assertEq(claimedAttempt?.status, 'running', '12c. attempt.status = running');
+做完之后,用一行告诉我 taskId。`, { to: 'worker' });
 
-// -----------------------------------------------------------------------------
-// Phase 6 — WORKER completes step1 (attempt + task done)
-// -----------------------------------------------------------------------------
-log('[Phase 6] WORKER finishes step1');
-const attDone = await callApi(env, 'POST', `/api/v1/attempts/${claimedAttempt.id}/transition`, {
-  token: worker.jwt, body: { target_status: 'done' },
-});
-assertEq(attDone.status, 'done', '13. attempt.status = done after WORKER transitions');
+const workerJwt = await getWorkerJwt(env);
+const workerJwtClaims = JSON.parse(Buffer.from(workerJwt.split('.')[1], 'base64url').toString());
+const WORKER_MID = workerJwtClaims.member_id;
+log(`  · worker member_id (from JWT): ${WORKER_MID}`);
 
-const taskDone = await callApi(env, 'POST', `/api/v1/tasks/${task1.id}/transition`, {
-  token: worker.jwt, body: { target_status: 'done' },
-});
-assertEq(taskDone.status, 'done', '14. task.status = done after WORKER transitions');
+const step1Task = await waitForTaskAssignee(env, ISSUE.id,
+  t => t.assignee_id === WORKER_MID && t.status === 'done',
+  { actor: 'lead', label: 'phase2-worker-task-done' });
+log(`Phase 2 done: step1 task ${step1Task.id} -> assignee=${step1Task.assignee_id} status=${step1Task.status}`);
 
-// Sanity: LEAD can still read the task and sees the worker's assignment
-const task1AsLead = await callApi(env, 'GET', `/api/v1/tasks/${task1.id}`, {
-  token: env.TEST_USER_TOKEN,
-});
-assertEq(task1AsLead.assignee_id, worker.memberId,
-    '15. LEAD can read task1 and sees WORKER as assignee (visibility cross-actor)');
+// ============================================================================
+// Phase 3 — NL → LEAD: finish step 2 + 3 + deliver + accept
+// ============================================================================
 
-// -----------------------------------------------------------------------------
-// Phase 7 — LEAD self-assigns steps 2 + 3
-// -----------------------------------------------------------------------------
-log('[Phase 7] LEAD self-assigns steps 2 + 3 (lead agent as assignee)');
-for (const [n, step] of [[2, s2], [3, s3]]) {
-  const t = await callApi(env, 'POST',
-    `/api/v1/projects/${env.TEST_PROJECT_ID}/issues/${issue.id}/tasks`, {
-      token: env.TEST_USER_TOKEN,
-      body: {
-        title:             `${NS} step${n}`,
-        description:       'lead self',
-        blueprint_step_id: step.id,
-        assignee_id:       env.TEST_AGENT_ID,
-      },
-    });
-  assertEq(t.status, 'running', `16.${n}a. step${n} task starts running (auto-claim from assignee_id)`);
-  assertEq(t.assignee_id, env.TEST_AGENT_ID, `16.${n}b. step${n} task.assignee = lead AGENT`);
+log('');
+log('[Phase 3] 给 LEAD 发自然语言 (收尾 step2/3 + 验收)');
+await sendInstruction(env, `\
+刚才那个标题为 "${TITLE}" 的 issue,第 2 步「整理对比模型」和第 3 步「输出分析报告」还没做。你自己来 —— 各自生成任务,自己承接,自己执行完整流转(尝试 → 任务 → 完成)。两步都干完之后,把 issue 推到 delivered,然后做最终验收(accepted=true,source=explicit)。
 
-  // Find the auto-created attempt
-  const attempts = await callApi(env, 'GET', `/api/v1/tasks/${t.id}/attempts`, {
-    token: env.TEST_USER_TOKEN,
-  });
-  const att = Array.isArray(attempts) ? attempts[0] : (attempts.items?.[0]);
-  assertTrue(att && att.id, `16.${n}c. step${n} attempt auto-created`);
+全部完成后用一行告诉我最终状态。`, { to: 'lead' });
 
-  await callApi(env, 'POST', `/api/v1/attempts/${att.id}/transition`, {
-    token: env.TEST_USER_TOKEN, body: { target_status: 'done' },
-  });
-  await callApi(env, 'POST', `/api/v1/tasks/${t.id}/transition`, {
-    token: env.TEST_USER_TOKEN, body: { target_status: 'done' },
-  });
-  ok(`step${n} done`);
+const phase3 = await waitForIssue(env,
+  i => i.id === ISSUE.id,
+  { targetStatus: 'accepted', actor: 'lead', label: 'phase3-lead' });
+log(`Phase 3 done: issue ${ISSUE.id} -> ${phase3.issue.status}, statusTrace=${phase3.statusTrace.map(s => s.status).join(' → ')}`);
+
+// ============================================================================
+// Assertions (18)
+// ============================================================================
+
+log('');
+log('[Phase 4] 深度断言');
+
+const finalIssue = await tm('issue.get', { id: ISSUE.id }, { actor: 'lead' }).then(r => r.data || r);
+
+// 1-7: heavy + blueprint + approval lifecycle
+assertTrue(typeof finalIssue.title === 'string' && finalIssue.title.includes(TITLE),
+  `1. issue.title contains ${TITLE}`);
+assertEq(finalIssue.mode,      'heavy',  '2. issue.mode');
+assertEq(finalIssue.priority,  'medium', '3. issue.priority');
+assertEq(finalIssue.lead_agent_id, env.lead.agent_id, '4. issue.lead_agent_id');
+assertTrue(!!finalIssue.current_blueprint_id, '5. issue.current_blueprint_id 非空');
+
+const bp = await tm('blueprint.get', { id: finalIssue.current_blueprint_id, includeSteps: true }, { actor: 'lead' })
+  .then(r => r.data || r);
+assertEq(bp.steps?.length, 3, '6a. blueprint steps.length === 3');
+const stepByIdx = bp.steps.sort((a,b) => (a.order ?? 0) - (b.order ?? 0));
+const [s1, s2, s3] = stepByIdx;
+assertTrue(Array.isArray(s2.depends_on) && s2.depends_on.includes(s1.id), '6b. s2 depends_on s1');
+assertTrue(Array.isArray(s3.depends_on) && s3.depends_on.includes(s2.id), '6c. s3 depends_on s2');
+
+const traceStatuses = [...phase1.statusTrace, ...phase3.statusTrace].map(s => s.status);
+assertTrue(traceStatuses.includes('pending_approval'), '7a. trace includes pending_approval');
+assertTrue(traceStatuses.includes('approved') || traceStatuses.includes('executing'),
+  '7b. trace includes approved or executing');
+
+// 8-11: cross-actor step 1 assignee
+const allTasks = await listTasks(ISSUE.id, { actor: 'lead' });
+const step1 = allTasks.find(t => t.id === step1Task.id);
+assertTrue(!!step1, '8a. step1 task exists in tasks list');
+assertEq(step1.assignee_id, WORKER_MID, '8. step1 task.assignee_id === WORKER.member_id');
+assertNot(step1.assignee_id === env.lead.agent_id, '9. step1 task.assignee_id !== LEAD.agent_id');
+
+const step1Attempts = await listAttempts(step1.id, { actor: 'lead' });
+assertEq(step1Attempts.length, 1, '10a. step1 has exactly 1 attempt');
+assertEq(step1Attempts[0].assignee_id, WORKER_MID, '10b. step1 attempt.assignee_id === WORKER.member_id');
+assertEq(step1.status,             'done', '11a. step1 task status');
+assertEq(step1Attempts[0].status,  'done', '11b. step1 attempt status');
+
+// 12-13: step 2/3 LEAD self-assign
+const lateTasks = allTasks.filter(t => t.id !== step1.id);
+assertTrue(lateTasks.length >= 2, `12a. step2+step3 tasks exist (got ${lateTasks.length})`);
+for (const t of lateTasks.slice(0, 2)) {
+  assertEq(t.assignee_id, env.lead.agent_id, `12b. ${t.title || t.id} assignee === LEAD`);
+  assertEq(t.status, 'done', `13. ${t.title || t.id} status === done`);
 }
 
-// -----------------------------------------------------------------------------
-// Phase 8 — LEAD delivers + accepts
-// -----------------------------------------------------------------------------
-log('[Phase 8] LEAD delivers + accepts the issue');
-const delivered = await callApi(env, 'POST', `/api/v1/issues/${issue.id}/transition`, {
-  token: env.TEST_USER_TOKEN, body: { target_status: 'delivered' },
-});
-assertEq(delivered.status, 'delivered', '17. issue.status = delivered');
+// 14-15: closure
+assertEq(phase3.issue.status, 'accepted', '14. final issue.status');
+const tracePhase3 = phase3.statusTrace.map(s => s.status);
+assertTrue(tracePhase3.includes('delivered'), '15a. phase3 trace includes delivered');
+assertTrue(tracePhase3.includes('accepted'),  '15b. phase3 trace includes accepted');
 
-const accepted = await callApi(env, 'POST', `/api/v1/issues/${issue.id}/acceptance`, {
-  token: env.TEST_USER_TOKEN, body: { accepted: true, source: 'explicit' },
-});
-assertEq(accepted.status, 'accepted', '18. issue.status = accepted');
-assertEq(accepted.acceptance_source, 'explicit', '19. issue.acceptance_source = explicit');
-assertEq(accepted.current_blueprint_id, bp.id, '20. issue.current_blueprint_id stays = bp.id');
+// 16-18: WORKER visibility
+const workerTasks = await listTasks(ISSUE.id, { actor: 'worker' });
+const workerStep1Att = await listAttempts(step1.id, { actor: 'worker' });
+assertEq(workerStep1Att[0]?.assignee_id, WORKER_MID, '16. WORKER POV: step1 attempt assignee 一致');
+const step2 = lateTasks[0];
+const workerStep2Att = await listAttempts(step2.id, { actor: 'worker' });
+assertTrue(workerStep2Att.length >= 1, '17. WORKER POV: step2 attempt 可见(同 org)');
 
-summary('Smoke 2 (multi-agent)');
-console.log(`   issue       = ${issue.id}`);
-console.log(`   blueprint   = ${bp.id}    (3 steps, DAG s1 → s2 → s3)`);
-console.log(`   worker      = ${worker.memberId}  (${worker.email})`);
-console.log(`   step1 task  = ${task1.id}  (worker-claim, assignee=WORKER)`);
-console.log(`   step2 + 3   = lead-self assignment`);
+// 18: WORKER POV - KB page exists for this issue (the page worker wrote)
+const kbPages = await tm('kb.list_pages_in_issue', { issueId: ISSUE.id }, { actor: 'worker' })
+  .then(r => Array.isArray(r) ? r : (r.data || r.pages || []));
+const matchingPage = kbPages.find(p => typeof p.title === 'string' && p.title.includes(KB_PAGE_TITLE));
+assertTrue(!!matchingPage, `18. WORKER POV: KB page "${KB_PAGE_TITLE}" 可见 (got ${kbPages.length} pages)`);
+
+summary('Smoke 2 multi-agent NL');
