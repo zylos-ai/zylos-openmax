@@ -32,8 +32,25 @@
  */
 
 import { loadConfig, resolveDefaultOrgId } from './config.js';
-import { getAccessToken } from './token.js';
+import { getAccessToken, invalidate as invalidateToken } from './token.js';
 import { cfAccessHeaders } from './cf-access.js';
+
+// 401 → refresh-and-retry throttle. Keyed by effective orgId (default-org
+// resolved when orgId is omitted). Records the timestamp of the last
+// 401-triggered refresh; subsequent 401s within the window propagate
+// without re-refreshing — protects /auth/refresh from being storm-called
+// during a server-side outage or a misconfigured request that always 401s.
+const REFRESH_ON_401_WINDOW_MS = 10 * 60 * 1000;   // 10 minutes
+const _last401RefreshByOrg = new Map();
+
+function tryConsumeRefreshAttempt(effectiveOrgId) {
+  const key = String(effectiveOrgId || '');
+  const now = Date.now();
+  const last = _last401RefreshByOrg.get(key) || 0;
+  if (now - last < REFRESH_ON_401_WINDOW_MS) return false;
+  _last401RefreshByOrg.set(key, now);
+  return true;
+}
 
 let activeApiKey = null;
 let activeBaseUrl = null;
@@ -179,29 +196,57 @@ function logRpcResponse(method, url, status, data) {
 
 async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId } = {}) {
   const url = buildUrl(baseUrl, path, query);
-  const headers = {
-    Accept: 'application/json',
-    ...cfAccessHeaders(),
-    ...(extraHeaders || {}),
+
+  // Single attempt: resolve token, send, parse response. Returned shape lets
+  // the caller decide whether to retry without re-doing all the bookkeeping.
+  const sendOnce = async () => {
+    const headers = {
+      Accept: 'application/json',
+      ...cfAccessHeaders(),
+      ...(extraHeaders || {}),
+    };
+    const token = await resolveToken(orgId);
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+    logRpcRequest(method, url, body, orgId);
+
+    const res = await fetch(url, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = text; }
+
+    logRpcResponse(method, url, res.status, data);
+    return { res, data, text };
   };
-  const token = await resolveToken(orgId);
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-  logRpcRequest(method, url, body, orgId);
+  let attempt = await sendOnce();
 
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  // 401 → refresh JWT and retry once. Throttle to one refresh per orgId per
+  // REFRESH_ON_401_WINDOW_MS so an outage or misconfigured request can't
+  // storm /auth/refresh. invalidate() clears the in-memory token cache;
+  // the retry's resolveToken() will mint a fresh JWT via /auth/agent/token.
+  if (attempt.res.status === 401) {
+    const effectiveOrgId = orgId || resolveDefaultOrgId() || '';
+    if (tryConsumeRefreshAttempt(effectiveOrgId)) {
+      console.warn(
+        `[rpc] 401 on ${method} ${url}; refreshing JWT for org=${effectiveOrgId || '(identity)'} and retrying once`,
+      );
+      invalidateToken(effectiveOrgId);
+      attempt = await sendOnce();
+    } else {
+      console.warn(
+        `[rpc] 401 on ${method} ${url}; refresh throttled (last attempt <10min ago), propagating`,
+      );
+    }
+  }
 
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = text; }
-
-  logRpcResponse(method, url, res.status, data);
-
+  const { res, data, text } = attempt;
   if (!res.ok) {
     const message =
       (data && typeof data === 'object' && (data.detail || data.error || data.message)) || text;
