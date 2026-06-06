@@ -70,23 +70,32 @@ async function readPageContent(pageId, actor) {
 const startedAt = Date.now();
 const POLL_MS = 2000;
 const MAX_WAIT = 15 * 60 * 1000;
-let workerPage = null, pageContent = '';
+let workerPage = null, pageContent = '', workerDmCount = 0;
 while (Date.now() - startedAt < MAX_WAIT) {
   try {
     workerPage = workerPage || await findPageByTitle('lead', KB_TITLE);
     if (workerPage) {
       pageContent = await readPageContent(workerPage.id, 'lead');
-      if (pageContent && pageContent.includes('line3: gamma')) {
-        log(`  · KB page id=${workerPage.id} content matched`);
-        break;
-      }
+    }
+    // Also probe the bot↔bot DM so we don't exit Phase 2 before the worker's
+    // "完成" agent_text lands. Previously this was checked only at Phase 3
+    // assertion time — if the KB page write committed before the DM ack
+    // round-tripped, assertion 5b would race-fail with workerAdded=0 despite
+    // the business pipeline being fully correct (observed live 2026-06-06).
+    const c = await countAgentMessagesBySender(
+      env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq },
+    );
+    workerDmCount = c[WORKER_MID] || 0;
+    if (workerPage && pageContent.includes('line3: gamma') && workerDmCount >= 1) {
+      log(`  · KB page id=${workerPage.id} content matched + worker DM acks=${workerDmCount}`);
+      break;
     }
   } catch (e) { /* retry */ }
   await new Promise(r => setTimeout(r, POLL_MS));
 }
-if (!workerPage || !pageContent.includes('line3: gamma')) {
-  console.error(`✗ phase2: KB page "${KB_TITLE}" with full content not appeared within ${MAX_WAIT}ms`);
-  console.error(`  have page=${!!workerPage}, has-line3=${pageContent.includes('line3: gamma')}, content len=${pageContent.length}`);
+if (!workerPage || !pageContent.includes('line3: gamma') || workerDmCount < 1) {
+  console.error(`✗ phase2: KB page "${KB_TITLE}" + worker DM ack not both ready within ${MAX_WAIT}ms`);
+  console.error(`  have page=${!!workerPage}, has-line3=${pageContent.includes('line3: gamma')}, content len=${pageContent.length}, workerDmCount=${workerDmCount}`);
   process.exit(1);
 }
 
