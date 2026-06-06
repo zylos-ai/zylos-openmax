@@ -274,6 +274,19 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
 
     const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
     const msg = { ...notification, ...(detail || {}) };
+    // get-message envelope nests scalar message fields under `message`; for
+    // real-time WS frames the notification already carries sender_id/seq/type
+    // at the top level, but sync catch-up frames don't. Hoist them so
+    // downstream consumers (shouldHandleMessage, last_seq update, msgType
+    // detection) see a uniform shape regardless of arrival path.
+    if (!msg.sender_id   && msg.message?.sender_id)   msg.sender_id   = msg.message.sender_id;
+    if (msg.seq == null  && msg.message?.seq != null) msg.seq         = msg.message.seq;
+    if (!msg.type        && msg.message?.type)        msg.type        = msg.message.type;
+    if (!msg.thread_id   && msg.message?.thread_id)   msg.thread_id   = msg.message.thread_id;
+    if (!msg.parent_message_id && msg.message?.parent_message_id) {
+      msg.parent_message_id = msg.message.parent_message_id;
+    }
+
     const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);
     if (conv) conv.id = conv.id || msg.conversation_id;
 
