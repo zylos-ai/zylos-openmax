@@ -128,10 +128,37 @@ function forwardToC4(endpoint, body) {
 // =============================================================================
 
 function extractMentions(msg) {
-  return msg.mentions ||
-    msg.mention_user_ids ||
-    msg.content?.mention_user_ids ||
-    [];
+  const raw =
+       msg.mentions
+    || msg.mention_user_ids
+    || msg.content?.mention_user_ids
+    || msg.message?.mentions
+    || [];
+  // Normalize to a list of ID strings. cws-comm shape is {entity_id, ...};
+  // raw string IDs and {id} variants are supported as fallbacks.
+  return raw.map(m =>
+    typeof m === 'string'
+      ? m
+      : String(m?.entity_id || m?.mentioned_id || m?.id || '')
+  ).filter(Boolean);
+}
+
+// Detect @<selfName> in the message text body. cws-core's get-message returns
+// raw text with literal "@Name" rather than a structured mentions[] array, so
+// without this fallback the mode=mention gate and the owner-mention bypass
+// would never trigger in practice.
+function isSelfNameMentionedInText(msg, selfName) {
+  if (!selfName) return false;
+  const text =
+       msg.content?.body?.text
+    || (typeof msg.content === 'string' ? msg.content : '')
+    || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+    || msg.content_text
+    || '';
+  if (!text) return false;
+  const escaped = selfName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // `(?![\w-])` keeps "@Zylos" from matching "@Zylos-GavinBox" or "@ZylosX".
+  return new RegExp('@' + escaped + '(?![\\w-])', 'i').test(text);
 }
 
 /**
@@ -188,8 +215,13 @@ function shouldHandleMessage(msg, conv, orgConfig) {
   // Owner @-mention signals — used as bypass for both the allowlist gate and
   // the per-group allowFrom gate, mirroring zylos-feishu src/index.js:1242 +
   // isSenderAllowedInGroup owner-exempt path.
+  // Mention detection has two paths: structured mentions[] from cws-comm, and
+  // a text-based "@<selfName>" fallback for messages where the server returns
+  // the raw text without a structured mentions array.
   const mentions = extractMentions(msg).map(String);
-  const mentioned = !!selfMemberId && mentions.includes(String(selfMemberId));
+  const mentionedById = !!selfMemberId && mentions.includes(String(selfMemberId));
+  const mentionedByText = isSelfNameMentionedInText(msg, orgConfig.self?.name);
+  const mentioned = mentionedById || mentionedByText;
   const ownerMemberId = orgConfig.owner?.member_id;
   const senderIsOwner = !!ownerMemberId && String(senderId) === String(ownerMemberId);
 
