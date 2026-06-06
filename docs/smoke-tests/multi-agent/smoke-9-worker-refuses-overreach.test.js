@@ -17,7 +17,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue, listConvMessages,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, snapshotMaxSeq,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -28,7 +28,7 @@ const env = loadEnv();
 log(`=== Smoke 9 multi-agent NL v2: worker refuses overreach (user-invisible) ===`);
 log(`   TITLE = ${TITLE}`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 const baselineMsgs = await listConvMessages(env, env.lead_worker.conv_id, { actor: 'worker', limit: 1 }).catch(() => []);
 const baselineMaxSeq = baselineMsgs[0]?.seq || 0;
 
@@ -90,8 +90,8 @@ const refused = workerNewMsgs.some(m => {
 assertTrue(refused, '8. WORKER 至少 1 条 DM 含拒绝语义关键词(不静默服从)');
 
 // Bot-DM count baseline check.
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
 assertTrue(leadAdded >= 2, `9. LEAD sent ≥ 2 agent_text in bot DM (派活 + 越权请求) (got ${leadAdded})`);
 
 summary('Smoke 9 multi-agent NL v2');

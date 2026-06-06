@@ -18,7 +18,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, snapshotMaxSeq,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -30,7 +30,7 @@ const env = loadEnv();
 log(`=== Smoke 8 multi-agent NL v2: concurrent independent (user-invisible) ===`);
 log(`   TITLE_A = ${TITLE_A}, TITLE_B = ${TITLE_B}`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 
 log('');
 log('[Phase 1] 给 LEAD 发唯一一条自然语言');
@@ -85,9 +85,9 @@ assertTrue(bAllDone, '9. issue B 所有 task done');
 
 // WORKER 视角:能看到 B 的 task 但不能看到 A(不一定能严格断言,因为 list 可能受 org 而非 task 过滤;主要靠上面 6 + 7 已经覆盖)
 // Bot-DM coordination evidence — only B should have generated bot DM traffic.
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 1, `10a. LEAD sent ≥ 1 agent_text in bot DM (B 派活) (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `10b. WORKER sent ≥ 1 agent_text in bot DM (B 回报) (got ${workerAdded})`);
 

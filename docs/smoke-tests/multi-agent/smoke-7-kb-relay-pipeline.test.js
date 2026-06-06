@@ -19,7 +19,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, snapshotMaxSeq, waitForBotDM,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -39,7 +39,7 @@ const env = loadEnv();
 log(`=== Smoke 7 multi-agent NL v2: KB relay pipeline (user-invisible) ===`);
 log(`   TITLE = ${TITLE}, STEP1_KEY = ${STEP1_KEY}`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 
 log('');
 log('[Phase 1] 给 LEAD 发唯一一条自然语言');
@@ -48,7 +48,9 @@ await sendInstruction(env, `\
 
 接下来全程自己来:
 
-1. 第 1 步你自己接:建一个 KB page,标题严格写 "${TAG} step1 调研",正文必须**逐字照抄**下面这段内容(包括那个调研标记):
+**3 个页面都放在 KB 根目录下**(不要建子目录),方便对比和检索。
+
+1. 第 1 步你自己接:在 KB 根目录建一个 page,标题严格写 "${TAG} step1 调研",正文必须**逐字照抄**下面这段内容(包括那个调研标记):
 
 """
 ${STEP1_BODY}
@@ -56,9 +58,9 @@ ${STEP1_BODY}
 
 做完 attempt + task done。
 
-2. 第 2 步派给 agent-gavin3:让它先去 KB 里把刚才你写的那个 "${TAG} step1 调研" 页面打开读完,然后基于里面的内容,新建一个 KB 页面标题严格写 "${TAG} step2 对比矩阵",正文里**必须包含你 step1 里的"调研标记"原文**(就是 ${STEP1_KEY} 这串),证明它真的读到了 step1 的内容。然后整理一份三种模式的对比矩阵(自由发挥即可,markdown 表格也行)。做完跟你说一声。
+2. 第 2 步派给 agent-gavin3:让它先去 KB 里把刚才你写的那个 "${TAG} step1 调研" 页面打开读完,然后基于里面的内容,在 KB 根目录新建一个页面标题严格写 "${TAG} step2 对比矩阵",正文里**必须包含你 step1 里的"调研标记"原文**(就是 ${STEP1_KEY} 这串),证明它真的读到了 step1 的内容。然后整理一份三种模式的对比矩阵(自由发挥即可,markdown 表格也行)。做完跟你说一声。
 
-3. 等 agent-gavin3 完成 step2 后,你自己接第 3 步:再建一个 KB 页面标题严格写 "${TAG} step3 最终建议",正文里**必须同时包含 ${STEP1_KEY} 和对 step2 矩阵的引用**(自由表达,提到"如对比矩阵所示"之类即可)。这是给项目的最终建议。做完 attempt + task done。
+3. 等 agent-gavin3 完成 step2 后,你自己接第 3 步:在 KB 根目录再建一个页面标题严格写 "${TAG} step3 最终建议",正文里**必须同时包含 ${STEP1_KEY} 和对 step2 矩阵的引用**(自由表达,提到"如对比矩阵所示"之类即可)。这是给项目的最终建议。做完 attempt + task done。
 
 4. 把 issue 推到 delivered,然后 set_acceptance(accepted=true, source=explicit)。
 
@@ -73,6 +75,12 @@ const ISSUE = final.issue;
 
 const workerJwt = await getWorkerJwt(env);
 const WORKER_MID = JSON.parse(Buffer.from(workerJwt.split('.')[1], 'base64url').toString()).member_id;
+
+// Close the timing race: LEAD pushes issue → accepted right after step3
+// done, but WORKER's "step2 完成" bot DM may land ~1s later. Wait for the
+// worker ack to materialize before counting.
+await waitForBotDM(env, env.lead_worker.conv_id, WORKER_MID,
+  0, { actor: 'worker', maxWaitMs: 30_000, label: 'v7-worker-step2-ack', afterSeq: baselineSeq });
 
 log(''); log('[Phase 3] 深度断言');
 
@@ -134,9 +142,9 @@ assertEq(step2Node.creator_id, WORKER_MID,
   '14. step2 KB node creator === WORKER (跨 actor KB 写入)');
 
 // Bot-DM coordination evidence
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 1, `15a. LEAD sent ≥ 1 agent_text in bot DM (派 step2) (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `15b. WORKER sent ≥ 1 agent_text in bot DM (step2 done 确认) (got ${workerAdded})`);
 

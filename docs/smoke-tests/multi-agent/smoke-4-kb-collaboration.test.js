@@ -8,7 +8,7 @@
 
 import {
   loadEnv, sendInstruction, tm, getWorkerJwt,
-  countAgentMessagesBySender, waitForBotDM,
+  countAgentMessagesBySender, snapshotMaxSeq, waitForBotDM,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -25,7 +25,7 @@ const WORKER_APPEND = `## Worker 补充
 const env = loadEnv();
 log(`=== Smoke 4 multi-agent NL v2: KB collab (user-invisible) ===`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 
 const workerJwt = await getWorkerJwt(env);
 const WORKER_MID = JSON.parse(Buffer.from(workerJwt.split('.')[1], 'base64url').toString()).member_id;
@@ -86,7 +86,7 @@ if (!leadPage || revCount < 2) {
 // Close the race: WORKER writes the page revision THEN sends the bot-DM
 // ack ~1s later. Wait briefly so Phase 3's DM-count assertion sees it.
 await waitForBotDM(env, env.lead_worker.conv_id, WORKER_MID,
-  baselineBotMsgs[WORKER_MID] || 0, { actor: 'worker', maxWaitMs: 30_000, label: 'v4-worker-ack' });
+  0, { actor: 'worker', maxWaitMs: 30_000, label: 'v4-worker-ack', afterSeq: baselineSeq });
 
 log(''); log('[Phase 3] 深度断言');
 
@@ -118,9 +118,9 @@ if (lastCreator) {
 }
 
 // Bot-DM coordination evidence
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 1, `7a. LEAD sent ≥ 1 agent_text in bot DM (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `7b. WORKER replied ≥ 1 agent_text in bot DM (got ${workerAdded})`);
 

@@ -364,12 +364,14 @@ export async function waitForTaskAssignee(env, issueId, taskPredicate, opts = {}
 // WORKER picked up the task by coincidence.
 // =============================================================================
 
-// Fetches all messages in a conversation, paginating through if needed.
-// Uses tm()'s shell-out path via comm.js CLI, so we can scope by actor.
-// NB: cws-core caps `limit` at 100 for /conversations/{id}/messages — exceeding
-// it 422s with "expected number <= 100". Default to 100 here.
+// Fetches messages in a conversation. Uses tm()'s shell-out path via
+// comm.js CLI, so we can scope by actor.
+// NB: cws-core caps `limit` at 100 for /conversations/{id}/messages —
+// exceeding it 422s with "expected number <= 100". Default to 100 here.
+// Pass `afterSeq` to get only messages with seq > afterSeq (incremental
+// query, decouples baseline from absolute count — see issue #6).
 export async function listConvMessages(env, conversationId, opts = {}) {
-  const { actor = 'worker', limit = 100 } = opts;
+  const { actor = 'worker', limit = 100, afterSeq } = opts;
   // comm.js exposes comm.get_messages but tm() above is bound to tm.js.
   // Inline a tiny exec for comm.js with the same per-actor JWT injection.
   const { execFile } = await import('node:child_process');
@@ -386,8 +388,10 @@ export async function listConvMessages(env, conversationId, opts = {}) {
     COCO_USER_TOKEN: token,
     COCO_RPC_LOG:    process.env.COCO_RPC_LOG ?? '0',
   };
+  const params = { conversationId, limit };
+  if (typeof afterSeq === 'number') params.afterSeq = afterSeq;
   const { stdout } = await execP('node', [commCli, 'comm.get_messages',
-                                  JSON.stringify({ conversationId, limit })], {
+                                  JSON.stringify(params)], {
     env: childEnv,
     cwd: path.dirname(path.dirname(commCli)),
     maxBuffer: 4 * 1024 * 1024,
@@ -396,8 +400,23 @@ export async function listConvMessages(env, conversationId, opts = {}) {
   return r.messages || r.data || (Array.isArray(r) ? r : []);
 }
 
+// Returns the largest seq currently present in the conversation. Used to
+// snapshot a baseline before Phase 1, so later counts can use afterSeq
+// for incremental delta instead of relying on absolute count windows
+// (which were capped at limit=100, see issue #6).
+export async function snapshotMaxSeq(env, conversationId, opts = {}) {
+  const msgs = await listConvMessages(env, conversationId, { ...opts, limit: 1 });
+  if (!Array.isArray(msgs) || msgs.length === 0) return 0;
+  const seq = Number(msgs[0].seq || 0);
+  return Number.isFinite(seq) ? seq : 0;
+}
+
 // Counts agent-sourced messages in a conv by sender_member_id.
 // Returns { [memberId]: count }.
+// Pass `afterSeq` to count only messages newer than the baseline seq —
+// this is the recommended pattern (see issue #6). When `afterSeq` is
+// omitted, returns absolute counts in the last `limit` (default 100)
+// messages.
 export async function countAgentMessagesBySender(env, conversationId, opts = {}) {
   const msgs = await listConvMessages(env, conversationId, opts);
   const counts = {};
@@ -423,11 +442,15 @@ export async function countAgentMessagesBySender(env, conversationId, opts = {})
 // =============================================================================
 
 export async function waitForBotDM(env, conversationId, senderMemberId, baselineCount, opts = {}) {
-  const { actor = 'lead', maxWaitMs = 30_000, pollMs = 1_500, label = 'bot-dm' } = opts;
+  const { actor = 'lead', maxWaitMs = 30_000, pollMs = 1_500, label = 'bot-dm', afterSeq } = opts;
   const startedAt = Date.now();
+  // afterSeq mode: count only messages newer than baseline seq; baselineCount=0 expected.
+  // legacy mode: absolute count vs prior baselineCount.
+  const useSeq = typeof afterSeq === 'number';
   while (Date.now() - startedAt < maxWaitMs) {
     try {
-      const counts = await countAgentMessagesBySender(env, conversationId, { actor });
+      const counts = await countAgentMessagesBySender(env, conversationId,
+        useSeq ? { actor, afterSeq } : { actor });
       const current = counts[senderMemberId] || 0;
       if (current > baselineCount) {
         log(`  · [${label}] ${senderMemberId.slice(-8)} DM ${baselineCount} → ${current} (+${((Date.now()-startedAt)/1000).toFixed(1)}s)`);

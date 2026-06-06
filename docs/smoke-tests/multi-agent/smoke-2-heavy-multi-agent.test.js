@@ -22,7 +22,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue, waitForTaskAssignee,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, snapshotMaxSeq,
   assertEq, assertTrue, assertNot, log, summary,
 } from './lib/runner.js';
 
@@ -38,11 +38,11 @@ log(`   LEAD         conv=${env.lead.conv_id}    agent=${env.lead.agent_id}`);
 log(`   WORKER       conv=${env.worker.conv_id}  (member_id from JWT)`);
 log(`   LEAD↔WORKER  conv=${env.lead_worker.conv_id}  (bot-to-bot DM)`);
 
-// Snapshot bot-DM message count BEFORE the test so the assertion can measure
+// Snapshot bot-DM max seq BEFORE the test so the assertion can measure
 // what was added during this run (rather than absolute totals across history).
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' })
-  .catch(() => ({}));
-log(`   baseline bot DM agent_text by sender: ${JSON.stringify(baselineBotMsgs)}`);
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' })
+  .catch(() => 0);
+log(`   baseline bot DM max seq: ${baselineSeq}`);
 
 // ============================================================================
 // The ONE NL message — user → LEAD. LEAD owns the rest.
@@ -148,10 +148,10 @@ assertEq(workerStep1Att[workerStep1Att.length - 1]?.assignee_id, WORKER_MID,
   '13. WORKER POV: step1 attempt visible + assignee matches');
 
 // 14: bot-to-bot DM coordination evidence (the v2 distinguishing assertion)
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-log(`   final bot DM agent_text by sender: ${JSON.stringify(finalBotMsgs)}`);
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+log(`   delta bot DM agent_text by sender: ${JSON.stringify(addedCounts)}`);
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 1, `14a. LEAD sent ≥ 1 agent_text in bot DM during run (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `14b. WORKER replied ≥ 1 agent_text in bot DM during run (got ${workerAdded})`);
 
