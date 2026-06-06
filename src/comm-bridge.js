@@ -25,7 +25,7 @@ import { execFile } from 'child_process';
 
 import { loadConfig, watchConfig, enabledOrgs, bindOwner } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
-import { formatInboundForC4, formatEndpoint } from './lib/message.js';
+import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, apiPath } from './lib/client.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
@@ -98,6 +98,34 @@ async function fetchMessageDetail(orgId, conversationId, messageId) {
   }
 }
 
+/**
+ * Send a brief refusal back to the sender when shouldHandleMessage drops a
+ * message with a userNotice set. Posted as a reply (parent_id = original) so
+ * the sender sees it in-thread on clients that render reply chains. Errors
+ * are logged and swallowed — we never want a reject-notice failure to mask
+ * the underlying drop decision.
+ */
+async function sendRejectNotice(orgConfig, msg, text) {
+  try {
+    await postForOrg(
+      orgConfig.org_id,
+      apiPath(`/conversations/${msg.conversation_id}/messages`),
+      {
+        client_msg_id: newClientMsgId(),
+        type:          'AGENT_TEXT',
+        content: {
+          content_type: 'text',
+          body:         { text },
+          attachments:  [],
+        },
+        parent_id: msg.id,
+      },
+    );
+  } catch (e) {
+    warn(`[${orgConfig.slug}] reject notice for msg=${msg.id} failed: ${e.message}`);
+  }
+}
+
 function forwardToC4(endpoint, body) {
   // c4-receive.js only accepts named flags (--channel / --endpoint / --content
   // / --json); the old positional invocation form
@@ -161,12 +189,31 @@ function isSelfNameMentionedInText(msg, selfName) {
   return new RegExp('@' + escaped + '(?![\\w-])', 'i').test(text);
 }
 
+// User-facing notice strings shown when a message is rejected. Mirrors the
+// English copy in zylos-feishu/src/index.js — group rejections only fire when
+// the sender actually @-mentioned us, so a non-@-ed group message that hits a
+// policy gate stays silent (no userNotice set). DM rejections always notify.
+const NOTICE_DM_NOT_ALLOWED =
+  "Sorry, I'm not available for private messages. Please ask my owner to grant you access.";
+const NOTICE_GROUP_DISABLED =
+  "Sorry, group chat is currently disabled.";
+const NOTICE_GROUP_NOT_ALLOWED =
+  "Sorry, I'm not available in this group.";
+const NOTICE_GROUP_SENDER_NOT_ALLOWED =
+  "Sorry, you don't have permission to interact with me in this group.";
+
 /**
  * Apply DM / group access policy for a specific org. Returns:
  *   { handle: true, reason }   — message passes, agent should respond
  *   { handle: false, reason }  — message dropped (logged with reason)
  *   { handle: true, bindOwnerHint: {memberId, displayName} }
  *                              — pass + caller should auto-bind owner
+ *
+ * When a drop should be surfaced back to the sender as a polite refusal, the
+ * decision additionally carries a `userNotice` string (mirrors
+ * zylos-feishu replyToMessage / sendMessage rejection paths). Caller posts it
+ * via the cws-core messages API; sync-replay frames are expected to skip the
+ * notice to avoid spamming old conversations after a bug fix.
  */
 function shouldHandleMessage(msg, conv, orgConfig) {
   const selfMemberId = orgConfig.self?.member_id;
@@ -187,7 +234,11 @@ function shouldHandleMessage(msg, conv, orgConfig) {
     if (policy === 'allowlist') {
       const list = (access.dmAllowFrom || []).map(String);
       if (list.includes(String(senderId))) return { handle: true, reason: 'dm:allowlist' };
-      return { handle: false, reason: `dm:allowlist (sender ${senderId} not listed)` };
+      return {
+        handle: false,
+        reason: `dm:allowlist (sender ${senderId} not listed)`,
+        userNotice: NOTICE_DM_NOT_ALLOWED,
+      };
     }
     // policy === 'owner' — bound state is derived from owner.member_id
     const owner = orgConfig.owner || {};
@@ -202,19 +253,19 @@ function shouldHandleMessage(msg, conv, orgConfig) {
     if (String(owner.member_id) === String(senderId)) {
       return { handle: true, reason: 'dm:owner' };
     }
-    return { handle: false, reason: `dm:owner (sender ${senderId} != bound owner ${owner.member_id})` };
+    return {
+      handle: false,
+      reason: `dm:owner (sender ${senderId} != bound owner ${owner.member_id})`,
+      userNotice: NOTICE_DM_NOT_ALLOWED,
+    };
   }
 
-  // group / thread
+  // group / thread — compute mentioned/owner once up front so all gates and
+  // their userNotice decisions share the same view.
   const policy = access.groupPolicy || 'allowlist';
-  if (policy === 'disabled') return { handle: false, reason: 'group:disabled' };
-
   const convId = msg.conversation_id;
   const groupCfg = (access.groups || {})[convId];
 
-  // Owner @-mention signals — used as bypass for both the allowlist gate and
-  // the per-group allowFrom gate, mirroring zylos-feishu src/index.js:1242 +
-  // isSenderAllowedInGroup owner-exempt path.
   // Mention detection has two paths: structured mentions[] from cws-comm, and
   // a text-based "@<selfName>" fallback for messages where the server returns
   // the raw text without a structured mentions array.
@@ -225,13 +276,27 @@ function shouldHandleMessage(msg, conv, orgConfig) {
   const ownerMemberId = orgConfig.owner?.member_id;
   const senderIsOwner = !!ownerMemberId && String(senderId) === String(ownerMemberId);
 
+  if (policy === 'disabled') {
+    return {
+      handle: false,
+      reason: 'group:disabled',
+      userNotice: mentioned ? NOTICE_GROUP_DISABLED : undefined,
+    };
+  }
+
+  // Owner @-mention bypasses the allowlist gate (mirrors zylos-feishu 1242).
   if (policy === 'allowlist' && !groupCfg && !(senderIsOwner && mentioned)) {
-    return { handle: false, reason: `group:allowlist (${convId} not in groups{})` };
+    return {
+      handle: false,
+      reason: `group:allowlist (${convId} not in groups{})`,
+      userNotice: mentioned ? NOTICE_GROUP_NOT_ALLOWED : undefined,
+    };
   }
 
   // mode: per-group `mode` if present, else default to 'mention'
   const mode = groupCfg?.mode || 'mention';
   if (mode === 'mention' && !mentioned) {
+    // No userNotice — this is normal background traffic, replying would spam.
     return { handle: false, reason: 'group:mention (not @-ed)' };
   }
   // mode === 'smart' bypasses the mention requirement
@@ -241,7 +306,11 @@ function shouldHandleMessage(msg, conv, orgConfig) {
   const allowFrom = groupCfg?.allowFrom;
   if (allowFrom && allowFrom.length > 0 && !allowFrom.includes('*') && !senderIsOwner) {
     if (!allowFrom.map(String).includes(String(senderId))) {
-      return { handle: false, reason: `group:allowFrom (sender ${senderId} not allowed in ${convId})` };
+      return {
+        handle: false,
+        reason: `group:allowFrom (sender ${senderId} not allowed in ${convId})`,
+        userNotice: mentioned ? NOTICE_GROUP_SENDER_NOT_ALLOWED : undefined,
+      };
     }
   }
 
@@ -293,6 +362,19 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     const decision = shouldHandleMessage(msg, conv || {}, orgConfig);
     if (!decision.handle) {
       log(`drop [${orgConfig.slug}] msg=${msg.id}: ${decision.reason}`);
+      // Send a polite refusal only when it actually helps the sender. Two
+      // skips:
+      //   - sync-replay frames re-process historic messages; a notice for
+      //     each would spam stale apologies after a bug fix.
+      //   - other agents (sender_type=AGENT) can DM us in normal workflows
+      //     (e.g. cws-comm agent-to-agent). They don't read English copy
+      //     and could auto-respond, producing reject-notice ping-pong.
+      const senderType = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
+      const isSyncReplay = notification._via === 'sync';
+      const isAgentSender = senderType === 'AGENT';
+      if (decision.userNotice && !isSyncReplay && !isAgentSender) {
+        sendRejectNotice(orgConfig, msg, decision.userNotice).catch(() => {});
+      }
       return;
     }
 
