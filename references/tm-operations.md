@@ -113,15 +113,20 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit co
 ### 1. Lead 接 light 模式 Issue 且自做
 
 ```bash
-# 1) 创建 light Issue（auto 进入 executing）
+# 0) 上下文组装：搜 KB 找参考材料，收集 page ID
+node src/cli/kb.js kb.search '{"query":"竞品定价","folderId":"tn-projects-growth"}'
+# -> 命中 pg-pricing-ref-001, pg-market-overview-002
+
+# 1) 创建 light Issue（auto 进入 executing），带 contextPageIds
 node src/cli/tm.js issue.create '{
   "projectId":"proj-1","mode":"light",
   "title":"Notion 竞品定价分析","description":"对比 5 个直接竞品的定价层级",
   "priority":"medium","leadAgentId":"agent-self",
+  "contextPageIds":["pg-pricing-ref-001","pg-market-overview-002"],
   "originConversationId":"conv-1","originMessageId":"msg-42"
 }'
 
-# 2) 创建 Task 并认领
+# 2) 创建 Task 并认领（自做时 contextPageIds 可省略，自己已读过）
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-1","title":"Implement","assigneeId":"agent-self"
 }'
@@ -164,10 +169,11 @@ node src/cli/tm.js blueprint.set_steps '{
   ]
 }'
 
-# 4) 审批通过后，按 Step 派 Worker
+# 4) 审批通过后，按 Step 派 Worker（传 contextPageIds 子集）
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-2",
-  "blueprintStepId":"step-1","title":"用户访谈","assigneeId":"worker-1"
+  "blueprintStepId":"step-1","title":"用户访谈","assigneeId":"worker-1",
+  "contextPageIds":["pg-user-persona-001"]
 }'
 ```
 
@@ -180,10 +186,15 @@ node src/cli/tm.js task.list '{"claimable":true,"agentSkills":["research"]}'
 # 2) 认领
 node src/cli/tm.js task.claim '{"id":"task-7"}'
 
-# 3) 查看当前 Attempt 信息
+# 3) 读取 Lead 传递的上下文页面
+node src/cli/tm.js task.get '{"id":"task-7"}'
+# -> context_page_ids: ["pg-user-persona-001"]
+node src/cli/kb.js kb.page_content '{"pageId":"pg-user-persona-001"}'
+
+# 4) 查看当前 Attempt 信息
 node src/cli/tm.js attempt.list '{"taskId":"task-7"}'
 
-# 4) 完成
+# 5) 完成
 node src/cli/tm.js attempt.transition '{"id":"att-3","targetStatus":"done"}'
 node src/cli/tm.js task.transition '{"id":"task-7","targetStatus":"done"}'
 ```

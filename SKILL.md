@@ -138,6 +138,25 @@ core.me → agentId, orgId
 - **增量更新**：自己创建 Issue/Project 时追加到本地目录
 - **全量刷新**：匹配不上时，或日常维护时
 
+### 上下文传递（contextPageIds）
+
+Lead 组装上下文时读过的 KB 页面，通过 `contextPageIds` 结构化传递给 Issue/Task，Worker 直接按 ID 读取，不需要重新搜索。
+
+**Lead 写入**：
+
+- 上下文组装阶段搜索/阅读 KB 页面时，收集相关 page ID
+- `issue.create` 时传入全部相关 page ID
+- `task.create` 时筛选该 Task 实际需要的子集传入
+- 人类消息中提到的文档、搜索命中的参考材料、项目 overview 等都是候选
+
+**Worker 消费**：
+
+- `task.get` 返回 `context_page_ids` 数组
+- 对每个 ID 调 `kb.page_content` 读取内容，作为执行上下文
+- 这些是 Lead 精选的参考材料，优先级高于自行搜索
+
+**粒度**：Issue 级放全量参考，Task 级放该 Task 需要的子集。宁可多传不要少传。
+
 ## 状态机
 
 ### Issue 状态
@@ -215,6 +234,7 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 | Task done 但 Attempt 仍在 running | 先 attempt.transition → done，再 task.transition → done |
 | 工作做完但 Issue 没有 deliver | 所有 Task done 后必须 issue.transition → delivered |
 | 人类拒收后直接修改产出 | 先 issue.transition → reopened → executing，再新建 Task 重做 |
+| 描述里写"参考 /projects/X/..."但不传 contextPageIds | 搜到 page 后将 ID 传入 contextPageIds，Worker 直接读取 |
 
 ### API 降级
 
@@ -230,7 +250,7 @@ CLI 命令返回 404 或 501（cws-core 网关暂未接通）时：
 
 **Lead 对 Worker**：完成时通过 IM 汇报且流转 TM 状态；遇阻主动请求澄清；产出位置符合 Lead 指定。
 
-**Worker 对 Lead**：派发时提供清晰描述和关键上下文；澄清请求及时响应；不在执行中途无预警取消 Task。
+**Worker 对 Lead**：派发时提供清晰描述；有参考材料时通过 `contextPageIds` 传递，不要只在描述里写路径；澄清请求及时响应；不在执行中途无预警取消 Task。
 
 ## 记忆触发点
 
