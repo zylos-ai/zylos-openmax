@@ -128,10 +128,37 @@ function forwardToC4(endpoint, body) {
 // =============================================================================
 
 function extractMentions(msg) {
-  return msg.mentions ||
-    msg.mention_user_ids ||
-    msg.content?.mention_user_ids ||
-    [];
+  const raw =
+       msg.mentions
+    || msg.mention_user_ids
+    || msg.content?.mention_user_ids
+    || msg.message?.mentions
+    || [];
+  // Normalize to a list of ID strings. cws-comm shape is {entity_id, ...};
+  // raw string IDs and {id} variants are supported as fallbacks.
+  return raw.map(m =>
+    typeof m === 'string'
+      ? m
+      : String(m?.entity_id || m?.mentioned_id || m?.id || '')
+  ).filter(Boolean);
+}
+
+// Detect @<selfName> in the message text body. cws-core's get-message returns
+// raw text with literal "@Name" rather than a structured mentions[] array, so
+// without this fallback the mode=mention gate and the owner-mention bypass
+// would never trigger in practice.
+function isSelfNameMentionedInText(msg, selfName) {
+  if (!selfName) return false;
+  const text =
+       msg.content?.body?.text
+    || (typeof msg.content === 'string' ? msg.content : '')
+    || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+    || msg.content_text
+    || '';
+  if (!text) return false;
+  const escaped = selfName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // `(?![\w-])` keeps "@Zylos" from matching "@Zylos-GavinBox" or "@ZylosX".
+  return new RegExp('@' + escaped + '(?![\\w-])', 'i').test(text);
 }
 
 /**
@@ -185,29 +212,47 @@ function shouldHandleMessage(msg, conv, orgConfig) {
   const convId = msg.conversation_id;
   const groupCfg = (access.groups || {})[convId];
 
-  if (policy === 'allowlist' && !groupCfg) {
+  // Owner @-mention signals — used as bypass for both the allowlist gate and
+  // the per-group allowFrom gate, mirroring zylos-feishu src/index.js:1242 +
+  // isSenderAllowedInGroup owner-exempt path.
+  // Mention detection has two paths: structured mentions[] from cws-comm, and
+  // a text-based "@<selfName>" fallback for messages where the server returns
+  // the raw text without a structured mentions array.
+  const mentions = extractMentions(msg).map(String);
+  const mentionedById = !!selfMemberId && mentions.includes(String(selfMemberId));
+  const mentionedByText = isSelfNameMentionedInText(msg, orgConfig.self?.name);
+  const mentioned = mentionedById || mentionedByText;
+  const ownerMemberId = orgConfig.owner?.member_id;
+  const senderIsOwner = !!ownerMemberId && String(senderId) === String(ownerMemberId);
+
+  if (policy === 'allowlist' && !groupCfg && !(senderIsOwner && mentioned)) {
     return { handle: false, reason: `group:allowlist (${convId} not in groups{})` };
   }
 
   // mode: per-group `mode` if present, else default to 'mention'
   const mode = groupCfg?.mode || 'mention';
-  if (mode === 'mention') {
-    const mentions = extractMentions(msg);
-    if (!selfMemberId || !mentions.includes(selfMemberId)) {
-      return { handle: false, reason: 'group:mention (not @-ed)' };
-    }
+  if (mode === 'mention' && !mentioned) {
+    return { handle: false, reason: 'group:mention (not @-ed)' };
   }
   // mode === 'smart' bypasses the mention requirement
 
-  // allowFrom: ['*'] / [] = all members allowed; otherwise restrict
+  // allowFrom: ['*'] / [] = all members allowed; otherwise restrict.
+  // Owner is exempt from per-group allowFrom — matches zylos-feishu.
   const allowFrom = groupCfg?.allowFrom;
-  if (allowFrom && allowFrom.length > 0 && !allowFrom.includes('*')) {
+  if (allowFrom && allowFrom.length > 0 && !allowFrom.includes('*') && !senderIsOwner) {
     if (!allowFrom.map(String).includes(String(senderId))) {
       return { handle: false, reason: `group:allowFrom (sender ${senderId} not allowed in ${convId})` };
     }
   }
 
-  return { handle: true, reason: `group:${policy}/${mode}` };
+  const ownerTag = (!groupCfg && senderIsOwner && mentioned) ? ' [owner-mention-bypass]' : '';
+  return {
+    handle: true,
+    reason: `group:${policy}/${mode}${ownerTag}`,
+    mode,
+    mentioned,
+    groupCfg,
+  };
 }
 
 // =============================================================================
@@ -308,8 +353,14 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       threadConversationId: msg.thread_id || undefined,
       parentMessageId: msg.thread_id ? msg.parent_message_id : undefined,
     });
+    // smartHint mirrors zylos-feishu: only emitted when the group is in smart
+    // mode AND the bot was NOT @-mentioned. When the bot was directly @-ed we
+    // want a direct reply, not a "should I respond?" deliberation.
+    const smartHint = decision.mode === 'smart' && !decision.mentioned;
+    const groupName = decision.groupCfg?.name || conv?.name;
+
     const body = formatInboundForC4(
-      { type: convType, id: msg.conversation_id },
+      { type: convType, id: msg.conversation_id, name: groupName },
       { displayName: senderName },
       {
         content: text,
@@ -317,6 +368,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         mediaLocalPath,
       },
       recent,
+      { groupName, smartHint },
     );
 
     try {

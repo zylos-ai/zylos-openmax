@@ -65,48 +65,116 @@ export function formatEndpoint(ep) {
 }
 
 /**
- * Format a single recent-message line for context blocks: `[name]: content`.
+ * Escape XML special chars in user-supplied strings before embedding them in
+ * the XML-tagged context blocks emitted by formatInboundForC4. Without this a
+ * sender could plant a literal `</current-message>` in their text and break
+ * out of the structural framing the LLM relies on.
+ */
+function escapeXml(s) {
+  if (s === undefined || s === null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/**
+ * Format a single context-line entry: `[name]: text`. Both fields go through
+ * escapeXml. Accepts the shape returned by fetchRecentMessages
+ * ({senderName, content}) as well as generic {user_name|sender_id, text|content}.
  */
 function formatContextLine(m) {
-  const name = m.senderName || m.sender_display_name || m.sender_id || 'unknown';
-  const text = m.content ?? m.content_text ?? '';
+  const name = escapeXml(
+       m.senderName
+    || m.sender_display_name
+    || m.user_name
+    || m.sender_id
+    || 'unknown',
+  );
+  const text = escapeXml(m.content ?? m.text ?? m.content_text ?? '');
   return `[${name}]: ${text}`;
 }
 
 /**
  * Build the C4-bridge inbound text for a single incoming message.
  *
- * @param {object} conv - { type:'dm'|'group'|'thread', id?:string }
- * @param {object} sender - { displayName }
- * @param {object} current - { content:string, type?:'text'|'image'|'file',
- *                             mediaLocalPath?:string }
- * @param {Array}  [recent] - prior messages used for group/thread context
+ * Output framing mirrors zylos-feishu `src/index.js formatMessage`:
+ *   - tag includes the group name for group / thread messages
+ *     (`[COCO GROUP:Engineering]`)
+ *   - context blocks are XML-tagged so the LLM can cleanly separate history
+ *     from the current message
+ *   - thread context, replying-to, and smart-mode hint blocks are emitted
+ *     when the relevant opts are present
+ *   - all user-supplied strings go through escapeXml
+ *
+ * @param {object} conv     - { type:'dm'|'group'|'thread', id?, name? }
+ * @param {object} sender   - { displayName }
+ * @param {object} current  - { content:string, type?:'text'|'image'|'file',
+ *                              mediaLocalPath?:string }
+ * @param {Array}  [recent] - recent group messages used for `<group-context>`
+ * @param {object} [opts]   - { groupName, quotedContent, threadContext,
+ *                              threadRootId, smartHint }
  * @returns {string}
  */
-export function formatInboundForC4(conv, sender, current, recent = []) {
-  const rawType = (conv.type || '').toLowerCase();
+export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
+  const rawType = (conv?.type || '').toLowerCase();
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
-  const tag = TYPE_TAG[type];
-  const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
-  const content = current?.content ?? '';
+  const { groupName, quotedContent, threadContext, threadRootId, smartHint } = opts;
 
-  let body;
-  if (type === 'dm') {
-    body = content;
-  } else {
-    const ctxLabel = type === 'thread'
-      ? '[Thread context:]'
-      : '[Group context - recent messages:]';
-    const ctxLines = (recent || []).map(formatContextLine).join('\n');
-    body = ctxLines
-      ? `${ctxLabel}\n${ctxLines}\n\n[Current message:] ${content}`
-      : `[Current message:] ${content}`;
+  const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
+  const safeName = escapeXml(name);
+  const safeContent = escapeXml(current?.content ?? '');
+
+  const baseTag = TYPE_TAG[type];
+  // baseTag is like "[COCO GROUP]" — inject ":<name>" before the closing "]".
+  const tag = (type === 'group' || type === 'thread')
+    ? `${baseTag.slice(0, -1)}:${escapeXml(groupName || conv?.name || 'unknown')}]`
+    : baseTag;
+
+  const parts = [`${tag} ${safeName} said: `];
+
+  if (threadContext && threadContext.length > 0) {
+    const lines = threadContext.map(m => {
+      const line = formatContextLine(m);
+      const id = m.message_id || m.id;
+      if (threadRootId && id && String(id) === String(threadRootId)) {
+        return `<thread-root>\n${line}\n</thread-root>`;
+      }
+      return line;
+    });
+    parts.push(`<thread-context>\n${lines.join('\n')}\n</thread-context>\n\n`);
+  } else if (type !== 'dm' && recent && recent.length > 0) {
+    const lines = recent.map(formatContextLine);
+    parts.push(`<group-context>\n${lines.join('\n')}\n</group-context>\n\n`);
   }
 
-  let line = `${tag} ${name} said: ${body}`;
+  if (quotedContent && !(threadContext && threadContext.length > 0)) {
+    const qsender = escapeXml(quotedContent.sender || quotedContent.senderName || 'unknown');
+    const qtext   = escapeXml(quotedContent.text   || quotedContent.content    || '');
+    parts.push(`<replying-to>\n[${qsender}]: ${qtext}\n</replying-to>\n\n`);
+  }
+
+  if (smartHint) {
+    parts.push(
+`<smart-mode>
+Decide whether to respond. Do NOT reply if: the message is unrelated to you,
+just casual chat, or doesn't need your input. Only reply when:
+1) someone asks a question you can help with,
+2) discussing technical topics you know well,
+3) someone clearly needs assistance.
+When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
+</smart-mode>\n\n`,
+    );
+  }
+
+  parts.push(`<current-message>\n${safeContent}\n</current-message>`);
+
+  let line = parts.join('');
   if (current?.mediaLocalPath) {
     const kind = current.type === 'image' ? 'image' : 'file';
-    line += ` ---- ${kind}: ${current.mediaLocalPath}`;
+    line += ` ---- ${kind}: ${escapeXml(current.mediaLocalPath)}`;
   }
   return line;
 }
