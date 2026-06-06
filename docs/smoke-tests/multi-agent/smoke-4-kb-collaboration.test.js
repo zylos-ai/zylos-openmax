@@ -8,7 +8,7 @@
 
 import {
   loadEnv, sendInstruction, tm, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, waitForBotDM,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -82,6 +82,11 @@ if (!leadPage || revCount < 2) {
   console.error(`✗ phase2: page or 2nd revision not appeared within ${MAX_WAIT}ms (have page=${!!leadPage}, revs=${revCount})`);
   process.exit(1);
 }
+
+// Close the race: WORKER writes the page revision THEN sends the bot-DM
+// ack ~1s later. Wait briefly so Phase 3's DM-count assertion sees it.
+await waitForBotDM(env, env.lead_worker.conv_id, WORKER_MID,
+  baselineBotMsgs[WORKER_MID] || 0, { actor: 'worker', maxWaitMs: 30_000, label: 'v4-worker-ack' });
 
 log(''); log('[Phase 3] 深度断言');
 

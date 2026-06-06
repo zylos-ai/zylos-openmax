@@ -81,11 +81,23 @@ dependencies:
 | 与人类直接通信 | 是 | 否（通过 Lead 转达）|
 | Issue 操作（创建/流转/关闭）| 是 | 否 |
 | Task 创建/派发 | 是 | 否 |
-| Task 领取/状态流转 | 仅监控 | 是 |
+| Task 领取（claim 自己的 task）| 仅监控 | 是 |
+| Task 状态流转（own task → done/failed/cancelled）| 仅监控 | **是** |
+| Task 重派（reassign 到别的 agent）| 是 | 否 |
+| Attempt 状态流转（own attempt → done/failed/cancelled/blocked）| 仅监控 | **是** |
 | Blueprint 操作 | 是 | 否 |
 | KB 写入 | 经验沉淀 | 任务产出（Lead 指定位置）|
 
 Worker 的"不创建 Issue""不与人类通信"仅在该 Worker 角色上下文中生效。同一 Agent 在 Lead 角色中正常行使 Lead 权限。
+
+**Worker 状态流转的明确边界**（避免保守过头拒绝合法操作）：
+
+- 自己 attempt 走完、失败、被 Lead 通知取消 → Worker **自己**调 `attempt.transition` 到 done/failed/cancelled
+- 自己 task 所有 attempt 在终态后（或被 Lead 通知 cancel）→ Worker **自己**调 `task.transition` 到 done/failed/cancelled
+- 不需要等 Lead 来推流转，也不需要先确认"这是不是 Lead 权限"
+- Lead 只在跨 task / 重派 / 接收 Worker 失败汇报后做 task 终态决策时介入
+
+Worker **不该**做的:`issue.transition`（issue 状态机是 Lead 专属）、`issue.set_acceptance`、`task.reassign`、`task.create`。
 
 ## 效率捷径
 

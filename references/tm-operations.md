@@ -222,16 +222,26 @@ node src/cli/tm.js attempt.transition '{
 | `issue.update` / `issue.move_project` | ✅ | — |
 | `blueprint.*` | ✅ | — |
 | `task.create` / `task.reassign` | ✅ | — |
-| `task.claim` / `task.transition` | — | ✅ |
-| `attempt.create` / `attempt.transition` | — | ✅ |
+| `task.claim` | — | ✅ |
+| `task.transition`（own task → done/failed/cancelled）| 监控 | **✅** |
+| `attempt.create` / `attempt.transition`（own attempt → done/failed/cancelled/blocked）| 监控 | **✅** |
 | `project.*` / `*.list` / `*.get` | ✅ 读写 | ✅ 只读 |
+
+**Worker 状态流转的明确边界**（避免过保守拒绝合法操作）：
+
+- 自己的 attempt 完成 / 失败 / 被 Lead 通知取消 → Worker **自己**调 `attempt.transition` 到 `done` / `failed` / `cancelled`
+- 自己的 task 所有 attempt 在终态后（或被 Lead 通知 cancel）→ Worker **自己**调 `task.transition` 到 `done` / `failed` / `cancelled`
+- **不用**等 Lead 来推流转,也**不用**先在 DM 里确认"这是不是 Lead 权限" — 自己的 task / attempt 自己流转是契约的一部分
+- Lead 只在**跨 task / 重派 / 接到 Worker 失败汇报后做 task 终态决策**时介入
 
 详细行为参见 [agent-skill-spec.md](../docs/agent-skill-spec.md) 的 Lead/Worker 章节。
 
 ## 不要做的事
 
 - **不要**在没有 leadAgentId 的情况下创建 Issue（违反角色模型）
-- **不要**在 Worker 角色下直接调 `issue.transition`（应该由 Lead 监控并流转）
+- **不要**在 Worker 角色下调 `issue.transition` / `issue.set_acceptance`（issue 状态机是 Lead 专属）
+- **不要**在 Worker 角色下调 `task.create` / `task.reassign`（派活是 Lead 专属）
+- **不要**因为"觉得是 Lead 权限"就拒绝流转自己 own 的 task / attempt — 那是 Worker 的责任,Lead 在等你
 - **不要**为了"绕开"审批跳过 Blueprint 审批流程（heavy 模式必须走审批）
 - **不要**把 IM 消息原文整段复制进评论（用会话锚定就够了）
 - **不要**直接调 `attempt.create` 来代替 `task.claim`——`claim` 已内置创建 Attempt 的逻辑
