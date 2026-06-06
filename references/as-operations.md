@@ -75,18 +75,12 @@ Base URL:`COCO_API_URL`(走 cws-int gateway,跟 cws-core/kb/comm 同一个 zone,
 
 | 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ✅ | `as.upload` | `{filePath, conversationId?, parentId?, mediaType?, contentType?, filename?}` | 3-step(上面那条);`conversationId` → IM,无 → KB(见上面"上传走哪条路径"那节)|
-| ✅ | `as.list` | `{pageSize?, pageToken?, mime?, status?, producer?}` | `GET /api/v1/artifacts` |
-| ✅ | `as.get` | `{artifactId}` | `GET /api/v1/artifacts/{id}` |
-| ✅ | `as.update` | `{artifactId, name?, description?, metadata?}` | `PATCH /api/v1/artifacts/{id}` |
-| ✅ | `as.delete` | `{artifactId}` | `DELETE /api/v1/artifacts/{id}` |
-| ✅ | `as.url` | `{artifactId, mode?}` | `GET /api/v1/artifacts/{id}/download` |
-| ✅ | `as.download` | `{artifactId, filename?}` | `as.url` + 字节下载到本地 |
-| ✅ | `as.abort` | `{artifactId}` | `POST /api/v1/artifacts/{id}/abort` |
-| ✅ | `as.resolve` | `{uris:["as://org_x/art_y", ...]}` | `POST /api/v1/artifacts/resolve` |
+| ✅ | `as.upload` | `{filePath, conversationId?, parentId?, mediaType?, contentType?, filename?}` | 双模 prepare/finalize(上面那条);`conversationId` → IM,无 → KB(见"上传走哪条路径") |
+| ✅ | `as.url` | `{artifactId\|uri, inline?}` | `POST /api/v1/artifacts/resolve`(取第一条 `download_url`)|
+| ✅ | `as.download` | `{artifactId\|uri, filename?}` | `as.url` + 字节下载到本地 |
+| ✅ | `as.resolve` | `{uris:["artifact://<id>", ...], inline?}` | `POST /api/v1/artifacts/resolve` |
 
-`as.update` 只能改 metadata(name / description / metadata),**字节不可变**;要换内容就 `as.upload` 重新建 artifact。
-`as.delete` 是软删除(status 转 `deleted`),保留期后真删除;期间 `as.list` 加 `status=deleted` 还能找回来。
+> **v5 BFF 主动收窄**:旧版 cws-as 直连的 artifact CRUD(`as.list / as.get / as.update / as.delete / as.abort`,对应 `GET\|PATCH\|DELETE /artifacts/{id}` + `POST /artifacts/{id}/abort`)**v5 已经不再通过 cws-core BFF 暴露**——这些端点都返回 404。如果以后需要恢复某项能力,要先在 cws-core BFF 加路由再补 CLI。Artifact 字节不可变,正常工作流是 `as.upload` 重新建一条新的,旧的留作历史。
 
 ### `as.upload` 详细
 
@@ -173,24 +167,24 @@ WS 推过来一帧 `{content:{media_id:"art_xyz"}, ...}`,comm-bridge 内部:
 通常**不需要直接调 as.js CLI**,因为 send.js 和 comm-bridge 自动用了。手动管理时:
 
 ```bash
-# 上传一份 PDF
+# 上传一份 PDF(KB 模式:不带 conversationId)
 node src/cli/as.js as.upload '{
   "filePath":"/tmp/report.pdf",
-  "mediaType":"file",
-  "description":"Q2 报告终版"
+  "mediaType":"file"
 }'
-# -> {artifactId:"art_...", instantUpload:false, status:"pending_verification"}
-
-# 列出我的 artifact
-node src/cli/as.js as.list '{"pageSize":20,"mime":"application/pdf"}'
+# -> {artifactId:"art_...", nodeId:"...", treeNode:{...}, instantUpload:false}
 
 # 拿临时链接分享给别人
-node src/cli/as.js as.url '{"artifactId":"art_...","mode":"download"}'
-# -> {url:"https://...", expiresAt:"..."}
+node src/cli/as.js as.url '{"artifactId":"art_..."}'
+# -> {url:"https://...", expiresAt:"...", contentType:"...", name:"..."}
 
 # 下到本地做分析
 node src/cli/as.js as.download '{"artifactId":"art_..."}'
-# -> {localPath:"/home/cocoai/.../<filename>"}
+# -> {localPath:"/home/cocoai/zylos/components/coco-workspace/media/<filename>"}
+
+# 批量解析多个 URI(给服务间调用用)
+node src/cli/as.js as.resolve '{"uris":["artifact://art_a","artifact://art_b"]}'
+# -> {resolved:{...}, failed:[...]}
 ```
 
 ## 选型对照
