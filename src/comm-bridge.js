@@ -605,6 +605,13 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
 const wsClients = [];
 let liveOrgCount = 0;
 
+// Live per-org config snapshots. `makeOrgMessageHandler` captures the
+// orgConfig at boot, so shouldHandleMessage / sendRejectNotice all read
+// through this same object. Hot-reload mutates it in place (see the
+// watchConfig callback at the bottom) so policy edits like adding a group to
+// `access.groups` take effect without a service restart.
+const activeOrgConfigs = new Map(); // slug → orgConfig (mutable)
+
 async function bootstrapOrgToken(orgConfig) {
   // Mint a JWT eagerly so token.exchange's member_id write-back lands before
   // the first WS open (and thus before the first inbound message hits the
@@ -677,6 +684,7 @@ function startOrgWs(orgConfig, wsBaseUrl) {
   });
 
   wsClients.push({ slug: orgConfig.slug, ws });
+  activeOrgConfigs.set(orgConfig.slug, orgConfig);
   liveOrgCount += 1;
   ws.start();
   log(`[${orgConfig.slug}] started (org=${orgConfig.org_id})`);
@@ -724,7 +732,24 @@ if (orgs.length === 0) {
 
 watchConfig((next) => {
   config = next;
-  log('config reloaded — WS settings apply on next reconnect; new/removed orgs require service restart');
+  // Mutate captured per-org config objects in place so policy edits picked up
+  // by watchConfig (`access.dmPolicy`, `access.groupPolicy`, `access.groups`,
+  // `access.dmAllowFrom`) take effect without restarting the service. Owner /
+  // self / org_id / api_key are still considered structural — adding or
+  // removing an org, rotating the api_key, or rebinding ownership still
+  // requires a service restart (and is logged below).
+  let accessUpdates = 0;
+  for (const [slug, live] of activeOrgConfigs) {
+    const updated = next.orgs?.[slug];
+    if (updated?.access) {
+      live.access = updated.access;
+      accessUpdates += 1;
+    }
+  }
+  log(
+    `config reloaded — applied access updates to ${accessUpdates} org(s); ` +
+    `WS settings apply on next reconnect; new/removed orgs require service restart`,
+  );
 });
 
 process.on('SIGTERM', () => {
