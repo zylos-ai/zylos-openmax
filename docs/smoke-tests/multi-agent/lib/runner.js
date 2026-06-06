@@ -67,7 +67,6 @@ const REQUIRED = [
   'TEST_CONV_ID',
   'TEST_AGENT_ID',
   'TEST_WORKER_CONV_ID',
-  'TEST_WORKER_AGENT_ID',
   'TEST_WORKER_API_KEY',
 ];
 
@@ -92,8 +91,9 @@ export function loadEnv() {
     },
     worker: {
       conv_id:    process.env.TEST_WORKER_CONV_ID,
-      agent_id:   process.env.TEST_WORKER_AGENT_ID,
       api_key:    process.env.TEST_WORKER_API_KEY,
+      // worker.agent_id (member_id) is derived from JWT claims in
+      // getWorkerJwt() — see WORKER_MID extraction in tests. Not an env var.
     },
     CF_ACCESS_CLIENT_ID:     process.env.CF_ACCESS_CLIENT_ID     || '',
     CF_ACCESS_CLIENT_SECRET: process.env.CF_ACCESS_CLIENT_SECRET || '',
@@ -134,13 +134,15 @@ export async function getWorkerJwt(env, { force = false } = {}) {
   const identityJwt     = exchangeBody.data.access_token;
   const identityRefresh = exchangeBody.data.refresh_token;
 
+  // NB: /auth/refresh does NOT accept `token_delivery` (422 with
+  // "unexpected property"), unlike /auth/login which requires it. cws-core
+  // contract drift — refresh defaults to body, no override available.
   const refreshRes = await fetch(`${env.COCO_API_URL}/auth/refresh`, {
     method:  'POST',
     headers: { ...baseHeaders, 'Authorization': `Bearer ${identityJwt}` },
     body:    JSON.stringify({
       refresh_token:  identityRefresh,
       org_id:         env.TEST_ORG_ID,
-      token_delivery: 'body',
     }),
   });
   const refreshBody = await refreshRes.json();

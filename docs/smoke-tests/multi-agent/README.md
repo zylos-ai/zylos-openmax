@@ -58,8 +58,7 @@ export TEST_AGENT_ID=<lead agent member_id>
 
 # Worker agent (另一台服务器上的 zylos-coco-workspace runtime)
 export TEST_WORKER_CONV_ID=<worker 与 user 的 DM conv id>
-export TEST_WORKER_AGENT_ID=<worker agent member_id>
-export TEST_WORKER_API_KEY=<worker cwsk_... — runner 用它换 JWT>
+export TEST_WORKER_API_KEY=<worker cwsk_... — runner 用它换 JWT,member_id 从 JWT claims 取>
 
 # 可选(CF Access 网关)
 export CF_ACCESS_CLIENT_ID=...

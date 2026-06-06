@@ -34,7 +34,7 @@ const env = loadEnv();
 log(`=== Smoke 2 multi-agent NL: cross-actor heavy + worker ===`);
 log(`   TITLE = ${TITLE}`);
 log(`   LEAD   conv=${env.lead.conv_id}    agent=${env.lead.agent_id}`);
-log(`   WORKER conv=${env.worker.conv_id}  agent=${env.worker.agent_id}`);
+log(`   WORKER conv=${env.worker.conv_id}  (member_id from JWT)`);
 
 // ============================================================================
 // Phase 1 — NL → LEAD: build heavy + blueprint + approve + executing + step-1 task
