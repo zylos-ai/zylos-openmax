@@ -68,6 +68,7 @@ const REQUIRED = [
   'TEST_AGENT_ID',
   'TEST_WORKER_CONV_ID',
   'TEST_WORKER_API_KEY',
+  'TEST_LEAD_WORKER_CONV_ID',
 ];
 
 export function loadEnv() {
@@ -94,6 +95,12 @@ export function loadEnv() {
       api_key:    process.env.TEST_WORKER_API_KEY,
       // worker.agent_id (member_id) is derived from JWT claims in
       // getWorkerJwt() — see WORKER_MID extraction in tests. Not an env var.
+    },
+    // Bot-to-bot DM between LEAD and WORKER. Created via comm.create_dm.
+    // Used by the v2 single-NL smoke flow: test sends ONE NL to LEAD,
+    // LEAD coordinates with WORKER via this DM autonomously.
+    lead_worker: {
+      conv_id:    process.env.TEST_LEAD_WORKER_CONV_ID,
     },
     CF_ACCESS_CLIENT_ID:     process.env.CF_ACCESS_CLIENT_ID     || '',
     CF_ACCESS_CLIENT_SECRET: process.env.CF_ACCESS_CLIENT_SECRET || '',
@@ -334,6 +341,58 @@ export async function waitForTaskAssignee(env, issueId, taskPredicate, opts = {}
   console.error(`✗ ${label} timed out after ${maxWaitMs}ms`);
   console.error(`  last tasks: ${JSON.stringify(lastTasks.map(t => ({id:t.id, status:t.status, assignee:t.assignee_id})))}`);
   process.exit(1);
+}
+
+// =============================================================================
+// Bot-to-bot DM message inspection — used by v2 single-NL smokes to verify
+// that LEAD and WORKER actually communicated via their bot DM, not that
+// WORKER picked up the task by coincidence.
+// =============================================================================
+
+// Fetches all messages in a conversation, paginating through if needed.
+// Uses tm()'s shell-out path via comm.js CLI, so we can scope by actor.
+export async function listConvMessages(env, conversationId, opts = {}) {
+  const { actor = 'worker', limit = 200 } = opts;
+  // comm.js exposes comm.get_messages but tm() above is bound to tm.js.
+  // Inline a tiny exec for comm.js with the same per-actor JWT injection.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execP = promisify(execFile);
+  const commCli = TM_CLI.replace('tm.js', 'comm.js');
+  let token;
+  if (actor === 'lead')        token = env.TEST_USER_TOKEN;
+  else if (actor === 'worker') token = await getWorkerJwt(env);
+  else die(`listConvMessages: bad actor ${actor}`);
+  const childEnv = {
+    ...process.env,
+    COCO_AUTH_TOKEN: token,
+    COCO_USER_TOKEN: token,
+    COCO_RPC_LOG:    process.env.COCO_RPC_LOG ?? '0',
+  };
+  const { stdout } = await execP('node', [commCli, 'comm.get_messages',
+                                  JSON.stringify({ conversationId, limit })], {
+    env: childEnv,
+    cwd: path.dirname(path.dirname(commCli)),
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const r = JSON.parse(stdout);
+  return r.messages || r.data || (Array.isArray(r) ? r : []);
+}
+
+// Counts agent-sourced messages in a conv by sender_member_id.
+// Returns { [memberId]: count }.
+export async function countAgentMessagesBySender(env, conversationId, opts = {}) {
+  const msgs = await listConvMessages(env, conversationId, opts);
+  const counts = {};
+  for (const m of msgs) {
+    const senderType = m.sender_type || m.senderType || m.kind || '';
+    if (String(senderType).toLowerCase() !== 'agent' &&
+        String(senderType).toLowerCase() !== 'agent_text') continue;
+    const senderId = m.sender_id || m.sender_member_id || m.from || m.author_id;
+    if (!senderId) continue;
+    counts[senderId] = (counts[senderId] || 0) + 1;
+  }
+  return counts;
 }
 
 // =============================================================================
