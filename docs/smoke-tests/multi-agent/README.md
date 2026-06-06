@@ -1,10 +1,12 @@
-# Smoke Tests — Multi Agent (NL-driven)
+# Smoke Tests — Multi Agent (NL-driven, user-invisible)
 
-> 多 agent runtime 端到端冒烟测试。两个真 agent 都跑各自的 zylos-coco-workspace runtime,test client 通过自然语言进入各自的对话,agent 自主感知 + 选工具完成任务。runner 不直接拿 agent 内部状态,只轮服务端真实状态做断言。
+> 多 agent runtime 端到端冒烟测试。两个真 agent 都跑各自的 zylos-coco-workspace runtime,**测试客户端只触发一次 user → LEAD 的自然语言**,之后 LEAD 自主通过跟 WORKER 的 bot↔bot DM 协调完成整个生命周期 — user 全程不感知中间步骤。runner 不查 agent 内部状态,只轮服务端真实状态 + 检查 bot DM 里双向 agent_text 消息证明做断言。
 
-## 范式转移说明
+## 范式演进
 
-本目录早期版本(commit 3609544 引入)是"dual-JWT 脚本驱动,无 agent runtime"的 fake-multi-agent。**自 v0.4.0 起改成真 NL-driven 多 runtime**(本 commit)。原因:fake 模式验不了"agent 跨 actor 自主感知 + 决策"这条最关键的 multi-agent 行为。
+- **v0(commit 3609544 引入)**:dual-JWT 脚本驱动,无 NL,无 agent runtime — 验 server 跨 actor authz,但验不了 agent 自主行为
+- **v1(commit 65b1441,2026-06-06 上午)**:NL 驱动,user 给 LEAD 和 WORKER 各发一条 NL 拍每一步 — agent 能动了,但 user 还在每步插手
+- **v2(本目录当前版本)**:**user 只发 1 条 NL**,LEAD 全程自主协调 WORKER(via bot↔bot DM),user 全程不感知 — 才是真正"多 agent 协作"的目标形态
 
 ## 跟 single-agent 的关系
 
@@ -57,8 +59,12 @@ export TEST_CONV_ID=<lead 与 user 的 DM conv id>
 export TEST_AGENT_ID=<lead agent member_id>
 
 # Worker agent (另一台服务器上的 zylos-coco-workspace runtime)
-export TEST_WORKER_CONV_ID=<worker 与 user 的 DM conv id>
+export TEST_WORKER_CONV_ID=<worker 与 user 的 DM conv id (仅历史保留,v2 已不再用)>
 export TEST_WORKER_API_KEY=<worker cwsk_... — runner 用它换 JWT,member_id 从 JWT claims 取>
+
+# Bot-to-bot DM (LEAD ↔ WORKER) — v2 单 NL 模式核心通道
+# 通过 `comm.create_dm {peerMemberId: <worker.member_id>}` 创建
+export TEST_LEAD_WORKER_CONV_ID=<LEAD ↔ WORKER 的 DM conv id>
 
 # 可选(CF Access 网关)
 export CF_ACCESS_CLIENT_ID=...
