@@ -1,21 +1,32 @@
-# Smoke Tests — Multi Agent
+# Smoke Tests — Multi Agent (NL-driven)
 
-> 多 actor 端到端冒烟测试,跟 [`../single-agent/`](../single-agent/) 并列。本子目录里的 smoke 验证 **cws-core 在多 member 视角下的 authz / assignment / visibility 语义** —— 比如 LEAD 派活、WORKER 接活、assignee_id 跨 actor 切换、各方 token 互不污染等等。
->
-> 父级 [`docs/smoke-tests/`](../) 的分类索引。
+> 多 agent runtime 端到端冒烟测试。两个真 agent 都跑各自的 zylos-coco-workspace runtime,test client 通过自然语言进入各自的对话,agent 自主感知 + 选工具完成任务。runner 不直接拿 agent 内部状态,只轮服务端真实状态做断言。
+
+## 范式转移说明
+
+本目录早期版本(commit 3609544 引入)是"dual-JWT 脚本驱动,无 agent runtime"的 fake-multi-agent。**自 v0.4.0 起改成真 NL-driven 多 runtime**(本 commit)。原因:fake 模式验不了"agent 跨 actor 自主感知 + 决策"这条最关键的 multi-agent 行为。
 
 ## 跟 single-agent 的关系
 
-- **single-agent 验"agent NL 决策 + 跑 CLI 正确"**:test client 发自然语言,agent 自主调 CLI,验 KB / Task / Issue 状态机 + 卡片回复语义
-- **multi-agent 验"server 跨 actor 的状态机 / 权限"**:test client 直接持多套 JWT 调 API/CLI,无 NL,无 agent runtime 参与。专门覆盖 single-agent 验不了的 cross-actor 路径
+- **single-agent 验**:1 agent + NL 决策 + 服务端状态机
+- **multi-agent 验**:2 agent + NL 决策(双向) + 服务端跨 actor authz / visibility / assignee 等 cross-actor 语义
 
-两套互补,**不替代**。同一个业务用例(比如 Heavy + Blueprint + Worker)会在两边各跑一遍,各看一面。
+两套互补,**不替代**。同一个业务用例(Heavy + Blueprint + Worker)在两边各跑一遍,各看一面。
 
-## 用例清单
+## 用例清单(共 4)
 
 | 用例 | 主验项 | 文档 | 脚本 |
 |---|---|---|---|
-| **2** | Heavy issue + LEAD 派 step1 + **WORKER cross-actor claim** + LEAD 自做 step2/3 + 交付验收。验 assignee/attempt.assignee 切到 WORKER,visibility 跨 actor OK。 | [md](./smoke-2-heavy-multi-agent.md) | [test.js](./smoke-2-heavy-multi-agent.test.js) |
+| **2** | LEAD 排 heavy + blueprint + executing + 派 step1 (无 assignee);WORKER 自主认领 step1 完成;LEAD 自做 step2/3 + 验收。**核心:cross-actor assignee + 跨 actor KB/attempt visibility**。 | [md](./smoke-2-heavy-multi-agent.md) | [test.js](./smoke-2-heavy-multi-agent.test.js) |
+| **3** | rework 循环:LEAD 排 heavy + 1 step;WORKER 交一版简陋稿;LEAD set_acceptance(false);WORKER 开新 attempt 重做;LEAD 接受。**核心:reject 信号 cross-actor 传递 + attempt 序号递增**。 | [md](./smoke-3-cross-actor-rework.md) | [test.js](./smoke-3-cross-actor-rework.test.js) |
+| **4** | KB 协作:LEAD 写一篇 page;WORKER 在同一 page 上追加内容(不开新 page);双方 POV 拉 revision 内容一致。**核心:跨 actor KB read/write + revision 归属正确**。 | [md](./smoke-4-kb-collaboration.md) | [test.js](./smoke-4-kb-collaboration.test.js) |
+| **5** | AS 文件交付:LEAD 上传 markdown artifact;WORKER 跨 actor 拉、下载、把内容写到 KB page。**核心:AS cross-actor 可见 + sha256 byte 一致 + AS→KB 二次处理流**。 | [md](./smoke-5-as-file-handoff.md) | [test.js](./smoke-5-as-file-handoff.test.js) |
+
+## NL 范式约束
+
+- 所有"指令"都是面向用户的自然语言,**不直接出现 CLI 命令名**(不写 `task.claim` / `kb.page_create` 这种)
+- 每个 agent 根据描述选合适的工具实现行为
+- runner 通过服务端接口轮询观察状态,与 agent 自报的话无关 —— agent 喊"做完了"不算数,服务端状态机说 done 才算数
 
 ## 公共 lib
 
@@ -23,26 +34,35 @@
 
 | 导出 | 用途 |
 |---|---|
-| `loadEnv()` | 校验 + 加载必需 env(增加 `TEST_ORG_ID` 比 single-agent 多一个) |
-| `bearerFetch(env, method, path, {token, body})` | 接受**每次调用单独的 token**,同一 env 持多套 JWT 不冲突 |
-| `callApi(env, method, path, opts)` | bearerFetch + auto-unwrap `.data` + die on non-2xx |
-| `provisionMember(env, {rolePrefix, label})` | **核心**:register → invite → accept → org-scoped login,一步拿到新 member 的 `{email, password, identityId, memberId, jwt, displayName}` |
-| `assertEq / assertTrue / assertNot / log / ok / warn / die / summary` | 标准断言 + 日志(跟 single-agent 风格一致,但是独立实现 —— 单 agent 那套带 NL/卡片轮询,这里不需要) |
-
-provisionMember 是这个 lib 的招牌:把"造一个干净的 org-member 来扮演 Worker"压成 1 行调用,可重复(每次 timestamped email 不撞)。
+| `loadEnv()` | 校验 + 加载必需 env(包含 lead + worker 两套) |
+| `sendInstruction(env, text, {to: 'lead' \| 'worker'})` | 把 NL 发到指定 actor 的对话 |
+| `tm(cmd, params, {actor: 'lead' \| 'worker'})` | shell out 到 tm.js,JWT 按 actor 切换 |
+| `listIssuesInProject / listTasks / listAttempts(..., {actor})` | tm 包装 + envelope 拆 |
+| `waitForIssue(env, predicate, {actor, targetStatus, ...})` | 轮 issue 状态直到 predicate / targetStatus |
+| `waitForTaskAssignee(env, issueId, taskPredicate, {actor, ...})` | 轮 task assignee 变化(跨 actor 接活场景) |
+| `getWorkerJwt(env)` | 用 worker api_key 换 org-scoped JWT(带 60s 缓存) |
+| `assertEq / assertTrue / assertNot / assertIn / assertNullish / log / ok / warn / die / summary` | 标准断言 + 日志 |
 
 ## Env
 
-跟 single-agent 大体一致,但**多一个 `TEST_ORG_ID`**(member provision 时 re-login 需要传 `org_id`):
-
 ```bash
+# 共享
 export COCO_API_URL=https://cws-int.coco.xyz
-export TEST_USER_TOKEN=<lead org-owner JWT>
+export TEST_USER_TOKEN=<owner JWT,用来代表用户向两个 conv 发消息>
 export TEST_ORG_ID=<目标 org uuid>
 export TEST_PROJECT_ID=<smoke 跑在哪个 project>
-export TEST_AGENT_ID=<lead agent 的 member_id>
-export CF_ACCESS_CLIENT_ID=...                # 可选
-export CF_ACCESS_CLIENT_SECRET=...             # 可选
+
+# Lead agent (本机 zylos-coco-workspace runtime)
+export TEST_CONV_ID=<lead 与 user 的 DM conv id>
+export TEST_AGENT_ID=<lead agent member_id>
+
+# Worker agent (另一台服务器上的 zylos-coco-workspace runtime)
+export TEST_WORKER_CONV_ID=<worker 与 user 的 DM conv id>
+export TEST_WORKER_API_KEY=<worker cwsk_... — runner 用它换 JWT,member_id 从 JWT claims 取>
+
+# 可选(CF Access 网关)
+export CF_ACCESS_CLIENT_ID=...
+export CF_ACCESS_CLIENT_SECRET=...
 ```
 
 ## 跑
@@ -50,12 +70,22 @@ export CF_ACCESS_CLIENT_SECRET=...             # 可选
 ```bash
 cd ~/zylos/workspace/zylos-coco-workspace
 node docs/smoke-tests/multi-agent/smoke-2-heavy-multi-agent.test.js
+node docs/smoke-tests/multi-agent/smoke-3-cross-actor-rework.test.js
+node docs/smoke-tests/multi-agent/smoke-4-kb-collaboration.test.js
+node docs/smoke-tests/multi-agent/smoke-5-as-file-handoff.test.js
 ```
 
-单个用例 ~2 秒,因为无 NL 等待。
+NL 单 case 跑时长 3-7 分钟(双 agent NL 各处理一次或多次)。
 
 ## 设计来源
 
-[`cws-deploy/docs/smoke-test-design.md`](https://git.coco.xyz/coco-workspace/cws-deploy/-/blob/main/docs/smoke-test-design.md) § **Smoke 2: Heavy 多 Agent 编排**。
+[`cws-deploy/docs/smoke-test-design.md`](https://git.coco.xyz/coco-workspace/cws-deploy/-/blob/main/docs/smoke-test-design.md) § **Smoke 2: Heavy 多 Agent 编排** 是 case 2 的源,case 3-5 在本 PR 中扩。
 
-> 设计里的"多 Agent" 在本 smoke 实现成"多 member"(register-and-invite 流的 humans 当 worker,不是 platform_agent_create 出来的真 agent)。原因:平台 agent provisioning 需要 platform-admin 权限,smoke 测试用 owner 跑不动;改用新 org member 后,**所有需要被验的 cross-actor 服务器行为(assignee / attempt assignment / visibility)语义完全一致**。后续 agent 与 human member 行为分化时(比如 skill-based dispatch),再开 `smoke-2-heavy-multi-AGENT.test.js` 单独验那条线。
+## 未覆盖(下一批可选)
+
+- 群会话三方协作(LEAD + WORKER + user 在同一 group conv 里 @mention)
+- 权限边界拒绝(WORKER 被要求做只有 org-owner 能干的事,应礼貌拒绝)
+- 跨 agent reassign(WORKER 把 task 抛回 LEAD)
+- 并发独立工作(LEAD + WORKER 并行做无关 issue,token / state 不串)
+
+如需添加,在新建 `smoke-6 / smoke-7 ...` 时复用本目录 runner.js 即可。
