@@ -137,6 +137,15 @@ async function main() {
   const [endpoint, ...messageParts] = args;
   const message = messageParts.join(' ');
 
+  // Smart-mode escape hatch: when formatInboundForC4 emits a <smart-mode>
+  // block, the LLM may decide to stay silent by replying with the literal
+  // string "[SKIP]". Treat that as a no-op so we don't actually post it.
+  // Mirrors zylos-feishu/scripts/send.js:64.
+  if (message.trim() === '[SKIP]') {
+    console.log(JSON.stringify({ ok: true, skipped: true }));
+    return;
+  }
+
   let ep;
   try {
     ep = parseEndpoint(endpoint);

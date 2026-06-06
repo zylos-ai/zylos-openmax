@@ -246,7 +246,13 @@ function shouldHandleMessage(msg, conv, orgConfig) {
   }
 
   const ownerTag = (!groupCfg && senderIsOwner && mentioned) ? ' [owner-mention-bypass]' : '';
-  return { handle: true, reason: `group:${policy}/${mode}${ownerTag}` };
+  return {
+    handle: true,
+    reason: `group:${policy}/${mode}${ownerTag}`,
+    mode,
+    mentioned,
+    groupCfg,
+  };
 }
 
 // =============================================================================
@@ -347,8 +353,14 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       threadConversationId: msg.thread_id || undefined,
       parentMessageId: msg.thread_id ? msg.parent_message_id : undefined,
     });
+    // smartHint mirrors zylos-feishu: only emitted when the group is in smart
+    // mode AND the bot was NOT @-mentioned. When the bot was directly @-ed we
+    // want a direct reply, not a "should I respond?" deliberation.
+    const smartHint = decision.mode === 'smart' && !decision.mentioned;
+    const groupName = decision.groupCfg?.name || conv?.name;
+
     const body = formatInboundForC4(
-      { type: convType, id: msg.conversation_id },
+      { type: convType, id: msg.conversation_id, name: groupName },
       { displayName: senderName },
       {
         content: text,
@@ -356,6 +368,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         mediaLocalPath,
       },
       recent,
+      { groupName, smartHint },
     );
 
     try {
