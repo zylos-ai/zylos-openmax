@@ -248,9 +248,21 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
 
   const { res, data, text } = attempt;
   if (!res.ok) {
-    const message =
-      (data && typeof data === 'object' && (data.detail || data.error || data.message)) || text;
-    const err = new Error(message);
+    // cws-core error envelope nests human-readable detail under `error`:
+    //   { error: { title, status, detail, code, errors: [...] }, request_id, ... }
+    // Previous extraction returned the whole `error` object when `detail` was
+    // absent at the top level, which produced "[object Object]" as Error.message.
+    // Drill into the envelope first, then fall back to flat shapes, then to text.
+    let message;
+    if (data && typeof data === 'object') {
+      const env = (data.error && typeof data.error === 'object') ? data.error : null;
+      message = (env && (env.detail || env.title))
+             || data.detail
+             || data.message
+             || (typeof data.error === 'string' ? data.error : null);
+    }
+    if (!message) message = text || `HTTP ${res.status}`;
+    const err = new Error(String(message));
     err.status = res.status;
     err.body = data;
     throw err;

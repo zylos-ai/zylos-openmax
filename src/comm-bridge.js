@@ -118,7 +118,11 @@ async function sendRejectNotice(orgConfig, msg, text) {
           body:         { text },
           attachments:  [],
         },
-        parent_id: msg.id,
+        // cws-core's sendMessageRequest expects parent_id as a string. The
+        // notification frame may carry numeric `id` (e.g. real-time WS) or a
+        // string `id` (e.g. sync catch-up); normalize to avoid HTTP 422
+        // "expected string, location body.parent_id".
+        parent_id: String(msg.id),
       },
     );
   } catch (e) {
