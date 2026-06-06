@@ -176,6 +176,20 @@ function resolveTmCli() {
 }
 const TM_CLI = resolveTmCli();
 
+// Without prefix routing, all `tm()` calls go to tm.js, so any `kb.*` /
+// `as.*` / `comm.*` / `core.*` call dies with "Unknown command". Route on
+// the namespace prefix so the same helper works for every CLI surface.
+function resolveCliFor(cmd) {
+  const ns = String(cmd).split('.', 1)[0];
+  const map = {
+    issue: 'tm.js', task: 'tm.js', attempt: 'tm.js',
+    blueprint: 'tm.js', project: 'tm.js',
+    kb: 'kb.js', as: 'as.js', comm: 'comm.js', core: 'core.js',
+  };
+  const cliName = map[ns] || 'tm.js';
+  return TM_CLI.replace(/[^/]+$/, cliName);
+}
+
 export async function tm(cmd, params = {}, opts = {}) {
   const { actor = 'lead', env: envArg } = opts;
   const env = envArg || loadEnv();
@@ -193,9 +207,10 @@ export async function tm(cmd, params = {}, opts = {}) {
     COCO_USER_TOKEN: token,
     COCO_RPC_LOG:    process.env.COCO_RPC_LOG ?? '0',
   };
-  const { stdout } = await exec('node', [TM_CLI, cmd, JSON.stringify(params)], {
+  const cli = resolveCliFor(cmd);
+  const { stdout } = await exec('node', [cli, cmd, JSON.stringify(params)], {
     env: childEnv,
-    cwd: path.dirname(path.dirname(TM_CLI)),
+    cwd: path.dirname(path.dirname(cli)),
     maxBuffer: 4 * 1024 * 1024,
   });
   return JSON.parse(stdout);
