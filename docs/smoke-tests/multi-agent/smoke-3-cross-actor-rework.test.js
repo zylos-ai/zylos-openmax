@@ -38,10 +38,10 @@ await sendInstruction(env, `\
 
 1. 通知 agent-gavin3:让它认领这个 task,交一版**故意不完整**的 KB 页面("${KB_TITLE}",正文只覆盖 1 家竞品),然后把 attempt 和 task 都标完成。
 2. 等 agent-gavin3 回复完成。
-3. 你审阅这份交付:发现内容只覆盖 1 家不是 3 家,把 issue 通过 set_acceptance(accepted=false, source=explicit, rejection_reason="覆盖竞品不足,请补齐 3 家") 打回。
+3. 你审阅这份交付:发现内容只覆盖 1 家不是 3 家。先把 issue 从 executing 推到 delivered(set_acceptance 必须先在 delivered 状态调用),再用 set_acceptance(accepted=false, source=explicit, rejection_reason="覆盖竞品不足,请补齐 3 家") 把 issue 打回到 rejected。
 4. 通知 agent-gavin3 重做:让它开一个新 attempt,把 KB 页面内容更新成包含 3 家竞品(随便编内容也行),完成新 attempt 和 task。
 5. 等 agent-gavin3 回复重做完成。
-6. 你最终验收:推 issue → delivered → set_acceptance(accepted=true, source=explicit)闭环。
+6. 现在 issue 在 rejected 状态,**状态机要求 rejected → reopened → executing**。所以先 transition issue 到 reopened,再 transition 到 executing,然后 transition 到 delivered,最后 set_acceptance(accepted=true, source=explicit) 闭环到 accepted。
 
 全部完成后**不要**回我消息,我从服务端状态确认。`, { to: 'lead' });
 

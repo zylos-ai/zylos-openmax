@@ -351,8 +351,10 @@ export async function waitForTaskAssignee(env, issueId, taskPredicate, opts = {}
 
 // Fetches all messages in a conversation, paginating through if needed.
 // Uses tm()'s shell-out path via comm.js CLI, so we can scope by actor.
+// NB: cws-core caps `limit` at 100 for /conversations/{id}/messages — exceeding
+// it 422s with "expected number <= 100". Default to 100 here.
 export async function listConvMessages(env, conversationId, opts = {}) {
-  const { actor = 'worker', limit = 200 } = opts;
+  const { actor = 'worker', limit = 100 } = opts;
   // comm.js exposes comm.get_messages but tm() above is bound to tm.js.
   // Inline a tiny exec for comm.js with the same per-actor JWT injection.
   const { execFile } = await import('node:child_process');

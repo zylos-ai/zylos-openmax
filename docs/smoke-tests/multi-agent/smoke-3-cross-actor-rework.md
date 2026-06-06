@@ -33,9 +33,11 @@ NL → LEAD:
 
 > 刚才那个 "SmokeM3-${TS}" issue 的交付有人提交了,你看一眼 KB 那个 v1 page。内容明显不够 — 只覆盖了 1 家竞品,不是 3 家。把这个 issue 打回去重做,理由写"覆盖竞品不足,请补齐 3 家",别接受。
 
-LEAD 调 `issue.set_acceptance` 设置 accepted=false + reason。状态机回退到 `executing`(或类似 returned)。
+cws-work 状态机要求 `set_acceptance` 调用前 issue 必须在 `delivered` 状态。所以这一步实际是两步:
+1. LEAD `issue.transition` 到 `delivered`
+2. LEAD `issue.set_acceptance(accepted=false, reason=...)` → issue 落到 `rejected`
 
-`waitForIssue(predicate: status ∈ ['executing','returned','running'] && i.acceptance?.accepted===false)`
+`waitForIssue(predicate: status === 'rejected')`
 
 ### Phase 4 — WORKER 感知 + 重做
 NL → WORKER:
@@ -45,9 +47,13 @@ NL → WORKER:
 `waitForTaskAssignee(predicate: attempts.length >= 2 && latest.status='done' && latest.assignee=WORKER)`
 
 ### Phase 5 — LEAD 接受
-NL → LEAD:
 
-> 那个 issue 的重做交付了,这次合格。推到 delivered,然后做最终验收(accepted=true,source=explicit)。
+issue 现在在 `rejected`。状态机要求 `rejected → reopened → executing` 才能继续干活。LEAD 走这条完整链:
+
+1. `issue.transition` 到 `reopened`
+2. `issue.transition` 到 `executing`(此时已有 worker 完成的 attempt #2)
+3. `issue.transition` 到 `delivered`
+4. `issue.set_acceptance(accepted=true, source=explicit)` → 最终 `accepted`
 
 `waitForIssue(targetStatus='accepted')`
 
