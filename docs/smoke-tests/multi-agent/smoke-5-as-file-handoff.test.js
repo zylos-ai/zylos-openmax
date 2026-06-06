@@ -16,7 +16,7 @@
 
 import {
   loadEnv, sendInstruction, tm, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, snapshotMaxSeq,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -31,7 +31,7 @@ const KB_TITLE    = `Smoke5 W-${TS} 引用文件内容`;
 const env = loadEnv();
 log(`=== Smoke 5 multi-agent NL v2: AS file handoff (user-invisible) ===`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 
 const workerJwt = await getWorkerJwt(env);
 const WORKER_MID = JSON.parse(Buffer.from(workerJwt.split('.')[1], 'base64url').toString()).member_id;
@@ -110,9 +110,9 @@ if (pageCreator) {
 }
 
 // 5: Bot-DM coordination evidence
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 1, `5a. LEAD sent ≥ 1 agent_text in bot DM (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `5b. WORKER replied ≥ 1 agent_text in bot DM (got ${workerAdded})`);
 

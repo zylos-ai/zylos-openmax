@@ -15,7 +15,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, snapshotMaxSeq,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -27,21 +27,20 @@ const env = loadEnv();
 log(`=== Smoke 3 multi-agent NL v2: cross-actor rework (user-invisible) ===`);
 log(`   TITLE = ${TITLE}`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 
 log('');
 log('[Phase 1] 给 LEAD 发唯一一条自然语言');
 await sendInstruction(env, `\
-建一个 heavy issue 标题严格为 "${TITLE}",描述 "smoke 3 验证打回重做(user-invisible)",priority=medium,你做 Lead。给它配一份 1 步的 blueprint:这一步「调研 3 家竞品定价并给一份 markdown 总结」。蓝图提交评审 → 批准 → issue 推到 executing → 为这步开一个 task 不指定承接人。
+建一个 heavy issue 标题严格为 "${TITLE}",描述 "smoke 3 验证打回重做(user-invisible)",priority=medium,你做 Lead。这个 issue 只有 1 个目标:调研 3 家竞品定价并产出一份 markdown 总结。给它做 1 步的 blueprint,然后正常推进到可以派活的阶段,派给 agent-gavin3 做(让它在 KB 建一个标题 "${KB_TITLE}" 的页面写产出)。
 
 接下来全程自己来,不要再来烦我:
 
-1. 通知 agent-gavin3:让它认领这个 task,交一版**故意不完整**的 KB 页面("${KB_TITLE}",正文只覆盖 1 家竞品),然后把 attempt 和 task 都标完成。
-2. 等 agent-gavin3 回复完成。
-3. 你审阅这份交付:发现内容只覆盖 1 家不是 3 家。先把 issue 从 executing 推到 delivered(set_acceptance 必须先在 delivered 状态调用),再用 set_acceptance(accepted=false, source=explicit, rejection_reason="覆盖竞品不足,请补齐 3 家") 把 issue 打回到 rejected。
-4. 通知 agent-gavin3 重做:让它开一个新 attempt,把 KB 页面内容更新成包含 3 家竞品(随便编内容也行),完成新 attempt 和 task。
-5. 等 agent-gavin3 回复重做完成。
-6. 现在 issue 在 rejected 状态,**状态机要求 rejected → reopened → executing**。所以先 transition issue 到 reopened,再 transition 到 executing,然后 transition 到 delivered,最后 set_acceptance(accepted=true, source=explicit) 闭环到 accepted。
+1. agent-gavin3 第一次会**故意只覆盖 1 家**(我提前跟它打过招呼了),你拿到交付后**自己评估** — 内容明显不够,你需要把它打回去让 worker 重做,理由按你判断填(比如"覆盖竞品不足")。
+2. worker 收到打回信号后会开新尝试,把页面补到 3 家。等它做完。
+3. 你最终接受这次重做后的成果,把整个 issue 走完闭环到验收通过。
+
+具体怎么操作状态机由你决定 — 业务目标就是"打回 → 重做 → 通过"。
 
 全部完成后**不要**回我消息,我从服务端状态确认。`, { to: 'lead' });
 
@@ -78,9 +77,9 @@ assertTrue((attempts[0].attempt_number ?? 0) < (attempts[1].attempt_number ?? 0)
 assertEq(finalIssue.status, 'accepted', '10. final issue.status=accepted');
 
 // Bot-DM coordination evidence
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 2, `11a. LEAD sent ≥ 2 agent_text in bot DM (claim + rework prompt) (got ${leadAdded})`);
 assertTrue(workerAdded >= 2, `11b. WORKER replied ≥ 2 agent_text in bot DM (v1 done + rework done) (got ${workerAdded})`);
 

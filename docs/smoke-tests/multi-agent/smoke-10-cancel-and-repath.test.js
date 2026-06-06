@@ -19,7 +19,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, snapshotMaxSeq,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -30,7 +30,7 @@ const env = loadEnv();
 log(`=== Smoke 10 multi-agent NL v2: cancel and re-path (user-invisible) ===`);
 log(`   TITLE = ${TITLE}`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 
 log('');
 log('[Phase 1] 给 LEAD 发唯一一条自然语言');
@@ -91,9 +91,9 @@ const lastDoneAttempt = doneAttempts.sort((a,b) => (b.attempt_number ?? 0) - (a.
 assertEq(lastDoneAttempt.status, 'done', '12. 新 task 最终 attempt status === done');
 
 // Bot-DM coordination evidence — multi-turn (派活 + 取消 + 重派 + 完成确认)
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 3, `13a. LEAD sent ≥ 3 agent_text in bot DM (派 + 取消 + 重派) (got ${leadAdded})`);
 assertTrue(workerAdded >= 2, `13b. WORKER sent ≥ 2 agent_text in bot DM (开始 + 取消确认 + 完成) (got ${workerAdded})`);
 

@@ -15,7 +15,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, snapshotMaxSeq,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -26,7 +26,7 @@ const env = loadEnv();
 log(`=== Smoke 6 multi-agent NL v2: cross-agent reassign (user-invisible) ===`);
 log(`   TITLE = ${TITLE}`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 
 log('');
 log('[Phase 1] 给 LEAD 发唯一一条自然语言');
@@ -76,9 +76,9 @@ assertEq(finalAttempt.assignee_id, env.lead.agent_id,
 assertEq(finalAttempt.status, 'done', '9. 最终 attempt status === done');
 
 // Bot-DM coordination evidence — both sides must have spoken about the handoff.
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 2, `10a. LEAD sent ≥ 2 agent_text in bot DM (派活 + 收回) (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `10b. WORKER sent ≥ 1 agent_text in bot DM (建议转手) (got ${workerAdded})`);
 

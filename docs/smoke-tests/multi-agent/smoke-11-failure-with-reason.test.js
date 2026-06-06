@@ -20,7 +20,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender, waitForBotDM,
+  countAgentMessagesBySender, snapshotMaxSeq, waitForBotDM,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -31,7 +31,7 @@ const env = loadEnv();
 log(`=== Smoke 11 multi-agent NL v2: failure with reason (user-invisible) ===`);
 log(`   TITLE = ${TITLE}`);
 
-const baselineBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => ({}));
+const baselineSeq = await snapshotMaxSeq(env, env.lead_worker.conv_id, { actor: 'worker' }).catch(() => 0);
 
 log('');
 log('[Phase 1] 给 LEAD 发唯一一条自然语言');
@@ -60,7 +60,7 @@ const WORKER_MID = JSON.parse(Buffer.from(workerJwt.split('.')[1], 'base64url').
 // failure ~1s later (and the LEAD closes the issue between those two,
 // causing waitForIssue to exit before the DM arrives).
 await waitForBotDM(env, env.lead_worker.conv_id, WORKER_MID,
-  baselineBotMsgs[WORKER_MID] || 0, { actor: 'worker', maxWaitMs: 30_000, label: 'v11-worker-failure-ack' });
+  0, { actor: 'worker', maxWaitMs: 30_000, label: 'v11-worker-failure-ack', afterSeq: baselineSeq });
 
 log(''); log('[Phase 3] 深度断言');
 
@@ -86,9 +86,9 @@ assertTrue((lastAttempt.failure_reason || '').length >= 5,
   `9. failure_reason 至少 5 字(言之有物) (len=${(lastAttempt.failure_reason||'').length})`);
 
 // Bot-DM coordination evidence — failure signal must surface through DM
-const finalBotMsgs = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker' });
-const leadAdded   = (finalBotMsgs[env.lead.agent_id] || 0) - (baselineBotMsgs[env.lead.agent_id] || 0);
-const workerAdded = (finalBotMsgs[WORKER_MID]        || 0) - (baselineBotMsgs[WORKER_MID]        || 0);
+const addedCounts = await countAgentMessagesBySender(env, env.lead_worker.conv_id, { actor: 'worker', afterSeq: baselineSeq });
+const leadAdded   = addedCounts[env.lead.agent_id] || 0;
+const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 1, `10a. LEAD sent ≥ 1 agent_text in bot DM (派活) (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `10b. WORKER sent ≥ 1 agent_text in bot DM (失败汇报) (got ${workerAdded})`);
 
