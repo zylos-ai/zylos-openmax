@@ -413,6 +413,34 @@ export async function countAgentMessagesBySender(env, conversationId, opts = {})
 }
 
 // =============================================================================
+// waitForBotDM — poll until a given sender's agent_text count grows past a
+// baseline. Used to close the race where Phase 2 exits on a server-state
+// signal (KB rev, issue.accepted) before the WORKER has finished pushing
+// its conversational ack into the bot DM.
+//
+// Without this, assertions like "WORKER replied ≥ 1 in bot DM" can flake
+// when the worker writes the artifact server-side and then DMs ~1s later.
+// =============================================================================
+
+export async function waitForBotDM(env, conversationId, senderMemberId, baselineCount, opts = {}) {
+  const { actor = 'lead', maxWaitMs = 30_000, pollMs = 1_500, label = 'bot-dm' } = opts;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxWaitMs) {
+    try {
+      const counts = await countAgentMessagesBySender(env, conversationId, { actor });
+      const current = counts[senderMemberId] || 0;
+      if (current > baselineCount) {
+        log(`  · [${label}] ${senderMemberId.slice(-8)} DM ${baselineCount} → ${current} (+${((Date.now()-startedAt)/1000).toFixed(1)}s)`);
+        return current;
+      }
+    } catch (_) { /* retry */ }
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+  warn(`waitForBotDM(${senderMemberId.slice(-8)}) timed out after ${maxWaitMs}ms (baseline=${baselineCount}); proceeding`);
+  return baselineCount;
+}
+
+// =============================================================================
 // Assertions + summary
 // =============================================================================
 

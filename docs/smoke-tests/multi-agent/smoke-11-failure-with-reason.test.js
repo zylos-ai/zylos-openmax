@@ -20,7 +20,7 @@
 import {
   loadEnv, sendInstruction, waitForIssue,
   tm, listTasks, listAttempts, getWorkerJwt,
-  countAgentMessagesBySender,
+  countAgentMessagesBySender, waitForBotDM,
   assertEq, assertTrue, log, summary,
 } from './lib/runner.js';
 
@@ -55,6 +55,12 @@ const ISSUE = final.issue;
 
 const workerJwt = await getWorkerJwt(env);
 const WORKER_MID = JSON.parse(Buffer.from(workerJwt.split('.')[1], 'base64url').toString()).member_id;
+
+// Close the race: WORKER marks attempt failed first, then DM-acks the
+// failure ~1s later (and the LEAD closes the issue between those two,
+// causing waitForIssue to exit before the DM arrives).
+await waitForBotDM(env, env.lead_worker.conv_id, WORKER_MID,
+  baselineBotMsgs[WORKER_MID] || 0, { actor: 'worker', maxWaitMs: 30_000, label: 'v11-worker-failure-ack' });
 
 log(''); log('[Phase 3] 深度断言');
 
