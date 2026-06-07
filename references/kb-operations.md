@@ -33,12 +33,14 @@ Org(组织,scope 单位)
 
 | 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ✅ | `kb.init` | `{orgId?}` | `POST /api/v1/kbs/init` |
-| ✅ | `kb.list` | `{orgId?, status?}` | `GET /api/v1/orgs/{orgId}/kbs?status=` |
-| ✅ | `kb.archive` | `{orgId?}` | `PUT /api/v1/orgs/{orgId}/kbs/archive` |
-| ✅ | `kb.unarchive` | `{orgId?}` | `PUT /api/v1/orgs/{orgId}/kbs/unarchive` |
-
-`status` 取值:`active` / `archived` / `all`。
+| ✅ | `kb.init` | `{}` | `POST /api/v1/kbs/init` — 给当前 org 初始化默认 KB(幂等) |
+| ✅ | `kb.list` | `{limit?, offset?}` | `GET /api/v1/kbs` |
+| ✅ | `kb.create` | `{name, visibility?, description?, icon?}` | `POST /api/v1/kbs` — `visibility` 取 `open` / `closed` / `private`(默认 `closed`);`slug` 服务端从 name 派生,不接受 |
+| ✅ | `kb.get` | `{kbId}` | `GET /api/v1/kbs/{kb_id}` |
+| ✅ | `kb.update` | `{kbId, name?, description?, setDescription?, visibility?, icon?, setIcon?}` | `PATCH /api/v1/kbs/{kb_id}` — `set_description` / `set_icon` 是 tri-state 信号(显式清空 vs 不动) |
+| ✅ | `kb.delete` | `{kbId}` | `DELETE /api/v1/kbs/{kb_id}` |
+| ✅ | `kb.archive` | `{kbId}` | `POST /api/v1/kbs/{kb_id}/archive` |
+| ✅ | `kb.unarchive` | `{kbId}` | `POST /api/v1/kbs/{kb_id}/unarchive` |
 
 ### 目录树
 
@@ -125,28 +127,19 @@ Org(组织,scope 单位)
 
 限流:1000 次/分钟/工作区。
 
-### 关联(KB ↔ Project / Issue 等)
-
-| 状态 | 命令 | 入参 | 真实端点 |
-| --- | --- | --- | --- |
-| ✅ | `kb.relations_list` | `{resourceType?, resourceId?, targetType?, targetId?, orgId?}` | `GET /relations` |
-| ✅ | `kb.relations_create` | `{resourceType, resourceId, targetType, targetId, role, orgId?}` | `POST /relations` |
-| ✅ | `kb.relations_check` | 同 list | `GET /relations/check` |
-| ✅ | `kb.relations_delete` | `{resourceType, resourceId, targetType, targetId, role?, orgId?}` | `DELETE /relations?...` |
-
-用例:把一个 Project 关到一个 KB folder("项目交付物归档到这"),后续 `kb.search` 可以按 `folder_id` 限定到这个 folder。
-
 ### 文件附件(KB 上传专用)
 
 | 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
 | ✅ | `kb.upload` | `{kbId, filePath, parentId?, contentType?, filename?}` | 委托给 `as.uploadMedia()`(KB 模式)→ 三步:`POST /api/v1/uploads/prepare` + 预签名 PUT + `POST /api/v1/uploads/finalize` |
+| ✅ | `kb.file_create` | `{kbId, name, artifactId, parentId?}` | `POST /api/v1/kbs/{kb_id}/tree/files` — 用已有 artifact 在 KB 树里登记一个 file 节点(`kb.upload` 内部就是 prepare/finalize + 这一步) |
+| ✅ | `kb.file_batch_download` | `{kbId, nodeIds, inline?}` | `POST /api/v1/kbs/{kb_id}/tree/files/batch-download` — 一次拿多个文件节点的预签名下载 URL |
 
 `kb.upload` 等价于 `as.upload {filePath, parentId?, ...}` 不带 conversationId 的 KB 模式语糖,**会在 KB 树里出现一个 file 节点**(返回里有 `nodeId` + `treeNode`),后续可以 `kb.node_get` / `kb.file_preview` / `kb.file_download` 操作它。
 
 **不要用 `kb.upload` 发会话附件**:会话/DM 里的图片或文件要走 **IM 上传**(`as.upload` 带 `conversationId`,详见 [as-operations.md](./as-operations.md) 顶部那节"上传走哪条路径"),否则文件挂到 KB 但接收方对话框里看不到。
 
-返回的 `mediaId` / `artifactId` 也可以塞到 Page body 里(比如 markdown 里写 `![](artifact://<id>)`),配合 `kb.relations_create` 把这个 artifact 跟当前页面挂上。
+返回的 `mediaId` / `artifactId` 也可以塞到 Page body 里(比如 markdown 里写 `![](artifact://<id>)`),让页面正文直接引用这份 artifact。
 
 ## 典型流程
 
