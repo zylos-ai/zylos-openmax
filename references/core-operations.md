@@ -1,42 +1,66 @@
 # Core 操作指南
 
+**作用**:身份 + org/member/role/invitation 目录查询 + org/平台 agent 写操作。Lead agent 上下文组装的入口——查我是谁、谁在 org 里、有哪些项目能派单。
+
+**何时加载本文档**:
+
+- 第一次启动 / 切换 org / 不确定当前身份时,查 `core.me`
+- 派任务前需要找候选 member,查 `core.member_list` / `core.project_members`
+- 想拉同事进当前 org(`core.invitation_create` / `accept` / `revoke`)
+- 切到另一个 org 工作(`core.org_switch`)
+- 注册新平台 agent / 注销旧 agent(`core.platform_agent_create` / `delete`)
+- 查角色清单决定给新人配什么权限(`core.role_list`)
+
+**不在本文档范围**:
+
+- 项目 / Issue / Task / Blueprint / Attempt 的 workflow → `references/tm-operations.md`(同一个 project 资源,workflow 视角)
+- KB 操作 → `references/kb-operations.md`
+- IM 通信 → `references/comm-operations.md`
+- 文件 / artifact → `references/as-operations.md`
+- **登录 / 注册 / token refresh** → cws-core `/auth/*` 端点目前没 CLI 暴露,token 管理由 `src/lib/token.js` 内部自动处理
+
+**依赖前置**:
+
+- 任何带 `orgId` 的命令,前面必须有 `core.me` 或 `core.org_switch` 确认 scope
+- `core.invitation_create` 需要先 `core.role_list` 拿到 `role_id`
+- `core.invitation_accept` 需要从邀请链接里拿到 `token`,自己造不出来
+- 完整参数依赖树见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)
+
+---
+
+> Layer 3 操作参考。本文档与 `src/cli/core.js` dispatch 表保持 1:1 对应。
+> 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
+
 CLI 位置:`src/cli/core.js`
 调用方式:`node src/cli/core.js <command> '<json>'`
 
-状态:✅ cws-core 已实装(全部 16 个命令都跑得通)。
+状态:✅ cws-core 已实装(全部 16 个命令都能跑通)。
 
-> 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
-> 默认前缀 `/api/v1`(可用 `COCO_API_PREFIX` 覆盖)
+## 环境变量
 
-## 何时使用 Core CLI
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF 基地址 |
+| `COCO_AUTH_TOKEN` | (空) | Bearer token |
+| `COCO_API_PREFIX` | `/api/v1` | 路径前缀 |
 
-Lead agent 上下文组装阶段查"工作空间里有谁、能做什么":
-
-- 列项目成员 → 决定派单对象
-- 查当前 user / workspace 身份
-- 列项目清单,确认任务归属
-- 切 org / 看角色 / 拉同事进 org(写)
-- 平台 agent(机器人成员)的注册和注销
-
-Core 是身份 + 目录视角;workflow 操作(task/issue/blueprint)走 `tm.js`,IM 走 `comm.js`,KB 走 `kb.js`。
-
-## 命令列表
+## 命令清单
 
 ### 身份
 
-| 状态 | 命令 | 入参 | 真实端点 |
-| --- | --- | --- | --- |
-| ✅ | `core.me` | `{}` | `GET /api/v1/me` |
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `core.me` | 当前 user / agent 的 identity + member + org + role 概览 | `{}` | `GET /api/v1/me` |
 
-返回当前 user / workspace / 权限概览,含 `member_id` + `org_id` + `role`。
+返回字段含 `member_id` / `org_id` / `role`,后续所有命令都依赖这几个 ID。
 
 ### 成员
 
-| 状态 | 命令 | 入参 | 真实端点 |
-| --- | --- | --- | --- |
-| ✅ | `core.member_list` | `{kind?, status?, search?, page?, pageSize?, orderBy?}` | `GET /api/v1/members` |
-| ✅ | `core.member_get` | `{memberId}` | `GET /api/v1/members/{id}` |
-| ✅ | `core.project_members` | `{projectId}` | `GET /api/v1/projects/{id}/members` |
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `core.member_list` | 列当前 org 的所有成员(可按 kind / status / 名字过滤) | `{kind?, status?, search?, page?, pageSize?, orderBy?}` | `GET /api/v1/members` |
+| ✅ | `core.member_get` | 取单个成员详情(含 online_status / role 等) | `{memberId}` | `GET /api/v1/members/{id}` |
+| ✅ | `core.project_members` | 列某个项目的成员(派任务前找候选) | `{projectId}` | `GET /api/v1/projects/{id}/members` |
 
 - `kind` 取值:`human` / `agent` / `all`(legacy alias `type`)
 - `search` 模糊匹配名字 / email(legacy alias `q`)
@@ -44,44 +68,44 @@ Core 是身份 + 目录视角;workflow 操作(task/issue/blueprint)走 `tm.js`,I
 
 ### 项目
 
-| 状态 | 命令 | 入参 | 真实端点 |
-| --- | --- | --- | --- |
-| ✅ | `core.project_list` | `{status?, page?, pageSize?, orderBy?}` | `GET /api/v1/projects` |
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `core.project_list` | 列当前 org 的项目目录(分页) | `{status?, page?, pageSize?, orderBy?}` | `GET /api/v1/projects` |
 
-项目的 CRUD / archive / members 等走 `tm.js`(同一资源,workflow 视角)。
+项目的 CRUD / archive / members 等写操作走 `tm.js`(同一资源,workflow 视角)。
 
 ### 组织
 
-| 状态 | 命令 | 入参 | 真实端点 |
-| --- | --- | --- | --- |
-| ✅ | `core.org_list` | `{orderBy?}` | `GET /api/v1/organizations` |
-| ✅ | `core.org_get` | `{orgId}` | `GET /api/v1/organizations/{id}` |
-| ✅ | `core.org_create` | `{name, slug, displayName}` | `POST /api/v1/organizations` — 调用方自动成为新 org 的 owner,响应里直接返回 access_token 已 scoped 到新 org |
-| ✅ | `core.org_switch` | `{orgId}` | `POST /api/v1/organizations/{id}/switch` — body 必填 `{}`(空对象,服务端 schema 是 closed);返回新 org scope 的 access_token |
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `core.org_list` | 列我加入的所有 org | `{orderBy?}` | `GET /api/v1/organizations` |
+| ✅ | `core.org_get` | 取单个 org 详情 | `{orgId}` | `GET /api/v1/organizations/{id}` |
+| ✅ | `core.org_create` | 创建新 org,调用方自动成为 owner;响应里附带新 org scope 的 access_token | `{name, slug, displayName}` | `POST /api/v1/organizations` |
+| ✅ | `core.org_switch` | 切到指定 org;返回的新 access_token scope 到目标 org 的 member_id | `{orgId}` | `POST /api/v1/organizations/{id}/switch` — body 必填 `{}`(空对象),schema closed |
 
 ### 角色
 
-| 状态 | 命令 | 入参 | 真实端点 |
-| --- | --- | --- | --- |
-| ✅ | `core.role_list` | `{scope?}` | `GET /api/v1/roles` |
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `core.role_list` | 列可用角色(发邀请前拿 role_id 用) | `{scope?}` | `GET /api/v1/roles` |
 
 `scope` 取值:`org` / `project` / 不传(全部)。
 
 ### 邀请
 
-| 状态 | 命令 | 入参 | 真实端点 |
-| --- | --- | --- | --- |
-| ✅ | `core.invitation_create` | `{roleId, email?, message?}` | `POST /api/v1/invitations` — org_id 服务端从 JWT 推导,**不要客户端发** |
-| ✅ | `core.invitation_list` | `{status?, page?, pageSize?, orderBy?}` | `GET /api/v1/invitations` |
-| ✅ | `core.invitation_accept` | `{invitationId, token, displayName}` | `POST /api/v1/invitations/{id}/accept` — `token` 和 `displayName` 都是必填(后者 = 接受方在新 org 里的显示名);CLI 同时接受 `display_name` 形式 |
-| ✅ | `core.invitation_revoke` | `{invitationId}` | `DELETE /api/v1/invitations/{id}` |
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `core.invitation_create` | 发邀请到指定 email,带可选 message;org_id 服务端从 JWT 推导 | `{roleId, email?, message?}` | `POST /api/v1/invitations` |
+| ✅ | `core.invitation_list` | 列本 org 的邀请(可按 status 过滤 pending/accepted/revoked/expired) | `{status?, page?, pageSize?, orderBy?}` | `GET /api/v1/invitations` |
+| ✅ | `core.invitation_accept` | 接受邀请加入新 org,响应里附带新 org scope 的 access_token | `{invitationId, token, displayName}` | `POST /api/v1/invitations/{id}/accept` — `token` 和 `displayName` 都必填(后者 = 接受方在新 org 里的显示名);CLI 同时接受 `display_name` 形式 |
+| ✅ | `core.invitation_revoke` | 撤销待处理的邀请 | `{invitationId}` | `DELETE /api/v1/invitations/{id}` |
 
 ### 平台 Agent(机器人成员的生命周期)
 
-| 状态 | 命令 | 入参 | 真实端点 |
-| --- | --- | --- | --- |
-| ✅ | `core.platform_agent_create` | `{displayName, description?, metadata?}` | `POST /api/v1/platform-agents` |
-| ✅ | `core.platform_agent_delete` | `{memberId}` | `DELETE /api/v1/platform-agents/{member_id}` |
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `core.platform_agent_create` | 在当前 org 注册一个 agent member(机器人),返回 member_id | `{displayName, description?, metadata?}` | `POST /api/v1/platform-agents` |
+| ✅ | `core.platform_agent_delete` | 注销 agent member(同 DELETE /members,标 departed) | `{memberId}` | `DELETE /api/v1/platform-agents/{member_id}` |
 
 平台 agent = org-scope 的机器人成员行,跟 human member 一样占 `member_id`,可以被 `task.create` 派单 / 入会话 / 写 KB。
 
@@ -157,10 +181,23 @@ cws-core 大部分 list endpoint 用 `PageParams`(`page` + `page_size` + `order_
 | `core.org_list` / `core.role_list` | 不分页(返回全集) |
 | 历史消息(`comm.get_messages`) | `after_seq` + `before_seq` + `limit`(对话流专用 cursor) |
 
-> 历史踩坑:CLI 早先版本对 `member_list` / `project_list` / `invitation_list` 发的是 `cursor` + `limit`,服务端不识别,默默忽略并永远返回第一页 default 20 条。修复后这三个命令同时接受 `pageSize`(canonical)/ `limit`(legacy alias),方便老调用方过渡。
+> 历史踩坑:CLI 早先对 `member_list` / `project_list` / `invitation_list` 发的是 `cursor` + `limit`,服务端不识别,默默忽略并永远返回第一页 default 20 条。修复后三个命令同时接受 `pageSize`(canonical)/ `limit`(legacy alias)。
 
-## 环境变量
+## 与 SKILL.md 的关系
 
-- `COCO_API_URL` — cws-core 入口(默认 `http://127.0.0.1:8080`)
-- `COCO_AUTH_TOKEN` — Bearer token
-- `COCO_API_PREFIX` — 路径前缀(默认 `/api/v1`)
+本文档是 [`SKILL.md`](../SKILL.md) 的 Layer 3 子 skill,只负责 Core CLI 的**命令机制**。下面这些行为面内容**在 SKILL.md 里**,本文档不重复:
+
+| 想看 | 去 SKILL.md 的哪节 |
+|---|---|
+| 何时该自动锚定身份 / 何时该问人类 | [效率捷径 > 上下文锚定](../SKILL.md) |
+| `core.me` / `core.member_list` 在依赖树里的位置 | [效率捷径 > 参数解析](../SKILL.md) |
+| 何时持久化 `agentId` / `orgId` 到记忆 | [记忆触发点](../SKILL.md) |
+| 通用错误防护 | [行为护栏 > 常见错误](../SKILL.md) |
+
+## Core 专属注意事项
+
+- `org_id` 在所有命令里都不由客户端传——服务端从 JWT 里推导。CLI 不接受 `orgId` 字段(除了 `org_get` 这种显式查别的 org 的命令)。要换 org scope 走 `core.org_switch`。
+- `invitation_create` 的 `org_id` 同理,即使 doc 里没写也不要尝试塞进 body,塞了会被 schema 拒。
+- `org_create` 和 `org_switch` 的响应里都会附带一个新的 `access_token`,后续调用必须用这个新 token,旧 token 还是旧 scope。
+- 注销 agent 走 `platform_agent_delete` 跟 `DELETE /members/{id}` 效果一样,但 platform_agent_delete 含针对机器人成员的额外清理(token 吊销等)。
+- `core.role_list` 现在不分页;role 一般 4-8 条,数量超过 100 的可能性极低,所以没在 cws-core 加 PageParams。
