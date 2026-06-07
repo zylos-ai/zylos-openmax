@@ -18,11 +18,12 @@ Comm CLI 用于 Agent **主动发起**的 IM:
 | --- | --- |
 | 列出我参与的会话 | `comm.list_conversations` |
 | 主动 DM 某个用户 | `comm.create_dm` → `comm.send` |
+| 拉群聊一群人 | `comm.create_group` → `comm.send` |
 | 在非当前会话里发消息 | `comm.send` |
-| 拉历史消息 | `comm.get_messages` |
-| 编辑 / 撤回 / 置顶 | `comm.edit_message` / `comm.delete_message` / `comm.pin` |
-| 标已读 / 正在输入 | `comm.mark_read` / `comm.typing` |
-| 全 IM 搜索 | `comm.search` |
+| 拉历史消息 | `comm.get_messages` / `comm.get_message` |
+| 看会话未读计数 | `comm.unread` |
+| WS 重连后拉漏掉的事件 | `comm.sync` |
+| KB page 搜索 | `comm.search`(v5 唯一搜索入口) |
 
 实时事件推送(`message.created` 等)走 WebSocket,不在本 CLI 范围。
 
@@ -33,12 +34,11 @@ Comm CLI 用于 Agent **主动发起**的 IM:
 | 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
 | ✅ | `comm.list_conversations` | `{pageSize?, pageToken?}` | `GET /api/v1/conversations` |
-| ✅ | `comm.create_conversation` | `{type, title?, participantIds?}` | `POST /api/v1/conversations` |
-| ✅ | `comm.create_dm` | `{participantId}` | `POST /api/v1/conversations` (type=dm) |
-| ⏳ | `comm.get_conversation` | `{conversationId}` | `GET /api/v1/conversations/{id}` |
+| ✅ | `comm.create_dm` | `{participantId}` | `POST /api/v1/conversations/dm` |
+| ✅ | `comm.create_group` | `{title, participantIds[]}` | `POST /api/v1/conversations/groups` |
+| ✅ | `comm.get_conversation` | `{conversationId}` | `GET /api/v1/conversations/{id}` |
 
-`type` 取值:`dm` / `group`(cws-core P0 只支持这两类)。
-`participantIds` 必须是 UUID 数组。DM 用一个 participant_id,group 用多个 + `title`。
+`participantIds` 必须是 UUID 数组。DM 用一个 `participantId`(无 `title`),group 用多个 + `title`。
 
 ### 消息
 
@@ -46,11 +46,7 @@ Comm CLI 用于 Agent **主动发起**的 IM:
 | --- | --- | --- | --- |
 | ✅ | `comm.send` | `{conversationId, content, replyTo?, clientMsgId?}` | `POST /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_messages` | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
-| ⏳ | `comm.edit_message` | `{messageId, content}` | `PATCH /api/v1/messages/{id}` |
-| ⏳ | `comm.delete_message` | `{messageId}` | `DELETE /api/v1/messages/{id}` |
-| ⏳ | `comm.pin` / `comm.unpin` | `{messageId}` | `POST/DELETE /api/v1/messages/{id}/pin` |
-| ⏳ | `comm.mark_read` | `{conversationId, messageId}` | `POST /api/v1/conversations/{id}/read` |
-| ⏳ | `comm.typing` | `{conversationId, state?}` | `POST /api/v1/conversations/{id}/typing` |
+| ✅ | `comm.get_message` | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
 `content` 接受四种输入,CLI 自动归一为 cws-core 的 `MessageContent[]`:
 
@@ -64,11 +60,23 @@ Comm CLI 用于 Agent **主动发起**的 IM:
 
 `clientMsgId` 用于服务端 5 分钟幂等去重,不传会自动生成 `cmsg_<uuid>`。同一条逻辑消息重试请用同一个 id。
 
+### 已读 / 未读
+
+| 状态 | 命令 | 入参 | 真实端点 |
+| --- | --- | --- | --- |
+| ✅ | `comm.unread` | `{conversationId}` | `GET /api/v1/conversations/{id}/unread` |
+
+### 同步
+
+| 状态 | 命令 | 入参 | 真实端点 |
+| --- | --- | --- | --- |
+| ✅ | `comm.sync` | `{sinceSeq, deviceId, limit?}` | `POST /api/v1/sync` — WS 重连后拉漏掉的事件 |
+
 ### 搜索
 
 | 状态 | 命令 | 入参 | 真实端点 |
 | --- | --- | --- | --- |
-| ⏳ | `comm.search` | `{q, type?, conversationId?, senderId?, pageSize?, pageToken?}` | `GET /api/v1/search` |
+| ✅ | `comm.search` | `{query, kbId?, limit?, offset?, sort?}` | `GET /api/v1/search/pages` — v5 唯一的搜索入口,实际是 KB page search(放在 comm CLI 里是历史原因) |
 
 ## 典型流程
 
@@ -105,28 +113,27 @@ node src/cli/comm.js comm.send '{
 }'
 ```
 
-### 同步历史 + 标已读
+### WS 重连后补漏
 
 ```bash
-# 拉最近一批(✅)
-node src/cli/comm.js comm.get_messages '{
-  "conversationId":"<conv-uuid>",
-  "limit":50
+# 用最后已知 seq + device_id 拉漏掉的事件(✅)
+node src/cli/comm.js comm.sync '{
+  "sinceSeq":12345,
+  "deviceId":"<device-id>",
+  "limit":100
 }'
 
-# 处理完后标读位(⏳ 暂未在 core)
-node src/cli/comm.js comm.mark_read '{
-  "conversationId":"<conv-uuid>",
-  "messageId":"<last-msg-uuid>"
-}'
+# 看某个会话还有多少未读(✅)
+node src/cli/comm.js comm.unread '{"conversationId":"<conv-uuid>"}'
 ```
 
 ## 注意事项
 
-- 网关的 IM 是同一会话模型,DM / 群 都走 `/conversations`,只是 `type` 不同
+- DM 走 `/conversations/dm`、Group 走 `/conversations/groups`,**不是**同一个 POST 通用入口
 - 发消息失败重试时,**保留同一个 `clientMsgId`**,服务端按它做 5 分钟幂等
 - cws-core 的 `SendMessageRequestBody` 是 `additionalProperties:false` —— 不要传 schema 外的字段(会被拒)
 - 实际响应包在 `{data:{...}, ...}` 里;本 CLI 不解包,调用方按需取 `.data`
+- `comm.search` 名字带 `comm` 但实际是 KB page search(`/api/v1/search/pages`),v5 没有独立的全消息搜索
 
 ## 环境变量
 

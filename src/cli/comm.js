@@ -135,16 +135,6 @@ const COMMANDS = {
     apiPath(`/conversations/${params.conversationId}/messages/${params.messageId}`),
   ),
 
-  // ✅ DELETE /api/v1/conversations/{id}/messages/{msg_id}
-  'comm.delete_message': () => del(
-    apiPath(`/conversations/${params.conversationId}/messages/${params.messageId}`),
-  ),
-
-  // ✅ POST /api/v1/conversations/{id}/read    body {message_id?, seq?}
-  'comm.mark_read': () => post(apiPath(`/conversations/${params.conversationId}/read`), {
-    message_id: params.messageId,
-    seq:        params.seq,
-  }),
   // ✅ GET /api/v1/conversations/{id}/unread
   'comm.unread': () => get(apiPath(`/conversations/${params.conversationId}/unread`)),
 
@@ -182,10 +172,8 @@ Messages
                             # content: string | {text|body, markdown?} | {type,body} | [{type,body}]
   comm.get_messages         {conversationId, afterSeq?, beforeSeq?, limit?}
   comm.get_message          {conversationId, messageId}
-  comm.delete_message       {conversationId, messageId}
 
 Read receipts
-  comm.mark_read            {conversationId, messageId?, seq?}       # POST /conversations/{id}/read
   comm.unread               {conversationId}                         # GET  /conversations/{id}/unread
 
 Search (KB pages only)
