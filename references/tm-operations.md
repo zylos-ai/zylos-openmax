@@ -18,14 +18,14 @@ CLI 位置:`src/cli/tm.js`
 
 ## 当前覆盖度速览
 
-全部 30 个命令均已对齐 cws-core@contract-v2，可直接调用。
+全部 31 个命令均已对齐 cws-core@contract-v2，可直接调用。
 
 | 域 | 命令数 | 状态 |
 | --- | --- | --- |
 | Project | 8 | ✅ 全部可用 |
 | Issue | 7 | ✅ 全部可用 |
 | Task | 7 | ✅ 全部可用 |
-| Blueprint | 4 | ✅ 全部可用 |
+| Blueprint | 5 | ✅ 全部可用 |
 | Attempt | 4 | ✅ 全部可用 |
 
 ## 错误处理
@@ -66,7 +66,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit co
 | ✅ | `issue.update` | `{id, title?, description?, priority?, dueDate?}` | `PATCH /issues/{id}` |
 | ✅ | `issue.transition` | `{id, targetStatus (or 'status'), rejectionReason?}` | `POST /issues/{id}/transition` |
 | ✅ | `issue.move_project` | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
-| ✅ | `issue.set_acceptance` | `{id, accepted, rejectionReason?}` | `POST /issues/{id}/acceptance` |
+| ✅ | `issue.set_acceptance` | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit`(默认 `explicit`),区分隐式 IM 验收和显式 set_acceptance 调用 |
 
 `mode` 取值：`light`（直接执行流）/ `heavy`（Blueprint 编排流）。
 
@@ -86,16 +86,17 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit co
 
 `task.claim` 无 body，principal 从 auth header 推断；服务端自动创建 Attempt。
 
-### Blueprint (4 条)
+### Blueprint (5 条)
 
 `blueprint.create` 和 `blueprint.list` 使用 issue 嵌套路径；`blueprint.set_steps` 是全量替换语义（PUT），不是追加。
 
 | 状态 | 命令 | 入参 | 端点 |
 | --- | --- | --- | --- |
-| ✅ | `blueprint.create` | `{issueId, authorAgentId, steps[], estimatedBudget?, notes?}` | `POST /issues/{iid}/blueprints` |
+| ✅ | `blueprint.create` | `{issueId, steps[], estimatedBudget?, notes?}` | `POST /issues/{iid}/blueprints` — 服务端从 auth principal 推导 author；CLI 接受 `authorAgentId` 形参但**不发到 body**(向后兼容老调用方) |
 | ✅ | `blueprint.get` | `{id, includeSteps?}` | `GET /blueprints/{id}` |
 | ✅ | `blueprint.list` | `{issueId, page?, pageSize?, orderBy?}` | `GET /issues/{iid}/blueprints` |
 | ✅ | `blueprint.set_steps` | `{blueprintId (or 'id'), steps[]}` | `PUT /blueprints/{id}/steps` |
+| ✅ | `blueprint.submit_for_approval` | `{id (or 'blueprintId')}` | `POST /blueprints/{id}/submit-for-approval` — heavy 模式蓝图提审；提交后 issue 走 `draft → pending_approval` |
 
 ### Attempt (4 条)
 
