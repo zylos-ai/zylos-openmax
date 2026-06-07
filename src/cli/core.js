@@ -26,12 +26,14 @@ const COMMANDS = {
   'core.me': () => get(apiPath('/me')),
 
   // ✅ Members directory.
+  // cws-core uses PageParams (envelope.go) — `page` + `page_size`, NOT cursor/limit.
+  // Legacy callers passing `limit` continue to work via the alias.
   'core.member_list': () => get(apiPath('/members'), {
     kind:      params.kind || params.type,
     status:    params.status,
     search:    params.search || params.q,
-    cursor:    params.cursor,
-    limit:     params.limit,
+    page:      params.page,
+    page_size: params.pageSize ?? params.limit,
     order_by:  params.orderBy,
   }),
   'core.member_get': () => get(apiPath(`/members/${params.memberId}`)),
@@ -50,10 +52,11 @@ const COMMANDS = {
   'core.platform_agent_delete': () => del(apiPath(`/platform-agents/${params.memberId}`)),
 
   // ✅ Projects list.
+  // cws-core uses PageParams — `page` + `page_size`, NOT cursor/limit.
   'core.project_list': () => get(apiPath('/projects'), {
     status:    params.status,
-    cursor:    params.cursor,
-    limit:     params.limit,
+    page:      params.page,
+    page_size: params.pageSize ?? params.limit,
     order_by:  params.orderBy,
   }),
 
@@ -93,12 +96,14 @@ const COMMANDS = {
     role_id: params.roleId,
     message: params.message,
   }),
-  // GET /api/v1/invitations — query {status?, cursor?, limit?}
+  // GET /api/v1/invitations — query {status?, page?, page_size?, order_by?}
   //   org_id is resolved server-side from the caller's JWT — do NOT send it.
+  //   cws-core uses PageParams — `page` + `page_size`, NOT cursor/limit.
   'core.invitation_list': () => get(apiPath('/invitations'), {
-    status: params.status,
-    cursor: params.cursor,
-    limit:  params.limit,
+    status:    params.status,
+    page:      params.page,
+    page_size: params.pageSize ?? params.limit,
+    order_by:  params.orderBy,
   }),
   // POST /api/v1/invitations/{invitation_id}/accept
   // Server requires BOTH `token` AND `display_name` since the contract
@@ -121,9 +126,9 @@ Identity
   core.me                  {}
 
 Members (humans + agents in one directory)
-  core.member_list         {kind?, status?, search?, cursor?, limit?, orderBy?}
+  core.member_list         {kind?, status?, search?, page?, pageSize?, orderBy?}
                            # kind: human|agent|all (legacy alias: type)
-                           # search legacy alias: q
+                           # search legacy alias: q;  pageSize legacy alias: limit
   core.member_get          {memberId}
   core.project_members     {projectId}
 
@@ -132,7 +137,7 @@ Platform agents (lifecycle)
   core.platform_agent_delete  {memberId}
 
 Projects (directory view — workflow ops live in tm.js)
-  core.project_list        {status?, cursor?, limit?, orderBy?}
+  core.project_list        {status?, page?, pageSize?, orderBy?}    # pageSize legacy alias: limit
 
 Organizations
   core.org_list            {orderBy?}
@@ -145,7 +150,7 @@ Roles
 
 Invitations
   core.invitation_create   {roleId, email?, message?}
-  core.invitation_list     {status?, cursor?, limit?}
+  core.invitation_list     {status?, page?, pageSize?, orderBy?}    # pageSize legacy alias: limit
   core.invitation_accept   {invitationId, token, displayName (or 'display_name')}
   core.invitation_revoke   {invitationId}
 
