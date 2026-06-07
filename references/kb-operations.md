@@ -3,11 +3,11 @@
 CLI 位置:`src/cli/kb.js`
 调用方式:`node src/cli/kb.js <command> '<json>'`
 
-状态:✅ cws-kb code 里已有 · ⏳ 在 cws-kb api-design.md 但 transport 层未实装
+状态:✅ cws-core BFF 已暴露(全部命令都能从 CLI 触达,链路 `kb.js → cws-core (/api/v1) → cws-kb`)。
 
-> 本 CLI **直连 cws-kb**(不走 cws-core BFF,因为 cws-core OpenAPI 没暴露 KB)。
-> Base URL:`config.comm.kb_url`(env `COCO_KB_URL` 可覆盖)
-> 真实路径以 cws-kb 仓库代码为准:`https://git.coco.xyz/coco-workspace/cws-kb`
+> 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
+> Base URL:`COCO_API_URL`(走 cws-int gateway,跟 tm/as/comm/core 同一个 client)
+> 默认前缀 `/api/v1`(可用 `COCO_API_PREFIX` 覆盖)
 
 ## 数据模型
 
@@ -222,6 +222,7 @@ node src/cli/kb.js kb.page_create '{
 
 ## 环境变量
 
-- `COCO_KB_URL` — cws-kb 直连地址(默认 `config.comm.kb_url`,即 `http://127.0.0.1:8080`)
-- `COCO_AUTH_TOKEN` — Bearer token(跟 cws-core / cws-as 共用)
+- `COCO_API_URL` — cws-core BFF 入口(默认 `http://127.0.0.1:8080`)
+- `COCO_API_PREFIX` — 路径前缀(默认 `/api/v1`)
+- `COCO_AUTH_TOKEN` — Bearer token(跟 tm / as / comm / core CLI 共用)
 - `COCO_ORG_ID` — 覆盖 `config.org_id`
