@@ -1,7 +1,32 @@
 # TM 操作指南
 
-> Layer 3 操作参考。Agent 在需要操作 Task Management 时按需加载本文档。
-> 命令规格的权威来源是 `src/cli/tm.js`,本文档与 CLI 保持 1:1 对应。
+**作用**:管理 Task Management 服务的工作流——`Project → Issue → Task → Attempt` 四层资源,加 Blueprint(heavy 模式的编排骨架)。所有命令通过 cws-core BFF 落到 cws-work。
+
+**何时加载本文档**:
+
+- 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,决定 `light`(直接执行流)还是 `heavy`(Blueprint 编排流)
+- 需要派 task 给别人或自己接活时,查 `task.create` / `task.claim`
+- 工作做完准备收尾时,查 `attempt.transition` → `task.transition` → `issue.transition` → `set_acceptance` 的顺序
+- Lead 编排 heavy issue 的步骤时,查整套 `blueprint.*`
+- Worker 失败 / 阻塞要汇报时,查 `attempt.transition` 的 `failed` / `blocked` 选项
+
+**不在本文档范围**:
+
+- 知识库操作(KB page / folder / file)→ `references/kb-operations.md`
+- 文件 / artifact 上传 → `references/as-operations.md`
+- IM 消息 / 对话管理 → `references/comm-operations.md`
+- 成员 / 角色 / 组织目录查询 → `references/core-operations.md`
+
+**依赖前置**:
+
+- 调用前先 `core.me` 确认当前 `member_id` 跟意图中的身份匹配
+- 创建 issue 前通常先 `project.list` 拿目标 projectId
+- 给 task 配 `contextPageIds` 时,KB page id 先用 `kb.search` 拉到
+- Worker 调 `task.list?claimable=true` 找活之前,确保自己的 `skillTags` 已经登记到 member 资料
+
+---
+
+> Layer 3 操作参考。本文档与 `src/cli/tm.js` dispatch 表保持 1:1 对应。
 > 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
 
 CLI 位置:`src/cli/tm.js`
@@ -12,13 +37,13 @@ CLI 位置:`src/cli/tm.js`
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core 基地址 |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF 基地址 |
 | `COCO_AUTH_TOKEN` | (空) | Bearer token,认证端点必填 |
 | `COCO_API_PREFIX` | `/api/v1` | 路径前缀;非默认场景才需要覆盖 |
 
 ## 当前覆盖度速览
 
-全部 31 个命令均已对齐 cws-core@contract-v2，可直接调用。
+全部 31 个命令均已对齐 cws-core@contract-v2,可直接调用。
 
 | 域 | 命令数 | 状态 |
 | --- | --- | --- |
@@ -30,7 +55,7 @@ CLI 位置:`src/cli/tm.js`
 
 ## 错误处理
 
-CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit code 1。常见错误：
+CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code 1。常见错误:
 
 | HTTP | 含义 | Agent 应对 |
 | --- | --- | --- |
@@ -43,69 +68,69 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit co
 
 ### Project (8 条)
 
-| 状态 | 命令 | 入参 | 端点 |
-| --- | --- | --- | --- |
-| ✅ | `project.list` | `{status?, page?, pageSize?, orderBy?}` | `GET /projects` |
-| ✅ | `project.create` | `{name, slug, leadMemberId, description?, isDefault?}` | `POST /projects` |
-| ✅ | `project.get` | `{id}` | `GET /projects/{id}` |
-| ✅ | `project.update` | `{id, name?, description?, leadMemberId?}` | `PATCH /projects/{id}` |
-| ✅ | `project.archive` | `{id}` | `POST /projects/{id}/archive` |
-| ✅ | `project.restore` | `{id}` | `POST /projects/{id}/restore` |
-| ✅ | `project.unarchive` | `{id}` (alias of restore) | `POST /projects/{id}/restore` |
-| ✅ | `project.members` | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
+| 状态 | 命令 | 说明 | 入参 | 端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `project.list` | 列项目目录(分页) | `{status?, page?, pageSize?, orderBy?}` | `GET /projects` |
+| ✅ | `project.create` | 新建项目,需指定 leadMemberId | `{name, slug, leadMemberId, description?, isDefault?}` | `POST /projects` |
+| ✅ | `project.get` | 取单个项目详情 | `{id}` | `GET /projects/{id}` |
+| ✅ | `project.update` | 改项目名 / 描述 / lead | `{id, name?, description?, leadMemberId?}` | `PATCH /projects/{id}` |
+| ✅ | `project.archive` | 归档项目(前端"删除"映射到这条,不做硬删) | `{id}` | `POST /projects/{id}/archive` |
+| ✅ | `project.restore` | 把归档项目恢复 active | `{id}` | `POST /projects/{id}/restore` |
+| ✅ | `project.unarchive` | `restore` 别名,行为完全一致 | `{id}` | `POST /projects/{id}/restore` |
+| ✅ | `project.members` | 列项目成员(从 cws-work 拉) | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
 
 ### Issue (7 条)
 
-写路径使用 flat path `/issues/{id}`，不使用 `/projects/{pid}/issues/{id}`。
+写路径使用 flat path `/issues/{id}`,不使用 `/projects/{pid}/issues/{id}`。
 
-| 状态 | 命令 | 入参 | 端点 |
-| --- | --- | --- | --- |
-| ✅ | `issue.list_in_project` | `{projectId, status?, priority?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
-| ✅ | `issue.get` | `{id}` | `GET /issues/{id}` |
-| ✅ | `issue.create` | `{projectId, title, mode, priority, leadAgentId, description?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
-| ✅ | `issue.update` | `{id, title?, description?, priority?, dueDate?}` | `PATCH /issues/{id}` |
-| ✅ | `issue.transition` | `{id, targetStatus (or 'status'), rejectionReason?}` | `POST /issues/{id}/transition` |
-| ✅ | `issue.move_project` | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
-| ✅ | `issue.set_acceptance` | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit`(默认 `explicit`),区分隐式 IM 验收和显式 set_acceptance 调用 |
+| 状态 | 命令 | 说明 | 入参 | 端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级过滤) | `{projectId, status?, priority?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
+| ✅ | `issue.get` | 取单个 issue 详情 | `{id}` | `GET /issues/{id}` |
+| ✅ | `issue.create` | 起 issue;`mode=light` 直执 / `mode=heavy` 走 Blueprint 编排 | `{projectId, title, mode, priority, leadAgentId, description?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
+| ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, priority?, dueDate?}` | `PATCH /issues/{id}` |
+| ✅ | `issue.transition` | 推 issue 状态机(executing / delivered / rejected / reopened / archived) | `{id, targetStatus (or 'status'), rejectionReason?}` | `POST /issues/{id}/transition` |
+| ✅ | `issue.move_project` | 把 issue 整体迁到另一个项目 | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
+| ✅ | `issue.set_acceptance` | 验收 issue(accepted=true 进 archived;false 进 rejected 走返工) | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit`(默认 `explicit`),区分隐式 IM 验收和显式 set_acceptance 调用 |
 
-`mode` 取值：`light`（直接执行流）/ `heavy`（Blueprint 编排流）。
+`mode` 取值:`light`(直接执行流)/ `heavy`(Blueprint 编排流)。
 
 ### Task (7 条)
 
-`task.create` 使用双重嵌套路径 `/projects/{pid}/issues/{iid}/tasks`；其余使用 flat path `/tasks/{id}`。
+`task.create` 使用双重嵌套路径 `/projects/{pid}/issues/{iid}/tasks`;其余使用 flat path `/tasks/{id}`。
 
-| 状态 | 命令 | 入参 | 端点 |
-| --- | --- | --- | --- |
-| ✅ | `task.list` | `{projectId?, issueId?, status?, claimable?, agentSkills?, page?, pageSize?, orderBy?}` | `GET /tasks` |
-| ✅ | `task.get` | `{id}` | `GET /tasks/{id}` |
-| ✅ | `task.create` | `{projectId, issueId, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
-| ✅ | `task.claim` | `{id}` | `POST /tasks/{id}/claim` |
-| ✅ | `task.transition` | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
-| ✅ | `task.status` | `{id, targetStatus (or 'status')}` (alias of transition) | `POST /tasks/{id}/transition` |
-| ✅ | `task.reassign` | `{id, newAssigneeId (or 'assigneeId')}` | `POST /tasks/{id}/reassign` |
+| 状态 | 命令 | 说明 | 入参 | 端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `task.list` | 列任务(可过滤 claimable + skillTags 找待领取的活) | `{projectId?, issueId?, status?, claimable?, agentSkills?, page?, pageSize?, orderBy?}` | `GET /tasks` |
+| ✅ | `task.get` | 取单个 task 详情(返回里有 `context_page_ids`,Worker 接活后逐个 kb.page_content 读) | `{id}` | `GET /tasks/{id}` |
+| ✅ | `task.create` | 派 task;带 `assigneeId` 直接 running,不带则 pending 等人 claim | `{projectId, issueId, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
+| ✅ | `task.claim` | 自己接 task(原 pending → running);服务端自动建 attempt | `{id}` | `POST /tasks/{id}/claim` |
+| ✅ | `task.transition` | 推 task 终态(done / failed / cancelled);所有 attempt 必须先到终态 | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
+| ✅ | `task.status` | `task.transition` 别名 | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
+| ✅ | `task.reassign` | 把已 claim 的 task 重派给别的 member(Lead 专属) | `{id, newAssigneeId (or 'assigneeId')}` | `POST /tasks/{id}/reassign` |
 
-`task.claim` 无 body，principal 从 auth header 推断；服务端自动创建 Attempt。
+`task.claim` 无 body,principal 从 auth header 推断;服务端自动创建 Attempt。
 
 ### Blueprint (5 条)
 
-`blueprint.create` 和 `blueprint.list` 使用 issue 嵌套路径；`blueprint.set_steps` 是全量替换语义（PUT），不是追加。
+`blueprint.create` 和 `blueprint.list` 使用 issue 嵌套路径;`blueprint.set_steps` 是全量替换语义(PUT),不是追加。
 
-| 状态 | 命令 | 入参 | 端点 |
-| --- | --- | --- | --- |
-| ✅ | `blueprint.create` | `{issueId, steps[], estimatedBudget?, notes?}` | `POST /issues/{iid}/blueprints` — 服务端从 auth principal 推导 author；CLI 接受 `authorAgentId` 形参但**不发到 body**(向后兼容老调用方) |
-| ✅ | `blueprint.get` | `{id, includeSteps?}` | `GET /blueprints/{id}` |
-| ✅ | `blueprint.list` | `{issueId, page?, pageSize?, orderBy?}` | `GET /issues/{iid}/blueprints` |
-| ✅ | `blueprint.set_steps` | `{blueprintId (or 'id'), steps[]}` | `PUT /blueprints/{id}/steps` |
-| ✅ | `blueprint.submit_for_approval` | `{id (or 'blueprintId')}` | `POST /blueprints/{id}/submit-for-approval` — heavy 模式蓝图提审；提交后 issue 走 `draft → pending_approval` |
+| 状态 | 命令 | 说明 | 入参 | 端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `blueprint.create` | 起 blueprint 草稿,steps 一次性给齐(后续可 set_steps 改) | `{issueId, steps[], estimatedBudget?, notes?}` | `POST /issues/{iid}/blueprints` — 服务端从 auth principal 推导 author;CLI 接受 `authorAgentId` 形参但**不发到 body**(向后兼容老调用方) |
+| ✅ | `blueprint.get` | 取 blueprint(含/不含 steps) | `{id, includeSteps?}` | `GET /blueprints/{id}` |
+| ✅ | `blueprint.list` | 列 issue 下的 blueprint 版本(看修订历史) | `{issueId, page?, pageSize?, orderBy?}` | `GET /issues/{iid}/blueprints` |
+| ✅ | `blueprint.set_steps` | 整批替换 steps(全量,不是 append) | `{blueprintId (or 'id'), steps[]}` | `PUT /blueprints/{id}/steps` |
+| ✅ | `blueprint.submit_for_approval` | heavy 模式提审蓝图;提交后 issue 走 `draft → pending_approval` 等审批 | `{id (or 'blueprintId')}` | `POST /blueprints/{id}/submit-for-approval` |
 
 ### Attempt (4 条)
 
-| 状态 | 命令 | 入参 | 端点 |
-| --- | --- | --- | --- |
-| ✅ | `attempt.create` | `{taskId}` | `POST /tasks/{taskId}/attempts` |
-| ✅ | `attempt.get` | `{id}` | `GET /attempts/{id}` |
-| ✅ | `attempt.list` | `{taskId, page?, pageSize?, orderBy?}` | `GET /tasks/{taskId}/attempts` |
-| ✅ | `attempt.transition` | `{id, targetStatus (or 'status'), failureReason?, blockedOnApprovalRequestIds?}` | `POST /attempts/{id}/transition` |
+| 状态 | 命令 | 说明 | 入参 | 端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `attempt.create` | 手动开新一轮(几乎用不到,`task.claim` 已经自带建 attempt) | `{taskId}` | `POST /tasks/{taskId}/attempts` |
+| ✅ | `attempt.get` | 取 attempt 详情(看 status / startedAt / failureReason) | `{id}` | `GET /attempts/{id}` |
+| ✅ | `attempt.list` | 列 task 的所有 attempt(看历次重试 / 失败原因) | `{taskId, page?, pageSize?, orderBy?}` | `GET /tasks/{taskId}/attempts` |
+| ✅ | `attempt.transition` | 推 attempt 状态(done / failed / blocked / cancelled);Worker 用这条标记自己的执行结果 | `{id, targetStatus (or 'status'), failureReason?, blockedOnApprovalRequestIds?}` | `POST /attempts/{id}/transition` |
 
 `attempt.create` 通常不需要直接调用——`task.claim` 会自动创建 Attempt。仅在需要手动开启新一轮尝试时使用。
 
@@ -114,11 +139,11 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`，exit co
 ### 1. Lead 接 light 模式 Issue 且自做
 
 ```bash
-# 0) 上下文组装：搜 KB 找参考材料，收集 page ID
+# 0) 上下文组装:搜 KB 找参考材料,收集 page ID
 node src/cli/kb.js kb.search '{"query":"竞品定价","folderId":"tn-projects-growth"}'
 # -> 命中 pg-pricing-ref-001, pg-market-overview-002
 
-# 1) 创建 light Issue（auto 进入 executing），带 contextPageIds
+# 1) 创建 light Issue(auto 进入 executing),带 contextPageIds
 node src/cli/tm.js issue.create '{
   "projectId":"proj-1","mode":"light",
   "title":"Notion 竞品定价分析","description":"对比 5 个直接竞品的定价层级",
@@ -127,13 +152,13 @@ node src/cli/tm.js issue.create '{
   "originConversationId":"conv-1","originMessageId":"msg-42"
 }'
 
-# 2) 创建 Task 并认领（自做时 contextPageIds 可省略，自己已读过）
+# 2) 创建 Task 并认领(自做时 contextPageIds 可省略,自己已读过)
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-1","title":"Implement","assigneeId":"agent-self"
 }'
 node src/cli/tm.js task.claim '{"id":"task-1"}'
 
-# 3) 工作完成，流转 Attempt → Task → Issue → 交付
+# 3) 工作完成,流转 Attempt → Task → Issue → 交付
 node src/cli/tm.js attempt.transition '{"id":"att-1","targetStatus":"done"}'
 node src/cli/tm.js task.transition    '{"id":"task-1","targetStatus":"done"}'
 node src/cli/tm.js issue.transition   '{"id":"iss-1","targetStatus":"delivered"}'
@@ -151,26 +176,29 @@ node src/cli/tm.js issue.create '{
   "title":"季度产品规划","leadAgentId":"agent-self"
 }'
 
-# 2) 起 Blueprint 草稿（含 Steps，一次提交）
+# 2) 起 Blueprint 草稿(含 Steps,一次提交)
 node src/cli/tm.js blueprint.create '{
-  "issueId":"iss-2","authorAgentId":"agent-self",
+  "issueId":"iss-2",
   "steps":[
     {"temp_id":"s1","description":"Step 1: 调研用户痛点"},
     {"temp_id":"s2","description":"Step 2: 写需求文档","depends_on_temp_ids":["s1"]}
   ]
 }'
 
-# 3) 需要修改 Steps 时，整体替换
+# 3) 需要修改 Steps 时,整体替换
 node src/cli/tm.js blueprint.set_steps '{
   "blueprintId":"bp-1",
   "steps":[
-    {"temp_id":"s1","description":"Step 1: 调研用户痛点（含问卷）"},
+    {"temp_id":"s1","description":"Step 1: 调研用户痛点(含问卷)"},
     {"temp_id":"s2","description":"Step 2: 写需求文档","depends_on_temp_ids":["s1"]},
     {"temp_id":"s3","description":"Step 3: 技术可行性评估","depends_on_temp_ids":["s2"]}
   ]
 }'
 
-# 4) 审批通过后，按 Step 派 Worker（传 contextPageIds 子集）
+# 4) 提审 Blueprint,等审批通过后再派 Worker
+node src/cli/tm.js blueprint.submit_for_approval '{"id":"bp-1"}'
+
+# 5) 审批通过后,按 Step 派 Worker(传 contextPageIds 子集)
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-2",
   "blueprintStepId":"step-1","title":"用户访谈","assigneeId":"worker-1",
@@ -203,12 +231,12 @@ node src/cli/tm.js task.transition '{"id":"task-7","targetStatus":"done"}'
 ### 4. Worker 遇阻塞 / 失败汇报
 
 ```bash
-# 标记 Attempt 失败（含原因）
+# 标记 Attempt 失败(含原因)
 node src/cli/tm.js attempt.transition '{
   "id":"att-3","targetStatus":"failed","failureReason":"missing_credentials"
 }'
 
-# 需要审批时，标记 blocked
+# 需要审批时,标记 blocked
 node src/cli/tm.js attempt.transition '{
   "id":"att-3","targetStatus":"blocked",
   "blockedOnApprovalRequestIds":["apr-1"]
@@ -224,14 +252,14 @@ node src/cli/tm.js attempt.transition '{
 | `blueprint.*` | ✅ | — |
 | `task.create` / `task.reassign` | ✅ | — |
 | `task.claim` | — | ✅ |
-| `task.transition`（own task → done/failed/cancelled）| 监控 | **✅** |
-| `attempt.create` / `attempt.transition`（own attempt → done/failed/cancelled/blocked）| 监控 | **✅** |
+| `task.transition`(own task → done/failed/cancelled) | 监控 | **✅** |
+| `attempt.create` / `attempt.transition`(own attempt → done/failed/cancelled/blocked) | 监控 | **✅** |
 | `project.*` / `*.list` / `*.get` | ✅ 读写 | ✅ 只读 |
 
-**Worker 状态流转的明确边界**（避免过保守拒绝合法操作）：
+**Worker 状态流转的明确边界**(避免过保守拒绝合法操作):
 
 - 自己的 attempt 完成 / 失败 / 被 Lead 通知取消 → Worker **自己**调 `attempt.transition` 到 `done` / `failed` / `cancelled`
-- 自己的 task 所有 attempt 在终态后（或被 Lead 通知 cancel）→ Worker **自己**调 `task.transition` 到 `done` / `failed` / `cancelled`
+- 自己的 task 所有 attempt 在终态后(或被 Lead 通知 cancel)→ Worker **自己**调 `task.transition` 到 `done` / `failed` / `cancelled`
 - **不用**等 Lead 来推流转,也**不用**先在 DM 里确认"这是不是 Lead 权限" — 自己的 task / attempt 自己流转是契约的一部分
 - Lead 只在**跨 task / 重派 / 接到 Worker 失败汇报后做 task 终态决策**时介入
 
@@ -239,20 +267,20 @@ node src/cli/tm.js attempt.transition '{
 
 ## 不要做的事
 
-- **不要**在没有 leadAgentId 的情况下创建 Issue（违反角色模型）
-- **不要**在 Worker 角色下调 `issue.transition` / `issue.set_acceptance`（issue 状态机是 Lead 专属）
-- **不要**在 Worker 角色下调 `task.create` / `task.reassign`（派活是 Lead 专属）
+- **不要**在没有 leadAgentId 的情况下创建 Issue(违反角色模型)
+- **不要**在 Worker 角色下调 `issue.transition` / `issue.set_acceptance`(issue 状态机是 Lead 专属)
+- **不要**在 Worker 角色下调 `task.create` / `task.reassign`(派活是 Lead 专属)
 - **不要**因为"觉得是 Lead 权限"就拒绝流转自己 own 的 task / attempt — 那是 Worker 的责任,Lead 在等你
-- **不要**为了"绕开"审批跳过 Blueprint 审批流程（heavy 模式必须走审批）
-- **不要**把 IM 消息原文整段复制进评论（用会话锚定就够了）
+- **不要**为了"绕开"审批跳过 Blueprint 审批流程(heavy 模式必须走审批)
+- **不要**把 IM 消息原文整段复制进评论(用会话锚定就够了)
 - **不要**直接调 `attempt.create` 来代替 `task.claim`——`claim` 已内置创建 Attempt 的逻辑
 
 ## 后续版本计划
 
-以下功能在 0.5 中不可用（cws-core 尚未转发），计划在后续版本加入：
+以下功能在 0.5 中不可用(cws-core 尚未转发),计划在后续版本加入:
 
-- Comment（评论追加 / 列表）
-- Link（WorkConversationLink 锚定）
-- System（工作区初始化 / 审批决策 / 自动归档）
-- TaskBoard（专用看板视图，当前可用 `task.list?claimable=true` 替代）
-- Blueprint 细粒度操作（单 Step 增删改、预算/备注设置、审批提交、修订版创建）
+- Comment(评论追加 / 列表)
+- Link(WorkConversationLink 锚定)
+- System(工作区初始化 / 审批决策 / 自动归档)
+- TaskBoard(专用看板视图,当前可用 `task.list?claimable=true` 替代)
+- Blueprint 细粒度操作(单 Step 增删改、预算/备注设置、修订版创建)
