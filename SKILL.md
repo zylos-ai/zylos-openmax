@@ -124,7 +124,7 @@ API 调用需要的 ID，按优先级获取：
 2. **自身行为产物** → 本 session 内 API 返回值（创建 Issue 返回的 issueId 等）
 3. **记忆** → 上次已知的 projectId、issueId 等
 4. **本地目录** → 从缓存的 Project/Issue name+description 语义匹配
-5. **API 查询** → project.list、core.agent_list 等
+5. **API 查询** → `project.list`、`core.member_list({kind:"agent"})` 等
 6. **默认值** → 未指定项目 → Inbox；mode 未指定 → light
 7. **询问人类**
 
@@ -133,7 +133,7 @@ API 调用需要的 ID，按优先级获取：
 ```
 core.me → agentId, orgId
   ├→ project.list → projectId
-  ├→ core.agent_list → assigneeId（派发 Task 时）
+  ├→ core.member_list({kind:"agent"}) → assigneeId（派发 Task 时）
   ├→ issue.create → issueId → task.create → taskId
   └→ kb.tree_roots → KB 目录结构 → pageId
 ```
@@ -263,6 +263,34 @@ CLI 命令返回 404 或 501（cws-core 网关暂未接通）时：
 **Lead 对 Worker**：完成时通过 IM 汇报且流转 TM 状态；遇阻主动请求澄清；产出位置符合 Lead 指定。
 
 **Worker 对 Lead**：派发时提供清晰描述；有参考材料时通过 `contextPageIds` 传递，不要只在描述里写路径；澄清请求及时响应；不在执行中途无预警取消 Task。
+
+### 跨 agent 沟通模式（Lead ↔ Worker）
+
+Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-bot DM 完成**（不是给人类发 IM）。完整流程：
+
+1. **找 worker 的 member_id**：
+   `core.member_list({kind:"agent", search:"<worker 显示名>"})` 拿 `member_id`。
+   常用 worker 的 member_id 应该已经在记忆里，记忆里有就别再查。
+
+2. **拿/建会话**：
+   `comm.create_dm({participantId: <worker-member-id>})` 返回 `conversationId`。
+   - 这条幂等：会话已存在直接返回原 id，没有就建一个新的
+   - 同一对 LEAD-WORKER 的 conversationId 应该持久化到记忆，下次直接复用，避免每次重新 create_dm
+
+3. **发协调消息**：
+   `comm.send({conversationId, content: "..."})` —— 用 markdown 表达任务细节、退回选项、上下文引用。
+   消息内容要**显式**：把命令 ID、退回触发词、判断标准都写清楚（参考 smoke-6 NL 的写法）。
+
+4. **等 worker 回复**：
+   不要轮询 `comm.get_messages`。Worker 的回复通过 WS 推到 comm-bridge，会作为新消息出现在你的输入流里。
+
+**何时跳过 bot DM 用 TM action 而非聊**：
+
+- 派任务用 `task.create({assigneeId})` 直接挂在 worker 名下（不是 DM 通知）
+- 重派用 `task.reassign({newAssigneeId})`（不是发"接回去吧"那种 NL）
+- 状态流转 worker 自己走 attempt/task transition，不需要发 DM 通知 Lead
+
+但**澄清需求、上下文同步、判断分歧**这些"对话"性质的事情，**必须**走 bot DM。
 
 ## 记忆触发点
 
