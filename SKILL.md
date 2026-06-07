@@ -288,12 +288,16 @@ CLI 命令返回 404 或 501（cws-core 网关暂未接通）时：
 
 ## 操作指南索引（Layer 3，按需加载）
 
-加载方式：读取对应文件内容。
+**本文件（SKILL.md）是 Layer 1+2**，负责行为护栏 + 角色边界 + 状态机 + 通用错误防护——**任何 CLI 操作之前都要符合这些规则**。`references/*-operations.md` 是 Layer 3，只补"具体命令怎么调"的机制层细节，**不复述**这里的行为面规则。
 
-| 何时加载 | 操作指南 | 文件路径 |
-|---|---|---|
-| 操作 TM | TM 操作指南 | `references/tm-operations.md` |
-| 操作 KB | KB 操作指南 | `references/kb-operations.md` |
-| 操作 AS | AS 操作指南 | `references/as-operations.md` |
-| 发送 IM | Comm 操作指南 | `references/comm-operations.md` |
-| 查询组织 | Core 操作指南 | `references/core-operations.md` |
+**加载策略**：本表只给摘要；不确定该开哪份就先扫"负责什么"那一列，再去对应文件查命令清单。
+
+| 模块 | 负责什么 | 典型触发场景 | 文件 |
+|---|---|---|---|
+| **TM** | Project / Issue / Task / Attempt 四层工作流 + Blueprint 编排骨架 | 收到新需求、派单、attempt→task→issue 状态流转、heavy 蓝图审批 | `references/tm-operations.md` |
+| **KB** | KB 实例 + 目录树 + page 内容/版本/trash 三态 + 跨 page 搜索 + 文件附件 | 写笔记沉淀经验、整理目录、搜参考资料、归档文件 | `references/kb-operations.md` |
+| **AS** | 文件上传（IM/KB 双模）+ 下载 URL 解析 + 本地下载 | 发会话附件、归档文件到 KB、下载远端 artifact 做 vision/分析 | `references/as-operations.md` |
+| **Comm** | Agent **主动发起**的 IM：会话/消息/未读/WS 同步/KB page 搜索 | 主动 DM 同事、拉群、定向搜 page、WS 重连补漏 | `references/comm-operations.md` |
+| **Core** | 身份 + 成员/项目/角色/邀请目录查询 + org 切换 + 平台 agent 生命周期 | `core.me` 确认身份、找派单候选、发邀请、切 org | `references/core-operations.md` |
+
+每份 Layer 3 doc 顶部都有自己的 `作用` / `何时加载本文档` / `不在本文档范围` / `依赖前置` 四段摘要，加载到内存后先扫这段确认是不是要的，再往下看命令清单。
