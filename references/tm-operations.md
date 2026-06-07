@@ -24,6 +24,8 @@
 - 给 task 配 `contextPageIds` 时,KB page id 先用 `kb.search` 拉到
 - Worker 调 `task.list?claimable=true` 找活之前,确保自己的 `skillTags` 已经登记到 member 资料
 
+> 完整的参数依赖树(`core.me → project.list → issue.create → task.create → ...`)见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)。本文档不重复,只补 TM 命令级细节。
+
 ---
 
 > Layer 3 操作参考。本文档与 `src/cli/tm.js` dispatch 表保持 1:1 对应。
@@ -243,37 +245,28 @@ node src/cli/tm.js attempt.transition '{
 }'
 ```
 
-## Lead 与 Worker 的操作分布
+## 与 SKILL.md 的关系
 
-| 操作 | Lead | Worker |
-| --- | --- | --- |
-| `issue.create` / `issue.transition` / `issue.set_acceptance` | ✅ | — |
-| `issue.update` / `issue.move_project` | ✅ | — |
-| `blueprint.*` | ✅ | — |
-| `task.create` / `task.reassign` | ✅ | — |
-| `task.claim` | — | ✅ |
-| `task.transition`(own task → done/failed/cancelled) | 监控 | **✅** |
-| `attempt.create` / `attempt.transition`(own attempt → done/failed/cancelled/blocked) | 监控 | **✅** |
-| `project.*` / `*.list` / `*.get` | ✅ 读写 | ✅ 只读 |
+本文档是 [`SKILL.md`](../SKILL.md) 的 Layer 3 子 skill,只负责 TM CLI 的**命令机制**(入参 / 端点 / 顺序 / 典型流程)。下面这些行为面内容**在 SKILL.md 里**,本文档不重复:
 
-**Worker 状态流转的明确边界**(避免过保守拒绝合法操作):
+| 想看 | 去 SKILL.md 的哪节 |
+|---|---|
+| Lead 与 Worker 的能力边界对照表 | [角色模型](../SKILL.md) |
+| Worker 自己流转 task / attempt 的契约 | [角色模型 > Worker 状态流转的明确边界](../SKILL.md) |
+| Issue / Task / Attempt 状态机完整图 | [状态机](../SKILL.md) |
+| 通用的"常见错误"清单(15 条) | [行为护栏 > 常见错误](../SKILL.md) |
+| 参数依赖树 / 上下文锚定 / contextPageIds | [效率捷径](../SKILL.md) |
+| 记忆持久化的时机 | [记忆触发点](../SKILL.md) |
 
-- 自己的 attempt 完成 / 失败 / 被 Lead 通知取消 → Worker **自己**调 `attempt.transition` 到 `done` / `failed` / `cancelled`
-- 自己的 task 所有 attempt 在终态后(或被 Lead 通知 cancel)→ Worker **自己**调 `task.transition` 到 `done` / `failed` / `cancelled`
-- **不用**等 Lead 来推流转,也**不用**先在 DM 里确认"这是不是 Lead 权限" — 自己的 task / attempt 自己流转是契约的一部分
-- Lead 只在**跨 task / 重派 / 接到 Worker 失败汇报后做 task 终态决策**时介入
+也就是说:**SKILL.md 讲行为,本文档讲机制**,两份配套使用。
 
-详细行为参见 [agent-skill-spec.md](../docs/agent-skill-spec.md) 的 Lead/Worker 章节。
+## TM 专属注意事项
 
-## 不要做的事
+下面几条是 SKILL.md "常见错误"没单独覆盖的 TM 命令级细节:
 
-- **不要**在没有 leadAgentId 的情况下创建 Issue(违反角色模型)
-- **不要**在 Worker 角色下调 `issue.transition` / `issue.set_acceptance`(issue 状态机是 Lead 专属)
-- **不要**在 Worker 角色下调 `task.create` / `task.reassign`(派活是 Lead 专属)
-- **不要**因为"觉得是 Lead 权限"就拒绝流转自己 own 的 task / attempt — 那是 Worker 的责任,Lead 在等你
-- **不要**为了"绕开"审批跳过 Blueprint 审批流程(heavy 模式必须走审批)
-- **不要**把 IM 消息原文整段复制进评论(用会话锚定就够了)
-- **不要**直接调 `attempt.create` 来代替 `task.claim`——`claim` 已内置创建 Attempt 的逻辑
+- **不要**把 IM 消息原文整段复制进 task description / 评论 —— 通过会话锚定 + `contextPageIds` 引用就够了
+- **不要**直接调 `attempt.create` 来代替 `task.claim` —— `claim` 已内置建 attempt,手动 create 会撞冲突
+- **不要**忘记 `task.reassign` 后老 attempt 已自动 cancelled —— 新 assignee 走的是新 attempt,旧 attempt 不要再操作
 
 ## 后续版本计划
 
