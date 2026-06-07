@@ -42,34 +42,64 @@ Base URL:`COCO_API_URL`(走 cws-int gateway,跟 cws-core/kb/comm 同一个 zone,
 
 ---
 
-## cws-as 三步上传(每次 `as.upload` 都走这条)
+## v5 三步上传(每次 `as.upload` 都走这条)
+
+v5 把上传按"用途"拆成两条并行流,共享同一个 prepare → PUT → finalize 节奏,只是 prepare/finalize 的 namespace 不同。`as.upload` 根据有没有 `conversationId` 自动选分支(见上面"上传走哪条路径")。
 
 ```
-本地文件
-  │
-  │  1. POST /api/v1/artifacts
-  │     Body: {name, mime_type, size_bytes, content_hash (SHA-256), description?}
-  │     Resp: {artifact:{id, status:"creating", ...},
-  │            upload:{upload_mode, upload_url, required_headers, expires_at},
-  │            instant_upload: bool}
-  │
-  ├─►  instant_upload=true ──► 短路返回(秒传命中,字节已在 S3)
-  │
-  │  2. PUT <upload.upload_url>
-  │     Body: 原始字节
-  │     Headers: upload.required_headers(Content-Type + x-goog-content-sha256 等)
-  │     (字节直传 S3 / MinIO / R2,不经过服务端)
-  │
-  │  3. POST /api/v1/artifacts/{id}/finalize
-  │     Body: {content_hash, content_length}
-  │     Resp: {artifact:{status: "pending_verification", ...}}
-  │     (服务端异步计算 SHA-256 → "active" 或 "hash_mismatch")
-  │
-  ▼
-{mediaId, artifactId, status, sizeBytes, mimeType, fileName, instantUpload}
+                本地文件
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+   有 conversationId         无 conversationId
+        │                       │
+        ▼                       ▼
+   ┌──────────────┐        ┌──────────────┐
+   │   IM 上传    │        │   KB 上传    │
+   └──────────────┘        └──────────────┘
+        │                       │
+  1. POST /api/v1/conversations  1. POST /api/v1/uploads/prepare
+     /{cid}/uploads/prepare         Body: {parent_id?, filename,
+     Body: {filename,                      content_type, size_bytes}
+            content_type,
+            size_bytes}
+        │                       │
+        └───────────┬───────────┘
+                    │
+              共同响应字段:
+              {upload_token, upload_url, headers,
+               expires_at, instant_upload}
+                    │
+        ┌───────────┴───────────┐
+        ├─► instant_upload=true ──► 跳过 PUT(秒传命中,字节已在 S3)
+        │
+        │  2. PUT <upload_url>
+        │     Body: 原始字节
+        │     Headers: 响应里的 headers(Content-Type 等)
+        │     (字节直传 S3 / MinIO / R2,不经过 cws-core / cws-as)
+        │
+        ▼
+   ┌──────────────┐        ┌──────────────┐
+   │ IM finalize  │        │ KB finalize  │
+   └──────────────┘        └──────────────┘
+        │                       │
+  3. POST /api/v1/conversations  3. POST /api/v1/uploads/finalize
+     /uploads/finalize             Body: {upload_token}
+     Body: {upload_token}          Resp: <tree_node>
+     Resp: {media_id,                    (KB 文件节点,含 artifact_id)
+            artifact_id}
+        │                       │
+        └───────────┬───────────┘
+                    ▼
+{mediaId, artifactId, [nodeId, treeNode (KB only),]
+ fileName, mimeType, sizeBytes, instantUpload}
 ```
 
-**秒传 (`instant_upload`)**:服务端按 `content_hash` 去查已有 active artifact,匹配就直接返回。Agent 反复上传同一个文件(比如截图)只第一次真传字节。
+底层 cws-core 拿到 prepare/finalize 后通过 connect-RPC 调 cws-as 完成 artifact 注册、SHA-256 校验、状态机推进等;Agent 这一侧只看到 cws-core BFF 上面这 3 步。
+
+**秒传 (`instant_upload`)**:服务端按 SHA-256 去查已有 active artifact,匹配就直接返回 `instant_upload=true`,客户端跳过 PUT 这一步。Agent 反复上传同一个文件(比如截图)只第一次真传字节。
+
+**老路径已下线**:contract-v4 时代曾有 `POST /api/v1/artifacts` 直接建 artifact + `POST /api/v1/artifacts/{id}/finalize` 收尾的单流上传,v5 已经废弃,cws-core 不再注册这两条路由。如果在老代码里看到调用方式,需要迁移成上面这两条 namespace 之一。
 
 ## 命令列表
 
@@ -204,7 +234,7 @@ node src/cli/as.js as.resolve '{"uris":["artifact://art_a","artifact://art_b"]}'
 - `artifact_id` 是 ULID 形态(`art_01JDKF...`,服务端生成)
 - 单文件大小上限 5 GB(超出返回 `payload_too_large` 413)
 - `mime_type` 黑名单:可执行文件(`.exe` / `.sh` 等)返回 `unsupported_media_type` 415
-- 预签名 PUT URL TTL 1 小时;超时需要重新 `POST /artifacts` 拿新 URL
+- 预签名 PUT URL TTL 1 小时;超时需要重新调对应的 prepare 端点(IM:`POST /api/v1/conversations/{cid}/uploads/prepare`;KB:`POST /api/v1/uploads/prepare`)拿新 `upload_token` + `upload_url`
 - 大文件(>100MB)cws-as 会自动选 Multipart 模式(`upload_mode:"multipart"`),我们目前的 `uploadMedia()` 还是单 PUT,大文件场景需要扩展(标 TODO)
 - `as.resolve` 是给 cws-comm 这种服务间调用用的:无权限的 artifact 跳过而不是 403,避免一个失败拖整批
 - `media_id` / `artifactId` 是同义词(向后兼容),返回里都给
