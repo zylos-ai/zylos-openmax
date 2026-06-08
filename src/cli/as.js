@@ -64,6 +64,39 @@ const MIME_BY_KIND = {
   sticker: 'image/webp',
 };
 
+// Real MIME inference by file extension. This is the source-of-truth fix for
+// issue #7: without it, a `.png` sent as `[MEDIA:file]` (or any non-image
+// `mediaType`) falls back to `application/octet-stream` and the receiving FE
+// renders it as a file card instead of an inline image. Inferring from the
+// extension means the content_type is correct regardless of how the upper
+// layer tagged the media. It also fixes the related bug where any image kind
+// was hardcoded to `image/png` (so `.jpg`/`.gif` got the wrong MIME).
+const MIME_BY_EXT = {
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.webp': 'image/webp',
+  '.bmp':  'image/bmp',
+  '.svg':  'image/svg+xml',
+  '.heic': 'image/heic',
+  '.mp4':  'video/mp4',
+  '.mov':  'video/quicktime',
+  '.webm': 'video/webm',
+  '.mp3':  'audio/mpeg',
+  '.ogg':  'audio/ogg',
+  '.wav':  'audio/wav',
+  '.m4a':  'audio/mp4',
+  '.pdf':  'application/pdf',
+};
+
+// Map a local path / filename to its MIME via extension, or null if unknown.
+function mimeFromExt(filePathOrName) {
+  if (!filePathOrName) return null;
+  const ext = path.extname(filePathOrName).toLowerCase();
+  return MIME_BY_EXT[ext] || null;
+}
+
 async function ensureTmpDir() {
   await fs.promises.mkdir(TMP_DIR, { recursive: true });
 }
@@ -100,8 +133,13 @@ export async function uploadMedia(localPath, opts = {}) {
 
   const fileName    = opts.filename || path.basename(localPath);
   const mediaType   = opts.mediaType || 'file';
+  // Priority: explicit override > inferred-from-extension > kind default >
+  // octet-stream. Inferring from the extension (issue #7) keeps the
+  // content_type correct even when the upper layer tagged an image as `file`.
   const contentType = opts.mimeType
     || opts.contentType
+    || mimeFromExt(fileName)
+    || mimeFromExt(localPath)
     || MIME_BY_KIND[mediaType]
     || 'application/octet-stream';
   const sizeBytes = stat.size;
