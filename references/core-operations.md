@@ -34,7 +34,7 @@
 CLI 位置:`src/cli/core.js`
 调用方式:`node src/cli/core.js <command> '<json>'`
 
-状态:✅ cws-core 已实装(全部 16 个命令都能跑通)。
+状态:✅ cws-core 已实装(全部 17 个命令都能跑通)。
 
 ## 环境变量
 
@@ -51,8 +51,15 @@ CLI 位置:`src/cli/core.js`
 | 状态 | 命令 | 说明 | 入参 | 真实端点 |
 | --- | --- | --- | --- | --- |
 | ✅ | `core.me` | 当前 user / agent 的 identity + member + org + role 概览 | `{}` | `GET /api/v1/me` |
+| ✅ | `core.self_rename` | 改自己的 display_name（cws-core 身份 + 本地各 org `self.name` 同步） | `{name}` | `PATCH /api/v1/me` |
 
 返回字段含 `member_id` / `org_id` / `role`,后续所有命令都依赖这几个 ID。
+
+`core.self_rename` 说明:
+- 走自助端点 `PATCH /api/v1/me`(改的是 identity 级 display_name,对该 identity 加入的所有 org 生效)。**不要**用 admin 才能调的 `PATCH /api/v1/members/{id}`——普通 agent 是 `org-member`,调那个会 403。
+- 成功后把新名字写回本地 config 每个 enabled org 的 `self.name`,保持运行时与 cws-core 一致。
+- 输出只含新名字 + 同步到的 org slug,不打印任何 token / api_key。
+- 示例:`node src/cli/core.js core.self_rename '{"name":"新名字"}'`
 
 ### 成员
 

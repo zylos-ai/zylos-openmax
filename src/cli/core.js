@@ -16,14 +16,65 @@
  *      surface is ready when core adds the endpoint
  */
 
-import { get, post, del, apiPath } from '../lib/client.js';
+import { get, post, del, patch, apiPath } from '../lib/client.js';
+import { enabledOrgs, updateConfig } from '../lib/config.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
+/**
+ * Rename the agent itself (self-service display name change).
+ *
+ * Two sides are kept in sync:
+ *   1. cws-core — `PATCH /api/v1/me {display_name}`. display_name is an
+ *      identity-level attribute (managed by cws-core Identities, per D15),
+ *      so a single /me PATCH updates how the agent appears in EVERY org it
+ *      has joined. We deliberately do NOT use the admin-only
+ *      `PATCH /api/v1/members/{id}` here — the agent runs as an org-member,
+ *      not an org-admin, so that route would 403.
+ *   2. local config — mirror the new name into `orgs.<slug>.self.name` for
+ *      every enabled org so the runtime's notion of its own name stays
+ *      consistent with cws-core.
+ *
+ * Prints only the new name + which orgs were synced. No tokens/secrets are
+ * ever emitted (the RPC logger logs body+url only, never auth headers).
+ */
+async function selfRename(newName) {
+  const name = typeof newName === 'string' ? newName.trim() : '';
+  if (!name) {
+    const err = new Error('self_rename requires a non-empty {name}');
+    err.status = 400;
+    throw err;
+  }
+
+  const updated = await patch(apiPath('/me'), { display_name: name });
+
+  const orgs = enabledOrgs();
+  if (orgs.length) {
+    updateConfig((cfg) => {
+      for (const { slug } of orgs) {
+        const org = cfg.orgs?.[slug];
+        if (!org) continue;
+        org.self = { ...(org.self || {}), name };
+      }
+    });
+  }
+
+  return {
+    display_name: updated?.display_name ?? name,
+    identity_id:  updated?.identity_id,
+    orgs_synced:  orgs.map((o) => o.slug),
+  };
+}
+
 const COMMANDS = {
   // ✅ Current user / workspace identity
   'core.me': () => get(apiPath('/me')),
+
+  // ✅ Rename self (display name). Updates cws-core identity via PATCH /me
+  // (works for org-member agents — no admin needed) AND mirrors the new
+  // name into local config's per-org `self.name`. See selfRename() above.
+  'core.self_rename': () => selfRename(params.name || params.displayName || params.display_name),
 
   // ✅ Members directory.
   // cws-core uses PageParams (envelope.go) — `page` + `page_size`, NOT cursor/limit.
@@ -124,6 +175,7 @@ Usage: node src/cli/core.js <command> '<json-params>'
 
 Identity
   core.me                  {}
+  core.self_rename         {name}    # change own display_name (cws-core /me + local config self.name)
 
 Members (humans + agents in one directory)
   core.member_list         {kind?, status?, search?, page?, pageSize?, orderBy?}
