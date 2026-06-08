@@ -1,0 +1,29 @@
+{
+  "name": "zylos-coco-workspace",
+  "version": "1.0.0",
+  "description": "COCO Workspace native communication and service integration",
+  "type": "module",
+  "main": "src/comm-bridge.js",
+  "scripts": {
+    "start": "node src/comm-bridge.js",
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://git.coco.xyz/coco-workspace/zylos-coco-workspace.git"
+  },
+  "keywords": [
+    "zylos",
+    "coco",
+    "workspace",
+    "agent"
+  ],
+  "author": "COCO Team",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

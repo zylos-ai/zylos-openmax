@@ -1,0 +1,766 @@
+#!/usr/bin/env node
+
+/**
+ * Communication bridge — PM2 service entry point.
+ *
+ * Multi-org architecture:
+ *   1. Reads `config.orgs.*` (enabled entries only).
+ *   2. Opens ONE WebSocket per enabled org. Each connection is independent:
+ *      its own urlProvider (per-org ws-ticket), its own message handler bound
+ *      to that org's identity and access policy, its own reconnect lifecycle.
+ *   3. Inbound `message` frames go through per-org `shouldHandleMessage`
+ *      (lark-style dmPolicy / groupPolicy / per-group config / owner) before
+ *      being forwarded to C4.
+ *   4. A single org going terminal (4002/4005/4006) only stops that org's
+ *      WS; other orgs keep running. The process exits only if every enabled
+ *      org has gone terminal.
+ *
+ * Conversation type lookup: when an inbound message arrives, the frame
+ * carries conversation_id but not the conversation type. We fetch the
+ * conversation via REST once and cache it for the dedup TTL window.
+ */
+
+import path from 'path';
+import { execFile } from 'child_process';
+
+import { loadConfig, watchConfig, enabledOrgs, bindOwner } from './lib/config.js';
+import { WsClient, createDeduper } from './lib/ws.js';
+import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
+import { getMediaUrl, downloadMedia } from './cli/as.js';
+import { getForOrg, postForOrg, apiPath } from './lib/client.js';
+import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
+import { loadOrgSession, saveOrgSession } from './lib/session.js';
+
+const LOG_PREFIX = '[comm-bridge]';
+const CHANNEL = 'coco-workspace';
+
+// Hardcoded message defaults (aligned with zylos-lark). `config.message.*`
+// may override either; if absent, these apply. Operator-edited config.json
+// files don't need to mention `message` at all.
+const DEFAULT_CONTEXT_MESSAGES = 5;
+const DEFAULT_DEDUP_TTL_MS     = 5 * 60 * 1000;   // 300_000
+
+// Hardcoded WS operational defaults. `config.server.{reconnect_max_delay,
+// heartbeat_interval}` may override either; if absent, these apply.
+const DEFAULT_WS_RECONNECT_MAX_MS = 30 * 1000;    // 30_000
+const DEFAULT_WS_HEARTBEAT_MS     = 30 * 1000;    // 30_000
+
+const C4_RECEIVE = path.join(
+  process.env.HOME || '',
+  'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js',
+);
+
+function log(...a)  { console.log(LOG_PREFIX, ...a); }
+function warn(...a) { console.warn(LOG_PREFIX, ...a); }
+
+let config = loadConfig();
+const dedupe = createDeduper(config.message?.dedup_ttl ?? DEFAULT_DEDUP_TTL_MS);
+
+// org_id → cached Conversation row (response_mode no longer used for filter
+// but other fields like `type` are still useful)
+const conversationCache = new Map();
+
+// =============================================================================
+// REST helpers
+// =============================================================================
+
+async function fetchConversation(orgId, conversationId) {
+  if (conversationCache.has(conversationId)) return conversationCache.get(conversationId);
+  try {
+    const conv = await getForOrg(orgId, apiPath(`/conversations/${conversationId}`));
+    conversationCache.set(conversationId, conv);
+    return conv;
+  } catch (e) {
+    warn(`fetchConversation ${conversationId} failed:`, e.message);
+    return null;
+  }
+}
+
+async function fetchRecentMessages(orgId, conversationId, beforeSeq, limit) {
+  try {
+    const r = await getForOrg(orgId, apiPath(`/conversations/${conversationId}/messages`), {
+      before_seq: beforeSeq,
+      limit:      limit || 10,
+    });
+    return Array.isArray(r) ? r : (r?.data || r?.messages || r?.items || []);
+  } catch (e) {
+    warn('fetchRecentMessages failed:', e.message);
+    return [];
+  }
+}
+
+async function fetchMessageDetail(orgId, conversationId, messageId) {
+  try {
+    return await getForOrg(orgId, apiPath(`/conversations/${conversationId}/messages/${messageId}`));
+  } catch (e) {
+    warn(`fetchMessageDetail conv=${conversationId} msg=${messageId} failed:`, e.message);
+    return null;
+  }
+}
+
+/**
+ * Send a brief refusal back to the sender when shouldHandleMessage drops a
+ * message with a userNotice set. Posted as a reply (parent_id = original) so
+ * the sender sees it in-thread on clients that render reply chains. Errors
+ * are logged and swallowed — we never want a reject-notice failure to mask
+ * the underlying drop decision.
+ */
+async function sendRejectNotice(orgConfig, msg, text) {
+  try {
+    await postForOrg(
+      orgConfig.org_id,
+      apiPath(`/conversations/${msg.conversation_id}/messages`),
+      {
+        client_msg_id: newClientMsgId(),
+        type:          'AGENT_TEXT',
+        content: {
+          content_type: 'text',
+          body:         { text },
+          attachments:  [],
+        },
+        // cws-core's sendMessageRequest expects parent_id as a string. The
+        // notification frame may carry numeric `id` (e.g. real-time WS) or a
+        // string `id` (e.g. sync catch-up); normalize to avoid HTTP 422
+        // "expected string, location body.parent_id".
+        parent_id: String(msg.id),
+      },
+    );
+  } catch (e) {
+    warn(`[${orgConfig.slug}] reject notice for msg=${msg.id} failed: ${e.message}`);
+  }
+}
+
+function forwardToC4(endpoint, body) {
+  // c4-receive.js only accepts named flags (--channel / --endpoint / --content
+  // / --json); the old positional invocation form
+  // `node c4-receive.js <channel> <endpoint> <body>` now rejects with
+  // "Unexpected argument: <channel>". execFile passes the array as argv
+  // directly, so no shell-escape is needed for content.
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [
+        C4_RECEIVE,
+        '--channel', CHANNEL,
+        '--endpoint', endpoint,
+        '--json',
+        '--content', body,
+      ],
+      { timeout: 30000 },
+      (err, stdout, stderr) => {
+        if (err) reject(new Error(stderr || err.message));
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
+// =============================================================================
+// Policy filter — lark-style, applied per inbound message
+// =============================================================================
+
+function extractMentions(msg) {
+  const raw =
+       msg.mentions
+    || msg.mention_user_ids
+    || msg.content?.mention_user_ids
+    || msg.message?.mentions
+    || [];
+  // Normalize to a list of ID strings. cws-comm shape is {entity_id, ...};
+  // raw string IDs and {id} variants are supported as fallbacks.
+  return raw.map(m =>
+    typeof m === 'string'
+      ? m
+      : String(m?.entity_id || m?.mentioned_id || m?.id || '')
+  ).filter(Boolean);
+}
+
+// Detect @<selfName> in the message text body. cws-core's get-message returns
+// raw text with literal "@Name" rather than a structured mentions[] array, so
+// without this fallback the mode=mention gate and the owner-mention bypass
+// would never trigger in practice.
+function isSelfNameMentionedInText(msg, selfName) {
+  if (!selfName) return false;
+  const text =
+       msg.content?.body?.text
+    || (typeof msg.content === 'string' ? msg.content : '')
+    || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+    || msg.content_text
+    || '';
+  if (!text) return false;
+  const escaped = selfName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // `(?![\w-])` keeps "@Zylos" from matching "@Zylos-GavinBox" or "@ZylosX".
+  return new RegExp('@' + escaped + '(?![\\w-])', 'i').test(text);
+}
+
+// User-facing notice strings shown when a message is rejected. Mirrors the
+// English copy in zylos-feishu/src/index.js — group rejections only fire when
+// the sender actually @-mentioned us, so a non-@-ed group message that hits a
+// policy gate stays silent (no userNotice set). DM rejections always notify.
+const NOTICE_DM_NOT_ALLOWED =
+  "Sorry, I'm not available for private messages. Please ask my owner to grant you access.";
+const NOTICE_GROUP_DISABLED =
+  "Sorry, group chat is currently disabled.";
+const NOTICE_GROUP_NOT_ALLOWED =
+  "Sorry, I'm not available in this group.";
+const NOTICE_GROUP_SENDER_NOT_ALLOWED =
+  "Sorry, you don't have permission to interact with me in this group.";
+
+/**
+ * Apply DM / group access policy for a specific org. Returns:
+ *   { handle: true, reason }   — message passes, agent should respond
+ *   { handle: false, reason }  — message dropped (logged with reason)
+ *   { handle: true, bindOwnerHint: {memberId, displayName} }
+ *                              — pass + caller should auto-bind owner
+ *
+ * When a drop should be surfaced back to the sender as a polite refusal, the
+ * decision additionally carries a `userNotice` string (mirrors
+ * zylos-feishu replyToMessage / sendMessage rejection paths). Caller posts it
+ * via the cws-core messages API; sync-replay frames are expected to skip the
+ * notice to avoid spamming old conversations after a bug fix.
+ */
+function shouldHandleMessage(msg, conv, orgConfig) {
+  const selfMemberId = orgConfig.self?.member_id;
+
+  // Skip self-echo: agent's own messages within this org.
+  if (msg.sender_id && selfMemberId && msg.sender_id === selfMemberId) {
+    return { handle: false, reason: 'self-echo' };
+  }
+
+  const convType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
+  const access = orgConfig.access || {};
+  const senderId = msg.sender_id;
+  const senderName = msg.sender_display_name || msg.sender?.display_name || '';
+
+  if (convType === 'dm') {
+    const policy = access.dmPolicy || 'owner';
+    if (policy === 'open') return { handle: true, reason: 'dm:open' };
+    if (policy === 'allowlist') {
+      const list = (access.dmAllowFrom || []).map(String);
+      if (list.includes(String(senderId))) return { handle: true, reason: 'dm:allowlist' };
+      return {
+        handle: false,
+        reason: `dm:allowlist (sender ${senderId} not listed)`,
+        userNotice: NOTICE_DM_NOT_ALLOWED,
+      };
+    }
+    // policy === 'owner' — bound state is derived from owner.member_id
+    const owner = orgConfig.owner || {};
+    if (!owner.member_id) {
+      // First DM ever for this org → auto-bind sender as owner and accept.
+      return {
+        handle: true,
+        reason: 'dm:owner (auto-bind)',
+        bindOwnerHint: { memberId: senderId, displayName: senderName },
+      };
+    }
+    if (String(owner.member_id) === String(senderId)) {
+      return { handle: true, reason: 'dm:owner' };
+    }
+    return {
+      handle: false,
+      reason: `dm:owner (sender ${senderId} != bound owner ${owner.member_id})`,
+      userNotice: NOTICE_DM_NOT_ALLOWED,
+    };
+  }
+
+  // group / thread — compute mentioned/owner once up front so all gates and
+  // their userNotice decisions share the same view.
+  const policy = access.groupPolicy || 'allowlist';
+  const convId = msg.conversation_id;
+  const groupCfg = (access.groups || {})[convId];
+
+  // Mention detection has two paths: structured mentions[] from cws-comm, and
+  // a text-based "@<selfName>" fallback for messages where the server returns
+  // the raw text without a structured mentions array.
+  const mentions = extractMentions(msg).map(String);
+  const mentionedById = !!selfMemberId && mentions.includes(String(selfMemberId));
+  const mentionedByText = isSelfNameMentionedInText(msg, orgConfig.self?.name);
+  const mentioned = mentionedById || mentionedByText;
+  const ownerMemberId = orgConfig.owner?.member_id;
+  const senderIsOwner = !!ownerMemberId && String(senderId) === String(ownerMemberId);
+
+  if (policy === 'disabled') {
+    return {
+      handle: false,
+      reason: 'group:disabled',
+      userNotice: mentioned ? NOTICE_GROUP_DISABLED : undefined,
+    };
+  }
+
+  // Owner @-mention bypasses the allowlist gate (mirrors zylos-feishu 1242).
+  if (policy === 'allowlist' && !groupCfg && !(senderIsOwner && mentioned)) {
+    return {
+      handle: false,
+      reason: `group:allowlist (${convId} not in groups{})`,
+      userNotice: mentioned ? NOTICE_GROUP_NOT_ALLOWED : undefined,
+    };
+  }
+
+  // mode: per-group `mode` if present, else default to 'mention'
+  const mode = groupCfg?.mode || 'mention';
+  if (mode === 'mention' && !mentioned) {
+    // No userNotice — this is normal background traffic, replying would spam.
+    return { handle: false, reason: 'group:mention (not @-ed)' };
+  }
+  // mode === 'smart' bypasses the mention requirement
+
+  // allowFrom: ['*'] / [] = all members allowed; otherwise restrict.
+  // Owner is exempt from per-group allowFrom — matches zylos-feishu.
+  const allowFrom = groupCfg?.allowFrom;
+  if (allowFrom && allowFrom.length > 0 && !allowFrom.includes('*') && !senderIsOwner) {
+    if (!allowFrom.map(String).includes(String(senderId))) {
+      return {
+        handle: false,
+        reason: `group:allowFrom (sender ${senderId} not allowed in ${convId})`,
+        userNotice: mentioned ? NOTICE_GROUP_SENDER_NOT_ALLOWED : undefined,
+      };
+    }
+  }
+
+  const ownerTag = (!groupCfg && senderIsOwner && mentioned) ? ' [owner-mention-bypass]' : '';
+  return {
+    handle: true,
+    reason: `group:${policy}/${mode}${ownerTag}`,
+    mode,
+    mentioned,
+    groupCfg,
+  };
+}
+
+// =============================================================================
+// Per-org inbound message handler
+// =============================================================================
+
+function makeOrgMessageHandler(orgConfig, sessionRef) {
+  return async function handleIncomingMessage(payload) {
+    const notification = payload?.payload || payload;
+    const notifId = notification?.id;
+    const notifConv = notification?.conversation_id;
+    const notifSender = notification?.sender_id;
+    log(`[ws] [${orgConfig.slug}] message frame: id=${notifId || '<missing>'} conv=${notifConv || '<missing>'} sender=${notifSender || '?'}`);
+    if (!notifId || !notifConv) return;
+    if (dedupe(notifId)) {
+      log(`[ws] [${orgConfig.slug}] msg=${notifId} duplicate, skipping`);
+      return;
+    }
+
+    const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
+    const msg = { ...notification, ...(detail || {}) };
+    // get-message envelope nests scalar message fields under `message`; for
+    // real-time WS frames the notification already carries sender_id/seq/type
+    // at the top level, but sync catch-up frames don't. Hoist them so
+    // downstream consumers (shouldHandleMessage, last_seq update, msgType
+    // detection) see a uniform shape regardless of arrival path.
+    if (!msg.sender_id   && msg.message?.sender_id)   msg.sender_id   = msg.message.sender_id;
+    if (msg.seq == null  && msg.message?.seq != null) msg.seq         = msg.message.seq;
+    if (!msg.type        && msg.message?.type)        msg.type        = msg.message.type;
+    if (!msg.thread_id   && msg.message?.thread_id)   msg.thread_id   = msg.message.thread_id;
+    if (!msg.parent_message_id && msg.message?.parent_message_id) {
+      msg.parent_message_id = msg.message.parent_message_id;
+    }
+
+    const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);
+    if (conv) conv.id = conv.id || msg.conversation_id;
+
+    const decision = shouldHandleMessage(msg, conv || {}, orgConfig);
+    if (!decision.handle) {
+      log(`drop [${orgConfig.slug}] msg=${msg.id}: ${decision.reason}`);
+      // Send a polite refusal only when it actually helps the sender. Two
+      // skips:
+      //   - sync-replay frames re-process historic messages; a notice for
+      //     each would spam stale apologies after a bug fix.
+      //   - other agents (sender_type=AGENT) can DM us in normal workflows
+      //     (e.g. cws-comm agent-to-agent). They don't read English copy
+      //     and could auto-respond, producing reject-notice ping-pong.
+      const senderType = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
+      const isSyncReplay = notification._via === 'sync';
+      const isAgentSender = senderType === 'AGENT';
+      if (decision.userNotice && !isSyncReplay && !isAgentSender) {
+        sendRejectNotice(orgConfig, msg, decision.userNotice).catch(() => {});
+      }
+      return;
+    }
+
+    if (decision.bindOwnerHint) {
+      const { memberId, displayName } = decision.bindOwnerHint;
+      log(`bind owner [${orgConfig.slug}] member_id=${memberId} name="${displayName}"`);
+      bindOwner(orgConfig.slug, memberId, displayName);
+      // Mutate the captured orgConfig so subsequent decisions see the new owner.
+      orgConfig.owner = { member_id: memberId, name: displayName || '' };
+    }
+
+    if (msg.seq && msg.seq > (sessionRef.last_seq || 0)) {
+      sessionRef.last_seq = msg.seq;
+      saveOrgSession(orgConfig.slug, { org_id: orgConfig.org_id, last_seq: msg.seq });
+    }
+
+    let recent = [];
+    const convType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
+    if (convType !== 'dm') {
+      const ctx = await fetchRecentMessages(
+        orgConfig.org_id,
+        msg.conversation_id,
+        msg.seq,
+        config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES,
+      );
+      recent = ctx.map(m => ({
+        senderName: m.sender_display_name || m.senderName || m.sender_id,
+        // list-messages returns a flat string in `m.content` (the canonical
+        // top-level fallback_text); get-message instead returns a structured
+        // object at `m.content.body.text`. Cover both for forward-compat.
+        content:    m.content?.body?.text
+                 || (typeof m.content === 'string' ? m.content : '')
+                 || m.content_text
+                 || '',
+      }));
+    }
+
+    // After `msg = { ...notification, ...detail }`, where detail is the
+    // get-message response unwrapped from D8 envelope:
+    //   msg.message  → { id, content: <string>, type, sender_id, seq, ... }
+    //   msg.content  → { content_type, body: { text, ... }, attachments: [] }
+    // Older bridge code assumed msg.content was a flat object with `.text`
+    // and `.media_id`, which silently produced empty content under the
+    // current cws-core schema.
+    const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
+    const text =
+        structured.body?.text
+     || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+     || (typeof msg.content === 'string' ? msg.content : '')
+     || '';
+
+    let mediaLocalPath;
+    const firstAttachment = Array.isArray(structured.attachments) ? structured.attachments[0] : null;
+    // attachment shape per cws-core: {artifact_id, file_name, content_type, size_bytes}
+    const mediaId = firstAttachment?.artifact_id || structured.media_id; // structured.media_id kept as legacy fallback
+    const mediaFileName = firstAttachment?.file_name || structured.filename;
+    if (mediaId) {
+      try {
+        const { url } = await getMediaUrl(mediaId, orgConfig.org_id);
+        if (url) mediaLocalPath = await downloadMedia(url, mediaFileName || mediaId);
+      } catch (e) {
+        warn('media fetch failed:', e.message);
+      }
+    }
+
+    const senderName = msg.sender_display_name || msg.sender?.display_name || msg.sender_id;
+    const msgType = (msg.type || msg.message?.type || '').toLowerCase();
+    const endpoint = formatEndpoint({
+      type: convType,
+      conversationId: msg.conversation_id,
+      threadConversationId: msg.thread_id || undefined,
+      parentMessageId: msg.thread_id ? msg.parent_message_id : undefined,
+    });
+    // smartHint mirrors zylos-feishu: only emitted when the group is in smart
+    // mode AND the bot was NOT @-mentioned. When the bot was directly @-ed we
+    // want a direct reply, not a "should I respond?" deliberation.
+    const smartHint = decision.mode === 'smart' && !decision.mentioned;
+    const groupName = decision.groupCfg?.name || conv?.name;
+
+    const body = formatInboundForC4(
+      { type: convType, id: msg.conversation_id, name: groupName },
+      { displayName: senderName },
+      {
+        content: text,
+        type: msgType === 'image' || msgType === 'agent_card' ? 'image' : (mediaId ? 'file' : 'text'),
+        mediaLocalPath,
+      },
+      recent,
+      { groupName, smartHint },
+    );
+
+    try {
+      await forwardToC4(endpoint, body);
+      log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}`);
+    } catch (e) {
+      warn('c4-receive failed:', e.message);
+    }
+  };
+}
+
+// =============================================================================
+// Per-org WS frame dispatch
+// =============================================================================
+
+const _frameTypeCounts = Object.create(null);
+const WS_METRIC_INTERVAL_MS = 5 * 60 * 1000;
+let _frameMetricTimer = null;
+
+function recordFrameType(slug, type) {
+  const k = `${slug}/${type || '(missing-type)'}`;
+  _frameTypeCounts[k] = (_frameTypeCounts[k] || 0) + 1;
+}
+
+function dumpFrameMetrics() {
+  const entries = Object.entries(_frameTypeCounts);
+  if (entries.length === 0) {
+    log('ws frame metric: no frames received in this window');
+    return;
+  }
+  entries.sort((a, b) => b[1] - a[1]);
+  log(`ws frame metric (cumulative since boot): ${entries.map(([k, n]) => `${k}=${n}`).join(' ')}`);
+}
+
+function startFrameMetricTimer() {
+  if (_frameMetricTimer) return;
+  _frameMetricTimer = setInterval(dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
+  _frameMetricTimer.unref?.();
+}
+
+function makeOrgFrameDispatcher(orgConfig, onMessage) {
+  return function onFrame(frame) {
+    const type = frame.type;
+    recordFrameType(orgConfig.slug, type);
+    switch (type) {
+      case 'message':
+        onMessage(frame).catch(e => warn(`[${orgConfig.slug}] handleIncomingMessage:`, e.message));
+        break;
+      case 'message_ack':
+        log(`[${orgConfig.slug}] message_ack seq=${frame.payload?.seq} msg=${frame.payload?.message_id}`);
+        break;
+      case 'system':
+        log(`[${orgConfig.slug}] system event=${frame.payload?.event || '<unknown>'} conv=${frame.payload?.conversation_id || '<unknown>'}`);
+        break;
+      case 'error':
+        warn(`[${orgConfig.slug}] server error frame:`, JSON.stringify(frame.payload || {}));
+        break;
+      case 'typing':
+      case 'presence':
+      case 'read_receipt':
+      case 'read_state_update':
+        break;
+      default:
+        log(`[${orgConfig.slug}] unknown frame type:`, type);
+    }
+  };
+}
+
+// =============================================================================
+// Disconnect catch-up — pull missed events via POST /api/v1/sync
+// =============================================================================
+
+// Cap a single catch-up sweep to avoid pulling unbounded backlog after a
+// very long outage. If there are more than this many events to catch up,
+// the rest will be pulled on the next reconnect (or the operator can
+// manually invoke `comm.sync` from the CLI).
+const SYNC_PAGE_SIZE  = 100;
+const SYNC_MAX_EVENTS = 2000;
+
+// Per-org guard so a concurrent reconnect doesn't trigger overlapping syncs.
+const _syncInFlight = new Set();
+
+async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
+  if (!sessionRef.last_seq) return;  // first-ever connect → nothing to catch up
+  if (_syncInFlight.has(orgConfig.slug)) {
+    log(`[${orgConfig.slug}] sync already in flight, skipping`);
+    return;
+  }
+  _syncInFlight.add(orgConfig.slug);
+  try {
+    const startSeq = sessionRef.last_seq;
+    let sinceSeq = startSeq;
+    let totalSynced = 0;
+    let hasMore = true;
+
+    while (hasMore && totalSynced < SYNC_MAX_EVENTS) {
+      const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
+        since_seq: sinceSeq,
+        device_id: config.agent?.device_id || '',
+        limit:     SYNC_PAGE_SIZE,
+      });
+      const events = Array.isArray(res?.events) ? res.events : [];
+      hasMore = res?.has_more === true;
+      if (events.length === 0) break;
+
+      for (const ev of events) {
+        if (!ev?.message_id || !ev.conversation_id) continue;
+        await onMessage({
+          id:              String(ev.message_id),
+          conversation_id: ev.conversation_id,
+          seq:             ev.seq,
+          // mark synthetic so it's clear in logs which path produced it
+          _via:            'sync',
+        });
+        if (typeof ev.seq === 'number' && ev.seq > sinceSeq) sinceSeq = ev.seq;
+      }
+      totalSynced += events.length;
+    }
+
+    if (totalSynced > 0) {
+      log(`[${orgConfig.slug}] sync caught up ${totalSynced} event(s) since seq=${startSeq}` +
+          (hasMore && totalSynced >= SYNC_MAX_EVENTS ? ` (hit per-sweep cap, more on next reconnect)` : ''));
+    }
+  } catch (err) {
+    warn(`[${orgConfig.slug}] sync failed: ${err.message} — will retry on next reconnect`);
+  } finally {
+    _syncInFlight.delete(orgConfig.slug);
+  }
+}
+
+// =============================================================================
+// WS pool — one connection per enabled org
+// =============================================================================
+
+const wsClients = [];
+let liveOrgCount = 0;
+
+// Live per-org config snapshots. `makeOrgMessageHandler` captures the
+// orgConfig at boot, so shouldHandleMessage / sendRejectNotice all read
+// through this same object. Hot-reload mutates it in place (see the
+// watchConfig callback at the bottom) so policy edits like adding a group to
+// `access.groups` take effect without a service restart.
+const activeOrgConfigs = new Map(); // slug → orgConfig (mutable)
+
+async function bootstrapOrgToken(orgConfig) {
+  // Mint a JWT eagerly so token.exchange's member_id write-back lands before
+  // the first WS open (and thus before the first inbound message hits the
+  // self-echo / @-mention filter). Errors here are non-fatal — the WS
+  // urlProvider will retry through its own backoff loop.
+  log(`[bootstrap] org=${orgConfig.slug} (${orgConfig.org_id}) acquiring JWT…`);
+  try {
+    await getAccessToken(orgConfig.org_id);
+    log(`[bootstrap] org=${orgConfig.slug} JWT ready`);
+  } catch (err) {
+    warn(`[bootstrap] org=${orgConfig.slug} JWT acquire failed: ${err.message} — WS will retry`);
+  }
+}
+
+function startOrgWs(orgConfig, wsBaseUrl) {
+  const session = loadOrgSession(orgConfig.slug) || {};
+  const sessionRef = { last_seq: session.last_seq || 0 };
+  if (sessionRef.last_seq) {
+    log(`[${orgConfig.slug}] warm-restart: lastSeq=${sessionRef.last_seq}`);
+  }
+
+  const onMessage = makeOrgMessageHandler(orgConfig, sessionRef);
+  const onFrame = makeOrgFrameDispatcher(orgConfig, onMessage);
+
+  const ws = new WsClient({
+    urlProvider: async () => {
+      log(`[ticket] org=${orgConfig.slug} requesting ws-ticket`);
+      const ticket = await getWsTicket(orgConfig.org_id);
+      log(`[ticket] org=${orgConfig.slug} got ws-ticket, connecting…`);
+      return `${wsBaseUrl}?ticket=${encodeURIComponent(ticket)}`;
+    },
+    deviceId:            config.agent?.device_id,
+    clientVersion:       config.agent?.app_version,
+    reconnectMaxMs:      config.server?.reconnect_max_delay ?? DEFAULT_WS_RECONNECT_MAX_MS,
+    heartbeatIntervalMs: config.server?.heartbeat_interval  ?? DEFAULT_WS_HEARTBEAT_MS,
+
+    onOpen: () => {
+      log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
+      // After WS open, pull anything missed since the last persisted seq.
+      // No-op on first-ever connect (last_seq=0). Errors are caught inside
+      // syncMissedEvents — they don't tear down the connection.
+      syncMissedEvents(orgConfig, sessionRef, onMessage);
+    },
+
+    onMessage: onFrame,
+
+    onClose: (code, reason, willReconnect) => {
+      log(`[${orgConfig.slug}] closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
+      if (code === 4003) {
+        // Session expired: drop the cached JWT/ticket so urlProvider mints a
+        // fresh one on the next connect. Keep `last_seq` — the conversation
+        // sequence is independent of the WS session, and we need it so the
+        // post-reconnect sync sweep can catch up.
+        log(`[${orgConfig.slug}] session expired; invalidating token cache (last_seq preserved for sync)`);
+        invalidateToken(orgConfig.org_id);
+      }
+    },
+
+    onFatal: (code, reason) => {
+      console.error(LOG_PREFIX, `[${orgConfig.slug}] FATAL close code=${code} reason="${reason || ''}" — stopping this org`);
+      if (code === 4002) console.error(LOG_PREFIX, `[${orgConfig.slug}] → auth failed; check api_key / org_id`);
+      if (code === 4005) console.error(LOG_PREFIX, `[${orgConfig.slug}] → workspace suspended`);
+      if (code === 4006) console.error(LOG_PREFIX, `[${orgConfig.slug}] → duplicate connection`);
+      liveOrgCount -= 1;
+      if (liveOrgCount <= 0) {
+        console.error(LOG_PREFIX, 'all orgs terminated — exiting');
+        process.exit(1);
+      }
+    },
+  });
+
+  wsClients.push({ slug: orgConfig.slug, ws });
+  activeOrgConfigs.set(orgConfig.slug, orgConfig);
+  liveOrgCount += 1;
+  ws.start();
+  log(`[${orgConfig.slug}] started (org=${orgConfig.org_id})`);
+}
+
+// =============================================================================
+// Main
+// =============================================================================
+
+if (!config.enabled) {
+  log('disabled in config, exiting');
+  process.exit(0);
+}
+
+const wsUrl = process.env.COCO_WS_URL || config.server?.ws_url;
+if (!wsUrl) {
+  console.error(LOG_PREFIX, 'COCO_WS_URL / config.server.ws_url not set');
+  process.exit(1);
+}
+const wsBaseUrl = wsUrl.replace(/\?.*$/, '');
+
+if (!config.agent?.api_key) {
+  warn('no config.agent.api_key — token exchange will fail for every org');
+}
+
+const orgs = enabledOrgs();
+if (orgs.length === 0) {
+  warn('no enabled orgs in config.orgs — add at least one org block and restart.');
+  warn('See ~/zylos/components/coco-workspace/config.json (post-install / post-upgrade printed the format).');
+  // Stay alive so PM2 doesn't crash-loop the service; operator just needs to
+  // edit config.json and restart.
+  setInterval(() => {}, 1 << 30).unref?.();
+} else {
+  log(`booting WS pool: ${orgs.length} org(s) enabled`);
+  // Pre-mint each org's JWT in parallel so member_id write-back happens
+  // before the WS handler hits the first message. Each WS still has its own
+  // urlProvider retry loop, so a failed bootstrap doesn't prevent startup.
+  (async () => {
+    await Promise.allSettled(orgs.map(bootstrapOrgToken));
+    for (const orgConfig of orgs) {
+      startOrgWs(orgConfig, wsBaseUrl);
+    }
+  })();
+}
+
+watchConfig((next) => {
+  config = next;
+  // Mutate captured per-org config objects in place so policy edits picked up
+  // by watchConfig (`access.dmPolicy`, `access.groupPolicy`, `access.groups`,
+  // `access.dmAllowFrom`) take effect without restarting the service. Owner /
+  // self / org_id / api_key are still considered structural — adding or
+  // removing an org, rotating the api_key, or rebinding ownership still
+  // requires a service restart (and is logged below).
+  let accessUpdates = 0;
+  for (const [slug, live] of activeOrgConfigs) {
+    const updated = next.orgs?.[slug];
+    if (updated?.access) {
+      live.access = updated.access;
+      accessUpdates += 1;
+    }
+  }
+  log(
+    `config reloaded — applied access updates to ${accessUpdates} org(s); ` +
+    `WS settings apply on next reconnect; new/removed orgs require service restart`,
+  );
+});
+
+process.on('SIGTERM', () => {
+  log('SIGTERM, stopping all orgs');
+  for (const c of wsClients) { try { c.ws.stop(); } catch {} }
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  log('SIGINT, stopping all orgs');
+  for (const c of wsClients) { try { c.ws.stop(); } catch {} }
+  process.exit(0);
+});
+
+startFrameMetricTimer();
