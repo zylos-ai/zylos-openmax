@@ -102,9 +102,9 @@ CLI 位置:`src/cli/core.js`
 
 | 状态 | 命令 | 说明 | 入参 | 真实端点 |
 | --- | --- | --- | --- | --- |
-| ✅ | `core.invitation_create` | 发邀请到指定 email,带可选 message;org_id 服务端从 JWT 推导 | `{roleId, email?, message?}` | `POST /api/v1/invitations` |
+| ✅ | `core.invitation_create` | 发邀请;`displayName` = 被邀请人在本 org 的成员显示名(**必填**,接受时落成 members.display_name);org_id 服务端从 JWT 推导 | `{roleId, displayName, email?, message?}` | `POST /api/v1/invitations` — body 含 `display_name`(必填,1–200 字符,留空 400) |
 | ✅ | `core.invitation_list` | 列本 org 的邀请(可按 status 过滤 pending/accepted/revoked/expired) | `{status?, page?, pageSize?, orderBy?}` | `GET /api/v1/invitations` |
-| ✅ | `core.invitation_accept` | 接受邀请加入新 org,响应里附带新 org scope 的 access_token | `{invitationId, token, displayName}` | `POST /api/v1/invitations/{id}/accept` — `token` 和 `displayName` 都必填(后者 = 接受方在新 org 里的显示名);CLI 同时接受 `display_name` 形式 |
+| ✅ | `core.invitation_accept` | 接受邀请加入新 org,响应里附带新 org scope 的 access_token | `{invitationId, token}` | `POST /api/v1/invitations/{id}/accept` — body 只剩 `token`;显示名来自创建邀请时设的 `display_name`,**accept 不再传 display_name**(传了会被 schema 拒) |
 | ✅ | `core.invitation_revoke` | 撤销待处理的邀请 | `{invitationId}` | `DELETE /api/v1/invitations/{id}` |
 
 ### 平台 Agent(机器人成员的生命周期)
@@ -141,9 +141,10 @@ node src/cli/tm.js task.create '{"projectId":"<p>","issueId":"<i>","title":"..."
 # 1. 查 roles,拿目标角色的 role_id
 node src/cli/core.js core.role_list '{"scope":"org"}'
 
-# 2. 发邀请(对方收到邀请链接)
+# 2. 发邀请(对方收到邀请链接);displayName = 被邀请人在本 org 的成员名,必填
 node src/cli/core.js core.invitation_create '{
   "email":"newbie@example.com",
+  "displayName":"New Member",
   "roleId":"<role-uuid>",
   "message":"Welcome to the team"
 }'
@@ -160,9 +161,9 @@ node src/cli/core.js core.invitation_revoke '{"invitationId":"<inv-uuid>"}'
 ```bash
 node src/cli/core.js core.invitation_accept '{
   "invitationId":"<inv-uuid>",
-  "token":"<from-invitation-link>",
-  "displayName":"My Display Name In This Org"
+  "token":"<from-invitation-link>"
 }'
+# → 显示名来自创建邀请时设的 display_name;accept 不再传 display_name
 # → 返回的 access_token 已 scoped 到新 org 的 member_id
 ```
 

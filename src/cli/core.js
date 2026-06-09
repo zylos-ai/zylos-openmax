@@ -140,12 +140,17 @@ const COMMANDS = {
   'core.role_list': () => get(apiPath('/roles'), { scope: params.scope }),
 
   // ✅ Invitations
-  // POST /api/v1/invitations — body {email?, role_id, message?}
+  // POST /api/v1/invitations — body {email?, display_name, role_id, message?}
   //   org_id is resolved server-side from the caller's JWT — do NOT send it.
+  //   `display_name` (the invitee's org-level member name) is REQUIRED since
+  //   cws-core #86 / MR !138 moved naming to create-time: the name is stored
+  //   on the invitation and becomes members.display_name on accept. Server
+  //   rejects a blank display_name with 400. Accept either camel or snake.
   'core.invitation_create': () => post(apiPath('/invitations'), {
-    email:   params.email,
-    role_id: params.roleId,
-    message: params.message,
+    email:        params.email,
+    display_name: params.displayName ?? params.display_name,
+    role_id:      params.roleId,
+    message:      params.message,
   }),
   // GET /api/v1/invitations — query {status?, page?, page_size?, order_by?}
   //   org_id is resolved server-side from the caller's JWT — do NOT send it.
@@ -157,12 +162,11 @@ const COMMANDS = {
     order_by:  params.orderBy,
   }),
   // POST /api/v1/invitations/{invitation_id}/accept
-  // Server requires BOTH `token` AND `display_name` since the contract
-  // tightened in Smoke 16 work. CLI forwards both; callers can pass
-  // either `displayName` (camel) or `display_name` (snake).
+  // Body is just `{token}` since cws-core #86 / MR !138: the invitee display
+  // name now comes from the invitation (set at create time), so accept no
+  // longer takes display_name — sending it would be schema-invalid.
   'core.invitation_accept': () => post(apiPath(`/invitations/${params.invitationId}/accept`), {
-    token:        params.token,
-    display_name: params.display_name ?? params.displayName,
+    token: params.token,
   }),
   // DELETE /api/v1/invitations/{invitation_id}
   'core.invitation_revoke': () => del(apiPath(`/invitations/${params.invitationId}`)),
@@ -201,9 +205,9 @@ Roles
   core.role_list           {scope?}
 
 Invitations
-  core.invitation_create   {roleId, email?, message?}
+  core.invitation_create   {roleId, displayName, email?, message?}   # displayName REQUIRED (invitee's org member name); accepts display_name
   core.invitation_list     {status?, page?, pageSize?, orderBy?}    # pageSize legacy alias: limit
-  core.invitation_accept   {invitationId, token, displayName (or 'display_name')}
+  core.invitation_accept   {invitationId, token}                    # no display_name — name comes from the invitation
   core.invitation_revoke   {invitationId}
 
 Environment:
