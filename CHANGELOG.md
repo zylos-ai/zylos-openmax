@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     complex-task flow's step 2 now requires confirming **project + KB** with the
     user before orchestration/execution — both enforcing *confirm project/KB →
     register Issue→Task → execute* (no execute-then-backfill).
+  - **Executor-bot selection must be user-confirmed**: the bot must NOT
+    auto-assign the executing agent. It **recommends** based on agent
+    descriptions (with rationale) but the **task initiator confirms/chooses**
+    which bot runs it (COCO-self only as a confirmed fallback). Updated the
+    trigger note, simple-flow step 5, complex-flow step 5 (assignee chosen at
+    blueprint-approval/instantiation), guardrail rule 2, +1 common-errors row.
 
 ## [1.0.4] - 2026-06-09
 
