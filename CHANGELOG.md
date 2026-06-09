@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Quoted image/file messages now reach the agent — with content, not just a
+  label.** A reply that quotes an image/file with no caption produced empty
+  quoted text, so the whole `<replying-to>` was dropped (the agent couldn't even
+  tell an image was quoted). `comm-bridge.js` now (1) labels the quoted media as
+  `[image]` / `[file: <name>]`, and (2) downloads the quoted message's
+  attachment and appends `---- <kind>: <path>` to the quoted text, so the agent
+  can actually read the referenced media — not merely know it exists
+  (`src/comm-bridge.js`).
+
 ## [1.0.3] - 2026-06-09
 
 ### Added

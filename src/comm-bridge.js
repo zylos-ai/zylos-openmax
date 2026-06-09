@@ -513,11 +513,33 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       const q = await fetchMessageDetail(orgConfig.org_id, msg.conversation_id, quotedMsgId);
       if (q) {
         const qStructured = (q.content && typeof q.content === 'object') ? q.content : {};
-        const qText =
+        let qText =
              qStructured.body?.text
           || (typeof q.message?.content === 'string' ? q.message.content : '')
           || q.message?.fallback_text
           || '';
+        // Quoted media: a quoted image/file with no caption yields empty text,
+        // which would drop the whole quote. Label it ([image]/[file: name]) and
+        // download the referenced attachment, appending `---- <kind>: <path>` so
+        // the agent can actually READ the quoted media (not just know it exists).
+        const qType = (q.message?.type || '').toLowerCase();
+        const qIsImage = qType === 'image' || qType === 'agent_card';
+        const qAtt = Array.isArray(qStructured.attachments) ? qStructured.attachments[0] : null;
+        const qMediaId = qAtt?.artifact_id || qStructured.media_id;
+        if (!qText && (qIsImage || qMediaId)) {
+          qText = qIsImage ? '[image]' : `[file${qAtt?.file_name ? ': ' + qAtt.file_name : ''}]`;
+        }
+        if (qMediaId) {
+          try {
+            const { url } = await getMediaUrl(qMediaId, orgConfig.org_id);
+            if (url) {
+              const qPath = await downloadMedia(url, qAtt?.file_name || qMediaId);
+              if (qPath) qText += ` ---- ${qIsImage ? 'image' : 'file'}: ${qPath}`;
+            }
+          } catch (e) {
+            warn('quoted media fetch failed:', e.message);
+          }
+        }
         const qSenderId = q.message?.sender_id;
         const qSender =
              q.message?.sender_display_name
