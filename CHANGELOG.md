@@ -13,15 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Acceptance loop (issue 789741f8)**: the API already supports it
     (`issue.set_acceptance {accepted, source:im|explicit, rejectionReason}` →
     accepted→archived / rejected→rework), but the behavior wasn't encoded. SKILL
-    now mandates: after delivery the bot **must request human acceptance and must
-    NOT self-accept/self-archive**; on 验收通过 → `set_acceptance(accepted:true)`
-    → archived; on 退回 → `set_acceptance(accepted:false, rejectionReason)` →
-    reopened → executing. Added as guardrail rule 6 + rewrote the "验收 & 状态收敛"
-    step in both simple/complex flows + two common-errors rows. "任务做完≠结束，
-    人验收通过才归档." Stale `pending_acceptance` wording corrected to the real
+    now mandates: after delivery the bot **must request acceptance from the human
+    who INITIATED the task** (the task initiator, identified via the issue's
+    `originConversationId` — NOT the bot itself, NOT the owner, NOT an arbitrary
+    user; a Worker relays via its Lead) **and must NOT self-accept/self-archive**;
+    on 验收通过 → `set_acceptance(accepted:true)` → archived; on 退回 →
+    `set_acceptance(accepted:false, rejectionReason)` → reopened → executing.
+    Added as guardrail rule 6 + rewrote the "验收 & 状态收敛" step in both
+    simple/complex flows + three common-errors rows. "任务做完≠结束，发起人验收通过才
+    归档." Stale `pending_acceptance` wording corrected to the real
     delivered→accepted→archived states.
-  - **Project/KB-first ordering (issue cbc24d82)**: simple-task flow now has an
-    explicit step 4 「登记 Issue→Task」 enforcing the order *confirm project/KB →
+  - **Project/KB-first ordering (issue cbc24d82) — BOTH simple AND complex
+    tasks**: simple-task flow gets an explicit step 4 「登记 Issue→Task」 and the
+    complex-task flow's step 2 now requires confirming **project + KB** with the
+    user before orchestration/execution — both enforcing *confirm project/KB →
     register Issue→Task → execute* (no execute-then-backfill).
 
 ## [1.0.4] - 2026-06-09
