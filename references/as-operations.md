@@ -59,7 +59,7 @@ CLI 位置:`src/cli/as.js`
 |---|---|---|
 | **聊天 / 会话里发图、发文件**(用户给 agent / agent 给用户) | **IM 上传** | `as.upload {filePath, conversationId, mediaType:"image"/"file"}` —— **必须带 conversationId** |
 | **归档资料到 KB**(项目交付物、研究笔记附件) | **KB 上传** | `kb.upload {kbId, filePath, parentId?}` 或 `as.upload {filePath, parentId?}` —— **不带 conversationId** |
-| Agent 出站发媒体消息(`scripts/send.js [MEDIA:image]/path`) | **IM 上传**(send.js 内部自动选)| 直接 `c4-send.js coco-workspace "[COCO DM]/<conv>" "[MEDIA:image]/path"` |
+| Agent 出站发媒体消息(`scripts/send.js [MEDIA:image]/path`) | **IM 上传**(send.js 内部自动选)| 直接 `c4-send.js coco-workspace "<conv>" "[MEDIA:image]/path"` |
 
 ### 服务端路径对照
 
@@ -210,7 +210,7 @@ node src/cli/as.js as.resolve '{"uris":["artifact://art_y","artifact://art_z"]}'
 ```bash
 # 通过 C4 出站:
 node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js \
-  coco-workspace '[COCO DM]/<conv-uuid>' '[MEDIA:image]/tmp/chart.png'
+  coco-workspace '<conv-uuid>' '[MEDIA:image]/tmp/chart.png'
 ```
 
 `scripts/send.js` 内部:

@@ -1,15 +1,30 @@
 /**
  * Message format helpers per DESIGN.md §3.4 and §3.5.
  *
- * Endpoint format (C4 routing key):
- *   [COCO DM]/<conversationId>
- *   [COCO GROUP]/<conversationId>|reply:<messageId>
- *   [COCO THREAD]/<conversationId>|thread:<threadConvId>|parent:<parentMsgId>
+ * Endpoint format (C4 routing key / `reply via` target):
+ *   <conversationId>
+ *   <conversationId>|reply:<messageId>
+ *   <conversationId>|thread:<threadConvId>|parent:<parentMsgId>
  *
- * Inbound C4 text format:
- *   [COCO DM]    <name> said: <content>
- *   [COCO GROUP] <name> said: [Group context - recent messages:]\n<ctx>\n\n[Current message:] <content>
- *   [COCO THREAD]<name> said: [Thread context:]\n<ctx>\n\n[Current message:] <content>
+ * The conversation type ([COCO DM]/[COCO GROUP]/[COCO THREAD]) is NOT part of
+ * the target: send.js routes purely off the conversation id plus the
+ * reply/thread/parent suffixes, so the type prefix was dead weight in the
+ * `reply via` string the agent has to copy. `parseEndpoint` still accepts the
+ * legacy `[COCO TYPE]/<id>...` form for backward compatibility (in-flight
+ * messages, older callers), but `formatEndpoint` now emits the minimal form.
+ *
+ * Inbound C4 text format (tag on its own line; the attributed utterance lives
+ * inside <current-message> for parity with other C4 channels):
+ *   [COCO DM]
+ *   <current-message>
+ *   <name> said: <content>
+ *   </current-message>
+ *
+ *   [COCO GROUP:<group>]
+ *   <group-context>...</group-context>
+ *   <current-message>
+ *   <name> said: <content>
+ *   </current-message>
  *   (with optional `---- file: <path>` or `---- image: <path>` suffix)
  */
 
@@ -28,16 +43,33 @@ export function newClientMsgId() {
 
 /**
  * Parse a C4 endpoint string into structured fields.
+ *
+ * Accepts two forms:
+ *   - minimal (current):  `<conversationId>[|reply:..][|thread:..][|parent:..]`
+ *   - legacy:             `[COCO TYPE]/<conversationId>[|...]`  (prefix stripped)
+ *
+ * The leading conversation id is whatever precedes the first `|`. The type
+ * prefix, if present, is informational only — routing is driven entirely by
+ * the conversation id and the reply/thread/parent suffixes.
+ *
  * @param {string} endpoint
  * @returns {{type:string, conversationId:string, replyTo?:string,
  *            threadConversationId?:string, parentMessageId?:string}}
  */
 export function parseEndpoint(endpoint) {
-  const m = /^\[COCO (DM|GROUP|THREAD)\]\/([^|]+)(.*)$/.exec(endpoint || '');
-  if (!m) throw new Error(`invalid endpoint: ${endpoint}`);
+  let rest = (endpoint || '').trim();
 
-  const result = { type: m[1].toLowerCase(), conversationId: m[2] };
-  for (const part of (m[3] || '').split('|').filter(Boolean)) {
+  // Strip the legacy `[COCO TYPE]/` prefix if present (back-compat).
+  let typeHint = null;
+  const legacy = /^\[COCO (DM|GROUP|THREAD)\]\/(.*)$/.exec(rest);
+  if (legacy) { typeHint = legacy[1].toLowerCase(); rest = legacy[2]; }
+
+  const segments = rest.split('|');
+  const conversationId = (segments.shift() || '').trim();
+  if (!conversationId) throw new Error(`invalid endpoint: ${endpoint}`);
+
+  const result = { conversationId };
+  for (const part of segments.filter(Boolean)) {
     const idx = part.indexOf(':');
     if (idx === -1) continue;
     const k = part.slice(0, idx);
@@ -46,18 +78,25 @@ export function parseEndpoint(endpoint) {
     else if (k === 'thread') result.threadConversationId = v;
     else if (k === 'parent') result.parentMessageId = v;
   }
+  // `type` is retained for callers that inspect it, but is not used for
+  // routing. Prefer the legacy hint; otherwise infer from the suffixes.
+  result.type = typeHint || (result.threadConversationId ? 'thread' : 'dm');
   return result;
 }
 
 /**
- * Build a C4 endpoint string from structured fields.
- * @param {{type:string, conversationId:string, replyTo?:string,
+ * Build a C4 endpoint string (the `reply via` target) from structured fields.
+ *
+ * Emits the minimal form — conversation id plus reply/thread/parent suffixes.
+ * The conversation type is intentionally omitted (see parseEndpoint): it was
+ * never consulted by the send path. `ep.type` is accepted but ignored.
+ *
+ * @param {{type?:string, conversationId:string, replyTo?:string,
  *          threadConversationId?:string, parentMessageId?:string}} ep
  */
 export function formatEndpoint(ep) {
-  const tag = TYPE_TAG[ep.type];
-  if (!tag) throw new Error(`unknown conversation type: ${ep.type}`);
-  let s = `${tag}/${ep.conversationId}`;
+  if (!ep?.conversationId) throw new Error('formatEndpoint: conversationId required');
+  let s = `${ep.conversationId}`;
   if (ep.replyTo)              s += `|reply:${ep.replyTo}`;
   if (ep.threadConversationId) s += `|thread:${ep.threadConversationId}`;
   if (ep.parentMessageId)      s += `|parent:${ep.parentMessageId}`;
@@ -133,7 +172,9 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
     ? `${baseTag.slice(0, -1)}:${escapeXml(groupName || conv?.name || 'unknown')}]`
     : baseTag;
 
-  const parts = [`${tag} ${safeName} said: `];
+  // Tag on its own line; the `<name> said: ...` attribution now lives inside
+  // the <current-message> block (semantic parity with other C4 channels).
+  const parts = [`${tag}\n`];
 
   if (threadContext && threadContext.length > 0) {
     const lines = threadContext.map(m => {
@@ -169,7 +210,7 @@ When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
     );
   }
 
-  parts.push(`<current-message>\n${safeContent}\n</current-message>`);
+  parts.push(`<current-message>\n${safeName} said: ${safeContent}\n</current-message>`);
 
   let line = parts.join('');
   if (current?.mediaLocalPath) {

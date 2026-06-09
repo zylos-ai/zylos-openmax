@@ -8,9 +8,11 @@
  *   node scripts/send.js '<endpoint>' '<message>'
  *
  * Endpoint forms (per docs/DESIGN.md §3.4; encoded by C4):
- *   [COCO DM]/<conversationId>
- *   [COCO GROUP]/<conversationId>|reply:<messageId>
- *   [COCO THREAD]/<conversationId>|thread:<threadConvId>|parent:<parentMsgId>
+ *   <conversationId>
+ *   <conversationId>|reply:<messageId>
+ *   <conversationId>|thread:<threadConvId>|parent:<parentMsgId>
+ * The legacy `[COCO TYPE]/<conversationId>...` form is still accepted by
+ * parseEndpoint for backward compatibility.
  *
  * Message body forms:
  *   plain text         → content=[{type:"text", body:<text>}]
@@ -49,9 +51,10 @@ function usage() {
   console.error('Usage: node scripts/send.js <endpoint> <message>');
   console.error('');
   console.error('Endpoint format:');
-  console.error('  [COCO DM]/<conversationId>');
-  console.error('  [COCO GROUP]/<conversationId>|reply:<messageId>');
-  console.error('  [COCO THREAD]/<conversationId>|thread:<threadId>|parent:<parentMsgId>');
+  console.error('  <conversationId>');
+  console.error('  <conversationId>|reply:<messageId>');
+  console.error('  <conversationId>|thread:<threadId>|parent:<parentMsgId>');
+  console.error('  (legacy [COCO TYPE]/<conversationId>... is still accepted)');
   console.error('');
   console.error('Message: plain text, markdown (auto-detected), or [MEDIA:image|file]/abs/path');
 }

@@ -60,9 +60,33 @@ const dedupe = createDeduper(config.message?.dedup_ttl ?? DEFAULT_DEDUP_TTL_MS);
 // but other fields like `type` are still useful)
 const conversationCache = new Map();
 
+// `${orgId}:${memberId}` → resolved display name. Member display names are
+// stable for the life of the process; caching avoids a /members/{id} lookup
+// per inbound message (and per context line) for the same sender.
+const memberNameCache = new Map();
+
 // =============================================================================
 // REST helpers
 // =============================================================================
+
+/**
+ * Resolve a member's display name from cws-core, cached per process.
+ * Returns null when the member can't be resolved (caller falls back to the id).
+ */
+async function fetchMemberName(orgId, memberId) {
+  if (!memberId) return null;
+  const key = `${orgId}:${memberId}`;
+  if (memberNameCache.has(key)) return memberNameCache.get(key);
+  try {
+    const m = await getForOrg(orgId, apiPath(`/members/${memberId}`));
+    const name = m?.display_name || m?.username || null;
+    if (name) memberNameCache.set(key, name);
+    return name;
+  } catch (e) {
+    warn(`fetchMemberName ${memberId} failed:`, e.message);
+    return null;
+  }
+}
 
 async function fetchConversation(orgId, conversationId) {
   if (conversationCache.has(conversationId)) return conversationCache.get(conversationId);
@@ -404,8 +428,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         msg.seq,
         config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES,
       );
-      recent = ctx.map(m => ({
-        senderName: m.sender_display_name || m.senderName || m.sender_id,
+      recent = await Promise.all(ctx.map(async m => ({
+        // Resolve the sender's display name; fall back to the raw id only when
+        // cws-core gives us neither an inline name nor a resolvable member.
+        senderName: m.sender_display_name
+                 || m.senderName
+                 || (await fetchMemberName(orgConfig.org_id, m.sender_id))
+                 || m.sender_id,
         // list-messages returns a flat string in `m.content` (the canonical
         // top-level fallback_text); get-message instead returns a structured
         // object at `m.content.body.text`. Cover both for forward-compat.
@@ -413,7 +442,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
                  || (typeof m.content === 'string' ? m.content : '')
                  || m.content_text
                  || '',
-      }));
+      })));
     }
 
     // After `msg = { ...notification, ...detail }`, where detail is the
@@ -444,7 +473,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       }
     }
 
-    const senderName = msg.sender_display_name || msg.sender?.display_name || msg.sender_id;
+    // Prefer an inline display name from the message; otherwise resolve the
+    // sender member via cws-core (cached). Fall back to the raw id only when
+    // no name is available — keeps the C4 envelope legible (issue #2).
+    const senderName = msg.sender_display_name
+                    || msg.sender?.display_name
+                    || (await fetchMemberName(orgConfig.org_id, msg.sender_id))
+                    || msg.sender_id;
     const msgType = (msg.type || msg.message?.type || '').toLowerCase();
     const endpoint = formatEndpoint({
       type: convType,
