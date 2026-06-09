@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-06-09
+
 ### Added
 - **`COCO_RPC_LOG_FILE` env var** — append every RPC request/response line to a
   file, independent of the stdout sink (`COCO_RPC_LOG`). Use case: in
