@@ -17,6 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moment of every issue/task status transition, (4) notify on every task
   completion, (5) auto-continue to the next task by priority after finishing
   one. Closes the agent-conformance issues (e9291b91, 15cd9249).
+- **Hardened the project/KB-selection + Issue→Task trigger rules** after a
+  smoke test showed a simple research task (gold-price analysis / connector
+  list) skipping project/KB selection. Changes: the 触发 section now lists two
+  non-skippable up-front actions for any 任务 — register Issue→Task, and confirm
+  project + KB — explicitly **not exempt for "simple" tasks**; simple-task flow
+  steps 2/3 make project/KB a mandatory question (禁止默默用默认); guardrail rule 1
+  names skipping Issue→Task registration as the #1 root cause of "task flow not
+  triggered"; guardrail rule 2 states simple research/analysis reports are NOT
+  exempt. Closes cbc24d82.
 
 ## [1.0.3] - 2026-06-09
 
