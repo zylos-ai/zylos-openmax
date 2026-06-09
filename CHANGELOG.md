@@ -19,6 +19,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Best-effort: disk errors are swallowed silently so RPCs never fail because
   the log file is unwritable.
 
+## [1.0.2] - 2026-06-09
+
+### Changed
+- **Invitation CLI aligned with the create-time display-name contract**
+  (cws-core #86). The invitee display name is now set when the invitation is
+  created (stored on the invitation, becomes `members.display_name` on accept)
+  rather than supplied at accept time:
+  - `core.invitation_create` now sends a **required** `display_name`
+    (accepts `displayName` or `display_name`; server rejects blank with 400).
+  - `core.invitation_accept` no longer sends `display_name` — the body is now
+    just `{token}` (sending `display_name` would be schema-invalid post-#86).
+  - Usage text and `references/core-operations.md` (command rows + flow
+    examples) updated to match.
+- **Improved the COCO inbound message envelope** delivered to the agent, for
+  parity with other C4 channels:
+  - Resolve the sender's display name (and group-context senders) via a cached
+    `GET /api/v1/members/{id}`, falling back to the raw member id only when no
+    name is available.
+  - Minimal `reply via` target: `<conversationId>[|reply:..][|thread:..]
+    [|parent:..]` — the `[COCO TYPE]/` prefix (never used for routing) is
+    dropped. `parseEndpoint` still accepts the legacy `[COCO TYPE]/...` form,
+    so in-flight messages remain replyable.
+  - The attributed utterance (`<name> said: <content>`) now lives inside the
+    `<current-message>` block, with the conversation-type tag on its own line.
+
 ## [0.3.9] - 2026-06-03
 
 ### Fixed
