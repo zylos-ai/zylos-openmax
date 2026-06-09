@@ -26,6 +26,7 @@ import { execFile } from 'child_process';
 import { loadConfig, watchConfig, enabledOrgs, bindOwner } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
+import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, apiPath } from './lib/client.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
@@ -492,6 +493,11 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     // want a direct reply, not a "should I respond?" deliberation.
     const smartHint = decision.mode === 'smart' && !decision.mentioned;
     const groupName = decision.groupCfg?.name || conv?.name;
+
+    // Record the display names seen in this conversation (sender + group
+    // context) so outbound @mentions can be canonicalized to the exact name
+    // cws-fe matches on. Best-effort; never blocks message handling.
+    recordParticipants(msg.conversation_id, [senderName, ...recent.map((m) => m.senderName)]);
 
     const body = formatInboundForC4(
       { type: convType, id: msg.conversation_id, name: groupName },
