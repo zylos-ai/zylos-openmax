@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- **Mandatory task-lifecycle guardrails added to `SKILL.md`** (new
+  「任务生命周期护栏（强制）」section under 行为护栏). Encodes the behaviors that
+  were defined-but-not-followed: (1) arrange the task in TM (Issue→Task) before
+  executing, (2) require user project/KB selection for deliverable tasks
+  (default Inbox only for internal bug-filing), (3) notify the user at the
+  moment of every issue/task status transition, (4) notify on every task
+  completion, (5) auto-continue to the next task by priority after finishing
+  one. Closes the agent-conformance issue (e9291b91).
+
 ## [1.0.3] - 2026-06-09
 
 ### Added
