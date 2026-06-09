@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-06-09
+
 ### Docs
 - **Cross-agent delegation: DM-permission + whoever-executes-creates-the-task; acceptance gates completion.** Three fixes after a real delegation failure (a Worker finished but its bot-DM completion report never reached the Lead):
   - **DM permission at dispatch (root cause)**: a Worker's report DM is dropped when the Lead's `dmPolicy` is `owner`/`allowlist` and the Worker isn't allowlisted — so the Lead never learns the task finished. SKILL now mandates: before delegating, add the Worker's `member_id` to the Lead's `dmAllowFrom` (set `dmPolicy=allowlist` if needed) **and** confirm the Worker's policy allows the Lead. Corrected the stale "Worker reply surfaces via WS" claim in the cross-agent section.
