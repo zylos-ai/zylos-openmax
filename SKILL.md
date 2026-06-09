@@ -280,7 +280,11 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 4. **完成即通知**：每个任务执行完**必须**主动通知用户结果，不能默默做完、让结论埋进消息流。
 5. **按优先级续做**：处理完一个任务后，**主动**按优先级接续处理下一个待办任务，而不是停下干等下一条指令（除非必须等用户输入/验收才能继续）。
 6. **人类验收闭环（交付后不自行收尾）**：出 deliverable 的任务，bot 交付（`issue.transition`→delivered）后**必须主动请发起该任务的人类验收，且不得自行 `set_acceptance` / 自行归档**。验收人＝**任务发起人**（按 issue 来源会话 / `originConversationId` 识别），**不是 bot 自己、不是 owner、也不是随便哪个用户**；Worker 没有直接与人沟通权时，经 Lead 转达给发起人。先后顺序：完成内层流转（attempt→done、task→done）→ issue→delivered → 请发起人验收。**发起人验收通过**才由 bot 调 `issue.set_acceptance({accepted:true, source:"im"})` 收敛到 **archived**；**退回**则 `issue.set_acceptance({accepted:false, rejectionReason})` → reopened → executing 重做。交付到验收之间停在 **delivered（待验收）**，别堆在「已完成」不管。**区分**：worker 把自己的 attempt/task 流转到 done 只代表「执行动作做完」；**Issue 真正进入「完成」(accepted) 和归档(archived)，都必须人类验收通过**——bot 绝不自行把任务推进到 accepted/archived。「任务做完 ≠ 结束，发起人验收通过才算完成、才能归档」。
-7. **跨 agent 派发：先开 DM 权限 + 谁执行谁建 Task**：把任务交给别的 bot 前，(a) **把该 bot 的 member_id 加进自己的 `dmAllowFrom`**（`config.json`，必要时 `dmPolicy=allowlist`）——否则它的回报 DM 被拦掉、Lead 收不到完成通知（跨 agent 通知链头号断点）；并确认对方也对你开放；(b) Lead 只建 **Issue** + 给目标，**Task 由被指派的 bot 自己 `task.create` 并认领**（谁执行谁建，Lead 不替它建）；(c) 收到它的完成回报后，Lead 才转 `delivered` 并转交发起人验收。
+7. **跨 agent 派发：双向 DM 权限确认（强制）+ 谁执行谁建 Task**：把任务交给别的 bot 前，**两个方向的 DM 权限都必须确认开通，缺一不可**：
+   - **方向①（worker→你）**：把该 bot 的 member_id 加进**自己的** `dmAllowFrom`（`config.json` → `orgs.<slug>.access`，必要时 `dmPolicy=allowlist`）——否则它的完成回报 DM 被你的 comm-bridge 拦掉、你永远收不到（跨 agent 通知链头号断点）。
+   - **方向②（你→worker）**：确认该 bot 的 `dmPolicy` 允许你给它发 DM——否则你的派发消息它收不到。
+   - **两个方向都通了再派**；任一方向没开通，先解决或反馈给人类，**不要盲派**。
+   (b) Lead 只建 **Issue** + 给目标，**Task 由被指派的 bot 自己 `task.create` 并认领**（谁执行谁建，Lead 不替它建）；(c) 收到它的完成回报后，Lead 才转 `delivered` 并转交发起人验收。
 
 > 区分两类动作：「用户任务执行（出 deliverable）」走完整流程（含项目/KB 选择 + 验收 + 通知）；「内部 bug/问题登记」可默认 Inbox、轻量记录，但完成后仍要通知。
 
