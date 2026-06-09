@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-06-09
+
 ### Docs
 - **Human-acceptance loop + project/KB-first ordering encoded in `SKILL.md`.**
   Two follow-ups requested after v1.0.4:
