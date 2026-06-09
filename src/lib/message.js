@@ -104,19 +104,25 @@ export function formatEndpoint(ep) {
 }
 
 /**
- * Escape XML special chars in user-supplied strings before embedding them in
- * the XML-tagged context blocks emitted by formatInboundForC4. Without this a
- * sender could plant a literal `</current-message>` in their text and break
- * out of the structural framing the LLM relies on.
+ * Neutralize the structural-breakout vector in user-supplied strings before
+ * embedding them in the XML-tagged context blocks emitted by formatInboundForC4.
+ *
+ * The consumer is an LLM reading raw text, NOT an XML parser. The only real
+ * threat is a sender planting a literal `</current-message>` (or any other
+ * closing tag) to break out of the framing the model relies on — that requires
+ * the `<` / `>` characters, so those are all we neutralize.
+ *
+ * We deliberately do NOT escape `&`, `"`, `'`: turning a user's natural
+ * ampersands, quotes, and apostrophes into `&amp;` / `&quot;` / `&apos;` only
+ * litters the text the model reads (e.g. `she said "hi"` → `she said &quot;hi&quot;`)
+ * without preventing any breakout. Keeping prose verbatim gives the model a
+ * cleaner, more faithful view of what the user actually wrote.
  */
 function escapeXml(s) {
   if (s === undefined || s === null) return '';
   return String(s)
-    .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+    .replace(/>/g, '&gt;');
 }
 
 /**
