@@ -19,6 +19,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Best-effort: disk errors are swallowed silently so RPCs never fail because
   the log file is unwritable.
 
+### Fixed
+- **Quoted/reply messages now reach the agent.** When an inbound message is a
+  reply (cws-comm `parent_id`), the bridge fetches the quoted message and
+  surfaces it as a `<replying-to>` block, mirroring zylos-lark. Previously
+  `comm-bridge.js` never built `quotedContent`, so replies were invisible to
+  the agent even though `formatInboundForC4` already supported the block
+  (`src/comm-bridge.js`).
+- **`<group-context>` is now chronological (oldest→newest).** cws-comm
+  `list-messages` with `before_seq` returns DESC (newest→oldest); the bridge
+  passed that order straight through, so group history read backwards. It now
+  sorts the fetched context ascending by `seq` before formatting, matching
+  zylos-lark (`src/comm-bridge.js`).
+
+### Docs
+- **Access-control section added to `SKILL.md`** documenting per-org
+  `dmPolicy` (`open`/`allowlist`/`owner`), `groupPolicy`
+  (`open`/`allowlist`/`disabled`), per-group `mode`/`allowFrom`, and
+  `dmAllowFrom` — all keyed by cws-core `member_id`, with a config example and
+  the DM/group independence note (closes #10).
+
 ## [1.0.2] - 2026-06-09
 
 ### Changed

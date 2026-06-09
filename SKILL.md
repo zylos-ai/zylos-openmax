@@ -351,6 +351,48 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
 
 沉淀位置遵循 KB 命名空间约定：项目决策 → `/projects/{slug}/decisions/`，调研 → `/projects/{slug}/research/`，Agent 经验 → `/agents/{slug}/lessons/`。
 
+## 访问控制（DM / 群消息）
+
+每个 org 在 `config.json` 的 `orgs.<slug>` 下有**独立**的访问策略，DM 与群消息策略**互不影响**。所有名单值都是 cws-core 的 **`member_id`**（不是显示名）。
+
+```jsonc
+// config.json → orgs.<slug>
+{
+  "owner": { "member_id": "", "name": "" },   // 绑定的人类 owner，member_id 为空 = 未绑定
+  "access": {
+    "dmPolicy":    "owner",          // "open" | "allowlist" | "owner"
+    "dmAllowFrom": [],               // member_id 列表，dmPolicy=allowlist 时生效
+    "groupPolicy": "allowlist",      // "open" | "allowlist" | "disabled"
+    "groups": {                      // 按 conversation_id 配置，groupPolicy=allowlist 时生效
+      "<conversationId>": {
+        "mode": "mention",           // "mention"（仅被 @ 时响应）| "smart"（收全部消息自行判断）
+        "allowFrom": ["*"]           // ['*'] 或 [] = 群内所有人；否则限定 member_id
+      }
+    }
+  }
+}
+```
+
+**私聊（dmPolicy）：**
+1. 是 owner？→ 永远放行
+2. `open`？→ 任何 org 成员都能 DM
+3. `owner`？→ 仅绑定的 owner（首次 DM 自动绑定到 `owner.member_id`）
+4. `allowlist`？→ 仅 `access.dmAllowFrom` 里的 member_id 放行，其余丢弃
+
+**群消息（groupPolicy）：**
+1. `disabled`？→ 所有群消息丢弃
+2. `open`？→ 任意群里被 @ 即响应
+3. `allowlist`？→ 仅 `access.groups` 里配置的群；未配置的群只有 owner 被 @ 能过，其余静默丢弃
+4. 群内 `allowFrom` 非空且非 `['*']`？→ 仅名单内 member_id 放行（owner 豁免）
+5. `mode: 'smart'`？→ 收群里全部消息、无需被 @；`mode: 'mention'`（默认）→ 仅处理 @ 机器人的消息
+
+**要点：**
+- `dmPolicy` 与 `groupPolicy` 完全独立，改一个不影响另一个
+- owner 仅豁免 allowlist / 群名单检查；`groupPolicy: disabled` 连 owner 的群消息也拦
+- 名单用 `member_id`，不是显示名；安装期 `COCO_OWNER_MEMBER_ID` 会预绑定 owner 并隐含 `dmPolicy=owner`
+
+（行为对齐 zylos-lark 的访问控制模型；差异仅在 coco 用 `member_id` 且策略按 org 维度配置。）
+
 ## 操作指南索引（Layer 3，按需加载）
 
 **本文件（SKILL.md）是 Layer 1+2**，负责行为护栏 + 角色边界 + 状态机 + 通用错误防护——**任何 CLI 操作之前都要符合这些规则**。`references/*-operations.md` 是 Layer 3，只补"具体命令怎么调"的机制层细节，**不复述**这里的行为面规则。
