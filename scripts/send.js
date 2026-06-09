@@ -46,6 +46,7 @@ import {
   splitMessage,
 } from '../src/lib/message.js';
 import { uploadMedia } from '../src/cli/as.js';
+import { resolveMentions } from '../src/lib/mention.js';
 
 function usage() {
   console.error('Usage: node scripts/send.js <endpoint> <message>');
@@ -72,6 +73,10 @@ function resolveTargetConversation(ep) {
 
 async function sendText(ep, text) {
   const convId = resolveTargetConversation(ep);
+  // Canonicalize @mentions to the exact participant display_name so cws-fe's
+  // participant-name matcher highlights them (cws-fe issue #6 covers the
+  // AGENT_TEXT render side). No-op when no known participant matches.
+  text = resolveMentions(text, convId);
   const chunks = splitMessage(text);
   const results = [];
   for (let i = 0; i < chunks.length; i++) {
