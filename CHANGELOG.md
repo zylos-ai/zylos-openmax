@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Image/file messages now carry a `[image]` / `[file: name]` label in the
+  message body** instead of an empty `said:`. The bridge built the C4 envelope
+  with the raw text as the body (empty when an image has no caption) and only
+  appended the media as a `---- <kind>: <path>` suffix, so a bare image arrived
+  as `said:` with nothing after it. `comm-bridge.js` now sets the body to
+  `[image]` / `[file: <name>]` (with any caption appended), keeping the
+  `---- <kind>: <path>` suffix for the local path (`src/comm-bridge.js`).
+
 ### Docs
 - **Mandatory task-lifecycle guardrails added to `SKILL.md`** (new
   「任务生命周期护栏（强制）」section under 行为护栏). Encodes the behaviors that

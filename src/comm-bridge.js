@@ -527,12 +527,26 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       }
     }
 
+    // Build a human-readable media label for the message body so an image/file
+    // message isn't delivered as an empty `said:`. Mirrors other C4 channels:
+    // the body carries `[image]` / `[file: name]` (plus any caption), while the
+    // `---- <kind>: <path>` suffix (emitted by formatInboundForC4) still gives
+    // the agent the local path when it needs to process the media.
+    const isImage = msgType === 'image' || msgType === 'agent_card';
+    const isFile = !isImage && !!mediaId;
+    let displayContent = text;
+    if (isImage) {
+      displayContent = `[image]${text ? ' ' + text : ''}`;
+    } else if (isFile) {
+      displayContent = `[file${mediaFileName ? ': ' + mediaFileName : ''}]${text ? ' ' + text : ''}`;
+    }
+
     const body = formatInboundForC4(
       { type: convType, id: msg.conversation_id, name: groupName },
       { displayName: senderName },
       {
-        content: text,
-        type: msgType === 'image' || msgType === 'agent_card' ? 'image' : (mediaId ? 'file' : 'text'),
+        content: displayContent,
+        type: isImage ? 'image' : (isFile ? 'file' : 'text'),
         mediaLocalPath,
       },
       recent,
