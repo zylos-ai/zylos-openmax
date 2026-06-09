@@ -430,7 +430,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       );
       // cws-comm list-messages with before_seq returns DESC (newest→oldest);
       // sort ascending by seq so <group-context> reads chronologically
-      // (oldest→newest), matching zylos-lark.
+      // (oldest→newest).
       const ctxAsc = [...ctx].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
       recent = await Promise.all(ctxAsc.map(async m => ({
         // Resolve the sender's display name; fall back to the raw id only when
@@ -499,8 +499,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
 
     // Quoted/reply: cws-comm marks a reply with parent_id (the WS notification
     // frame omits it, so it comes from the get-message detail merged into msg).
-    // Fetch the quoted message and surface it as <replying-to>, mirroring
-    // zylos-lark. Threads take precedence (threadContext), so skip for threads.
+    // Fetch the quoted message and surface it as <replying-to>. Threads take
+    // precedence (threadContext), so skip for threads.
     let quotedContent;
     const quotedMsgId = msg.parent_id || msg.message?.parent_id || msg.parent_message_id;
     if (quotedMsgId && convType !== 'thread') {

@@ -22,15 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Quoted/reply messages now reach the agent.** When an inbound message is a
   reply (cws-comm `parent_id`), the bridge fetches the quoted message and
-  surfaces it as a `<replying-to>` block, mirroring zylos-lark. Previously
-  `comm-bridge.js` never built `quotedContent`, so replies were invisible to
-  the agent even though `formatInboundForC4` already supported the block
-  (`src/comm-bridge.js`).
+  surfaces it as a `<replying-to>` block. Previously `comm-bridge.js` never
+  built `quotedContent`, so replies were invisible to the agent even though
+  `formatInboundForC4` already supported the block (`src/comm-bridge.js`).
 - **`<group-context>` is now chronological (oldest→newest).** cws-comm
   `list-messages` with `before_seq` returns DESC (newest→oldest); the bridge
   passed that order straight through, so group history read backwards. It now
-  sorts the fetched context ascending by `seq` before formatting, matching
-  zylos-lark (`src/comm-bridge.js`).
+  sorts the fetched context ascending by `seq` before formatting
+  (`src/comm-bridge.js`).
 
 ### Docs
 - **Access-control section added to `SKILL.md`** documenting per-org

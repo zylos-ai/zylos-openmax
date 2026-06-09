@@ -390,8 +390,7 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
 - `dmPolicy` 与 `groupPolicy` 完全独立，改一个不影响另一个
 - owner 仅豁免 allowlist / 群名单检查；`groupPolicy: disabled` 连 owner 的群消息也拦
 - 名单用 `member_id`，不是显示名；安装期 `COCO_OWNER_MEMBER_ID` 会预绑定 owner 并隐含 `dmPolicy=owner`
-
-（行为对齐 zylos-lark 的访问控制模型；差异仅在 coco 用 `member_id` 且策略按 org 维度配置。）
+- 策略按 org 维度配置（每个 org 有独立的 `access` 块）
 
 ## 操作指南索引（Layer 3，按需加载）
 
