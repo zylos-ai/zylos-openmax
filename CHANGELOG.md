@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/lib/client.js` (REST traffic) and `src/lib/token.js` (auth handshake).
   Best-effort: disk errors are swallowed silently so RPCs never fail because
   the log file is unwritable.
+- **Outbound @-mention canonicalization** (`src/lib/mention.js`). cws-fe
+  highlights a mention by matching `@<participant display_name>` in the message
+  text (no member_id/token in the body — purely client-side name matching). The
+  bridge now records the display names it sees per conversation
+  (`recordParticipants`, from inbound sender + group context), and `send.js`
+  runs `resolveMentions` to canonicalize any `@name` token in outbound text to
+  the exact recorded display_name (case/spacing-tolerant, longest-name-first),
+  so the agent's mentions land on cws-fe's matcher. Render-side highlighting for
+  agent (`AGENT_TEXT`) messages is tracked in cws-fe issue #6; once that lands,
+  these canonicalized mentions light up with no further change here.
 
 ### Fixed
 - **Quoted/reply messages now reach the agent.** When an inbound message is a
