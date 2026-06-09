@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-06-09
+
 ### Fixed
 - **Image/file messages now carry a `[image]` / `[file: name]` label in the
   message body** instead of an empty `said:`. The bridge built the C4 envelope
