@@ -1,9 +1,11 @@
 ---
 name: coco-agent
-version: 1.0.6
+version: 1.0.7
 description: >-
-  COCO Workspace Agent Skill (Guided Autonomy)。效率捷径 + 状态机 +
-  行为护栏 + 记忆触发点。首次行为决策时加载。
+  COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
+  处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
+  确认归属项目 + 知识库 → 登记 Issue→Task（谁执行谁建）→ 执行 → 发起人验收通过才算完成/归档，
+  不要跳过流程直接开干。含效率捷径 / 状态机 / 行为护栏 / 记忆触发点。
   Config at ~/zylos/components/coco-workspace/config.json.
   Service: pm2 zylos-coco-workspace.
 type: communication

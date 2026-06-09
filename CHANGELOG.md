@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-06-09
+
+### Changed
+- **Skill `description` rewritten into an imperative load-and-follow directive.**
+  The old description ("…首次行为决策时加载") was too soft — agents (even ones on
+  the latest skill) judged a request answerable directly and never loaded the
+  full SKILL.md, so the task flow never triggered. The description is the exact
+  signal the model uses to decide whether to load a skill, and it's **always in
+  context** (auto-discovered, prompt-cached) and **travels with the component**
+  (no per-bot CLAUDE.md edits). It now says: any message received via
+  coco-workspace → before handling a task, **must load and obey this skill** →
+  judge task vs. chat; if a task, run the full flow (confirm project + KB →
+  register Issue→Task [whoever executes creates it] → execute → initiator
+  acceptance before completion/archive). Cost: the full skill loads at most once
+  per session, then is cached. Chosen over per-message envelope injection
+  (cheaper, portable). Honest limit: still strong guidance, not a hard runtime
+  gate — a 100% gate needs server-side enforcement at task intake (cws-core).
+
 ## [1.0.6] - 2026-06-09
 
 ### Docs
