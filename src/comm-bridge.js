@@ -429,7 +429,11 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         msg.seq,
         config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES,
       );
-      recent = await Promise.all(ctx.map(async m => ({
+      // cws-comm list-messages with before_seq returns DESC (newest→oldest);
+      // sort ascending by seq so <group-context> reads chronologically
+      // (oldest→newest).
+      const ctxAsc = [...ctx].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
+      recent = await Promise.all(ctxAsc.map(async m => ({
         // Resolve the sender's display name; fall back to the raw id only when
         // cws-core gives us neither an inline name nor a resolvable member.
         senderName: m.sender_display_name
@@ -499,6 +503,30 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     // cws-fe matches on. Best-effort; never blocks message handling.
     recordParticipants(msg.conversation_id, [senderName, ...recent.map((m) => m.senderName)]);
 
+    // Quoted/reply: cws-comm marks a reply with parent_id (the WS notification
+    // frame omits it, so it comes from the get-message detail merged into msg).
+    // Fetch the quoted message and surface it as <replying-to>. Threads take
+    // precedence (threadContext), so skip for threads.
+    let quotedContent;
+    const quotedMsgId = msg.parent_id || msg.message?.parent_id || msg.parent_message_id;
+    if (quotedMsgId && convType !== 'thread') {
+      const q = await fetchMessageDetail(orgConfig.org_id, msg.conversation_id, quotedMsgId);
+      if (q) {
+        const qStructured = (q.content && typeof q.content === 'object') ? q.content : {};
+        const qText =
+             qStructured.body?.text
+          || (typeof q.message?.content === 'string' ? q.message.content : '')
+          || q.message?.fallback_text
+          || '';
+        const qSenderId = q.message?.sender_id;
+        const qSender =
+             q.message?.sender_display_name
+          || (await fetchMemberName(orgConfig.org_id, qSenderId))
+          || qSenderId;
+        if (qText) quotedContent = { sender: qSender, text: qText };
+      }
+    }
+
     const body = formatInboundForC4(
       { type: convType, id: msg.conversation_id, name: groupName },
       { displayName: senderName },
@@ -508,7 +536,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         mediaLocalPath,
       },
       recent,
-      { groupName, smartHint },
+      { groupName, smartHint, quotedContent },
     );
 
     try {
