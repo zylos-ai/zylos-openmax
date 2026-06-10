@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-06-10
+
+### Docs
+- **Complex tasks now hard-require a Blueprint + approval (was descriptive, now a guardrail).**
+  The complex-task flow already *described* generating a Blueprint and getting
+  it approved, but nothing forbade running a genuinely complex job in `light`
+  mode — decomposing it straight into a pile of Tasks and starting work,
+  skipping the blueprint and its approval gate. That shortcut hollows out the
+  complex-task flow (no plan, no approval). SKILL.md now states the constraint
+  explicitly in three places:
+  - **判断简单/复杂** section: a new callout — *复杂任务 = heavy 模式 + Blueprint（强制，不可绕过）*；
+    `light` mode is only for single-output/single-agent simple tasks; anything
+    multi-step / multi-agent / dependency-bearing must go heavy + Blueprint;
+    when unsure, ask.
+  - **复杂任务流程** steps 3–4: generating the Blueprint and passing approval are
+    marked mandatory gates — no Task may be instantiated before the Blueprint is
+    approved.
+  - **行为护栏** new rule 8 + two 常见错误 rows: a complex task run via `light` to
+    bypass the blueprint, and instantiating Tasks with no approved Blueprint,
+    are both named as errors. Per Gavin's directive.
+
 ## [1.0.7] - 2026-06-09
 
 ### Changed
