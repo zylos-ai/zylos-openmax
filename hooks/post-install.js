@@ -84,6 +84,17 @@ function cfAccessHeaders() {
 
 const isInteractive = process.stdin.isTTY === true;
 
+// Path selection — gated on COCO_API_KEY (borrowing the env-var keys from
+// scripts/init-coco-workspace.sh):
+//   - COCO_API_KEY present → take EVERYTHING from env and write config, no
+//     prompts (even on a TTY). The non-interactive block below already reads
+//     all values from env.
+//   - COCO_API_KEY absent  → keep the previous behavior unchanged: interactive
+//     prompts when a TTY is available, otherwise the non-interactive env +
+//     auto-register bootstrap (same as before).
+const hasEnvApiKey = !!(process.env.COCO_API_KEY || '').trim();
+const useEnvPath   = hasEnvApiKey || !isInteractive;
+
 function ask(question) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   return new Promise((resolve) => {
@@ -204,7 +215,7 @@ function deriveWsUrl(bffUrl) {
   return bffUrl.replace(/^http/, 'ws') + '/ws';
 }
 
-if (isInteractive) {
+if (!useEnvPath) {
   console.log('');
   console.log('========================================');
   console.log('  COCO Workspace — initial setup');
