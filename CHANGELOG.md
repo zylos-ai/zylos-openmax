@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-06-10
+
+### Changed
+- **post-install now gates env-vs-interactive on `COCO_API_KEY`.** Previously the
+  hook chose its path purely by TTY (interactive on a terminal, env-driven
+  without one). Now: if `COCO_API_KEY` has a value, the hook takes **everything**
+  from env vars (borrowing the same env keys as `scripts/init-coco-workspace.sh`:
+  `COCO_BFF_URL` / `COCO_WS_URL` / `COCO_IDENTITY_ID` / `COCO_MEMBER_ID` /
+  `COCO_ORG_ID` / `COCO_ORG_NAME` / `COCO_OWNER_*` / `COCO_SELF_NAME` /
+  `COCO_CF_ACCESS_*`) and writes config with **no prompts — even on a TTY**.
+  When `COCO_API_KEY` is absent, behavior is **unchanged**: interactive prompts
+  on a TTY, otherwise the non-interactive env + auto-register bootstrap. Minimal
+  change — only the path-selection gate (`useEnvPath = hasEnvApiKey || !isInteractive`)
+  was added; the interactive and env blocks themselves are untouched, so the
+  existing idempotency (existing `agent.api_key` is never overwritten) and the
+  auto-register fallback are preserved.
+
 ## [1.0.9] - 2026-06-10
 
 ### Added

@@ -1,6 +1,6 @@
 ---
 name: coco-agent
-version: 1.0.9
+version: 1.0.11
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
