@@ -40,10 +40,10 @@ const VALID_TYPES = new Set(['dm', 'group', 'thread']);
 // Relying on each bot's standing instructions is unreliable (bots skip it and
 // just answer). Injecting the directive into the message itself makes the rule
 // travel with the component: upgrade coco-workspace → every inbound message
-// reminds the agent to load the coco-agent skill and run its task flow, with no
-// per-bot instruction edits. Mirrors the existing <smart-mode> injection.
+// reminds the agent to load the coco-workspace skill and run its task flow, with
+// no per-bot instruction edits. Mirrors the existing <smart-mode> injection.
 const SKILL_FLOW_DIRECTIVE =
-`<coco-agent>Before handling this message, load and obey the coco-workspace skill. First decide whether this is a task or a question/chat; if a task, follow the skill's flow (confirm project + KB → register Issue→Task → drive in light/heavy mode → initiator acceptance) and do not skip it. The skill is the source of truth.</coco-agent>`;
+`<coco-workspace>Before handling this message, load and obey the coco-workspace skill. First decide whether this is a task or a question/chat; if a task, follow the skill's flow (confirm project + KB → register Issue→Task → drive in light/heavy mode → initiator acceptance) and do not skip it. The skill is the source of truth.</coco-workspace>`;
 
 /**
  * Generate a client-side idempotency key for SendMessageRequest.client_msg_id.
@@ -195,7 +195,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const parts = [`${tag}\n`];
 
   // Lead with the forced skill-load directive so the agent loads + follows the
-  // coco-agent flow before reading/handling anything below (enforcement L1).
+  // coco-workspace flow before reading/handling anything below (enforcement L1).
   if (enforceSkillFlow) {
     parts.push(`${SKILL_FLOW_DIRECTIVE}\n\n`);
   }
