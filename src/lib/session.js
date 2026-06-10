@@ -67,4 +67,4 @@ export function clearOrgSession(orgSlug) {
   writeAll(all);
 }
 
-export { SESSION_PATH };
+export { SESSION_PATH, RUNTIME_DIR };
