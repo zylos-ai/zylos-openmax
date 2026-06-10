@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.15] - 2026-06-11
+## [1.0.16] - 2026-06-11
+
+### Changed
+- **Promoted "always use the coco CLI, never hand-roll BFF REST" from a 常见错误
+  table row to a top-level iron rule in SKILL.md body** ("服务调用铁律"), placed
+  just before the task-classification flow so it's seen whenever the skill is
+  loaded. Motivation: an agent (with the skill installed) hand-rolled BFF REST
+  and guessed the wrong nested path for issue-update (`PATCH
+  /projects/{id}/issues/{id}`) instead of the flat `PATCH /issues/{id}` the CLI
+  uses. The rule now states all TM/KB/AS/Comm/Core ops go through
+  `src/cli/{tm,kb,as,comm,core}.js`, calls out the flat-vs-nested write-path
+  trap and the accepted PATCH fields, and directs agents to run the CLI / read
+  the ops doc rather than guess REST paths. Strengthened the matching 常见错误
+  row to point at the new rule.
 
 ### Changed
 - **Corrected the complex-task dependency model to bot-driven self-claim
