@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.15] - 2026-06-11
+
+### Changed
+- **Corrected the complex-task dependency model to bot-driven self-claim
+  (status must reflect reality).** v1.0.14 described dependent steps as
+  "auto-advancing" to running when their predecessor completes — but the
+  cws-work backend has no such auto-advance, and more importantly auto-flipping
+  a task to RUNNING without a bot actually executing it makes the status lie.
+  Revised the flow (复杂任务流程 step 5/6) and guardrail #9:
+  - On instantiation, **dependent steps are created WITHOUT `assigneeId`** so
+    they sit in 待办 (pending); only steps with no unmet dependency are created
+    WITH `assigneeId` (auto-claim → 进行中). The planned executor of a dependent
+    step is recorded in the Blueprint step, not on the task, until claim time.
+  - Advance is **bot-driven**: the finishing bot notifies the downstream bot
+    (bot-DM), which then `task.claim`s its own task (claim validates
+    `dependsOn`) → becomes assignee → 进行中 → executes. RUNNING only ever flips
+    when a real bot picks the task up — no phantom "in progress".
+  - Rationale: creating a dependent task WITH `assigneeId` triggers cws-work's
+    create-time auto-claim (which does NOT check `dependsOn`), forcing it
+    straight to running and leaving 待办 empty.
+  - Added matching 常见错误 rows (don't pass assigneeId for dependent steps;
+    don't expect backend auto-advance).
+
 ## [1.0.14] - 2026-06-10
 
 ### Changed
