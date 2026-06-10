@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.14] - 2026-06-10
+
+### Changed
+- **SKILL.md: complex-task guardrail now mandates one-shot instantiation of all
+  Blueprint steps.** After a Blueprint is approved, the Lead MUST instantiate
+  *all* steps as Tasks at once with their `dependsOn` dependencies set —
+  piecemeal "create one step at a time as you go" is now explicitly forbidden.
+  Dependency-driven flow: independent steps enter `running` (进行中) in parallel;
+  dependent steps wait in `pending` (待办) and auto-advance to `running` once
+  their predecessor is `done`. This makes the kanban/task panel show the full
+  DAG of an issue from the start (what's running / waiting / blocked). Documents
+  the board semantic: **待办 = planned-but-dependency-blocked steps**, not
+  not-yet-decomposed steps. Added a matching row to the 常见错误 table.
+
 ## [1.0.13] - 2026-06-10
 
 ### Fixed
