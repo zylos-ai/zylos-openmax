@@ -33,17 +33,16 @@ import { randomUUID } from 'crypto';
 const TYPE_TAG = { dm: '[COCO DM]', group: '[COCO GROUP]', thread: '[COCO THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
 
-// Forced skill-load directive injected into every inbound coco envelope when
-// `enforceSkillFlow` is on (config.message.enforceSkillFlow, default true).
-// Rationale: a SKILL.md is load-on-demand guidance, not a runtime gate — an
-// agent only follows it if it actually loads + obeys the skill on that message.
-// Relying on each bot's standing instructions is unreliable (bots skip it and
-// just answer). Injecting the directive into the message itself makes the rule
-// travel with the component: upgrade coco-workspace → every inbound message
-// reminds the agent to load the coco-workspace skill and run its task flow, with
-// no per-bot instruction edits. Mirrors the existing <smart-mode> injection.
+// Forced skill-flow directive, appended INSIDE the <current-message> block right
+// after the user's words when `enforceSkillFlow` is on
+// (config.message.enforceSkillFlow, default true). Placed post-user-content
+// (not as a leading namespace-style tag) on purpose: recency + co-location with
+// the actual ask maximize the chance the agent acts on it, whereas a leading
+// `<coco-workspace>` envelope tends to be read as ignorable metadata and skipped.
+// The rule travels with the component: upgrade coco-workspace → every inbound
+// human task is forced through the skill flow, with no per-bot instruction edits.
 const SKILL_FLOW_DIRECTIVE =
-`<coco-workspace>Before handling this message, load and obey the coco-workspace skill. First decide whether this is a task or a question/chat; if a task, follow the skill's flow (confirm project + KB → register Issue→Task → drive in light/heavy mode → initiator acceptance) and do not skip it. The skill is the source of truth.</coco-workspace>`;
+`[SYSTEM · DO FIRST] If the above is a task from a human (do-it-for-me / review / analyze / develop / integrate / research — anything that produces a deliverable): you MUST follow the coco-workspace skill — classify it as simple vs complex, register Issue→Task, and run the matching flow (simple = light; complex = heavy mode + Blueprint approval) before acting. Do NOT answer it as casual chat. Only pure Q&A / chit-chat may be answered directly. The skill is the source of truth.`;
 
 /**
  * Generate a client-side idempotency key for SendMessageRequest.client_msg_id.
@@ -194,12 +193,6 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // the <current-message> block (semantic parity with other C4 channels).
   const parts = [`${tag}\n`];
 
-  // Lead with the forced skill-load directive so the agent loads + follows the
-  // coco-workspace flow before reading/handling anything below (enforcement L1).
-  if (enforceSkillFlow) {
-    parts.push(`${SKILL_FLOW_DIRECTIVE}\n\n`);
-  }
-
   if (threadContext && threadContext.length > 0) {
     const lines = threadContext.map(m => {
       const line = formatContextLine(m);
@@ -234,7 +227,10 @@ When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
     );
   }
 
-  parts.push(`<current-message>\n${safeName} said: ${safeContent}\n</current-message>`);
+  // Append the skill-flow directive INSIDE current-message, right after the
+  // user's words (recency + can't be dismissed as envelope). enforceSkillFlow gates it.
+  const directiveSuffix = enforceSkillFlow ? `\n\n${SKILL_FLOW_DIRECTIVE}` : '';
+  parts.push(`<current-message>\n${safeName} said: ${safeContent}${directiveSuffix}\n</current-message>`);
 
   let line = parts.join('');
   if (current?.mediaLocalPath) {
