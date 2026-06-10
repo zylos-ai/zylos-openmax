@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.0.15] - 2026-06-11
+## [1.0.17] - 2026-06-11
+
+### Changed
+- **Reworked the skill-flow injection: moved from a leading `<coco-workspace>`
+  tag to an imperative directive placed INSIDE `<current-message>`, right after
+  the user's words** (`src/lib/message.js`). Motivation: a leading
+  component-named XML tag tends to be read as ignorable envelope/metadata
+  (banner-blindness on every message), so task requests (e.g. "do a code
+  review") sometimes weren't run through the task flow. Post-user placement
+  uses recency + co-location with the actual ask so the directive can't be
+  dismissed as envelope. New wording (English) is imperative, names task verbs
+  (do-it-for-me / review / analyze / develop / integrate / research), and
+  requires: for a **human** task, classify simple vs complex, register
+  Issue→Task, and run the matching flow (simple = light; complex = heavy +
+  Blueprint approval) before acting — don't answer as chat. `enforceSkillFlow`
+  still gates the injection.
+
+### Changed
+- **Promoted "always use the coco CLI, never hand-roll BFF REST" from a 常见错误
+  table row to a top-level iron rule in SKILL.md body** ("服务调用铁律"), placed
+  just before the task-classification flow so it's seen whenever the skill is
+  loaded. Motivation: an agent (with the skill installed) hand-rolled BFF REST
+  and guessed the wrong nested path for issue-update (`PATCH
+  /projects/{id}/issues/{id}`) instead of the flat `PATCH /issues/{id}` the CLI
+  uses. The rule now states all TM/KB/AS/Comm/Core ops go through
+  `src/cli/{tm,kb,as,comm,core}.js` and directs agents to run the CLI / read the
+  ops doc rather than guess REST paths. Kept the rule general — the exact
+  endpoint/field details (flat-vs-nested write paths, accepted PATCH fields)
+  stay in the CLI and `references/*-operations.md` as the reference. Strengthened
+  the matching 常见错误 row to point at the new rule.
 
 ### Changed
 - **Corrected the complex-task dependency model to bot-driven self-claim
