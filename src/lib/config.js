@@ -124,6 +124,12 @@ export const DEFAULT_CONFIG = {
   // Config may supply a `message` block to override either field; if absent,
   // the hardcoded defaults apply. Keeping these out of DEFAULT_CONFIG means
   // operator-edited config.json files don't need to mention them at all.
+  //
+  // `message.enforceSkillFlow` (boolean, default TRUE) — when on, every inbound
+  // envelope leads with a <coco-agent> directive telling the agent to load the
+  // coco-agent skill and run its task flow before handling (enforcement L1, see
+  // SKILL_FLOW_DIRECTIVE in src/lib/message.js). Set to false to suppress the
+  // injected directive (e.g. a bot that never runs the coco-agent skill).
 };
 
 let currentConfig = null;

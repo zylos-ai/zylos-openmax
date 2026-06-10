@@ -572,7 +572,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         mediaLocalPath,
       },
       recent,
-      { groupName, smartHint, quotedContent },
+      { groupName, smartHint, quotedContent, enforceSkillFlow: config.message?.enforceSkillFlow ?? true },
     );
 
     try {

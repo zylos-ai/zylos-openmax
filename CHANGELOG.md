@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-06-10
+
+### Added
+- **Forced skill-flow directive injected into every inbound envelope
+  (`message.enforceSkillFlow`, default true) — enforcement L1, belt-and-suspenders
+  on top of the v1.0.7 imperative description.** A `SKILL.md` is load-on-demand
+  guidance, not a runtime gate: an agent only follows the task flow if it
+  actually loads + obeys the coco-agent skill on that message. The skill
+  description (v1.0.7) already nudges this, but per Gavin's directive we now also
+  inject the rule into the message itself. `formatInboundForC4` leads every coco
+  inbound message with a short `<coco-agent>` directive block (mirrors the
+  existing `<smart-mode>` injection) telling the agent to **load the coco-agent
+  skill and run its task flow before handling** — judge task vs. chat; if a task,
+  confirm project + KB, register Issue→Task (whoever executes creates it), follow
+  the simple/complex flow, and wait for the initiator's acceptance before
+  set_acceptance/archive; bidirectional DM-permission check before cross-agent
+  dispatch. The block is deliberately terse (a pointer, not the full skill) to
+  keep per-message token cost minimal. The rule **travels with the component**:
+  upgrading coco-workspace on any bot auto-applies it, no per-bot instruction
+  edits. Toggle off via `config.message.enforceSkillFlow = false`. Note: still
+  strong guidance, not a hard gate — a true 100% gate needs server-side
+  enforcement at task intake (cws-core). Revives the approach from PR #18
+  (previously closed in favor of the description-only route).
+
 ## [1.0.8] - 2026-06-10
 
 ### Docs
