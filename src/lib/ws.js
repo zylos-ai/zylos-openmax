@@ -230,28 +230,45 @@ export class WsClient {
 }
 
 /**
- * Message deduplication based on messageId with TTL.
+ * Message deduplication by message_id, retaining the most recent N ids.
  *
- * Returns a function that takes a message id and returns true if it was
- * already seen within the TTL window, false otherwise (and records it).
+ * Returns a function that takes a message id and returns true if it was already
+ * seen (within the retained window), false otherwise (and records it).
+ *
+ * Retention is COUNT-based (keep the most recent `maxEntries` ids), NOT
+ * time-based. Rationale: a reconnect/restart catch-up can replay up to
+ * SYNC_MAX_EVENTS (2000) events regardless of how long the bot was offline, so
+ * a fixed-size recent-id window guarantees those replays are deduped. A short
+ * TTL (the previous behavior) let ids age out mid-catch-up and leaked
+ * duplicates after a >TTL outage.
  *
  * `opts.persistPath` (optional): back the seen-id window with a JSON file so it
- * survives a process restart. On init, entries within the TTL window are
- * reloaded; on each add (and on TTL sweep) the file is rewritten via a
- * debounced atomic write. Best-effort — any fs error is swallowed and the
- * deduper degrades to in-memory only.
+ * survives a process restart (debounced atomic write; loaded + capped on init).
+ * Best-effort — fs errors are swallowed and the deduper degrades to in-memory.
+ * `opts.maxEntries` (default 5000): retained-id count; must exceed
+ * SYNC_MAX_EVENTS so a full catch-up sweep is always covered.
+ * (`ttlMs` is accepted for call-site backward-compat but no longer used for
+ * eviction — retention is purely count-based.)
  */
 export function createDeduper(ttlMs = 300000, opts = {}) {
-  const { persistPath = null } = opts;
-  const seen = new Map();
+  const { persistPath = null, maxEntries = 5000 } = opts;
+  const seen = new Map();   // id -> first-seen ts(ms); Map insertion order = age
+
+  function evictOverflow() {
+    while (seen.size > maxEntries) {
+      const oldest = seen.keys().next().value;
+      if (oldest === undefined) break;
+      seen.delete(oldest);
+    }
+  }
 
   if (persistPath) {
     try {
       const raw = JSON.parse(fs.readFileSync(persistPath, 'utf-8'));
-      const now = Date.now();
       for (const [k, t] of Object.entries(raw)) {
-        if (typeof t === 'number' && now - t <= ttlMs) seen.set(k, t);
+        if (typeof t === 'number') seen.set(k, t);
       }
+      evictOverflow();   // keep only the most recent maxEntries on load
     } catch { /* missing/corrupt → start empty */ }
   }
 
@@ -274,19 +291,11 @@ export function createDeduper(ttlMs = 300000, opts = {}) {
     flushTimer.unref?.();
   }
 
-  const sweepMs = Math.max(60000, Math.floor(ttlMs / 5));
-  const sweeper = setInterval(() => {
-    const now = Date.now();
-    for (const [k, t] of seen) {
-      if (now - t > ttlMs) { seen.delete(k); dirty = true; }
-    }
-    if (dirty) scheduleFlush();
-  }, sweepMs);
-  sweeper.unref?.();
   return (id) => {
     if (!id) return false;
     if (seen.has(id)) return true;
     seen.set(id, Date.now());
+    evictOverflow();
     dirty = true; scheduleFlush();
     return false;
   };

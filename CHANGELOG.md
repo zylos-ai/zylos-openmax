@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.13] - 2026-06-10
+
+### Fixed
+- **Dedup retention is now count-based instead of time-based (TTL).** The
+  message_id deduper previously evicted ids after a 5-minute TTL. A
+  reconnect/restart catch-up can replay up to `SYNC_MAX_EVENTS` (2000) events
+  regardless of how long the bot was offline, so after an outage longer than the
+  TTL the replayed ids had already aged out — letting duplicates leak back into
+  delivery. `createDeduper` now retains the most recent `maxEntries` ids
+  (default 5000, well above the catch-up cap) and drops the TTL sweep entirely;
+  `ttlMs` is kept only for call-site backward-compat. `comm-bridge.js` wires the
+  persistent deduper with `maxEntries: 20` — enough for a normal restart, where
+  catch-up only re-pulls a handful. Caveat: an outage long enough that a single
+  catch-up re-pulls >20 messages could replay the tail beyond the most-recent
+  20; bump `maxEntries` to cover longer outages if needed.
+
 ## [1.0.12] - 2026-06-10
 
 ### Fixed
