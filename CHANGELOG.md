@@ -17,10 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and guessed the wrong nested path for issue-update (`PATCH
   /projects/{id}/issues/{id}`) instead of the flat `PATCH /issues/{id}` the CLI
   uses. The rule now states all TM/KB/AS/Comm/Core ops go through
-  `src/cli/{tm,kb,as,comm,core}.js`, calls out the flat-vs-nested write-path
-  trap and the accepted PATCH fields, and directs agents to run the CLI / read
-  the ops doc rather than guess REST paths. Strengthened the matching 常见错误
-  row to point at the new rule.
+  `src/cli/{tm,kb,as,comm,core}.js` and directs agents to run the CLI / read the
+  ops doc rather than guess REST paths. Kept the rule general — the exact
+  endpoint/field details (flat-vs-nested write paths, accepted PATCH fields)
+  stay in the CLI and `references/*-operations.md` as the reference. Strengthened
+  the matching 常见错误 row to point at the new rule.
 
 ### Changed
 - **Corrected the complex-task dependency model to bot-driven self-claim
