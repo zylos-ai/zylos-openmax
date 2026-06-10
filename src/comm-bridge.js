@@ -390,17 +390,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       msg.parent_message_id = msg.message.parent_message_id;
     }
 
-    // Persistent seq floor — defends against restart/reconnect re-delivery.
-    // `last_seq` is persisted to runtime/session.json and reloaded on warm
-    // restart, so a catch-up re-sync (or a reconnect replay) cannot re-deliver
-    // a message we've already processed — even after a process restart wipes
-    // the in-memory deduper. seq is hoisted just above, so this gate covers
-    // both live WS frames and sync catch-up frames. (last_seq is still only
-    // advanced after the message is forwarded, below.)
-    if (msg.seq != null && msg.seq <= (sessionRef.last_seq || 0)) {
-      log(`[ws] [${orgConfig.slug}] msg=${msg.id} seq=${msg.seq} <= last_seq=${sessionRef.last_seq} (already delivered), skipping`);
-      return;
-    }
+    // NOTE: a global seq-floor gate was tried in 1.0.10 and REVERTED here —
+    // `seq` is per-conversation, not a per-org monotonic cursor, so gating on a
+    // single org-wide last_seq dropped live messages from any conversation whose
+    // seq sat below the global max (caused a message-delivery outage). Duplicate
+    // suppression relies on the id-based deduper only (which IS persisted across
+    // restarts via dedup.json — that part is safe). last_seq is still advanced
+    // below purely as the catch-up cursor.
 
     const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);
     if (conv) conv.id = conv.id || msg.conversation_id;

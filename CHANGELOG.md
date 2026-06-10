@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.12] - 2026-06-10
+
+### Fixed
+- **HOTFIX: revert the global seq-floor delivery gate from 1.0.10 — it dropped
+  live messages and caused a delivery outage.** The 1.0.10 gate assumed `seq`
+  was a per-org monotonic cursor and dropped any inbound with
+  `seq <= sessionRef.last_seq`. In reality `seq` is **per-conversation**: after a
+  reconnect catch-up advanced the single org-wide `last_seq` to a high value
+  (from one busy conversation), brand-new messages in other conversations (with
+  lower per-conversation seq) were misclassified as "already delivered" and
+  silently dropped — no messages got through. Removed the seq gate entirely.
+  Duplicate suppression now relies solely on the **id-based deduper**, which the
+  1.0.10 change also made **persistent** (`runtime/dedup.json`) — that part is
+  safe and is kept, so restart/reconnect still gets reduced (id-based) replay
+  protection without the over-dropping bug. `last_seq` remains the catch-up
+  cursor only. Lesson: never gate delivery on a per-conversation seq with an
+  org-wide cursor.
+
 ## [1.0.11] - 2026-06-10
 
 ### Changed
