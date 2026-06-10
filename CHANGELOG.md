@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.14] - 2026-06-10
+
+### Changed
+- **SKILL.md: complex-task guardrail now mandates one-shot instantiation of all
+  Blueprint steps.** After a Blueprint is approved, the Lead MUST instantiate
+  *all* steps as Tasks at once with their `dependsOn` dependencies set —
+  piecemeal "create one step at a time as you go" is now explicitly forbidden.
+  Dependency-driven flow: independent steps enter `running` (进行中) in parallel;
+  dependent steps wait in `pending` (待办) and auto-advance to `running` once
+  their predecessor is `done`. This makes the kanban/task panel show the full
+  DAG of an issue from the start (what's running / waiting / blocked). Documents
+  the board semantic: **待办 = planned-but-dependency-blocked steps**, not
+  not-yet-decomposed steps. Added a matching row to the 常见错误 table.
+- **Renamed the skill from `coco-agent` to `coco-workspace`** for naming
+  consistency — frontmatter `name`, and the per-message injected directive tag
+  `<coco-agent>` → `<coco-workspace>` (src/lib/message.js; directive body
+  already referenced "coco-workspace skill"). No code parses the tag literally,
+  so the rename is behavior-neutral.
+- **Trimmed redundant skill text (conservative dedup; 3-layer reinforcement
+  structure kept):** removed the redundant "强制加载提示" note (enforcement lives
+  in code, not in a skill declaration); consolidated the duplicated
+  one-shot-instantiation wording between 复杂任务流程 step 6 and guardrail #9
+  (step 6 is now the authority, #9 a terse red-line pointer); merged two
+  near-identical Blueprint anti-pattern rows in the 常见错误 table into one.
+
 ## [1.0.13] - 2026-06-10
 
 ### Fixed

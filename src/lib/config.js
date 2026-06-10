@@ -126,10 +126,10 @@ export const DEFAULT_CONFIG = {
   // operator-edited config.json files don't need to mention them at all.
   //
   // `message.enforceSkillFlow` (boolean, default TRUE) — when on, every inbound
-  // envelope leads with a <coco-agent> directive telling the agent to load the
-  // coco-agent skill and run its task flow before handling (enforcement L1, see
-  // SKILL_FLOW_DIRECTIVE in src/lib/message.js). Set to false to suppress the
-  // injected directive (e.g. a bot that never runs the coco-agent skill).
+  // envelope leads with a <coco-workspace> directive telling the agent to load
+  // the coco-workspace skill and run its task flow before handling (enforcement
+  // L1, see SKILL_FLOW_DIRECTIVE in src/lib/message.js). Set to false to suppress
+  // the injected directive (e.g. a bot that never runs the coco-workspace skill).
 };
 
 let currentConfig = null;
