@@ -43,11 +43,7 @@ const VALID_TYPES = new Set(['dm', 'group', 'thread']);
 // reminds the agent to load the coco-agent skill and run its task flow, with no
 // per-bot instruction edits. Mirrors the existing <smart-mode> injection.
 const SKILL_FLOW_DIRECTIVE =
-`<coco-agent>
-处理本消息前，先加载 coco-agent skill 并遵守其规则：先判断这是「任务」还是「问话/闲聊」。
-若是任务：① 与发起人确认归属项目 + 知识库 → ② 登记 Issue→Task（谁执行谁建）→ ③ 按简单/复杂流程推进 → ④ 完成后等发起人验收通过，才 set_acceptance / 归档；跨 agent 派发前先做双向 DM 权限确认。
-不要跳过流程直接开干。
-</coco-agent>`;
+`<coco-agent>Before handling this message, load and obey the coco-workspace skill. First decide whether this is a task or a question/chat; if a task, follow the skill's flow (confirm project + KB → register Issue→Task → drive in light/heavy mode → initiator acceptance) and do not skip it. The skill is the source of truth.</coco-agent>`;
 
 /**
  * Generate a client-side idempotency key for SendMessageRequest.client_msg_id.
