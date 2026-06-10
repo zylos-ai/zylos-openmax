@@ -32,6 +32,8 @@
  * the message handler receives the ping but does NOT need to reply.
  */
 
+import fs from 'fs';
+import path from 'path';
 import WebSocket from 'ws';
 import { cfAccessHeaders } from './cf-access.js';
 
@@ -232,21 +234,60 @@ export class WsClient {
  *
  * Returns a function that takes a message id and returns true if it was
  * already seen within the TTL window, false otherwise (and records it).
+ *
+ * `opts.persistPath` (optional): back the seen-id window with a JSON file so it
+ * survives a process restart. On init, entries within the TTL window are
+ * reloaded; on each add (and on TTL sweep) the file is rewritten via a
+ * debounced atomic write. Best-effort — any fs error is swallowed and the
+ * deduper degrades to in-memory only.
  */
-export function createDeduper(ttlMs = 300000) {
+export function createDeduper(ttlMs = 300000, opts = {}) {
+  const { persistPath = null } = opts;
   const seen = new Map();
+
+  if (persistPath) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(persistPath, 'utf-8'));
+      const now = Date.now();
+      for (const [k, t] of Object.entries(raw)) {
+        if (typeof t === 'number' && now - t <= ttlMs) seen.set(k, t);
+      }
+    } catch { /* missing/corrupt → start empty */ }
+  }
+
+  let dirty = false;
+  let flushTimer = null;
+  function flush() {
+    flushTimer = null;
+    if (!persistPath || !dirty) return;
+    dirty = false;
+    try {
+      fs.mkdirSync(path.dirname(persistPath), { recursive: true });
+      const tmp = `${persistPath}.tmp.${process.pid}`;
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(seen)));
+      fs.renameSync(tmp, persistPath);
+    } catch { /* best-effort */ }
+  }
+  function scheduleFlush() {
+    if (!persistPath || flushTimer) return;
+    flushTimer = setTimeout(flush, 1000);
+    flushTimer.unref?.();
+  }
+
   const sweepMs = Math.max(60000, Math.floor(ttlMs / 5));
   const sweeper = setInterval(() => {
     const now = Date.now();
     for (const [k, t] of seen) {
-      if (now - t > ttlMs) seen.delete(k);
+      if (now - t > ttlMs) { seen.delete(k); dirty = true; }
     }
+    if (dirty) scheduleFlush();
   }, sweepMs);
   sweeper.unref?.();
   return (id) => {
     if (!id) return false;
     if (seen.has(id)) return true;
     seen.set(id, Date.now());
+    dirty = true; scheduleFlush();
     return false;
   };
 }

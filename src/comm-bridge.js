@@ -30,7 +30,7 @@ import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, apiPath } from './lib/client.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
-import { loadOrgSession, saveOrgSession } from './lib/session.js';
+import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'coco-workspace';
@@ -55,7 +55,12 @@ function log(...a)  { console.log(LOG_PREFIX, ...a); }
 function warn(...a) { console.warn(LOG_PREFIX, ...a); }
 
 let config = loadConfig();
-const dedupe = createDeduper(config.message?.dedup_ttl ?? DEFAULT_DEDUP_TTL_MS);
+// Persist the deduper's seen-id window to disk so a process restart doesn't
+// reset it (belt-and-suspenders alongside the persistent seq floor). Covers
+// the narrow case where a message was delivered live but last_seq wasn't yet
+// advanced/saved before a crash — the persisted id set still suppresses it.
+const DEDUP_PATH = path.join(RUNTIME_DIR, 'dedup.json');
+const dedupe = createDeduper(config.message?.dedup_ttl ?? DEFAULT_DEDUP_TTL_MS, { persistPath: DEDUP_PATH });
 
 // org_id → cached Conversation row (response_mode no longer used for filter
 // but other fields like `type` are still useful)
@@ -383,6 +388,18 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     if (!msg.thread_id   && msg.message?.thread_id)   msg.thread_id   = msg.message.thread_id;
     if (!msg.parent_message_id && msg.message?.parent_message_id) {
       msg.parent_message_id = msg.message.parent_message_id;
+    }
+
+    // Persistent seq floor — defends against restart/reconnect re-delivery.
+    // `last_seq` is persisted to runtime/session.json and reloaded on warm
+    // restart, so a catch-up re-sync (or a reconnect replay) cannot re-deliver
+    // a message we've already processed — even after a process restart wipes
+    // the in-memory deduper. seq is hoisted just above, so this gate covers
+    // both live WS frames and sync catch-up frames. (last_seq is still only
+    // advanced after the message is forwarded, below.)
+    if (msg.seq != null && msg.seq <= (sessionRef.last_seq || 0)) {
+      log(`[ws] [${orgConfig.slug}] msg=${msg.id} seq=${msg.seq} <= last_seq=${sessionRef.last_seq} (already delivered), skipping`);
+      return;
     }
 
     const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);

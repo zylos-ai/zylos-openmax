@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.10] - 2026-06-10
+
+### Fixed
+- **Duplicate message delivery after a service restart / WS reconnect.** The
+  inbound deduper was in-memory only (`createDeduper`, a TTL Map), so a process
+  restart wiped it; the persisted `last_seq` cursor was only *advanced* after
+  forwarding and never used to *gate* delivery. On restart/reconnect the
+  catch-up re-sync re-pulled recent messages and, with the deduper empty, they
+  were re-delivered as new (observed as a burst of already-handled messages).
+  Two fixes:
+  - **Persistent seq floor (primary)** — `comm-bridge.js` now drops any inbound
+    whose `seq <= sessionRef.last_seq` right after seq is hoisted (covers both
+    live frames and sync catch-up). Since `last_seq` is persisted to
+    `runtime/session.json` and reloaded on warm restart, an already-processed
+    message can't be re-delivered even after the in-memory deduper resets.
+    `last_seq` is still advanced only after a message is forwarded, preserving
+    exactly-once delivery.
+  - **Persistent deduper (belt-and-suspenders)** — `createDeduper` gained an
+    optional `persistPath`; the seen-id window is backed by `runtime/dedup.json`
+    (debounced atomic writes, TTL-pruned on load) so it survives a restart and
+    covers the narrow crash-window case where a message was forwarded but
+    `last_seq` wasn't yet saved. Best-effort: fs errors degrade to in-memory.
+  - Scope: `src/comm-bridge.js` + `src/lib/ws.js` (+ `RUNTIME_DIR` export from
+    `src/lib/session.js`). No protocol or cross-component changes.
+
 ## [1.0.9] - 2026-06-10
 
 ### Added
