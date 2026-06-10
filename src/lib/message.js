@@ -33,6 +33,22 @@ import { randomUUID } from 'crypto';
 const TYPE_TAG = { dm: '[COCO DM]', group: '[COCO GROUP]', thread: '[COCO THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
 
+// Forced skill-load directive injected into every inbound coco envelope when
+// `enforceSkillFlow` is on (config.message.enforceSkillFlow, default true).
+// Rationale: a SKILL.md is load-on-demand guidance, not a runtime gate — an
+// agent only follows it if it actually loads + obeys the skill on that message.
+// Relying on each bot's standing instructions is unreliable (bots skip it and
+// just answer). Injecting the directive into the message itself makes the rule
+// travel with the component: upgrade coco-workspace → every inbound message
+// reminds the agent to load the coco-agent skill and run its task flow, with no
+// per-bot instruction edits. Mirrors the existing <smart-mode> injection.
+const SKILL_FLOW_DIRECTIVE =
+`<coco-agent>
+处理本消息前，先加载 coco-agent skill 并遵守其规则：先判断这是「任务」还是「问话/闲聊」。
+若是任务：① 与发起人确认归属项目 + 知识库 → ② 登记 Issue→Task（谁执行谁建）→ ③ 按简单/复杂流程推进 → ④ 完成后等发起人验收通过，才 set_acceptance / 归档；跨 agent 派发前先做双向 DM 权限确认。
+不要跳过流程直接开干。
+</coco-agent>`;
+
 /**
  * Generate a client-side idempotency key for SendMessageRequest.client_msg_id.
  * The server de-dupes identical client_msg_id within 5 minutes (api-design.md §5.1).
@@ -166,7 +182,7 @@ function formatContextLine(m) {
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
   const rawType = (conv?.type || '').toLowerCase();
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
-  const { groupName, quotedContent, threadContext, threadRootId, smartHint } = opts;
+  const { groupName, quotedContent, threadContext, threadRootId, smartHint, enforceSkillFlow } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
   const safeName = escapeXml(name);
@@ -181,6 +197,12 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // Tag on its own line; the `<name> said: ...` attribution now lives inside
   // the <current-message> block (semantic parity with other C4 channels).
   const parts = [`${tag}\n`];
+
+  // Lead with the forced skill-load directive so the agent loads + follows the
+  // coco-agent flow before reading/handling anything below (enforcement L1).
+  if (enforceSkillFlow) {
+    parts.push(`${SKILL_FLOW_DIRECTIVE}\n\n`);
+  }
 
   if (threadContext && threadContext.length > 0) {
     const lines = threadContext.map(m => {
