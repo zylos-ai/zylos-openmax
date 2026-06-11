@@ -267,6 +267,14 @@ function shouldHandleMessage(msg, conv, orgConfig) {
 
   if (convType === 'dm') {
     const policy = access.dmPolicy || 'owner';
+    // Owner is always allowed in DM, regardless of policy (mirrors the group
+    // branch's owner @-mention exemption below). Without this, dmPolicy=allowlist
+    // silently drops the bound owner's DMs unless their member_id was also
+    // manually added to dmAllowFrom — the bug recorded as KB "CWS Issue 汇总" #34.
+    const dmOwnerMemberId = orgConfig.owner?.member_id;
+    if (dmOwnerMemberId && String(senderId) === String(dmOwnerMemberId)) {
+      return { handle: true, reason: 'dm:owner-exempt' };
+    }
     if (policy === 'open') return { handle: true, reason: 'dm:open' };
     if (policy === 'allowlist') {
       const list = (access.dmAllowFrom || []).map(String);
@@ -287,9 +295,8 @@ function shouldHandleMessage(msg, conv, orgConfig) {
         bindOwnerHint: { memberId: senderId, displayName: senderName },
       };
     }
-    if (String(owner.member_id) === String(senderId)) {
-      return { handle: true, reason: 'dm:owner' };
-    }
+    // A bound owner is already accepted by the owner-exempt check above; any
+    // other sender under owner-policy is rejected.
     return {
       handle: false,
       reason: `dm:owner (sender ${senderId} != bound owner ${owner.member_id})`,
