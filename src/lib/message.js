@@ -257,9 +257,14 @@ export function looksLikeMarkdown(text) {
  * Matches `[MEDIA:image]/path/to/file` or `[MEDIA:file]/path/to/doc.pdf`.
  */
 export function parseMediaPrefix(message) {
-  const m = /^\[MEDIA:(image|file)\](.+)$/s.exec(message || '');
+  // First line after the tag is the file path (may contain spaces); anything
+  // after the first newline is an optional caption that travels with the media
+  // message (cws-fe puts it in content.body.text). Path-only messages (no
+  // newline) keep working unchanged.
+  const m = /^\[MEDIA:(image|file)\]([^\n]*)(?:\n([\s\S]*))?$/.exec(message || '');
   if (!m) return null;
-  return { kind: m[1], localPath: m[2].trim() };
+  const caption = m[3] != null ? m[3].trim() : '';
+  return { kind: m[1], localPath: m[2].trim(), caption: caption || undefined };
 }
 
 /**
