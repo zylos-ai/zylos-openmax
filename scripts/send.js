@@ -105,7 +105,7 @@ async function sendText(ep, text) {
   return { ok: true, chunks: chunks.length, message_ids: results };
 }
 
-async function sendMediaMessage(ep, kind, localPath) {
+async function sendMediaMessage(ep, kind, localPath, caption) {
   const convId = resolveTargetConversation(ep);
   const messageType = kind === 'image' ? 'IMAGE' : 'FILE';
   const contentType = kind === 'image' ? 'image' : 'file';
@@ -131,7 +131,11 @@ async function sendMediaMessage(ep, kind, localPath) {
     type:          messageType,
     content: {
       content_type: contentType,
-      body:         {},
+      // cws-fe renders the file/image card and caption from content.body
+      // ({file_name, text}); an empty body shows a blank bubble. Match the
+      // shape the web client itself sends (chat/page.tsx) so attachments and
+      // the caption render. Sending body:{} here was the blank-bubble bug.
+      body:         { file_name: fileName || '', ...(caption ? { text: caption } : {}) },
       attachments: [{
         artifact_id:  artifactId || mediaId,    // prefer the cws-as artifact id; fall back to media id only for backward-compat
         file_name:    fileName || '',
@@ -170,7 +174,7 @@ async function main() {
   try {
     const media = parseMediaPrefix(message);
     const result = media
-      ? await sendMediaMessage(ep, media.kind, media.localPath)
+      ? await sendMediaMessage(ep, media.kind, media.localPath, media.caption)
       : await sendText(ep, message);
     console.log(JSON.stringify(result));
   } catch (e) {
