@@ -118,12 +118,13 @@ export const DEFAULT_CONFIG = {
     // },
   },
 
-  // `message.context_messages` / `message.dedup_ttl` are NOT in DEFAULT_CONFIG.
-  // Defaults are hardcoded in src/comm-bridge.js (DEFAULT_CONTEXT_MESSAGES,
-  // DEFAULT_DEDUP_TTL_MS) — aligned with zylos-lark's hardcoded constants.
-  // Config may supply a `message` block to override either field; if absent,
-  // the hardcoded defaults apply. Keeping these out of DEFAULT_CONFIG means
-  // operator-edited config.json files don't need to mention them at all.
+  // `message.context_messages` / `message.dedup_ttl` / `message.dedup_max_entries`
+  // are NOT in DEFAULT_CONFIG. Defaults are hardcoded in src/comm-bridge.js
+  // (DEFAULT_CONTEXT_MESSAGES, DEFAULT_DEDUP_TTL_MS, DEFAULT_DEDUP_MAX_ENTRIES) —
+  // aligned with zylos-lark's hardcoded constants. Config may supply a `message`
+  // block to override any of these fields; if absent, the hardcoded defaults
+  // apply. Keeping these out of DEFAULT_CONFIG means operator-edited config.json
+  // files don't need to mention them at all.
   //
   // `message.enforceSkillFlow` (boolean, default TRUE) — when on, every inbound
   // envelope leads with a <coco-workspace> directive telling the agent to load

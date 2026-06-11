@@ -8,14 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
-- **Bumped message-dedup retention `maxEntries` from 20 to 500**
-  (`src/comm-bridge.js`). The seen-id window must span a full reconnect/restart
-  catch-up (up to SYNC_MAX_EVENTS = 2000 events); at 20, any restart whose
-  catch-up re-pulled more than 20 messages let the older tail age out of the
-  window and replay as "new" inbound messages (observed twice during v1.0.1x
-  upgrade restarts). 500 covers normal restarts and typical catch-ups. No
-  message was ever re-executed — dedup only affects delivery, not action — but
-  the replays are noisy. (Not yet released; to be bundled into a future fix.)
+- **Message-dedup retention `maxEntries` is now configurable (default raised
+  20 → 500)** (`src/comm-bridge.js`, `src/lib/config.js`). Read from
+  `config.message.dedup_max_entries` if set, else `DEFAULT_DEDUP_MAX_ENTRIES`
+  (500) — mirroring the existing `dedup_ttl` override pattern. The seen-id
+  window must span a full reconnect/restart catch-up (up to SYNC_MAX_EVENTS =
+  2000 events); at 20, any restart whose catch-up re-pulled more than 20
+  messages let the older tail age out of the window and replay as "new" inbound
+  messages (observed twice during v1.0.1x upgrade restarts). 500 covers normal
+  restarts and typical catch-ups, and operators can raise it via config without
+  a code change. No message was ever re-executed — dedup only affects delivery,
+  not action — but the replays are noisy. (Not yet released; to be bundled into
+  a future fix.)
 
 ## [1.0.18] - 2026-06-11
 
