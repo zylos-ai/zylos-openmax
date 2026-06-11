@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.19] - 2026-06-11
+
+### Fixed
+- **Media messages (image/file) rendered as a blank bubble; captions are now
+  carried with the file** (`scripts/send.js`, `src/lib/message.js`).
+  `sendMediaMessage` posted `content.body = {}`, while cws-fe's own web client
+  sends `body = { file_name, text }`; the empty body left the file/image card
+  blank and dropped any caption (forcing a separate follow-up text message).
+  `sendMediaMessage` now sends `body: { file_name, text? }` matching the web
+  client, and `parseMediaPrefix` supports an optional newline-separated caption
+  after the path (`[MEDIA:file]/path\n<caption>`) instead of merging it into the
+  path (which previously caused an ENOENT send failure). Verified live against
+  cws-int. (GitHub #31)
+
 ### Changed
 - **Message-dedup retention `maxEntries` is now configurable (default raised
   20 → 500)** (`src/comm-bridge.js`, `src/lib/config.js`). Read from
@@ -18,8 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages (observed twice during v1.0.1x upgrade restarts). 500 covers normal
   restarts and typical catch-ups, and operators can raise it via config without
   a code change. No message was ever re-executed — dedup only affects delivery,
-  not action — but the replays are noisy. (Not yet released; to be bundled into
-  a future fix.)
+  not action — but the replays are noisy. (GitHub #30)
 
 ## [1.0.18] - 2026-06-11
 
