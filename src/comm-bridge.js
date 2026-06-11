@@ -40,6 +40,7 @@ const CHANNEL = 'coco-workspace';
 // files don't need to mention `message` at all.
 const DEFAULT_CONTEXT_MESSAGES = 5;
 const DEFAULT_DEDUP_TTL_MS     = 5 * 60 * 1000;   // 300_000
+const DEFAULT_DEDUP_MAX_ENTRIES = 500;
 
 // Hardcoded WS operational defaults. `config.server.{reconnect_max_delay,
 // heartbeat_interval}` may override either; if absent, these apply.
@@ -57,13 +58,17 @@ function warn(...a) { console.warn(LOG_PREFIX, ...a); }
 let config = loadConfig();
 // Persist the deduper's seen-id window to disk (runtime/dedup.json) so a
 // restart/reconnect catch-up re-pull is deduped by message_id. Retention is
-// count-based: keep the most recent `maxEntries` ids. 20 covers a normal
-// restart (catch-up only re-pulls a handful); if the bot is offline long
-// enough that a catch-up re-pulls >20 messages, ids beyond the most-recent 20
-// can age out and that tail could replay — bump maxEntries to cover longer
-// outages if needed.
+// count-based: keep the most recent `maxEntries` ids. A reconnect/restart
+// catch-up can re-pull up to SYNC_MAX_EVENTS (2000) events at once, so the
+// window must be large enough to span a whole catch-up — otherwise ids beyond
+// the window age out mid-catch-up and the tail replays as "new" messages.
+// Overridable via `config.message.dedup_max_entries`; default 500 covers normal
+// restarts and typical catch-ups. Raise toward SYNC_MAX_EVENTS for longer outages.
 const DEDUP_PATH = path.join(RUNTIME_DIR, 'dedup.json');
-const dedupe = createDeduper(config.message?.dedup_ttl ?? DEFAULT_DEDUP_TTL_MS, { persistPath: DEDUP_PATH, maxEntries: 20 });
+const dedupe = createDeduper(
+  config.message?.dedup_ttl ?? DEFAULT_DEDUP_TTL_MS,
+  { persistPath: DEDUP_PATH, maxEntries: config.message?.dedup_max_entries ?? DEFAULT_DEDUP_MAX_ENTRIES },
+);
 
 // org_id → cached Conversation row (response_mode no longer used for filter
 // but other fields like `type` are still useful)
