@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.18] - 2026-06-11
+
+### Fixed
+- **DM access control now always allows the bound owner, regardless of
+  `dmPolicy`** (`src/comm-bridge.js`). Previously the DM branch checked
+  `open` / `allowlist` / `owner` policies without an owner short-circuit, so
+  under `dmPolicy=allowlist` the bound owner's own DMs were dropped (and the
+  sender got `NOTICE_DM_NOT_ALLOWED`) unless their `member_id` was also
+  manually present in `dmAllowFrom`. The group branch already had an owner
+  exemption (`senderIsOwner && mentioned`); the DM branch did not. Added a
+  `dm:owner-exempt` short-circuit at the top of the DM branch to mirror it.
+  Matches KB "CWS Issue 汇总 — 2026-06-09" #34 (GitLab coco-workspace #81).
+  The auto-bind path (first-ever DM under `owner` policy with no bound owner)
+  is unchanged.
+
 ## [1.0.17] - 2026-06-11
 
 ### Changed
