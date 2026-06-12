@@ -641,6 +641,80 @@ function startFrameMetricTimer() {
   _frameMetricTimer.unref?.();
 }
 
+// =============================================================================
+// System events — message recall / edit → inject a notice to the agent
+// =============================================================================
+//
+// cws-comm delivers non-create message lifecycle events (recalled / edited /
+// deleted / reaction) as `system` frames — see cws-comm
+// internal/transport/ws/gateway_consumer.go buildWSFrame(): "message.created"
+// becomes a `message` frame, every other event becomes a `system` frame whose
+// payload is { event, conversation_id, data }, where `data` is the raw event
+// JSON (message_id, edited_by / deleted_by, new content, ...). We surface
+// recall and edit to the agent as a synthetic inbound notice so it knows a
+// prior message changed; reactions / read-state / other system events are
+// logged and ignored (unchanged behavior).
+
+function classifySystemEvent(eventName) {
+  const e = String(eventName || '').toLowerCase();
+  if (e.includes('recall') || e.includes('delete')) return 'recall';
+  if (e.includes('edit') || e.includes('updat')) return 'edit';
+  return null;
+}
+
+async function handleSystemEvent(orgConfig, frame) {
+  const payload = frame.payload || {};
+  const kind = classifySystemEvent(payload.event);
+  if (!kind) return; // reactions / read-state / other — nothing to surface
+
+  const data = payload.data || {};
+  const conversationId = payload.conversation_id || data.conversation_id;
+  if (!conversationId) {
+    warn(`[${orgConfig.slug}] system ${payload.event}: missing conversation_id, skip`);
+    return;
+  }
+  const messageId = data.message_id || data.id || data.msg_id || '';
+
+  // Dedup so a reconnect/catch-up replay of the same lifecycle event does not
+  // re-inject the notice. Keyed distinctly from message-create ids.
+  const dedupKey = `sys:${kind}:${conversationId}:${messageId || payload.event}`;
+  if (dedupe(dedupKey)) {
+    log(`[${orgConfig.slug}] system ${kind} dedup msg=${messageId}`);
+    return;
+  }
+
+  let notice;
+  if (kind === 'recall') {
+    notice = `对方撤回了一条消息${messageId ? `(message_id=${messageId})` : ''}。该消息内容已被撤回,请勿再依据它行动。`;
+  } else {
+    // edit: surface the new content when the event payload carries it.
+    const newText =
+         (typeof data?.content?.body?.text === 'string' && data.content.body.text)
+      || (typeof data.new_content === 'string' && data.new_content)
+      || (typeof data.text === 'string' && data.text)
+      || '';
+    notice = `对方编辑了一条消息${messageId ? `(message_id=${messageId})` : ''}。${newText ? `新内容:${newText}` : '内容已变更,请以最新内容为准。'}`;
+  }
+
+  // Inject as a standalone inbound notice (no skill-flow directive — this is a
+  // system event, not a user task). conv type defaults to dm; the endpoint is
+  // keyed by conversationId so routing is correct regardless of dm/group.
+  const endpoint = formatEndpoint({ type: 'dm', conversationId });
+  const body = formatInboundForC4(
+    { type: 'dm', id: conversationId },
+    { displayName: '系统' },
+    { content: notice, type: 'text' },
+    [],
+    { enforceSkillFlow: false },
+  );
+  try {
+    await forwardToC4(endpoint, body);
+    log(`[${orgConfig.slug}] system ${kind} notice -> agent conv=${conversationId} msg=${messageId}`);
+  } catch (e) {
+    warn(`[${orgConfig.slug}] system ${kind} notice failed: ${e.message}`);
+  }
+}
+
 function makeOrgFrameDispatcher(orgConfig, onMessage) {
   return function onFrame(frame) {
     const type = frame.type;
@@ -654,6 +728,7 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
         break;
       case 'system':
         log(`[${orgConfig.slug}] system event=${frame.payload?.event || '<unknown>'} conv=${frame.payload?.conversation_id || '<unknown>'}`);
+        handleSystemEvent(orgConfig, frame).catch(e => warn(`[${orgConfig.slug}] handleSystemEvent:`, e.message));
         break;
       case 'error':
         warn(`[${orgConfig.slug}] server error frame:`, JSON.stringify(frame.payload || {}));
