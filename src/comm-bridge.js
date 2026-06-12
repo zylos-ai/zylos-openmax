@@ -737,8 +737,8 @@ async function handleSystemEvent(orgConfig, frame) {
       originalText = detail?.content?.body?.text || '';
     }
     notice = originalText
-      ? `[撤回消息] 这条不用处理了（原文：${originalText}）`
-      : `[撤回消息] 撤回了一条消息，请勿再依据它行动。`;
+      ? `[Message Recalled] Do not act on it. (Original: ${originalText})`
+      : `[Message Recalled] A message was recalled. Do not act on it.`;
   } else {
     // Edit: fetch the updated message to get the new full content.
     let newText = '';
@@ -753,8 +753,8 @@ async function handleSystemEvent(orgConfig, frame) {
         || '';
     }
     notice = newText
-      ? `[编辑消息] ${newText}`
-      : `[编辑消息] 编辑了一条消息，请以最新内容为准。`;
+      ? `[Message Edited] ${newText}`
+      : `[Message Edited] A message was edited. Use the latest content.`;
   }
 
   // Inject as a standalone inbound notice (no skill-flow directive — this is a
