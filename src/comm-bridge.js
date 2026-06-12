@@ -194,6 +194,31 @@ function forwardToC4(endpoint, body) {
 }
 
 // =============================================================================
+// Receive acknowledgement — react to an inbound message on receipt
+// =============================================================================
+//
+// cws-comm allows agent principals to add reactions as of PRD v2.5 (cws-comm
+// MR !398; the prior human-only hard reject was removed). The reaction
+// registry is deliberately kept at 8 keys — ⏳ (hourglass) is NOT registered —
+// so the "received / processing" acknowledgement uses the closest registered
+// code, `eyes` (👀). Overridable via config.message.receive_reaction_code
+// (must be one of the registry keys: thumbs_up/smile/heart/tada/eyes/joy/
+// fire/white_check_mark). Set to "" to disable. Fire-and-forget: a failed
+// reaction must never delay or block delivering the message to the agent.
+const DEFAULT_RECEIVE_REACTION = 'eyes';
+
+function reactOnReceive(orgConfig, msg) {
+  const code = config.message?.receive_reaction_code ?? DEFAULT_RECEIVE_REACTION;
+  if (!code || !msg?.id) return;
+  // POST /api/v1/messages/{message_id}/reactions {reaction_code} — proxied by
+  // cws-core (transport/http/reaction.go) to cws-comm. Reactor identity (agent)
+  // is derived server-side from the auth principal.
+  postForOrg(orgConfig.org_id, apiPath(`/messages/${msg.id}/reactions`), { reaction_code: code })
+    .then(() => log(`[${orgConfig.slug}] reacted '${code}' on msg=${msg.id}`))
+    .catch(e => warn(`[${orgConfig.slug}] react-on-receive failed msg=${msg.id}: ${e.message}`));
+}
+
+// =============================================================================
 // Policy filter — lark-style, applied per inbound message
 // =============================================================================
 
@@ -434,6 +459,11 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       }
       return;
     }
+
+    // Feature 1 (chat-features): acknowledge receipt by reacting to the inbound
+    // message immediately (fire-and-forget, only for messages we actually
+    // handle). See reactOnReceive — ⏳ is not registry-supported, so 👀 is used.
+    reactOnReceive(orgConfig, msg);
 
     if (decision.bindOwnerHint) {
       const { memberId, displayName } = decision.bindOwnerHint;
