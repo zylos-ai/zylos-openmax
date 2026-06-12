@@ -655,8 +655,20 @@ function startFrameMetricTimer() {
 // prior message changed; reactions / read-state / other system events are
 // logged and ignored (unchanged behavior).
 
+// Event-name strings are cws-comm's authoritative domain event constants
+// (cws-comm internal/domain/message_events.go, *.EventName()):
+//   "message.recalled" / "message.deleted" -> recall
+//   "message.updated"                       -> edit  (NB: cws-comm names edit
+//                                              "updated", not "edited")
+// Ignored (return null): message.created / .read / .delivered /
+//   .reaction.added / .reaction.removed / .mention.created.
+// Exact match keeps us in lock-step with the contract; the substring fallback
+// only guards against a future rename (e.g. a "message.edited" alias).
 function classifySystemEvent(eventName) {
   const e = String(eventName || '').toLowerCase();
+  if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
+  if (e === 'message.updated') return 'edit';
+  // Defensive fallback for naming drift — does not match reaction/read/etc.
   if (e.includes('recall') || e.includes('delete')) return 'recall';
   if (e.includes('edit') || e.includes('updat')) return 'edit';
   return null;
