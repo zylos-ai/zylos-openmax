@@ -734,7 +734,10 @@ function classifySystemEvent(eventName) {
 async function handleSystemEvent(orgConfig, frame) {
   const payload = frame.payload || {};
   const kind = classifySystemEvent(payload.event);
-  if (!kind) return; // reactions / read-state / other — nothing to surface
+  if (!kind) {
+    warn(`[${orgConfig.slug}] unhandled system event: ${payload.event || '(unknown)'} conv=${payload.conversation_id || '?'}`);
+    return;
+  }
 
   const data = payload.data || {};
   const conversationId = payload.conversation_id || data.conversation_id;
