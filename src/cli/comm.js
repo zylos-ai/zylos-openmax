@@ -24,14 +24,43 @@
  */
 
 import { randomUUID } from 'crypto';
-import { get, post, del, apiPath } from '../lib/client.js';
+import { get, post, del, getForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
+import { enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
 function ensureClientMsgId(id) {
   return id || `cmsg_${randomUUID()}`;
+}
+
+/**
+ * Resolve the target org block for owner commands. Accepts `org` as a config
+ * slug or an org UUID; with neither, defaults to the single enabled org.
+ * Returns { slug, org_id, self, owner } or throws a helpful error.
+ */
+function resolveOrg(p) {
+  const key = p.org || p.orgSlug || p.orgId || p.org_id;
+  const enabled = enabledOrgs();
+  if (key) {
+    const bySlug = enabled.find((o) => o.slug === key);
+    if (bySlug) return bySlug;
+    const byId = getOrgByOrgId(key);
+    if (byId) return byId;
+    throw new Error(`org not found in config: "${key}" (known slugs: ${enabled.map((o) => o.slug).join(', ') || 'none'})`);
+  }
+  if (enabled.length === 1) return enabled[0];
+  if (enabled.length === 0) throw new Error('no enabled orgs in config.orgs');
+  throw new Error(`multiple enabled orgs — pass {"org":"<slug>"} (one of: ${enabled.map((o) => o.slug).join(', ')})`);
+}
+
+// Read this agent's own member record from cws-core for the given org; the
+// authoritative owner_member_id lives here.
+async function fetchSelfMember(org) {
+  const selfId = org.self?.member_id;
+  if (!selfId) throw new Error(`org "${org.slug}" has no self.member_id yet (token exchange not completed)`);
+  return getForOrg(org.org_id, apiPath(`/members/${selfId}`));
 }
 
 /**
@@ -154,6 +183,60 @@ const COMMANDS = {
     device_id: params.deviceId,
     limit:     params.limit,
   }),
+
+  // ---- Owner ------------------------------------------------------------------
+  // cws-core is the authoritative source of an agent's owner (reassigned via
+  // POST /platform-agents/{member_id}/transfer-owner). These commands inspect
+  // and reconcile the local config.json owner cache against core. The running
+  // comm-bridge also auto-syncs on every WS (re)connect; these are the
+  // manual / trigger path.
+
+  // Show the local (config.json) owner alongside core's authoritative value.
+  'comm.get_owner': async () => {
+    const org = resolveOrg(params);
+    const member = await fetchSelfMember(org);
+    return {
+      org_slug:        org.slug,
+      org_id:          org.org_id,
+      local_owner:     org.owner || { member_id: '', name: '' },
+      core_owner_id:   member?.owner_member_id || '',
+      in_sync:         (org.owner?.member_id || '') === (member?.owner_member_id || ''),
+    };
+  },
+
+  // Manually set (overwrite) the local owner binding. Pass an empty memberId to
+  // clear it (revert to unbound → first-DM auto-bind takes over). Note: this
+  // sets the LOCAL cache only; the authoritative owner is changed on cws-core.
+  'comm.set_owner': async () => {
+    const org = resolveOrg(params);
+    const memberId = params.memberId ?? params.member_id ?? '';
+    const name = params.name ?? params.displayName ?? '';
+    setOwner(org.slug, memberId, name);
+    return { org_slug: org.slug, owner: { member_id: memberId || '', name: name || '' }, cleared: !memberId };
+  },
+
+  // Pull the authoritative owner from cws-core and write it into config.json
+  // (the running service applies it live via its config watcher). No-op when
+  // core has no owner recorded (the local binding is left untouched).
+  'comm.sync_owner': async () => {
+    const org = resolveOrg(params);
+    const member = await fetchSelfMember(org);
+    const coreOwnerId = member?.owner_member_id || '';
+    const localOwnerId = org.owner?.member_id || '';
+    if (!coreOwnerId) {
+      return { org_slug: org.slug, synced: false, reason: 'core has no owner recorded; local binding left as-is', local_owner_id: localOwnerId };
+    }
+    if (coreOwnerId === localOwnerId) {
+      return { org_slug: org.slug, synced: false, reason: 'already in sync', owner_id: coreOwnerId };
+    }
+    let name = '';
+    try {
+      const ownerMember = await getForOrg(org.org_id, apiPath(`/members/${coreOwnerId}`));
+      name = ownerMember?.display_name || ownerMember?.username || '';
+    } catch { /* name is cosmetic */ }
+    setOwner(org.slug, coreOwnerId, name);
+    return { org_slug: org.slug, synced: true, previous_owner_id: localOwnerId, owner: { member_id: coreOwnerId, name } };
+  },
 };
 
 function printUsage() {
@@ -181,6 +264,12 @@ Search (KB pages only)
 
 Sync (WS reconnect catch-up)
   comm.sync                 {sinceSeq, deviceId, limit?}             # POST /sync
+
+Owner (local cache ↔ cws-core authoritative)
+  comm.get_owner            {org?}                  # show local vs core owner
+  comm.set_owner            {memberId, name?, org?} # overwrite local owner (empty memberId clears)
+  comm.sync_owner           {org?}                  # pull authoritative owner from core into config
+                            # org = config slug or org UUID; defaults to the single enabled org
 
 Environment:
   COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)

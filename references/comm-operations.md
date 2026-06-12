@@ -94,6 +94,22 @@ CLI 位置:`src/cli/comm.js`
 | --- | --- | --- | --- | --- |
 | ✅ | `comm.search` | KB page 全文搜索(v5 唯一搜索入口;名字带 comm 是历史包袱)| `{query, kbId?, limit?, offset?, sort?}` | `GET /api/v1/search/pages` |
 
+### Owner(归属 owner;cws-core 为权威源)
+
+cws-core 是 agent owner 的权威源(可通过 `POST /api/v1/platform-agents/{member_id}/transfer-owner`
+转让)。本地 `config.json` 的 `orgs.<slug>.owner` 只是缓存。**comm-bridge 在每次 WS(重)连接时
+自动从 core 拉取并同步**(免重启);下面几条命令是手动 / 触发用途。`org` 入参可填 config 里的 slug
+或 org UUID,单 org 部署可省略。
+
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `comm.get_owner` | 对比本地缓存 owner 与 core 权威 owner | `{org?}` | `GET /api/v1/members/{self}` |
+| ✅ | `comm.set_owner` | 覆盖本地 owner 缓存(memberId 传空=清空,回到未绑定→首次 DM 自动绑定兜底)| `{memberId, name?, org?}` | 仅写本地 config |
+| ✅ | `comm.sync_owner` | 从 core 拉权威 owner 写入 config(运行中的服务经 config watcher 即时生效);core 无 owner 时不动本地 | `{org?}` | `GET /api/v1/members/{self}` |
+
+> 注意:owner 的**权威变更**发生在 cws-core(转让端点),不在本地。`comm.set_owner` 只改本地缓存,
+> 下次重连会被 core 的权威值覆盖。要持久改归属,走 core 的 transfer-owner(由 owner 本人或 org-admin 操作)。
+
 ## 典型流程
 
 ### Agent 主动联系一个人

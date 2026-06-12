@@ -243,6 +243,28 @@ export function bindOwner(orgSlug, memberId, displayName) {
   });
 }
 
+/**
+ * Authoritatively set (overwrite) the owner of an org. Unlike bindOwner —
+ * which is a first-DM fallback and no-ops when an owner is already bound —
+ * this always writes the given binding. Used by the cws-core owner-sync (core
+ * is the authoritative source of an agent's owner) and the `comm set-owner` /
+ * `comm sync-owner` CLIs.
+ *
+ * Pass an empty/falsy `memberId` to clear the binding (back to unbound, so the
+ * first-DM auto-bind fallback can take over again).
+ */
+export function setOwner(orgSlug, memberId, displayName) {
+  if (!orgSlug) return null;
+  return updateConfig((cfg) => {
+    const org = cfg.orgs?.[orgSlug];
+    if (!org) return;
+    org.owner = {
+      member_id: memberId || '',
+      name: displayName || '',
+    };
+  });
+}
+
 // =============================================================================
 // Hot-reload watcher
 // =============================================================================
