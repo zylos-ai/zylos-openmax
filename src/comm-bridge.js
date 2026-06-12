@@ -194,6 +194,31 @@ function forwardToC4(endpoint, body) {
 }
 
 // =============================================================================
+// Receive acknowledgement — react to an inbound message on receipt
+// =============================================================================
+//
+// cws-comm allows agent principals to add reactions as of PRD v2.5 (cws-comm
+// MR !398; the prior human-only hard reject was removed). The reaction
+// registry is deliberately kept at 8 keys — ⏳ (hourglass) is NOT registered —
+// so the "received / processing" acknowledgement uses the closest registered
+// code, `eyes` (👀). Overridable via config.message.receive_reaction_code
+// (must be one of the registry keys: thumbs_up/smile/heart/tada/eyes/joy/
+// fire/white_check_mark). Set to "" to disable. Fire-and-forget: a failed
+// reaction must never delay or block delivering the message to the agent.
+const DEFAULT_RECEIVE_REACTION = 'eyes';
+
+function reactOnReceive(orgConfig, msg) {
+  const code = config.message?.receive_reaction_code ?? DEFAULT_RECEIVE_REACTION;
+  if (!code || !msg?.id) return;
+  // POST /api/v1/messages/{message_id}/reactions {reaction_code} — proxied by
+  // cws-core (transport/http/reaction.go) to cws-comm. Reactor identity (agent)
+  // is derived server-side from the auth principal.
+  postForOrg(orgConfig.org_id, apiPath(`/messages/${msg.id}/reactions`), { reaction_code: code })
+    .then(() => log(`[${orgConfig.slug}] reacted '${code}' on msg=${msg.id}`))
+    .catch(e => warn(`[${orgConfig.slug}] react-on-receive failed msg=${msg.id}: ${e.message}`));
+}
+
+// =============================================================================
 // Policy filter — lark-style, applied per inbound message
 // =============================================================================
 
@@ -435,6 +460,11 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       return;
     }
 
+    // Feature 1 (chat-features): acknowledge receipt by reacting to the inbound
+    // message immediately (fire-and-forget, only for messages we actually
+    // handle). See reactOnReceive — ⏳ is not registry-supported, so 👀 is used.
+    reactOnReceive(orgConfig, msg);
+
     if (decision.bindOwnerHint) {
       const { memberId, displayName } = decision.bindOwnerHint;
       log(`bind owner [${orgConfig.slug}] member_id=${memberId} name="${displayName}"`);
@@ -641,6 +671,92 @@ function startFrameMetricTimer() {
   _frameMetricTimer.unref?.();
 }
 
+// =============================================================================
+// System events — message recall / edit → inject a notice to the agent
+// =============================================================================
+//
+// cws-comm delivers non-create message lifecycle events (recalled / edited /
+// deleted / reaction) as `system` frames — see cws-comm
+// internal/transport/ws/gateway_consumer.go buildWSFrame(): "message.created"
+// becomes a `message` frame, every other event becomes a `system` frame whose
+// payload is { event, conversation_id, data }, where `data` is the raw event
+// JSON (message_id, edited_by / deleted_by, new content, ...). We surface
+// recall and edit to the agent as a synthetic inbound notice so it knows a
+// prior message changed; reactions / read-state / other system events are
+// logged and ignored (unchanged behavior).
+
+// Event-name strings are cws-comm's authoritative domain event constants
+// (cws-comm internal/domain/message_events.go, *.EventName()):
+//   "message.recalled" / "message.deleted" -> recall
+//   "message.updated"                       -> edit  (NB: cws-comm names edit
+//                                              "updated", not "edited")
+// Ignored (return null): message.created / .read / .delivered /
+//   .reaction.added / .reaction.removed / .mention.created.
+// Exact match keeps us in lock-step with the contract; the substring fallback
+// only guards against a future rename (e.g. a "message.edited" alias).
+function classifySystemEvent(eventName) {
+  const e = String(eventName || '').toLowerCase();
+  if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
+  if (e === 'message.updated') return 'edit';
+  // Defensive fallback for naming drift — does not match reaction/read/etc.
+  if (e.includes('recall') || e.includes('delete')) return 'recall';
+  if (e.includes('edit') || e.includes('updat')) return 'edit';
+  return null;
+}
+
+async function handleSystemEvent(orgConfig, frame) {
+  const payload = frame.payload || {};
+  const kind = classifySystemEvent(payload.event);
+  if (!kind) return; // reactions / read-state / other — nothing to surface
+
+  const data = payload.data || {};
+  const conversationId = payload.conversation_id || data.conversation_id;
+  if (!conversationId) {
+    warn(`[${orgConfig.slug}] system ${payload.event}: missing conversation_id, skip`);
+    return;
+  }
+  const messageId = data.message_id || data.id || data.msg_id || '';
+
+  // Dedup so a reconnect/catch-up replay of the same lifecycle event does not
+  // re-inject the notice. Keyed distinctly from message-create ids.
+  const dedupKey = `sys:${kind}:${conversationId}:${messageId || payload.event}`;
+  if (dedupe(dedupKey)) {
+    log(`[${orgConfig.slug}] system ${kind} dedup msg=${messageId}`);
+    return;
+  }
+
+  let notice;
+  if (kind === 'recall') {
+    notice = `对方撤回了一条消息${messageId ? `(message_id=${messageId})` : ''}。该消息内容已被撤回,请勿再依据它行动。`;
+  } else {
+    // edit: surface the new content when the event payload carries it.
+    const newText =
+         (typeof data?.content?.body?.text === 'string' && data.content.body.text)
+      || (typeof data.new_content === 'string' && data.new_content)
+      || (typeof data.text === 'string' && data.text)
+      || '';
+    notice = `对方编辑了一条消息${messageId ? `(message_id=${messageId})` : ''}。${newText ? `新内容:${newText}` : '内容已变更,请以最新内容为准。'}`;
+  }
+
+  // Inject as a standalone inbound notice (no skill-flow directive — this is a
+  // system event, not a user task). conv type defaults to dm; the endpoint is
+  // keyed by conversationId so routing is correct regardless of dm/group.
+  const endpoint = formatEndpoint({ type: 'dm', conversationId });
+  const body = formatInboundForC4(
+    { type: 'dm', id: conversationId },
+    { displayName: '系统' },
+    { content: notice, type: 'text' },
+    [],
+    { enforceSkillFlow: false },
+  );
+  try {
+    await forwardToC4(endpoint, body);
+    log(`[${orgConfig.slug}] system ${kind} notice -> agent conv=${conversationId} msg=${messageId}`);
+  } catch (e) {
+    warn(`[${orgConfig.slug}] system ${kind} notice failed: ${e.message}`);
+  }
+}
+
 function makeOrgFrameDispatcher(orgConfig, onMessage) {
   return function onFrame(frame) {
     const type = frame.type;
@@ -654,6 +770,7 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
         break;
       case 'system':
         log(`[${orgConfig.slug}] system event=${frame.payload?.event || '<unknown>'} conv=${frame.payload?.conversation_id || '<unknown>'}`);
+        handleSystemEvent(orgConfig, frame).catch(e => warn(`[${orgConfig.slug}] handleSystemEvent:`, e.message));
         break;
       case 'error':
         warn(`[${orgConfig.slug}] server error frame:`, JSON.stringify(frame.payload || {}));
