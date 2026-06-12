@@ -57,6 +57,11 @@ export const DEFAULT_CONFIG = {
     // override either. `platform` is no longer present (was never read).
     bff_url: 'http://127.0.0.1:8080',
     ws_url:  'ws://127.0.0.1:8080/ws',
+
+    // Frontend base path — the SPA mount point on the same origin as bff_url.
+    // Used by frontendUrl() to construct browser-navigable links. Override
+    // when the deployment mounts cws-fe at a different path.
+    frontend_base_path: '/cws',
   },
 
   // Cloudflare Access service-token headers, attached to every outbound REST
