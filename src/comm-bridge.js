@@ -79,6 +79,32 @@ const conversationCache = new Map();
 // per inbound message (and per context line) for the same sender.
 const memberNameCache = new Map();
 
+// message_id → { text, ts }. TTL slightly over 2 min (the recall window).
+const MSG_TEXT_TTL_MS = 130_000;
+const recentMsgTextCache = new Map();
+
+function cacheMessageText(messageId, text) {
+  if (!messageId || !text) return;
+  recentMsgTextCache.set(messageId, { text, ts: Date.now() });
+  // Lazy eviction: prune expired entries when cache grows past 500
+  if (recentMsgTextCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of recentMsgTextCache) {
+      if (now - v.ts > MSG_TEXT_TTL_MS) recentMsgTextCache.delete(k);
+    }
+  }
+}
+
+function getCachedMessageText(messageId) {
+  const entry = recentMsgTextCache.get(messageId);
+  if (!entry) return '';
+  if (Date.now() - entry.ts > MSG_TEXT_TTL_MS) {
+    recentMsgTextCache.delete(messageId);
+    return '';
+  }
+  return entry.text;
+}
+
 // =============================================================================
 // REST helpers
 // =============================================================================
@@ -417,6 +443,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
 
     const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
     const msg = { ...notification, ...(detail || {}) };
+    cacheMessageText(notification.id, msg.content?.body?.text);
     // get-message envelope nests scalar message fields under `message`; for
     // real-time WS frames the notification already carries sender_id/seq/type
     // at the top level, but sync catch-up frames don't. Hoist them so
@@ -725,17 +752,36 @@ async function handleSystemEvent(orgConfig, frame) {
     return;
   }
 
+  const orgId = orgConfig.org_id;
+  const actorId = data.recalled_by || data.edited_by || data.sender_id || '';
+  const actorName = (await fetchMemberName(orgId, actorId)) || actorId || '对方';
+
   let notice;
   if (kind === 'recall') {
-    notice = `对方撤回了一条消息${messageId ? `(message_id=${messageId})` : ''}。该消息内容已被撤回,请勿再依据它行动。`;
+    let originalText = messageId ? getCachedMessageText(messageId) : '';
+    if (!originalText && messageId) {
+      const detail = await fetchMessageDetail(orgId, conversationId, messageId);
+      originalText = detail?.content?.body?.text || '';
+    }
+    notice = originalText
+      ? `[Message Recalled] Do not act on it. (Original: ${originalText})`
+      : `[Message Recalled] A message was recalled. Do not act on it.`;
   } else {
-    // edit: surface the new content when the event payload carries it.
-    const newText =
-         (typeof data?.content?.body?.text === 'string' && data.content.body.text)
-      || (typeof data.new_content === 'string' && data.new_content)
-      || (typeof data.text === 'string' && data.text)
-      || '';
-    notice = `对方编辑了一条消息${messageId ? `(message_id=${messageId})` : ''}。${newText ? `新内容:${newText}` : '内容已变更,请以最新内容为准。'}`;
+    // Edit: fetch the updated message to get the new full content.
+    let newText = '';
+    if (messageId) {
+      const detail = await fetchMessageDetail(orgId, conversationId, messageId);
+      newText = detail?.content?.body?.text || '';
+    }
+    if (!newText) {
+      newText = (typeof data?.content?.body?.text === 'string' && data.content.body.text)
+        || (typeof data.new_content === 'string' && data.new_content)
+        || (typeof data.text === 'string' && data.text)
+        || '';
+    }
+    notice = newText
+      ? `[Message Edited] ${newText}`
+      : `[Message Edited] A message was edited. Use the latest content.`;
   }
 
   // Inject as a standalone inbound notice (no skill-flow directive — this is a
@@ -744,7 +790,7 @@ async function handleSystemEvent(orgConfig, frame) {
   const endpoint = formatEndpoint({ type: 'dm', conversationId });
   const body = formatInboundForC4(
     { type: 'dm', id: conversationId },
-    { displayName: '系统' },
+    { displayName: actorName },
     { content: notice, type: 'text' },
     [],
     { enforceSkillFlow: false },
