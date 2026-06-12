@@ -725,17 +725,36 @@ async function handleSystemEvent(orgConfig, frame) {
     return;
   }
 
+  const orgId = orgConfig.org_id;
+  const actorId = data.recalled_by || data.edited_by || data.sender_id || '';
+  const actorName = (await fetchMemberName(orgId, actorId)) || actorId || '对方';
+
   let notice;
   if (kind === 'recall') {
-    notice = `对方撤回了一条消息${messageId ? `(message_id=${messageId})` : ''}。该消息内容已被撤回,请勿再依据它行动。`;
+    let originalText = '';
+    if (messageId) {
+      const detail = await fetchMessageDetail(orgId, conversationId, messageId);
+      originalText = detail?.content?.body?.text || '';
+    }
+    notice = originalText
+      ? `[撤回消息] 这条不用处理了（原文：${originalText}）`
+      : `[撤回消息] 撤回了一条消息，请勿再依据它行动。`;
   } else {
-    // edit: surface the new content when the event payload carries it.
-    const newText =
-         (typeof data?.content?.body?.text === 'string' && data.content.body.text)
-      || (typeof data.new_content === 'string' && data.new_content)
-      || (typeof data.text === 'string' && data.text)
-      || '';
-    notice = `对方编辑了一条消息${messageId ? `(message_id=${messageId})` : ''}。${newText ? `新内容:${newText}` : '内容已变更,请以最新内容为准。'}`;
+    // Edit: fetch the updated message to get the new full content.
+    let newText = '';
+    if (messageId) {
+      const detail = await fetchMessageDetail(orgId, conversationId, messageId);
+      newText = detail?.content?.body?.text || '';
+    }
+    if (!newText) {
+      newText = (typeof data?.content?.body?.text === 'string' && data.content.body.text)
+        || (typeof data.new_content === 'string' && data.new_content)
+        || (typeof data.text === 'string' && data.text)
+        || '';
+    }
+    notice = newText
+      ? `[编辑消息] ${newText}`
+      : `[编辑消息] 编辑了一条消息，请以最新内容为准。`;
   }
 
   // Inject as a standalone inbound notice (no skill-flow directive — this is a
@@ -744,7 +763,7 @@ async function handleSystemEvent(orgConfig, frame) {
   const endpoint = formatEndpoint({ type: 'dm', conversationId });
   const body = formatInboundForC4(
     { type: 'dm', id: conversationId },
-    { displayName: '系统' },
+    { displayName: actorName },
     { content: notice, type: 'text' },
     [],
     { enforceSkillFlow: false },
