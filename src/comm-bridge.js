@@ -79,6 +79,32 @@ const conversationCache = new Map();
 // per inbound message (and per context line) for the same sender.
 const memberNameCache = new Map();
 
+// message_id → { text, ts }. TTL slightly over 2 min (the recall window).
+const MSG_TEXT_TTL_MS = 130_000;
+const recentMsgTextCache = new Map();
+
+function cacheMessageText(messageId, text) {
+  if (!messageId || !text) return;
+  recentMsgTextCache.set(messageId, { text, ts: Date.now() });
+  // Lazy eviction: prune expired entries when cache grows past 500
+  if (recentMsgTextCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of recentMsgTextCache) {
+      if (now - v.ts > MSG_TEXT_TTL_MS) recentMsgTextCache.delete(k);
+    }
+  }
+}
+
+function getCachedMessageText(messageId) {
+  const entry = recentMsgTextCache.get(messageId);
+  if (!entry) return '';
+  if (Date.now() - entry.ts > MSG_TEXT_TTL_MS) {
+    recentMsgTextCache.delete(messageId);
+    return '';
+  }
+  return entry.text;
+}
+
 // =============================================================================
 // REST helpers
 // =============================================================================
@@ -417,6 +443,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
 
     const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
     const msg = { ...notification, ...(detail || {}) };
+    cacheMessageText(notification.id, msg.content?.body?.text);
     // get-message envelope nests scalar message fields under `message`; for
     // real-time WS frames the notification already carries sender_id/seq/type
     // at the top level, but sync catch-up frames don't. Hoist them so
@@ -731,8 +758,8 @@ async function handleSystemEvent(orgConfig, frame) {
 
   let notice;
   if (kind === 'recall') {
-    let originalText = '';
-    if (messageId) {
+    let originalText = messageId ? getCachedMessageText(messageId) : '';
+    if (!originalText && messageId) {
       const detail = await fetchMessageDetail(orgId, conversationId, messageId);
       originalText = detail?.content?.body?.text || '';
     }
