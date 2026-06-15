@@ -51,6 +51,10 @@ const C4_RECEIVE = path.join(
   process.env.HOME || '',
   'zylos/.claude/skills/comm-bridge/scripts/c4-receive.js',
 );
+const C4_CONTROL = path.join(
+  process.env.HOME || '',
+  'zylos/.claude/skills/comm-bridge/scripts/c4-control.js',
+);
 
 function log(...a)  { console.log(LOG_PREFIX, ...a); }
 function warn(...a) { console.warn(LOG_PREFIX, ...a); }
@@ -983,6 +987,29 @@ async function syncOwnerFromCore(orgConfig) {
   const live = activeOrgConfigs.get(orgConfig.slug);
   if (live && live !== orgConfig) live.owner = { member_id: coreOwnerId, name: ownerName };
   log(`[${orgConfig.slug}] owner synced from core: ${localOwnerId || '(none)'} → ${coreOwnerId}${ownerName ? ` (${ownerName})` : ''}`);
+
+  // Notify the bot session so it can update memory/references.md with the new
+  // owner — config.json is updated but the AI context won't see it until told.
+  notifyOwnerChanged(orgConfig.slug, coreOwnerId, ownerName, localOwnerId);
+}
+
+function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) {
+  const payload = JSON.stringify({
+    type: 'owner-changed',
+    org: orgSlug,
+    owner: { member_id: newOwnerId, name: newOwnerName },
+    previous_owner_member_id: previousOwnerId || null,
+  });
+  const content = `[OWNER-CHANGED] ${payload}`;
+  execFile(
+    process.execPath,
+    [C4_CONTROL, 'enqueue', '--content', content, '--priority', '2', '--no-ack-suffix'],
+    { timeout: 10000 },
+    (err, _stdout, stderr) => {
+      if (err) warn(`[${orgSlug}] failed to enqueue owner-changed control: ${stderr || err.message}`);
+      else log(`[${orgSlug}] owner-changed control enqueued`);
+    },
+  );
 }
 
 // Periodic owner sync — covers the gap where a WS connection stays alive but
