@@ -23,7 +23,7 @@
 import path from 'path';
 import { execFile } from 'child_process';
 
-import { loadConfig, watchConfig, enabledOrgs, bindOwner, updateOwnerName } from './lib/config.js';
+import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { recordParticipants } from './lib/mention.js';
@@ -500,8 +500,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     reactOnReceive(orgConfig, msg);
 
     if (decision.bindOwnerHint) {
+      // Fallback binding only: shouldHandleMessage emits bindOwnerHint solely
+      // when no owner is bound, and the WS open-time syncOwnerFromCore has
+      // already authoritatively applied any owner cws-core knows about. So we
+      // only reach here when core ALSO has no owner — first-DM auto-bind then
+      // takes over locally (bindOwner no-ops if a binding sneaked in meanwhile).
       const { memberId, displayName } = decision.bindOwnerHint;
-      log(`bind owner [${orgConfig.slug}] member_id=${memberId} name="${displayName}"`);
+      log(`bind owner (fallback, core had none) [${orgConfig.slug}] member_id=${memberId} name="${displayName}"`);
       bindOwner(orgConfig.slug, memberId, displayName);
       // Mutate the captured orgConfig so subsequent decisions see the new owner.
       orgConfig.owner = { member_id: memberId, name: displayName || '' };
@@ -905,6 +910,81 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
 }
 
 // =============================================================================
+// Owner sync — cws-core is the authoritative source of an agent's owner
+// =============================================================================
+//
+// An agent's owner can be reassigned server-side via cws-core
+// (POST /api/v1/platform-agents/{member_id}/transfer-owner). cws-core holds the
+// authoritative `owner_member_id`; this plugin's `orgs.<slug>.owner` block is a
+// local cache. On every WS (re)connect we pull our own member record and, when
+// core reports a different owner, update both the live in-memory orgConfig and
+// config.json — no restart needed.
+//
+// Pull-based by design: we never let a pushed WS payload mutate ownership (a
+// forged frame must not be able to hand the bot to an attacker). The
+// authoritative read is an authenticated GET against core.
+//
+// Sync triggers: (1) every WS (re)connect, (2) every OWNER_SYNC_INTERVAL_MS
+// while the process is alive (covers long-lived connections). CLI
+// `comm.sync_owner` provides a manual trigger.
+//
+// The first-DM auto-bind (bindOwner) is only a fallback for when core has NO
+// owner recorded — if core reports an owner here it always wins, and when core
+// reports none we leave the local binding untouched so auto-bind still works.
+
+async function syncOwnerFromCore(orgConfig) {
+  const selfMemberId = orgConfig.self?.member_id;
+  if (!selfMemberId) {
+    // member_id is written back by the token exchange; if it's not there yet
+    // we simply skip this round and try again on the next reconnect.
+    return;
+  }
+  let member;
+  try {
+    member = await getForOrg(orgConfig.org_id, apiPath(`/members/${selfMemberId}`));
+  } catch (err) {
+    warn(`[${orgConfig.slug}] owner-sync: fetch self member failed: ${err.message} — keeping local owner`);
+    return;
+  }
+  const coreOwnerId = member?.owner_member_id || '';
+  // Core has no authoritative owner → leave the local binding as-is so the
+  // first-DM auto-bind fallback keeps working. We never clear a local owner here.
+  if (!coreOwnerId) return;
+
+  const localOwnerId = orgConfig.owner?.member_id || '';
+  if (coreOwnerId === localOwnerId) return; // already in sync
+
+  let ownerName = '';
+  try { ownerName = (await fetchMemberName(orgConfig.org_id, coreOwnerId)) || ''; }
+  catch { /* display name is cosmetic */ }
+
+  // Persist to config.json and update the live captured orgConfig in place so
+  // the message handler's owner gate sees the new owner without a restart.
+  setOwner(orgConfig.slug, coreOwnerId, ownerName);
+  orgConfig.owner = { member_id: coreOwnerId, name: ownerName };
+  const live = activeOrgConfigs.get(orgConfig.slug);
+  if (live && live !== orgConfig) live.owner = { member_id: coreOwnerId, name: ownerName };
+  log(`[${orgConfig.slug}] owner synced from core: ${localOwnerId || '(none)'} → ${coreOwnerId}${ownerName ? ` (${ownerName})` : ''}`);
+}
+
+// Periodic owner sync — covers the gap where a WS connection stays alive but
+// the owner was reassigned on cws-core. Interval is conservative (5 min);
+// each round is one cheap GET per org.
+const OWNER_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+let _ownerSyncTimer = null;
+
+function startPeriodicOwnerSync() {
+  if (_ownerSyncTimer) return;
+  _ownerSyncTimer = setInterval(() => {
+    for (const [slug, orgConfig] of activeOrgConfigs) {
+      syncOwnerFromCore(orgConfig).catch(e =>
+        warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
+    }
+  }, OWNER_SYNC_INTERVAL_MS);
+  _ownerSyncTimer.unref?.();
+}
+
+// =============================================================================
 // WS pool — one connection per enabled org
 // =============================================================================
 
@@ -954,10 +1034,15 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     reconnectMaxMs:      config.server?.reconnect_max_delay ?? DEFAULT_WS_RECONNECT_MAX_MS,
     heartbeatIntervalMs: config.server?.heartbeat_interval  ?? DEFAULT_WS_HEARTBEAT_MS,
 
-    onOpen: () => {
+    onOpen: async () => {
       log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
-      // After WS open, pull anything missed since the last persisted seq.
-      // No-op on first-ever connect (last_seq=0). Errors are caught inside
+      // Pull the authoritative owner from cws-core first (one cheap GET) so the
+      // owner gate is current before we replay any caught-up messages — e.g. a
+      // newly-transferred owner's queued DM must not be rejected. Errors are
+      // swallowed inside syncOwnerFromCore and never tear down the connection.
+      await syncOwnerFromCore(orgConfig);
+      // Then pull anything missed since the last persisted seq. No-op on
+      // first-ever connect (last_seq=0). Errors are caught inside
       // syncMissedEvents — they don't tear down the connection.
       syncMissedEvents(orgConfig, sessionRef, onMessage);
     },
@@ -1038,23 +1123,32 @@ if (orgs.length === 0) {
 
 watchConfig((next) => {
   config = next;
-  // Mutate captured per-org config objects in place so policy edits picked up
-  // by watchConfig (`access.dmPolicy`, `access.groupPolicy`, `access.groups`,
-  // `access.dmAllowFrom`) take effect without restarting the service. Owner /
-  // self / org_id / api_key are still considered structural — adding or
-  // removing an org, rotating the api_key, or rebinding ownership still
-  // requires a service restart (and is logged below).
+  // Mutate captured per-org config objects in place so edits picked up by
+  // watchConfig take effect without restarting the service: access policy
+  // (`access.dmPolicy`, `access.groupPolicy`, `access.groups`,
+  // `access.dmAllowFrom`) and `owner` (rebinding ownership). self / org_id /
+  // api_key are still considered structural — adding or removing an org or
+  // rotating the api_key still requires a service restart (logged below).
   let accessUpdates = 0;
+  let ownerUpdates = 0;
   for (const [slug, live] of activeOrgConfigs) {
     const updated = next.orgs?.[slug];
     if (updated?.access) {
       live.access = updated.access;
       accessUpdates += 1;
     }
+    // Owner edits (via `comm set-owner` / `comm sync-owner`, or the daemon's
+    // own core owner-sync writing config.json) apply in place — no restart
+    // needed to rebind ownership. org_id / api_key / self stay structural.
+    if (updated?.owner && (updated.owner.member_id || '') !== (live.owner?.member_id || '')) {
+      live.owner = { member_id: updated.owner.member_id || '', name: updated.owner.name || '' };
+      ownerUpdates += 1;
+    }
   }
   log(
-    `config reloaded — applied access updates to ${accessUpdates} org(s); ` +
-    `WS settings apply on next reconnect; new/removed orgs require service restart`,
+    `config reloaded — applied access updates to ${accessUpdates} org(s), ` +
+    `owner updates to ${ownerUpdates} org(s); ` +
+    `WS settings apply on next reconnect; org_id/api_key/self changes require service restart`,
   );
 });
 
@@ -1070,3 +1164,4 @@ process.on('SIGINT', () => {
 });
 
 startFrameMetricTimer();
+startPeriodicOwnerSync();

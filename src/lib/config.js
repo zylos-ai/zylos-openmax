@@ -248,6 +248,18 @@ export function bindOwner(orgSlug, memberId, displayName) {
   });
 }
 
+export function setOwner(orgSlug, memberId, displayName) {
+  if (!orgSlug) return null;
+  return updateConfig((cfg) => {
+    const org = cfg.orgs?.[orgSlug];
+    if (!org) return;
+    org.owner = {
+      member_id: memberId || '',
+      name: displayName || '',
+    };
+  });
+}
+
 export function updateOwnerName(orgSlug, displayName) {
   if (!orgSlug || !displayName) return null;
   return updateConfig((cfg) => {

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.21] - 2026-06-12
+
+### Added
+- **Agent owner is now synced from cws-core, the authoritative source**
+  (`src/comm-bridge.js`, `src/lib/config.js`, `src/cli/comm.js`). An agent's
+  owner can be reassigned server-side via cws-core
+  (`POST /api/v1/platform-agents/{member_id}/transfer-owner`). On every WS
+  (re)connect the bridge pulls its own member record and, when core reports a
+  different `owner_member_id`, updates both the live in-memory org config and
+  `config.json` — no restart needed. Pull-based by design: ownership is never
+  mutated from a pushed WS payload (a forged frame must not be able to hand the
+  bot to an attacker); the authoritative read is an authenticated GET.
+- **`comm.get_owner` / `comm.set_owner` / `comm.sync_owner` CLI commands**
+  (`src/cli/comm.js`) for inspecting and reconciling the local owner cache
+  against core (manual / trigger path; the running service auto-syncs on each
+  reconnect). Plus `setOwner()` in `src/lib/config.js` — an authoritative
+  overwrite (vs `bindOwner`'s first-DM no-op-if-bound).
+
+### Changed
+- **First-DM owner auto-bind is now an explicit fallback** — it only takes
+  effect when cws-core has no owner recorded for the agent. When core reports
+  an owner it always wins. (`src/comm-bridge.js`)
+- **Owner edits to `config.json` now apply live** via the config watcher (in
+  place, no restart) — same treatment as access-policy edits. `org_id` /
+  `api_key` / `self` remain structural (restart required). (`src/comm-bridge.js`)
+
 ## [1.0.19] - 2026-06-11
 
 ### Fixed

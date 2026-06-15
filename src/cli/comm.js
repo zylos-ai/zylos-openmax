@@ -24,15 +24,43 @@
  */
 
 import { randomUUID } from 'crypto';
-import { get, post, del, apiPath } from '../lib/client.js';
+import { get, post, del, getForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
-import { loadConfig, updateConfig, enabledOrgs } from '../lib/config.js';
+import { loadConfig, updateConfig, enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
 function ensureClientMsgId(id) {
   return id || `cmsg_${randomUUID()}`;
+}
+
+/**
+ * Resolve the target org block for owner commands. Accepts `org` as a config
+ * slug or an org UUID; with neither, defaults to the single enabled org.
+ * Returns { slug, org_id, self, owner } or throws a helpful error.
+ */
+function resolveOrgConfig(p) {
+  const key = p.org || p.orgSlug || p.orgId || p.org_id;
+  const enabled = enabledOrgs();
+  if (key) {
+    const bySlug = enabled.find((o) => o.slug === key);
+    if (bySlug) return bySlug;
+    const byId = getOrgByOrgId(key);
+    if (byId) return byId;
+    throw new Error(`org not found in config: "${key}" (known slugs: ${enabled.map((o) => o.slug).join(', ') || 'none'})`);
+  }
+  if (enabled.length === 1) return enabled[0];
+  if (enabled.length === 0) throw new Error('no enabled orgs in config.orgs');
+  throw new Error(`multiple enabled orgs — pass {"org":"<slug>"} (one of: ${enabled.map((o) => o.slug).join(', ')})`);
+}
+
+// Read this agent's own member record from cws-core for the given org; the
+// authoritative owner_member_id lives here.
+async function fetchSelfMember(org) {
+  const selfId = org.self?.member_id;
+  if (!selfId) throw new Error(`org "${org.slug}" has no self.member_id yet (token exchange not completed)`);
+  return getForOrg(org.org_id, apiPath(`/members/${selfId}`));
 }
 
 /**
@@ -171,6 +199,27 @@ const COMMANDS = {
     limit:     params.limit,
   }),
 
+  // ---- Owner ------------------------------------------------------------------
+  'comm.sync_owner': async () => {
+    const org = resolveOrgConfig(params);
+    const member = await fetchSelfMember(org);
+    const coreOwnerId = member?.owner_member_id || '';
+    const localOwnerId = org.owner?.member_id || '';
+    if (!coreOwnerId) {
+      return { org_slug: org.slug, synced: false, reason: 'core has no owner recorded; local binding left as-is', local_owner_id: localOwnerId };
+    }
+    if (coreOwnerId === localOwnerId) {
+      return { org_slug: org.slug, synced: false, reason: 'already in sync', owner_id: coreOwnerId };
+    }
+    let name = '';
+    try {
+      const ownerMember = await getForOrg(org.org_id, apiPath(`/members/${coreOwnerId}`));
+      name = ownerMember?.display_name || ownerMember?.username || '';
+    } catch { /* name is cosmetic */ }
+    setOwner(org.slug, coreOwnerId, name);
+    return { org_slug: org.slug, synced: true, previous_owner_id: localOwnerId, owner: { member_id: coreOwnerId, name } };
+  },
+
   // ---- DM access control (local config, hot-reloaded) -----------------------
 
   'comm.dm_policy': () => {
@@ -246,6 +295,9 @@ Search (KB pages only)
 
 Sync (WS reconnect catch-up)
   comm.sync                 {sinceSeq, deviceId, limit?}             # POST /sync
+
+Owner (local cache ↔ cws-core authoritative)
+  comm.sync_owner           {org?}                  # pull authoritative owner from core into config
 
 DM access control (local config, hot-reloaded by running service)
   comm.dm_policy            {org?, policy?}                          # show or set dmPolicy (open|allowlist|owner)
