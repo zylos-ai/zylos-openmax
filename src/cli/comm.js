@@ -191,30 +191,6 @@ const COMMANDS = {
   // comm-bridge also auto-syncs on every WS (re)connect; these are the
   // manual / trigger path.
 
-  // Show the local (config.json) owner alongside core's authoritative value.
-  'comm.get_owner': async () => {
-    const org = resolveOrg(params);
-    const member = await fetchSelfMember(org);
-    return {
-      org_slug:        org.slug,
-      org_id:          org.org_id,
-      local_owner:     org.owner || { member_id: '', name: '' },
-      core_owner_id:   member?.owner_member_id || '',
-      in_sync:         (org.owner?.member_id || '') === (member?.owner_member_id || ''),
-    };
-  },
-
-  // Manually set (overwrite) the local owner binding. Pass an empty memberId to
-  // clear it (revert to unbound → first-DM auto-bind takes over). Note: this
-  // sets the LOCAL cache only; the authoritative owner is changed on cws-core.
-  'comm.set_owner': async () => {
-    const org = resolveOrg(params);
-    const memberId = params.memberId ?? params.member_id ?? '';
-    const name = params.name ?? params.displayName ?? '';
-    setOwner(org.slug, memberId, name);
-    return { org_slug: org.slug, owner: { member_id: memberId || '', name: name || '' }, cleared: !memberId };
-  },
-
   // Pull the authoritative owner from cws-core and write it into config.json
   // (the running service applies it live via its config watcher). No-op when
   // core has no owner recorded (the local binding is left untouched).
@@ -266,8 +242,6 @@ Sync (WS reconnect catch-up)
   comm.sync                 {sinceSeq, deviceId, limit?}             # POST /sync
 
 Owner (local cache ↔ cws-core authoritative)
-  comm.get_owner            {org?}                  # show local vs core owner
-  comm.set_owner            {memberId, name?, org?} # overwrite local owner (empty memberId clears)
   comm.sync_owner           {org?}                  # pull authoritative owner from core into config
                             # org = config slug or org UUID; defaults to the single enabled org
 

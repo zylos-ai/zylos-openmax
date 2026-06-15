@@ -868,6 +868,10 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
 // forged frame must not be able to hand the bot to an attacker). The
 // authoritative read is an authenticated GET against core.
 //
+// Sync triggers: (1) every WS (re)connect, (2) every OWNER_SYNC_INTERVAL_MS
+// while the process is alive (covers long-lived connections). CLI
+// `comm.sync_owner` provides a manual trigger.
+//
 // The first-DM auto-bind (bindOwner) is only a fallback for when core has NO
 // owner recorded — if core reports an owner here it always wins, and when core
 // reports none we leave the local binding untouched so auto-bind still works.
@@ -905,6 +909,23 @@ async function syncOwnerFromCore(orgConfig) {
   const live = activeOrgConfigs.get(orgConfig.slug);
   if (live && live !== orgConfig) live.owner = { member_id: coreOwnerId, name: ownerName };
   log(`[${orgConfig.slug}] owner synced from core: ${localOwnerId || '(none)'} → ${coreOwnerId}${ownerName ? ` (${ownerName})` : ''}`);
+}
+
+// Periodic owner sync — covers the gap where a WS connection stays alive but
+// the owner was reassigned on cws-core. Interval is conservative (5 min);
+// each round is one cheap GET per org.
+const OWNER_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+let _ownerSyncTimer = null;
+
+function startPeriodicOwnerSync() {
+  if (_ownerSyncTimer) return;
+  _ownerSyncTimer = setInterval(() => {
+    for (const [slug, orgConfig] of activeOrgConfigs) {
+      syncOwnerFromCore(orgConfig).catch(e =>
+        warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
+    }
+  }, OWNER_SYNC_INTERVAL_MS);
+  _ownerSyncTimer.unref?.();
 }
 
 // =============================================================================
@@ -1087,3 +1108,4 @@ process.on('SIGINT', () => {
 });
 
 startFrameMetricTimer();
+startPeriodicOwnerSync();
