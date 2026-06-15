@@ -4,9 +4,9 @@
 
 **何时加载本文档**:
 
-- 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,决定 `light`(直接执行流)还是 `heavy`(Blueprint 编排流)
+- 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,决定 `light`(单 Agent/无 Blueprint)还是 `heavy`(Blueprint 编排流),再由 Lead 判断是否需要审批
 - 需要派 task 给别人或自己接活时,查 `task.create` / `task.claim`
-- 工作做完准备收尾时,查 `attempt.transition` → `task.transition` → `issue.transition` → `set_acceptance` 的顺序
+- 工作做完准备收尾时,查 `attempt.transition` → `task.transition` → `issue.deliver` → `accept_delivered` / `reject_delivered` 的顺序
 - Lead 编排 heavy issue 的步骤时,查整套 `blueprint.*`
 - Worker 失败 / 阻塞要汇报时,查 `attempt.transition` 的 `failed` / `blocked` 选项
 
@@ -45,12 +45,12 @@ CLI 位置:`src/cli/tm.js`
 
 ## 当前覆盖度速览
 
-全部 31 个命令均已对齐 cws-core@contract-v2,可直接调用。
+全部 38 个命令均已对齐 cws-core BFF,可直接调用。
 
 | 域 | 命令数 | 状态 |
 | --- | --- | --- |
 | Project | 8 | ✅ 全部可用 |
-| Issue | 7 | ✅ 全部可用 |
+| Issue | 14 | ✅ 全部可用 |
 | Task | 7 | ✅ 全部可用 |
 | Blueprint | 5 | ✅ 全部可用 |
 | Attempt | 4 | ✅ 全部可用 |
@@ -81,21 +81,28 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `project.unarchive` | `restore` 别名,行为完全一致 | `{id}` | `POST /projects/{id}/restore` |
 | ✅ | `project.members` | 列项目成员(从 cws-work 拉) | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
 
-### Issue (7 条)
+### Issue (14 条)
 
-写路径使用 flat path `/issues/{id}`,不使用 `/projects/{pid}/issues/{id}`。
+写路径使用 flat path `/issues/{id}`,不使用 `/projects/{pid}/issues/{id}`。每个状态变更是一个带不变量校验和副作用的语义化动作;通用 `POST /issues/{id}/transition` 已被删除,`issue.transition` 仅作旧脚本兼容 shim。
 
 | 状态 | 命令 | 说明 | 入参 | 端点 |
 | --- | --- | --- | --- | --- |
 | ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级过滤) | `{projectId, status?, priority?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
 | ✅ | `issue.get` | 取单个 issue 详情 | `{id}` | `GET /issues/{id}` |
-| ✅ | `issue.create` | 起 issue;`mode=light` 直执 / `mode=heavy` 走 Blueprint 编排 | `{projectId, title, mode, priority, leadAgentId, description?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
+| ✅ | `issue.create` | 起 issue;`mode=light` 表示无 Blueprint,`mode=heavy` 表示 Blueprint 编排;`disposition=backlog` 可先记录不执行 | `{projectId, title, mode, priority, leadAgentId, description?, disposition?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
 | ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, priority?, dueDate?}` | `PATCH /issues/{id}` |
-| ✅ | `issue.transition` | 推 issue 状态机(executing / delivered / rejected / reopened / archived) | `{id, targetStatus (or 'status'), rejectionReason?}` | `POST /issues/{id}/transition` |
+| ✅ | `issue.activate` | backlog → pending_start;按 source 决定是否唤醒 Lead | `{id, source?}` | `POST /issues/{id}/activate` |
+| ✅ | `issue.start_execution` | Lead 判断无需审批/已具备条件后直接开工(pending_start/draft → executing) | `{id}` | `POST /issues/{id}/start-execution` |
+| ✅ | `issue.deliver` | executing → delivered | `{id}` | `POST /issues/{id}/deliver` |
+| ✅ | `issue.reopen` | rejected → pending_start,进入返工接手 | `{id}` | `POST /issues/{id}/reopen` |
+| ✅ | `issue.archive` | 归档 issue(任意非归档态可达) | `{id}` | `POST /issues/{id}/archive` |
+| ✅ | `issue.accept_delivered` | delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` — `source` 取 `im` / `explicit`(默认 `explicit`) |
+| ✅ | `issue.reject_delivered` | delivered → rejected | `{id, source?, rejectionReason?}` | `POST /issues/{id}/reject-delivered` |
+| ✅ | `issue.transition` | 旧脚本兼容 shim;新调用优先用上面的语义命令 | `{id, targetStatus (or 'status'), rejectionReason?}` | 映射到语义端点 |
 | ✅ | `issue.move_project` | 把 issue 整体迁到另一个项目 | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
-| ✅ | `issue.set_acceptance` | 验收 issue(accepted=true 进 archived;false 进 rejected 走返工) | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit`(默认 `explicit`),区分隐式 IM 验收和显式 set_acceptance 调用 |
+| ✅ | `issue.set_acceptance` | 兼容 wrapper;新调用优先用 `accept_delivered` / `reject_delivered` | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit`(默认 `explicit`) |
 
-`mode` 取值:`light`(直接执行流)/ `heavy`(Blueprint 编排流)。
+`mode` 取值:`light`(单 Agent/无 Blueprint)/ `heavy`(Blueprint 编排流)。是否需要审批不是 mode 的副作用,由 Lead/策略按风险、预算、权限等因素显式选择。`disposition` 取值:`start`(默认) / `backlog`。
 
 ### Task (7 条)
 
@@ -145,7 +152,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 node src/cli/kb.js kb.search '{"query":"竞品定价","folderId":"tn-projects-growth"}'
 # -> 命中 pg-pricing-ref-001, pg-market-overview-002
 
-# 1) 创建 light Issue(auto 进入 executing),带 contextPageIds
+# 1) 创建 light Issue(进入 pending_start),带 contextPageIds
 node src/cli/tm.js issue.create '{
   "projectId":"proj-1","mode":"light",
   "title":"Notion 竞品定价分析","description":"对比 5 个直接竞品的定价层级",
@@ -153,6 +160,9 @@ node src/cli/tm.js issue.create '{
   "contextPageIds":["pg-pricing-ref-001","pg-market-overview-002"],
   "originConversationId":"conv-1","originMessageId":"msg-42"
 }'
+
+# 1.5) Lead 接手后判断无需审批,启动执行
+node src/cli/tm.js issue.start_execution '{"id":"iss-1"}'
 
 # 2) 创建 Task 并认领(自做时 contextPageIds 可省略,自己已读过)
 node src/cli/tm.js task.create '{
@@ -163,10 +173,10 @@ node src/cli/tm.js task.claim '{"id":"task-1"}'
 # 3) 工作完成,流转 Attempt → Task → Issue → 交付
 node src/cli/tm.js attempt.transition '{"id":"att-1","targetStatus":"done"}'
 node src/cli/tm.js task.transition    '{"id":"task-1","targetStatus":"done"}'
-node src/cli/tm.js issue.transition   '{"id":"iss-1","targetStatus":"delivered"}'
+node src/cli/tm.js issue.deliver      '{"id":"iss-1"}'
 
 # 4) 人类验收
-node src/cli/tm.js issue.set_acceptance '{"id":"iss-1","accepted":true}'
+node src/cli/tm.js issue.accept_delivered '{"id":"iss-1","source":"im"}'
 ```
 
 ### 2. Lead heavy 模式 Blueprint 编排
@@ -197,10 +207,11 @@ node src/cli/tm.js blueprint.set_steps '{
   ]
 }'
 
-# 4) 提审 Blueprint,等审批通过后再派 Worker
+# 4) Lead 判断需要审批时,提审 Blueprint;无需审批时直接 start_execution
 node src/cli/tm.js blueprint.submit_for_approval '{"id":"bp-1"}'
+# node src/cli/tm.js issue.start_execution '{"id":"iss-2"}'
 
-# 5) 审批通过后,按 Step 派 Worker(传 contextPageIds 子集)
+# 5) 审批通过或 start_execution 后,按 Step 派 Worker(传 contextPageIds 子集)
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-2",
   "blueprintStepId":"step-1","title":"用户访谈","assigneeId":"worker-1",

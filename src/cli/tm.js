@@ -38,6 +38,36 @@ function pageParams(p) {
   };
 }
 
+// Backward-compat shim for the removed generic transition endpoint. cws-core
+// no longer exposes POST /issues/{id}/transition; map the requested target
+// status onto the corresponding semantic action endpoint. Note `reopened` is
+// an old target name — it now lands the issue in `pending_start` via /reopen.
+function issueTransitionCompat() {
+  const target = params.status ?? params.targetStatus;
+  switch (target) {
+    case 'executing':
+      return post(apiPath(`/issues/${params.id}/start-execution`));
+    case 'delivered':
+      return post(apiPath(`/issues/${params.id}/deliver`));
+    case 'reopened':
+    case 'pending_start':
+      return post(apiPath(`/issues/${params.id}/reopen`));
+    case 'archived':
+      return post(apiPath(`/issues/${params.id}/archive`));
+    case 'accepted':
+      return post(apiPath(`/issues/${params.id}/accept-delivered`), {
+        source: params.source ?? 'explicit',
+      });
+    case 'rejected':
+      return post(apiPath(`/issues/${params.id}/reject-delivered`), {
+        source:           params.source ?? 'explicit',
+        rejection_reason: params.rejectionReason,
+      });
+    default:
+      throw new Error(`issue.transition compatibility shim cannot map target status: ${target}`);
+  }
+}
+
 const COMMANDS = {
   // =========================================================================
   //  PROJECT  (✅ all 7 in contract-v2)
@@ -78,12 +108,12 @@ const COMMANDS = {
   ),
 
   // =========================================================================
-  //  ISSUE  (✅ all 7 in contract-v2 — note `issue.get/update/transition/move`
+  //  ISSUE  (✅ all cws-core BFF issue commands — note issue write paths
   //  use the FLAT path /issues/{id}, not /projects/{pid}/issues/{id})
   // =========================================================================
 
   'issue.list_in_project': () => get(apiPath(`/projects/${params.projectId}/issues`), {
-    status:   params.status,     // enum (draft / pending_approval / ... / archived)
+    status:   params.status,     // enum (backlog / pending_start / ... / archived)
     priority: params.priority,   // enum: low|medium|high
     ...pageParams(params),
   }),
@@ -93,11 +123,12 @@ const COMMANDS = {
 
   // contract-v2 create-issue body: requires title*, mode*, priority*,
   // lead_agent_id*; optional context_page_ids, input_artifact_ids,
-  // origin_conversation_id, origin_message_id, due_date.
+  // origin_conversation_id, origin_message_id, due_date, disposition.
   'issue.create': () => post(apiPath(`/projects/${params.projectId}/issues`), {
     title:                  params.title,
     description:            params.description || '',
     mode:                   params.mode,                  // light|heavy (required)
+    disposition:            params.disposition,           // start|backlog (default: start)
     priority:               params.priority,              // low|medium|high (required)
     due_date:               params.dueDate,
     lead_agent_id:          params.leadAgentId,
@@ -118,14 +149,32 @@ const COMMANDS = {
     },
   ),
 
-  // Flat path; body field is `target_status` (not `status`).
-  'issue.transition': () => post(
-    apiPath(`/issues/${params.id}/transition`),
+  // Semantic issue lifecycle actions (cws-core BFF). The generic
+  // POST /issues/{id}/transition endpoint was removed; each state change is
+  // now its own endpoint that enforces invariants and side effects.
+  'issue.activate': () => post(
+    apiPath(`/issues/${params.id}/activate`),
+    { source: params.source ?? 'lead_chat' },
+  ),
+  'issue.start_execution': () => post(apiPath(`/issues/${params.id}/start-execution`)),
+  'issue.deliver':         () => post(apiPath(`/issues/${params.id}/deliver`)),
+  'issue.reopen':          () => post(apiPath(`/issues/${params.id}/reopen`)),
+  'issue.archive':         () => post(apiPath(`/issues/${params.id}/archive`)),
+  'issue.accept_delivered': () => post(
+    apiPath(`/issues/${params.id}/accept-delivered`),
+    { source: params.source ?? 'explicit' },
+  ),
+  'issue.reject_delivered': () => post(
+    apiPath(`/issues/${params.id}/reject-delivered`),
     {
-      target_status:    params.status ?? params.targetStatus,
+      source:           params.source ?? 'explicit',
       rejection_reason: params.rejectionReason,
     },
   ),
+
+  // Backward-compat alias for older scripts. Prefer the semantic commands
+  // above; cws-core no longer exposes POST /issues/{id}/transition.
+  'issue.transition': issueTransitionCompat,
 
   // Flat path; body field is `new_project_id` (not `project_id`).
   'issue.move_project': () => post(
@@ -133,7 +182,8 @@ const COMMANDS = {
     { new_project_id: params.targetProjectId ?? params.newProjectId },
   ),
 
-  // contract-v2 set-issue-acceptance: POST /issues/{id}/acceptance
+  // Compatibility wrapper: POST /issues/{id}/acceptance. Prefer the semantic
+  // issue.accept_delivered / issue.reject_delivered commands for new calls.
   'issue.set_acceptance': () => post(
     apiPath(`/issues/${params.id}/acceptance`),
     {
@@ -303,11 +353,19 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.get              {id}
   issue.create           {projectId, title, mode, priority, leadAgentId,
                           description?, dueDate?, contextPageIds?,
-                          inputArtifactIds?, originConversationId?, originMessageId?}
+                          inputArtifactIds?, originConversationId?, originMessageId?,
+                          disposition?}                                      # disposition: start|backlog
   issue.update           {id, title?, description?, priority?, dueDate?}
-  issue.transition       {id, targetStatus (or 'status'), rejectionReason?}
+  issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
+  issue.start_execution  {id}
+  issue.deliver          {id}
+  issue.reopen           {id}                                                 # rejected → pending_start
+  issue.archive          {id}
+  issue.accept_delivered {id, source?}                                        # source: im|explicit
+  issue.reject_delivered {id, source?, rejectionReason?}
+  issue.transition       {id, targetStatus (or 'status'), rejectionReason?}    # compatibility shim only
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
-  issue.set_acceptance   {id, accepted, source?, rejectionReason?}        # source: im|explicit (default: explicit)
+  issue.set_acceptance   {id, accepted, source?, rejectionReason?}        # compat wrapper; prefer accept/reject_delivered
 
 TASK  (all ✅ on contract-v2; create uses doubly-nested path)
   task.list              {projectId?, issueId?, status?, claimable?, agentSkills?,
