@@ -53,7 +53,7 @@ function issueTransitionCompat() {
     case 'pending_start':
       return post(apiPath(`/issues/${params.id}/reopen`));
     case 'archived':
-      return post(apiPath(`/issues/${params.id}/archive`));
+      return post(apiPath(`/issues/${params.id}/transition`), { target_status: 'archived' });
     case 'accepted':
       return post(apiPath(`/issues/${params.id}/accept-delivered`), {
         source: params.source ?? 'explicit',
@@ -159,7 +159,7 @@ const COMMANDS = {
   'issue.start_execution': () => post(apiPath(`/issues/${params.id}/start-execution`)),
   'issue.deliver':         () => post(apiPath(`/issues/${params.id}/deliver`)),
   'issue.reopen':          () => post(apiPath(`/issues/${params.id}/reopen`)),
-  'issue.archive':         () => post(apiPath(`/issues/${params.id}/archive`)),
+  'issue.archive':         () => post(apiPath(`/issues/${params.id}/transition`), { target_status: 'archived' }),
   'issue.accept_delivered': () => post(
     apiPath(`/issues/${params.id}/accept-delivered`),
     { source: params.source ?? 'explicit' },
