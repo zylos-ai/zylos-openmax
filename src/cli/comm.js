@@ -183,7 +183,7 @@ const COMMANDS = {
   'comm.unread': () => get(apiPath(`/conversations/${params.conversationId}/unread`)),
 
   // ✅ POST /api/v1/conversations/{id}/read
-  'comm.mark_read': () => post(apiPath(`/conversations/${params.conversationId}/read`), {}),
+  'comm.mark_read': () => post(apiPath(`/conversations/${params.conversationId}/read`), { read_until_seq: params.seq }),
 
   // ✅ GET /api/v1/search/pages  — KB page search (only search surface in v5)
   'comm.search': () => get(apiPath('/search/pages'), {
@@ -292,7 +292,7 @@ Messages
 
 Read receipts
   comm.unread               {conversationId}                         # GET  /conversations/{id}/unread
-  comm.mark_read            {conversationId}                         # POST /conversations/{id}/read
+  comm.mark_read            {conversationId, seq}                    # POST /conversations/{id}/read
 
 Search (KB pages only)
   comm.search               {query, kbId?, limit?, offset?, sort?}   # GET /search/pages

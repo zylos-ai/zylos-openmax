@@ -254,10 +254,10 @@ function reactOnReceive(orgConfig, msg) {
 // Fire-and-forget (like reactOnReceive): a failed mark-read must never block
 // message delivery or outbound sends.
 
-function markRead(orgConfig, conversationId) {
-  if (!conversationId) return;
-  postForOrg(orgConfig.org_id, apiPath(`/conversations/${conversationId}/read`), {})
-    .then(() => log(`[${orgConfig.slug}] marked read conv=${conversationId}`))
+function markRead(orgConfig, conversationId, seq) {
+  if (!conversationId || !seq) return;
+  postForOrg(orgConfig.org_id, apiPath(`/conversations/${conversationId}/read`), { read_until_seq: seq })
+    .then(() => log(`[${orgConfig.slug}] marked read conv=${conversationId} seq=${seq}`))
     .catch(e => warn(`[${orgConfig.slug}] mark-read failed conv=${conversationId}: ${e.message}`));
 }
 
@@ -692,7 +692,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     try {
       await forwardToC4(endpoint, body);
       log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}`);
-      markRead(orgConfig, msg.conversation_id);
+      markRead(orgConfig, msg.conversation_id, msg.seq);
     } catch (e) {
       warn('c4-receive failed:', e.message);
     }
