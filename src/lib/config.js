@@ -248,6 +248,15 @@ export function bindOwner(orgSlug, memberId, displayName) {
   });
 }
 
+export function updateOwnerName(orgSlug, displayName) {
+  if (!orgSlug || !displayName) return null;
+  return updateConfig((cfg) => {
+    const org = cfg.orgs?.[orgSlug];
+    if (!org?.owner?.member_id) return;
+    org.owner.name = displayName;
+  });
+}
+
 // =============================================================================
 // Hot-reload watcher
 // =============================================================================
