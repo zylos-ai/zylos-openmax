@@ -23,7 +23,7 @@
 import path from 'path';
 import { execFile } from 'child_process';
 
-import { loadConfig, watchConfig, enabledOrgs, bindOwner } from './lib/config.js';
+import { loadConfig, watchConfig, enabledOrgs, bindOwner, updateOwnerName } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { recordParticipants } from './lib/mention.js';
@@ -286,8 +286,10 @@ function isSelfNameMentionedInText(msg, selfName) {
 // English copy in zylos-feishu/src/index.js — group rejections only fire when
 // the sender actually @-mentioned us, so a non-@-ed group message that hits a
 // policy gate stays silent (no userNotice set). DM rejections always notify.
-const NOTICE_DM_NOT_ALLOWED =
-  "Sorry, I'm not available for private messages. Please ask my owner to grant you access.";
+function noticeDmNotAllowed(ownerName) {
+  if (ownerName) return `Sorry, I'm not available for private messages. Please contact ${ownerName} to grant you access.`;
+  return "Sorry, I'm not available for private messages. Please ask my owner to grant you access.";
+}
 const NOTICE_GROUP_DISABLED =
   "Sorry, group chat is currently disabled.";
 const NOTICE_GROUP_NOT_ALLOWED =
@@ -329,16 +331,21 @@ function shouldHandleMessage(msg, conv, orgConfig) {
     // manually added to dmAllowFrom — the bug recorded as KB "CWS Issue 汇总" #34.
     const dmOwnerMemberId = orgConfig.owner?.member_id;
     if (dmOwnerMemberId && String(senderId) === String(dmOwnerMemberId)) {
+      if (!orgConfig.owner.name && senderName) {
+        orgConfig.owner.name = senderName;
+        updateOwnerName(orgConfig.slug, senderName);
+      }
       return { handle: true, reason: 'dm:owner-exempt' };
     }
     if (policy === 'open') return { handle: true, reason: 'dm:open' };
     if (policy === 'allowlist') {
       const list = (access.dmAllowFrom || []).map(String);
       if (list.includes(String(senderId))) return { handle: true, reason: 'dm:allowlist' };
+      const ownerName = orgConfig.owner?.name;
       return {
         handle: false,
         reason: `dm:allowlist (sender ${senderId} not listed)`,
-        userNotice: NOTICE_DM_NOT_ALLOWED,
+        userNotice: noticeDmNotAllowed(ownerName),
       };
     }
     // policy === 'owner' — bound state is derived from owner.member_id
@@ -356,7 +363,7 @@ function shouldHandleMessage(msg, conv, orgConfig) {
     return {
       handle: false,
       reason: `dm:owner (sender ${senderId} != bound owner ${owner.member_id})`,
-      userNotice: NOTICE_DM_NOT_ALLOWED,
+      userNotice: noticeDmNotAllowed(owner.name),
     };
   }
 
