@@ -71,6 +71,12 @@ function resolveTargetConversation(ep) {
   return ep.threadConversationId || ep.conversationId;
 }
 
+function markRead(conversationId) {
+  if (!conversationId) return;
+  post(apiPath(`/conversations/${conversationId}/read`), {})
+    .catch(() => {});
+}
+
 async function sendText(ep, text) {
   const convId = resolveTargetConversation(ep);
   // Canonicalize @mentions to the exact participant display_name so cws-fe's
@@ -176,6 +182,7 @@ async function main() {
     const result = media
       ? await sendMediaMessage(ep, media.kind, media.localPath, media.caption)
       : await sendText(ep, message);
+    markRead(resolveTargetConversation(ep));
     console.log(JSON.stringify(result));
   } catch (e) {
     const payload = { error: e.message };
