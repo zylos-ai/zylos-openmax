@@ -23,7 +23,7 @@
 import path from 'path';
 import { execFile } from 'child_process';
 
-import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner } from './lib/config.js';
+import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { recordParticipants } from './lib/mention.js';
@@ -78,6 +78,32 @@ const conversationCache = new Map();
 // stable for the life of the process; caching avoids a /members/{id} lookup
 // per inbound message (and per context line) for the same sender.
 const memberNameCache = new Map();
+
+// message_id → { text, ts }. TTL slightly over 2 min (the recall window).
+const MSG_TEXT_TTL_MS = 130_000;
+const recentMsgTextCache = new Map();
+
+function cacheMessageText(messageId, text) {
+  if (!messageId || !text) return;
+  recentMsgTextCache.set(messageId, { text, ts: Date.now() });
+  // Lazy eviction: prune expired entries when cache grows past 500
+  if (recentMsgTextCache.size > 500) {
+    const now = Date.now();
+    for (const [k, v] of recentMsgTextCache) {
+      if (now - v.ts > MSG_TEXT_TTL_MS) recentMsgTextCache.delete(k);
+    }
+  }
+}
+
+function getCachedMessageText(messageId) {
+  const entry = recentMsgTextCache.get(messageId);
+  if (!entry) return '';
+  if (Date.now() - entry.ts > MSG_TEXT_TTL_MS) {
+    recentMsgTextCache.delete(messageId);
+    return '';
+  }
+  return entry.text;
+}
 
 // =============================================================================
 // REST helpers
@@ -260,8 +286,10 @@ function isSelfNameMentionedInText(msg, selfName) {
 // English copy in zylos-feishu/src/index.js — group rejections only fire when
 // the sender actually @-mentioned us, so a non-@-ed group message that hits a
 // policy gate stays silent (no userNotice set). DM rejections always notify.
-const NOTICE_DM_NOT_ALLOWED =
-  "Sorry, I'm not available for private messages. Please ask my owner to grant you access.";
+function noticeDmNotAllowed(ownerName) {
+  if (ownerName) return `Sorry, I'm not available for private messages. Please contact ${ownerName} to grant you access.`;
+  return "Sorry, I'm not available for private messages. Please ask my owner to grant you access.";
+}
 const NOTICE_GROUP_DISABLED =
   "Sorry, group chat is currently disabled.";
 const NOTICE_GROUP_NOT_ALLOWED =
@@ -303,16 +331,21 @@ function shouldHandleMessage(msg, conv, orgConfig) {
     // manually added to dmAllowFrom — the bug recorded as KB "CWS Issue 汇总" #34.
     const dmOwnerMemberId = orgConfig.owner?.member_id;
     if (dmOwnerMemberId && String(senderId) === String(dmOwnerMemberId)) {
+      if (!orgConfig.owner.name && senderName) {
+        orgConfig.owner.name = senderName;
+        updateOwnerName(orgConfig.slug, senderName);
+      }
       return { handle: true, reason: 'dm:owner-exempt' };
     }
     if (policy === 'open') return { handle: true, reason: 'dm:open' };
     if (policy === 'allowlist') {
       const list = (access.dmAllowFrom || []).map(String);
       if (list.includes(String(senderId))) return { handle: true, reason: 'dm:allowlist' };
+      const ownerName = orgConfig.owner?.name;
       return {
         handle: false,
         reason: `dm:allowlist (sender ${senderId} not listed)`,
-        userNotice: NOTICE_DM_NOT_ALLOWED,
+        userNotice: noticeDmNotAllowed(ownerName),
       };
     }
     // policy === 'owner' — bound state is derived from owner.member_id
@@ -330,7 +363,7 @@ function shouldHandleMessage(msg, conv, orgConfig) {
     return {
       handle: false,
       reason: `dm:owner (sender ${senderId} != bound owner ${owner.member_id})`,
-      userNotice: NOTICE_DM_NOT_ALLOWED,
+      userNotice: noticeDmNotAllowed(owner.name),
     };
   }
 
@@ -417,6 +450,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
 
     const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
     const msg = { ...notification, ...(detail || {}) };
+    cacheMessageText(notification.id, msg.content?.body?.text);
     // get-message envelope nests scalar message fields under `message`; for
     // real-time WS frames the notification already carries sender_id/seq/type
     // at the top level, but sync catch-up frames don't. Hoist them so
@@ -712,7 +746,10 @@ function classifySystemEvent(eventName) {
 async function handleSystemEvent(orgConfig, frame) {
   const payload = frame.payload || {};
   const kind = classifySystemEvent(payload.event);
-  if (!kind) return; // reactions / read-state / other — nothing to surface
+  if (!kind) {
+    warn(`[${orgConfig.slug}] unhandled system event: ${payload.event || '(unknown)'} conv=${payload.conversation_id || '?'}`);
+    return;
+  }
 
   const data = payload.data || {};
   const conversationId = payload.conversation_id || data.conversation_id;
@@ -730,17 +767,36 @@ async function handleSystemEvent(orgConfig, frame) {
     return;
   }
 
+  const orgId = orgConfig.org_id;
+  const actorId = data.recalled_by || data.edited_by || data.sender_id || '';
+  const actorName = (await fetchMemberName(orgId, actorId)) || actorId || '对方';
+
   let notice;
   if (kind === 'recall') {
-    notice = `对方撤回了一条消息${messageId ? `(message_id=${messageId})` : ''}。该消息内容已被撤回,请勿再依据它行动。`;
+    let originalText = messageId ? getCachedMessageText(messageId) : '';
+    if (!originalText && messageId) {
+      const detail = await fetchMessageDetail(orgId, conversationId, messageId);
+      originalText = detail?.content?.body?.text || '';
+    }
+    notice = originalText
+      ? `[Message Recalled] Do not act on it. (Original: ${originalText})`
+      : `[Message Recalled] A message was recalled. Do not act on it.`;
   } else {
-    // edit: surface the new content when the event payload carries it.
-    const newText =
-         (typeof data?.content?.body?.text === 'string' && data.content.body.text)
-      || (typeof data.new_content === 'string' && data.new_content)
-      || (typeof data.text === 'string' && data.text)
-      || '';
-    notice = `对方编辑了一条消息${messageId ? `(message_id=${messageId})` : ''}。${newText ? `新内容:${newText}` : '内容已变更,请以最新内容为准。'}`;
+    // Edit: fetch the updated message to get the new full content.
+    let newText = '';
+    if (messageId) {
+      const detail = await fetchMessageDetail(orgId, conversationId, messageId);
+      newText = detail?.content?.body?.text || '';
+    }
+    if (!newText) {
+      newText = (typeof data?.content?.body?.text === 'string' && data.content.body.text)
+        || (typeof data.new_content === 'string' && data.new_content)
+        || (typeof data.text === 'string' && data.text)
+        || '';
+    }
+    notice = newText
+      ? `[Message Edited] ${newText}`
+      : `[Message Edited] A message was edited. Use the latest content.`;
   }
 
   // Inject as a standalone inbound notice (no skill-flow directive — this is a
@@ -749,7 +805,7 @@ async function handleSystemEvent(orgConfig, frame) {
   const endpoint = formatEndpoint({ type: 'dm', conversationId });
   const body = formatInboundForC4(
     { type: 'dm', id: conversationId },
-    { displayName: '系统' },
+    { displayName: actorName },
     { content: notice, type: 'text' },
     [],
     { enforceSkillFlow: false },

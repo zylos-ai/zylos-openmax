@@ -16,7 +16,7 @@
  *      surface is ready when core adds the endpoint
  */
 
-import { get, post, del, patch, apiPath } from '../lib/client.js';
+import { get, post, del, patch, apiPath, frontendUrl } from '../lib/client.js';
 import { enabledOrgs, updateConfig } from '../lib/config.js';
 
 const [command, ...rest] = process.argv.slice(2);
@@ -170,6 +170,14 @@ const COMMANDS = {
   }),
   // DELETE /api/v1/invitations/{invitation_id}
   'core.invitation_revoke': () => del(apiPath(`/invitations/${params.invitationId}`)),
+
+  // Local helper — build a browser-navigable frontend URL. Not an API call.
+  // Uses server.frontend_base_path (default /cws) + bff_url origin.
+  'core.frontend_url': () => {
+    const p = params.path || params.p || '';
+    if (!p) throw Object.assign(new Error('path is required'), { status: 400 });
+    return { url: frontendUrl(p) };
+  },
 };
 
 function printUsage() {
@@ -210,6 +218,10 @@ Invitations
   core.invitation_accept   {invitationId, token}                    # no display_name — name comes from the invitation
   core.invitation_revoke   {invitationId}
 
+Helpers
+  core.frontend_url        {path}   # build browser-navigable URL: bff_url + frontend_base_path + path
+                           # e.g. {path:"/knowledge?kb=xxx&node=yyy"} → https://cws-int.coco.xyz/cws/knowledge?...
+
 Environment:
   COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)
   COCO_API_PREFIX    Path prefix override (default: /api/v1)
@@ -233,6 +245,8 @@ async function main() {
   } catch (err) {
     const payload = { error: err.message };
     if (err.status) payload.status = err.status;
+    const fieldErrors = err.body?.error?.errors;
+    if (Array.isArray(fieldErrors) && fieldErrors.length > 0) payload.errors = fieldErrors;
     console.error(JSON.stringify(payload));
     process.exit(1);
   }

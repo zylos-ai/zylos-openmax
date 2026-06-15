@@ -267,6 +267,7 @@ node src/cli/tm.js attempt.transition '{
 - **不要**把 IM 消息原文整段复制进 task description / 评论 —— 通过会话锚定 + `contextPageIds` 引用就够了
 - **不要**直接调 `attempt.create` 来代替 `task.claim` —— `claim` 已内置建 attempt,手动 create 会撞冲突
 - **不要**忘记 `task.reassign` 后老 attempt 已自动 cancelled —— 新 assignee 走的是新 attempt,旧 attempt 不要再操作
+- **description 支持 Markdown**：Project / Issue / Task 的 description 均为纯文本字段,API 原样存储。建议使用 Markdown 格式(标题、列表、代码块等),前端会渲染富文本
 
 ## 后续版本计划
 

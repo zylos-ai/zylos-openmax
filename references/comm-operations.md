@@ -176,3 +176,36 @@ node src/cli/comm.js comm.unread '{"conversationId":"<conv-uuid>"}'
 - cws-core 的 `SendMessageRequestBody` 是 `additionalProperties:false` —— 不要传 schema 外的字段(会被拒)
 - 实际响应包在 `{data:{...}, ...}` 里;本 CLI 不解包,调用方按需取 `.data`
 - `comm.search` 名字带 `comm` 但实际是 KB page search(`/api/v1/search/pages`),v5 没有独立的全消息搜索
+
+## DM 权限管理 CLI
+
+管理 DM 访问策略和白名单,修改后运行中的服务热加载生效(无需重启)。
+
+| 命令 | 说明 | 参数 |
+|---|---|---|
+| `comm.dm_policy` | 查看或设置 DM 策略 | `{org?, policy?}` policy: open/allowlist/owner |
+| `comm.dm_list` | 列出当前策略和白名单 | `{org?}` |
+| `comm.dm_allow` | 添加成员到 DM 白名单 | `{memberId\|memberIds, org?}` |
+| `comm.dm_revoke` | 从 DM 白名单移除成员 | `{memberId\|memberIds, org?}` |
+
+- `org` 可选 — 单组织部署自动解析,多组织需指定 slug 或 org_id
+- 修改直接写入 `config.json`,运行中的 comm-bridge 通过 `watchConfig` 热加载 `access.*` 字段
+- `dmPolicy=owner` 模式下白名单不生效(仅 owner 可 DM);切到 `allowlist` 后白名单才有意义
+
+示例:
+```bash
+# 查看当前策略
+node src/cli/comm.js comm.dm_list '{}'
+
+# 开放给指定成员
+node src/cli/comm.js comm.dm_allow '{"memberId":"019ea63f-b7ff-..."}'
+
+# 批量添加
+node src/cli/comm.js comm.dm_allow '{"memberIds":["id1","id2"]}'
+
+# 撤销
+node src/cli/comm.js comm.dm_revoke '{"memberId":"019ea63f-b7ff-..."}'
+
+# 切换策略
+node src/cli/comm.js comm.dm_policy '{"policy":"allowlist"}'
+```

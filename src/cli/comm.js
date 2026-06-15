@@ -26,7 +26,7 @@
 import { randomUUID } from 'crypto';
 import { get, post, del, getForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
-import { enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
+import { loadConfig, updateConfig, enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -40,7 +40,7 @@ function ensureClientMsgId(id) {
  * slug or an org UUID; with neither, defaults to the single enabled org.
  * Returns { slug, org_id, self, owner } or throws a helpful error.
  */
-function resolveOrg(p) {
+function resolveOrgConfig(p) {
   const key = p.org || p.orgSlug || p.orgId || p.org_id;
   const enabled = enabledOrgs();
   if (key) {
@@ -120,6 +120,21 @@ function buildSendBody(params) {
   };
 }
 
+function resolveOrg(p) {
+  const cfg = loadConfig();
+  const orgs = cfg.orgs || {};
+  if (p.org) {
+    if (orgs[p.org]) return { slug: p.org, org: orgs[p.org] };
+    const byId = Object.entries(orgs).find(([, o]) => o.org_id === p.org);
+    if (byId) return { slug: byId[0], org: byId[1] };
+    throw new Error(`Org not found: ${p.org}`);
+  }
+  const enabled = enabledOrgs();
+  if (enabled.length === 1) return { slug: enabled[0].slug, org: orgs[enabled[0].slug] };
+  if (enabled.length === 0) throw new Error('No enabled orgs in config');
+  throw new Error(`Multiple orgs enabled — specify org slug: ${enabled.map(o => o.slug).join(', ')}`);
+}
+
 const COMMANDS = {
   // ---- Conversation collection -------------------------------------------------
   // ✅ GET /api/v1/conversations
@@ -185,17 +200,8 @@ const COMMANDS = {
   }),
 
   // ---- Owner ------------------------------------------------------------------
-  // cws-core is the authoritative source of an agent's owner (reassigned via
-  // POST /platform-agents/{member_id}/transfer-owner). These commands inspect
-  // and reconcile the local config.json owner cache against core. The running
-  // comm-bridge also auto-syncs on every WS (re)connect; these are the
-  // manual / trigger path.
-
-  // Pull the authoritative owner from cws-core and write it into config.json
-  // (the running service applies it live via its config watcher). No-op when
-  // core has no owner recorded (the local binding is left untouched).
   'comm.sync_owner': async () => {
-    const org = resolveOrg(params);
+    const org = resolveOrgConfig(params);
     const member = await fetchSelfMember(org);
     const coreOwnerId = member?.owner_member_id || '';
     const localOwnerId = org.owner?.member_id || '';
@@ -212,6 +218,55 @@ const COMMANDS = {
     } catch { /* name is cosmetic */ }
     setOwner(org.slug, coreOwnerId, name);
     return { org_slug: org.slug, synced: true, previous_owner_id: localOwnerId, owner: { member_id: coreOwnerId, name } };
+  },
+
+  // ---- DM access control (local config, hot-reloaded) -----------------------
+
+  'comm.dm_policy': () => {
+    const { slug, org } = resolveOrg(params);
+    const access = org.access || {};
+    if (params.policy) {
+      const valid = ['open', 'allowlist', 'owner'];
+      if (!valid.includes(params.policy)) throw new Error(`Invalid policy: ${params.policy}. Must be one of: ${valid.join(', ')}`);
+      updateConfig(cfg => { cfg.orgs[slug].access = { ...cfg.orgs[slug].access, dmPolicy: params.policy }; });
+      return { org: slug, dmPolicy: params.policy, applied: true };
+    }
+    return { org: slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
+  },
+
+  'comm.dm_list': () => {
+    const { slug, org } = resolveOrg(params);
+    const access = org.access || {};
+    return { org: slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
+  },
+
+  'comm.dm_allow': () => {
+    const ids = params.memberIds || params.memberId
+      ? [].concat(params.memberIds || params.memberId)
+      : [];
+    if (!ids.length) throw new Error('memberIds (or memberId) required');
+    const { slug } = resolveOrg(params);
+    const result = updateConfig(cfg => {
+      const access = cfg.orgs[slug].access = cfg.orgs[slug].access || {};
+      const list = new Set(access.dmAllowFrom || []);
+      for (const id of ids) list.add(id);
+      access.dmAllowFrom = [...list];
+    });
+    return { org: slug, dmAllowFrom: result.orgs[slug].access.dmAllowFrom, added: ids };
+  },
+
+  'comm.dm_revoke': () => {
+    const ids = params.memberIds || params.memberId
+      ? [].concat(params.memberIds || params.memberId)
+      : [];
+    if (!ids.length) throw new Error('memberIds (or memberId) required');
+    const { slug } = resolveOrg(params);
+    const result = updateConfig(cfg => {
+      const access = cfg.orgs[slug].access = cfg.orgs[slug].access || {};
+      const remove = new Set(ids.map(String));
+      access.dmAllowFrom = (access.dmAllowFrom || []).filter(id => !remove.has(String(id)));
+    });
+    return { org: slug, dmAllowFrom: result.orgs[slug].access.dmAllowFrom, removed: ids };
   },
 };
 
@@ -243,7 +298,12 @@ Sync (WS reconnect catch-up)
 
 Owner (local cache ↔ cws-core authoritative)
   comm.sync_owner           {org?}                  # pull authoritative owner from core into config
-                            # org = config slug or org UUID; defaults to the single enabled org
+
+DM access control (local config, hot-reloaded by running service)
+  comm.dm_policy            {org?, policy?}                          # show or set dmPolicy (open|allowlist|owner)
+  comm.dm_list              {org?}                                   # list current dmPolicy + dmAllowFrom
+  comm.dm_allow             {memberId|memberIds, org?}               # add member(s) to dmAllowFrom
+  comm.dm_revoke            {memberId|memberIds, org?}               # remove member(s) from dmAllowFrom
 
 Environment:
   COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)
@@ -268,6 +328,8 @@ async function main() {
   } catch (err) {
     const payload = { error: err.message };
     if (err.status) payload.status = err.status;
+    const fieldErrors = err.body?.error?.errors;
+    if (Array.isArray(fieldErrors) && fieldErrors.length > 0) payload.errors = fieldErrors;
     console.error(JSON.stringify(payload));
     process.exit(1);
   }

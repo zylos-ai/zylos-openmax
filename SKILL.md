@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.21
+version: 1.0.25
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -440,6 +440,19 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
 - owner 仅豁免 allowlist / 群名单检查；`groupPolicy: disabled` 连 owner 的群消息也拦
 - 名单用 `member_id`，不是显示名；安装期 `COCO_OWNER_MEMBER_ID` 会预绑定 owner 并隐含 `dmPolicy=owner`
 - 策略按 org 维度配置（每个 org 有独立的 `access` 块）
+
+## 前端链接（Frontend URL Patterns）
+
+分享 Workspace 资源链接时，**必须**加上 `/cws` 前缀（`server.frontend_base_path` 配置值，默认 `/cws`）。直接拼 BFF 路径会 404。
+
+| 资源 | URL 模板 |
+|---|---|
+| KB 页面 | `{bff_url}/cws/knowledge?kb={kb_id}&node={node_id}` |
+| KB 列表 | `{bff_url}/cws/knowledge?kb={kb_id}` |
+| Issue 详情 | `{bff_url}/cws/issue/{issue_id}` |
+| 项目看板 | `{bff_url}/cws/project/{project_id}` |
+
+可用 CLI 一步生成：`node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=xxx&node=yyy"}'`，输出完整 URL。
 
 ## 操作指南索引（Layer 3，按需加载）
 

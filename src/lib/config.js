@@ -57,6 +57,11 @@ export const DEFAULT_CONFIG = {
     // override either. `platform` is no longer present (was never read).
     bff_url: 'http://127.0.0.1:8080',
     ws_url:  'ws://127.0.0.1:8080/ws',
+
+    // Frontend base path — the SPA mount point on the same origin as bff_url.
+    // Used by frontendUrl() to construct browser-navigable links. Override
+    // when the deployment mounts cws-fe at a different path.
+    frontend_base_path: '/cws',
   },
 
   // Cloudflare Access service-token headers, attached to every outbound REST
@@ -243,16 +248,6 @@ export function bindOwner(orgSlug, memberId, displayName) {
   });
 }
 
-/**
- * Authoritatively set (overwrite) the owner of an org. Unlike bindOwner —
- * which is a first-DM fallback and no-ops when an owner is already bound —
- * this always writes the given binding. Used by the cws-core owner-sync (core
- * is the authoritative source of an agent's owner) and the `comm set-owner` /
- * `comm sync-owner` CLIs.
- *
- * Pass an empty/falsy `memberId` to clear the binding (back to unbound, so the
- * first-DM auto-bind fallback can take over again).
- */
 export function setOwner(orgSlug, memberId, displayName) {
   if (!orgSlug) return null;
   return updateConfig((cfg) => {
@@ -262,6 +257,15 @@ export function setOwner(orgSlug, memberId, displayName) {
       member_id: memberId || '',
       name: displayName || '',
     };
+  });
+}
+
+export function updateOwnerName(orgSlug, displayName) {
+  if (!orgSlug || !displayName) return null;
+  return updateConfig((cfg) => {
+    const org = cfg.orgs?.[orgSlug];
+    if (!org?.owner?.member_id) return;
+    org.owner.name = displayName;
   });
 }
 
