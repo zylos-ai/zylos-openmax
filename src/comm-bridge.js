@@ -245,6 +245,23 @@ function reactOnReceive(orgConfig, msg) {
 }
 
 // =============================================================================
+// Mark conversation as read — advance the agent's read cursor
+// =============================================================================
+//
+// POST /api/v1/conversations/{id}/read — tells cws-comm that the agent has
+// consumed messages up to the current point. Without this, the agent's read
+// cursor stays at 0 and cws-fe shows perpetual "unread" badges.
+// Fire-and-forget (like reactOnReceive): a failed mark-read must never block
+// message delivery or outbound sends.
+
+function markRead(orgConfig, conversationId) {
+  if (!conversationId) return;
+  postForOrg(orgConfig.org_id, apiPath(`/conversations/${conversationId}/read`), {})
+    .then(() => log(`[${orgConfig.slug}] marked read conv=${conversationId}`))
+    .catch(e => warn(`[${orgConfig.slug}] mark-read failed conv=${conversationId}: ${e.message}`));
+}
+
+// =============================================================================
 // Policy filter — lark-style, applied per inbound message
 // =============================================================================
 
@@ -675,6 +692,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     try {
       await forwardToC4(endpoint, body);
       log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}`);
+      markRead(orgConfig, msg.conversation_id);
     } catch (e) {
       warn('c4-receive failed:', e.message);
     }

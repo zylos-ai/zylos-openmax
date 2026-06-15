@@ -81,6 +81,7 @@ CLI 位置:`src/cli/comm.js`
 | 状态 | 命令 | 说明 | 入参 | 真实端点 |
 | --- | --- | --- | --- | --- |
 | ✅ | `comm.unread` | 查会话的未读消息计数 | `{conversationId}` | `GET /api/v1/conversations/{id}/unread` |
+| ✅ | `comm.mark_read` | 标记会话已读(推进 read cursor) | `{conversationId}` | `POST /api/v1/conversations/{id}/read` |
 
 ### 同步
 
