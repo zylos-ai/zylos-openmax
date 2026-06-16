@@ -74,9 +74,9 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | 状态 | 命令 | 说明 | 入参 | 端点 |
 | --- | --- | --- | --- | --- |
 | ✅ | `project.list` | 列项目目录(分页) | `{status?, page?, pageSize?, orderBy?}` | `GET /projects` |
-| ✅ | `project.create` | 新建项目,需指定 leadMemberId | `{name, slug, leadMemberId, description?, isDefault?}` | `POST /projects` |
+| ✅ | `project.create` | 新建项目,需指定 leadMemberId | `{name, slug, leadMemberId, description?, descriptionFormat?, isDefault?}` | `POST /projects` |
 | ✅ | `project.get` | 取单个项目详情 | `{id}` | `GET /projects/{id}` |
-| ✅ | `project.update` | 改项目名 / 描述 / lead | `{id, name?, description?, leadMemberId?}` | `PATCH /projects/{id}` |
+| ✅ | `project.update` | 改项目名 / 描述 / lead | `{id, name?, description?, descriptionFormat?, leadMemberId?}` | `PATCH /projects/{id}` |
 | ✅ | `project.archive` | 归档项目(前端"删除"映射到这条,不做硬删) | `{id}` | `POST /projects/{id}/archive` |
 | ✅ | `project.restore` | 把归档项目恢复 active | `{id}` | `POST /projects/{id}/restore` |
 | ✅ | `project.unarchive` | `restore` 别名,行为完全一致 | `{id}` | `POST /projects/{id}/restore` |
@@ -90,8 +90,8 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | --- | --- | --- | --- | --- |
 | ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级过滤) | `{projectId, status?, priority?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
 | ✅ | `issue.get` | 取单个 issue 详情 | `{id}` | `GET /issues/{id}` |
-| ✅ | `issue.create` | 起 issue;`mode=light` 表示无 Blueprint,`mode=heavy` 表示 Blueprint 编排;`disposition=backlog` 可先记录不执行 | `{projectId, title, mode, priority, leadAgentId, description?, disposition?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
-| ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, priority?, dueDate?}` | `PATCH /issues/{id}` |
+| ✅ | `issue.create` | 起 issue;`mode=light` 表示无 Blueprint,`mode=heavy` 表示 Blueprint 编排;`disposition=backlog` 可先记录不执行 | `{projectId, title, mode, priority, leadAgentId, description?, descriptionFormat?, disposition?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
+| ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, descriptionFormat?, priority?, dueDate?}` | `PATCH /issues/{id}` |
 | ✅ | `issue.activate` | backlog → pending_start;按 source 决定是否唤醒 Lead | `{id, source?}` | `POST /issues/{id}/activate` |
 | ✅ | `issue.start_execution` | Lead 判断无需审批/已具备条件后直接开工(pending_start/draft → executing) | `{id}` | `POST /issues/{id}/start-execution` |
 | ✅ | `issue.deliver` | executing → delivered | `{id}` | `POST /issues/{id}/deliver` |
@@ -114,7 +114,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | --- | --- | --- | --- | --- |
 | ✅ | `task.list` | 列任务(可过滤 claimable + skillTags 找待领取的活) | `{projectId?, issueId?, status?, claimable?, agentSkills?, page?, pageSize?, orderBy?}` | `GET /tasks` |
 | ✅ | `task.get` | 取单个 task 详情(返回里有 `context_page_ids`,Worker 接活后逐个 kb.page_content 读) | `{id}` | `GET /tasks/{id}` |
-| ✅ | `task.create` | 派 task;带 `assigneeId` 直接进 assigned(已分配,待 start),不带则 pending 等人 claim | `{projectId, issueId, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
+| ✅ | `task.create` | 派 task;带 `assigneeId` 直接进 assigned(已分配,待 start),不带则 pending 等人 claim | `{projectId, issueId, title, description?, descriptionFormat?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
 | ✅ | `task.claim` | 自己接 task,**只分配**(pending → assigned);不再自动建 attempt,接完要 `task.start` | `{id}` | `POST /tasks/{id}/claim` |
 | ✅ | `task.start` | 开工(assigned → running)并开 attempt;依赖闸(dependsOn 全 done)在此校验 | `{id}` | `POST /tasks/{id}/start` |
 | ✅ | `task.transition` | 推 task 终态(done / failed / cancelled);所有 attempt 必须先到终态 | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
@@ -281,7 +281,10 @@ node src/cli/tm.js attempt.transition '{
 - **不要**把 IM 消息原文整段复制进 task description / 评论 —— 通过会话锚定 + `contextPageIds` 引用就够了
 - **不要**直接调 `attempt.create` 来代替 `task.claim` —— `claim` 已内置建 attempt,手动 create 会撞冲突
 - **不要**忘记 `task.reassign` 后老 attempt 已自动 cancelled —— 新 assignee 走的是新 attempt,旧 attempt 不要再操作
-- **description 支持 Markdown**：Project / Issue / Task 的 description 均为纯文本字段,API 原样存储。建议使用 Markdown 格式(标题、列表、代码块等),前端会渲染富文本
+- **description 必须使用 Markdown 格式**：Project / Issue / Task 的 description 字段均支持 Markdown。CLI 默认传 `description_format: "markdown"`,前端按此渲染富文本。写 description 时使用标题(`##`)、列表(`-`)、加粗(`**`)、代码块(`` ``` ``)、链接(`[text](url)`)等标准 Markdown 语法。示例：
+  ```json
+  {"title":"用户增长分析","description":"## 目标\n\n分析 Q2 用户增长趋势。\n\n## 产出\n\n- 增长漏斗分析报告\n- 关键指标 dashboard\n- 改进建议清单"}
+  ```
 
 ## 后续版本计划
 

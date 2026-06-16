@@ -81,20 +81,22 @@ const COMMANDS = {
   // contract-v2 create-project body: { name*, description?, slug*,
   // is_default, lead_member_id* }
   'project.create': () => post(apiPath('/projects'), {
-    name:           params.name,
-    description:    params.description,
-    slug:           params.slug,
-    is_default:     params.isDefault,
-    lead_member_id: params.leadMemberId,
+    name:               params.name,
+    description:        params.description,
+    description_format: params.descriptionFormat || 'markdown',
+    slug:               params.slug,
+    is_default:         params.isDefault,
+    lead_member_id:     params.leadMemberId,
   }),
 
   'project.get': () => get(apiPath(`/projects/${params.id}`)),
 
   // contract-v2 update-project body: { name?, description?, lead_member_id? }
   'project.update': () => patch(apiPath(`/projects/${params.id}`), {
-    name:           params.name,
-    description:    params.description,
-    lead_member_id: params.leadMemberId,
+    name:               params.name,
+    description:        params.description,
+    description_format: params.descriptionFormat || 'markdown',
+    lead_member_id:     params.leadMemberId,
   }),
 
   'project.archive':   () => post(apiPath(`/projects/${params.id}/archive`)),
@@ -127,6 +129,7 @@ const COMMANDS = {
   'issue.create': () => post(apiPath(`/projects/${params.projectId}/issues`), {
     title:                  params.title,
     description:            params.description || '',
+    description_format:     params.descriptionFormat || 'markdown',
     mode:                   params.mode,                  // light|heavy (required)
     disposition:            params.disposition,           // start|backlog (default: start)
     priority:               params.priority,              // low|medium|high (required)
@@ -142,10 +145,11 @@ const COMMANDS = {
   'issue.update': () => patch(
     apiPath(`/issues/${params.id}`),
     {
-      title:       params.title,
-      description: params.description,
-      priority:    params.priority,
-      due_date:    params.dueDate,
+      title:              params.title,
+      description:        params.description,
+      description_format: params.descriptionFormat || 'markdown',
+      priority:           params.priority,
+      due_date:           params.dueDate,
     },
   ),
 
@@ -229,13 +233,14 @@ const COMMANDS = {
   'task.create': () => post(
     apiPath(`/projects/${params.projectId}/issues/${params.issueId}/tasks`),
     {
-      title:             params.title,
-      description:       params.description || '',
-      assignee_id:       params.assigneeId,
-      skill_tags:        params.skillTags,
-      blueprint_step_id: params.blueprintStepId,
-      depends_on:        params.dependsOn,
-      context_page_ids:  params.contextPageIds,
+      title:              params.title,
+      description:        params.description || '',
+      description_format: params.descriptionFormat || 'markdown',
+      assignee_id:        params.assigneeId,
+      skill_tags:         params.skillTags,
+      blueprint_step_id:  params.blueprintStepId,
+      depends_on:         params.dependsOn,
+      context_page_ids:   params.contextPageIds,
     },
   ),
 
@@ -360,9 +365,9 @@ Usage: node src/cli/tm.js <command> '<json-params>'
 
 PROJECT  (all ✅ on contract-v2)
   project.list           {status?, page?, pageSize?, orderBy?}
-  project.create         {name, slug, leadMemberId, description?, isDefault?}
+  project.create         {name, slug, leadMemberId, description?, descriptionFormat?, isDefault?}
   project.get            {id}
-  project.update         {id, name?, description?, leadMemberId?}
+  project.update         {id, name?, description?, descriptionFormat?, leadMemberId?}
   project.archive        {id}
   project.restore        {id}                                                    # alias: project.unarchive
   project.members        {id, page?, pageSize?, orderBy?}
@@ -371,10 +376,10 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.list_in_project  {projectId, status?, priority?, page?, pageSize?, orderBy?}
   issue.get              {id}
   issue.create           {projectId, title, mode, priority, leadAgentId,
-                          description?, dueDate?, contextPageIds?,
+                          description?, descriptionFormat?, dueDate?, contextPageIds?,
                           inputArtifactIds?, originConversationId?, originMessageId?,
                           disposition?}                                      # disposition: start|backlog
-  issue.update           {id, title?, description?, priority?, dueDate?}
+  issue.update           {id, title?, description?, descriptionFormat?, priority?, dueDate?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
   issue.start_execution  {id}
   issue.deliver          {id}
@@ -391,8 +396,8 @@ TASK  (all ✅ on contract-v2; create uses doubly-nested path)
   task.list              {projectId?, issueId?, status?, claimable?, agentSkills?,
                           page?, pageSize?, orderBy?}
   task.get               {id}
-  task.create            {projectId, issueId, title, description?, assigneeId?,
-                          skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}
+  task.create            {projectId, issueId, title, description?, descriptionFormat?,
+                          assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}
   task.claim             {id}                                                    # 只分配 pending→assigned; no body
   task.start             {id}                                                    # assigned→running + 开 attempt; no body
   task.transition        {id, targetStatus}                                      # alias: task.status

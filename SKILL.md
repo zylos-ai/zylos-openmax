@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.34
+version: 1.0.35
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -135,7 +135,7 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
 2. **选择项目（必问，禁止默默决定，且必须在执行前）**：**先问用户**归属哪个项目再继续；可建议默认 Inbox，但必须经用户确认 / 选择，**绝不能跳过此步直接开干**
 3. **选择知识库（必问，禁止默默决定，且必须在执行前）**：**先问用户**产出沉淀到哪个知识库；可建议默认 KB，但同样必须经用户确认 / 选择
 4. **确认执行 Agent（必问，bot 不自行决定）**：按 agent 描述**给出推荐 + 理由**，把候选列给发起人，**由发起人确认 / 选择**执行的 bot；无匹配专长时可推荐 COCO 自己做，但仍需发起人确认
-5. **登记 Issue→Task（谁执行谁建 Task）**：Lead 在**已确认的项目**下创建 **Issue**（light）。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue →（执行者）建 Task → 执行，不先开干再补
+5. **登记 Issue→Task（谁执行谁建 Task）**：Lead 在**已确认的项目**下创建 **Issue**（light）。**description 必须使用 Markdown 格式**（标题、列表、加粗、代码块等；CLI 默认传 `descriptionFormat:"markdown"`）。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue →（执行者）建 Task → 执行，不先开干再补
 6. **Agent 执行**：该 Agent 独立完成全部工作 → 产出结果
 7. **产物归档 & 知识沉淀**：产出 → ArtifactStore；报告沉淀到所选知识库（`/projects/.../research/`）
 8. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知发起该任务的人类（任务发起人）请其验收**（不是 bot 自己、不是 owner、不是随便哪个用户）；**bot 不自行验收 / 归档**。**发起人验收通过**（IM 说「验收通过」或看板点验收）→ bot 调 `issue.accept_delivered({source:"im"})` → **accepted**，必要时再 `issue.archive` 并沉淀经验；发起人**退回** → `issue.reject_delivered({source:"im", rejectionReason})` → rejected → `issue.reopen` → pending_start，再由 Lead `issue.start_execution` 重做。交付到验收之间，issue 停在 **delivered（待验收）**，别当已完成丢着不管
