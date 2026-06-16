@@ -156,4 +156,22 @@ const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 1, `14a. LEAD sent ≥ 1 agent_text in bot DM during run (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `14b. WORKER replied ≥ 1 agent_text in bot DM during run (got ${workerAdded})`);
 
+// ---- Cleanup ---------------------------------------------------------------
+log('');
+log('[Cleanup] 清理测试数据');
+try {
+  await tm('issue.archive', { id: ISSUE.id }, { actor: 'lead' });
+  ok(`cleanup: issue ${ISSUE.id} archived`);
+} catch (e) { log(`   ⚠ cleanup: issue archive failed: ${e.message}`); }
+try {
+  const allPages = await tm('kb.pages', { limit: 200 }, { actor: 'lead' });
+  const items = Array.isArray(allPages) ? allPages : (allPages.data || allPages.pages || []);
+  const list = Array.isArray(items) ? items : (items.items || items.data || []);
+  const kbPage = list.find(p => typeof p.title === 'string' && p.title.includes(`Smoke2 W-${TS}`));
+  if (kbPage) {
+    await tm('kb.page_delete', { pageId: kbPage.id }, { actor: 'lead' });
+    ok(`cleanup: KB page ${kbPage.id} deleted`);
+  }
+} catch (e) { log(`   ⚠ cleanup: KB page delete failed: ${e.message}`); }
+
 summary('Smoke 2 multi-agent NL v2');

@@ -213,3 +213,15 @@ log(`✅ Smoke 8 (NL) PASS (14 / 14)`);
 log(`   project A   = ${env.TEST_PROJECT_ID} (description updated)`);
 log(`   project B   = ${projB.id} (created, archive→restore round-trip)`);
 log(`   issue   I   = ${issueI.id} (moved A→B, priority=high)`);
+
+// ---- Cleanup ---------------------------------------------------------------
+log('');
+log('[Cleanup] 清理测试数据');
+try {
+  await tm('issue.archive', { id: issueI.id });
+  ok(`cleanup: issue ${issueI.id} archived`);
+} catch (e) { warn(`cleanup: issue archive failed: ${e.message}`); }
+try {
+  await tm('project.archive', { id: projB.id });
+  ok(`cleanup: project ${projB.id} archived`);
+} catch (e) { warn(`cleanup: project archive failed: ${e.message}`); }

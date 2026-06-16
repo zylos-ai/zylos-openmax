@@ -125,4 +125,12 @@ const workerAdded = addedCounts[WORKER_MID]        || 0;
 assertTrue(leadAdded   >= 1, `7a. LEAD sent ≥ 1 agent_text in bot DM (got ${leadAdded})`);
 assertTrue(workerAdded >= 1, `7b. WORKER replied ≥ 1 agent_text in bot DM (got ${workerAdded})`);
 
+// ---- Cleanup ---------------------------------------------------------------
+log('');
+log('[Cleanup] 清理测试数据');
+try {
+  await tm('kb.page_delete', { pageId: leadPage.id }, { actor: 'lead' });
+  ok(`cleanup: KB page ${leadPage.id} deleted`);
+} catch (e) { log(`   ⚠ cleanup: KB page delete failed: ${e.message}`); }
+
 summary('Smoke 4 multi-agent NL v2');

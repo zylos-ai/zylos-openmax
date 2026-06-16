@@ -245,6 +245,12 @@ if (lastMsg) {
   warn(`6. msgsG 为空,跳过 get_message; warn-only`);
 }
 
+// ---- Cleanup ---------------------------------------------------------------
+// No conversation delete API exists — group and messages persist.
+// USER2 is a throwaway test account (gavin-test-003) — no cleanup needed.
+log('');
+log('[Cleanup] comm 无 conversation 删除 API,群聊数据保留');
+
 // ---------------------------------------------------------------------------
 log('');
 log(`✅ Smoke 13 (NL) PASS (6 / 6)`);
