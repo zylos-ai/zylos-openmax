@@ -1,0 +1,11 @@
+{
+  "description": "Curated smoke set — runs on every deploy. Covers multi-agent coordination, task-flow transitions, and file upload. The broader suite under ../smoke-tests/ is integration-only (on-demand / CI).",
+  "cases": [
+    { "id": "single-8",  "file": "smoke-8-tm-metadata-edges.test.js",      "kind": "single", "covers": "TM metadata + edge transitions" },
+    { "id": "single-10", "file": "smoke-10-kb-instance-lifecycle.test.js", "kind": "single", "covers": "KB instance lifecycle" },
+    { "id": "single-13", "file": "smoke-13-comm-conversations.test.js",    "kind": "single", "covers": "Comm conversation lifecycle" },
+    { "id": "multi-2",   "file": "smoke-2-heavy-multi-agent.test.js",      "kind": "multi",  "covers": "Heavy + blueprint + cross-actor worker claim + KB" },
+    { "id": "multi-4",   "file": "smoke-4-kb-collaboration.test.js",       "kind": "multi",  "covers": "Cross-actor KB collaboration" },
+    { "id": "multi-5",   "file": "smoke-5-as-file-handoff.test.js",        "kind": "multi",  "covers": "Cross-actor AS file hand-off (upload)" }
+  ]
+}
