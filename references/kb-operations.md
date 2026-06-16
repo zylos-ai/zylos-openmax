@@ -91,7 +91,7 @@ Org(组织,scope 单位)
 
 节点 ID 形态:`tn-{uuid}`。Page 通过 `kb.page_create` 间接建出对应 tree node,不走 folder_create。
 
-**⚠️ page_id ≠ node_id — 拼前端 URL 必须用 node_id,不能用 page_id。** 详见下方 [前端链接拼接](#前端链接拼接agent-易错必读) 专节。
+**⚠️ page_id ≠ node_id — 拼接 KB 页面链接时,`?node=` 参数必须用 node_id,不能用 page_id。** 详见下方 [前端链接拼接](#前端链接拼接agent-易错必读) 专节。
 
 ### 页面
 
