@@ -5,7 +5,8 @@
 **何时加载本文档**:
 
 - 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,决定 `light`(单 Agent/无 Blueprint)还是 `heavy`(Blueprint 编排流),再由 Lead 判断是否需要审批
-- 需要派 task 给别人或自己接活时,查 `task.create` / `task.claim`
+- 需要派 task 给别人或自己接活时,查 `task.create` / `task.claim` → `task.start`(接活两步:claim 分配、start 开工)
+- 需要提前停掉一个还没结论的 issue 时,查 `issue.terminate`(终止 + 善后)
 - 工作做完准备收尾时,查 `attempt.transition` → `task.transition` → `issue.deliver` → `accept_delivered` / `reject_delivered` 的顺序
 - Lead 编排 heavy issue 的步骤时,查整套 `blueprint.*`
 - Worker 失败 / 阻塞要汇报时,查 `attempt.transition` 的 `failed` / `blocked` 选项
@@ -45,13 +46,13 @@ CLI 位置:`src/cli/tm.js`
 
 ## 当前覆盖度速览
 
-全部 38 个命令均已对齐 cws-core BFF,可直接调用。
+全部 40 个命令均已对齐 cws-core BFF,可直接调用。
 
 | 域 | 命令数 | 状态 |
 | --- | --- | --- |
 | Project | 8 | ✅ 全部可用 |
-| Issue | 14 | ✅ 全部可用 |
-| Task | 7 | ✅ 全部可用 |
+| Issue | 15 | ✅ 全部可用 |
+| Task | 8 | ✅ 全部可用 |
 | Blueprint | 5 | ✅ 全部可用 |
 | Attempt | 4 | ✅ 全部可用 |
 
@@ -81,7 +82,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `project.unarchive` | `restore` 别名,行为完全一致 | `{id}` | `POST /projects/{id}/restore` |
 | ✅ | `project.members` | 列项目成员(从 cws-work 拉) | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
 
-### Issue (14 条)
+### Issue (15 条)
 
 写路径使用 flat path `/issues/{id}`,不使用 `/projects/{pid}/issues/{id}`。每个状态变更是一个带不变量校验和副作用的语义化动作;通用 `POST /issues/{id}/transition` 已被删除,`issue.transition` 仅作旧脚本兼容 shim。
 
@@ -95,16 +96,17 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `issue.start_execution` | Lead 判断无需审批/已具备条件后直接开工(pending_start/draft → executing) | `{id}` | `POST /issues/{id}/start-execution` |
 | ✅ | `issue.deliver` | executing → delivered | `{id}` | `POST /issues/{id}/deliver` |
 | ✅ | `issue.reopen` | rejected → pending_start,进入返工接手 | `{id}` | `POST /issues/{id}/reopen` |
-| ✅ | `issue.archive` | 归档 issue(任意非归档态可达) | `{id}` | `POST /issues/{id}/archive` |
+| ✅ | `issue.archive` | 归档 issue(**仅终态 accepted / terminated 可归档**;级联归档其 Task) | `{id}` | `POST /issues/{id}/archive` |
 | ✅ | `issue.accept_delivered` | delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` — `source` 取 `im` / `explicit`(默认 `explicit`) |
 | ✅ | `issue.reject_delivered` | delivered → rejected | `{id, source?, rejectionReason?}` | `POST /issues/{id}/reject-delivered` |
 | ✅ | `issue.transition` | 旧脚本兼容 shim;新调用优先用上面的语义命令 | `{id, targetStatus (or 'status'), rejectionReason?}` | 映射到语义端点 |
 | ✅ | `issue.move_project` | 把 issue 整体迁到另一个项目 | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
 | ✅ | `issue.set_acceptance` | 兼容 wrapper;新调用优先用 `accept_delivered` / `reject_delivered` | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit`(默认 `explicit`) |
+| ✅ | `issue.terminate` | 提前终止未结论 issue → terminated;服务端级联取消非终态 Task + 发 `issue.terminated` 事件给 Lead 善后(不回滚已发生副作用) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` 默认 `lead_chat` |
 
 `mode` 取值:`light`(单 Agent/无 Blueprint)/ `heavy`(Blueprint 编排流)。是否需要审批不是 mode 的副作用,由 Lead/策略按风险、预算、权限等因素显式选择。`disposition` 取值:`start`(默认) / `backlog`。
 
-### Task (7 条)
+### Task (8 条)
 
 `task.create` 使用双重嵌套路径 `/projects/{pid}/issues/{iid}/tasks`;其余使用 flat path `/tasks/{id}`。
 
@@ -112,13 +114,14 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | --- | --- | --- | --- | --- |
 | ✅ | `task.list` | 列任务(可过滤 claimable + skillTags 找待领取的活) | `{projectId?, issueId?, status?, claimable?, agentSkills?, page?, pageSize?, orderBy?}` | `GET /tasks` |
 | ✅ | `task.get` | 取单个 task 详情(返回里有 `context_page_ids`,Worker 接活后逐个 kb.page_content 读) | `{id}` | `GET /tasks/{id}` |
-| ✅ | `task.create` | 派 task;带 `assigneeId` 直接 running,不带则 pending 等人 claim | `{projectId, issueId, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
-| ✅ | `task.claim` | 自己接 task(原 pending → running);服务端自动建 attempt | `{id}` | `POST /tasks/{id}/claim` |
+| ✅ | `task.create` | 派 task;带 `assigneeId` 直接进 assigned(已分配,待 start),不带则 pending 等人 claim | `{projectId, issueId, title, description?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
+| ✅ | `task.claim` | 自己接 task,**只分配**(pending → assigned);不再自动建 attempt,接完要 `task.start` | `{id}` | `POST /tasks/{id}/claim` |
+| ✅ | `task.start` | 开工(assigned → running)并开 attempt;依赖闸(dependsOn 全 done)在此校验 | `{id}` | `POST /tasks/{id}/start` |
 | ✅ | `task.transition` | 推 task 终态(done / failed / cancelled);所有 attempt 必须先到终态 | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
 | ✅ | `task.status` | `task.transition` 别名 | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
 | ✅ | `task.reassign` | 把已 claim 的 task 重派给别的 member(Lead 专属) | `{id, newAssigneeId (or 'assigneeId')}` | `POST /tasks/{id}/reassign` |
 
-`task.claim` 无 body,principal 从 auth header 推断;服务端自动创建 Attempt。
+`task.claim` / `task.start` 均无 body,principal 从 auth header 推断。v0.7 起 claim 与 start 分离:**claim 只把 task 分给自己(assigned),start 才真正开工并建 Attempt**。Worker 接活的标准两步是 `task.claim` → `task.start`。
 
 ### Blueprint (5 条)
 

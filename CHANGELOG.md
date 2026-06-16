@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.31] - 2026-06-16
+
+### Added
+- **`task.start`** (`src/cli/tm.js` → `POST /tasks/{id}/start`): v0.7 cws-work
+  split claim/start. Claim now ONLY assigns a task (pending → assigned);
+  `task.start` is the new step that actually begins work (assigned → running),
+  opens the attempt, and enforces the `dependsOn` gate. Worker 接活两步:
+  `task.claim` → `task.start`.
+- **`issue.terminate`** (`POST /issues/{id}/terminate`, body `{reason?, source?}`):
+  提前终止一个未结论 Issue → `terminated`. The server cascades cancellation to
+  non-terminal Tasks and emits `issue.terminated` for the Lead to run cleanup.
+
+### Changed
+- **`task.claim` semantics**: no longer auto-runs or auto-creates an attempt; it
+  only assigns (pending → assigned). The dependency gate moved from claim to
+  `task.start`.
+- **SKILL.md** state machine + guardrails updated for v0.7: new `assigned` Task
+  state and `terminated` Issue state; archive is now terminal-only
+  ({accepted, terminated}); added the **提前终止善后 SOP** (Lead handles
+  `issue.terminated`: no revival, three-bucket triage, external irreversible
+  actions decided with the human, closure message).
+- `references/tm-operations.md`: documented `task.start` / `issue.terminate`,
+  tightened `issue.archive` to terminal-only, fixed `task.claim` and
+  create-with-assignee descriptions; command count 38 → 40.
+
 ## [1.0.21] - 2026-06-12
 
 ### Added

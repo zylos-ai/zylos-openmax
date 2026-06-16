@@ -193,9 +193,22 @@ const COMMANDS = {
     },
   ),
 
+  // 提前终止(v0.7): 把一个未结论 Issue 主动停下 → terminated。服务端会级联
+  // 取消其下非终态 Task,并给 Lead 发 issue.terminated 事件做善后。
+  // 不回滚已发生副作用——善后由 Lead 与人类共同决定(见 SKILL.md)。
+  // POST /issues/{id}/terminate, body: { reason?, source? }
+  'issue.terminate': () => post(
+    apiPath(`/issues/${params.id}/terminate`),
+    {
+      reason: params.reason,
+      source: params.source ?? 'lead_chat',
+    },
+  ),
+
   // =========================================================================
-  //  TASK  (✅ all 7 in contract-v2; create uses the doubly-nested path
-  //  /projects/{pid}/issues/{iid}/tasks)
+  //  TASK  (✅ all 8 on cws-core BFF; create uses the doubly-nested path
+  //  /projects/{pid}/issues/{iid}/tasks. v0.7 claim/start split: claim only
+  //  assigns, task.start begins work + opens the attempt + checks dependsOn.)
   // =========================================================================
 
   'task.list': () => get(apiPath('/tasks'), {
@@ -226,9 +239,15 @@ const COMMANDS = {
     },
   ),
 
-  // contract-v2 claim-task: POST /tasks/{id}/claim (no body; principal
-  // from auth header). Auto-creates an attempt server-side.
+  // v0.7 claim/start split: claim ONLY assigns the task to the caller
+  // (pending → assigned). It does NOT start work or open an attempt — call
+  // task.start next. POST /tasks/{id}/claim (no body; principal from auth header).
   'task.claim': () => post(apiPath(`/tasks/${params.id}/claim`)),
+
+  // v0.7: start an assigned task (assigned → running) and open the attempt.
+  // The dependency gate (depends_on all done) is enforced here, not at claim.
+  // POST /tasks/{id}/start (no body; principal from auth header).
+  'task.start': () => post(apiPath(`/tasks/${params.id}/start`)),
 
   // Path is /transition (not /status); body field is target_status.
   'task.transition': () => post(
@@ -366,6 +385,7 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.transition       {id, targetStatus (or 'status'), rejectionReason?}    # compatibility shim only
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
   issue.set_acceptance   {id, accepted, source?, rejectionReason?}        # compat wrapper; prefer accept/reject_delivered
+  issue.terminate        {id, reason?, source?}                           # 提前终止 → terminated; 级联取消 Task + 发善后事件
 
 TASK  (all ✅ on contract-v2; create uses doubly-nested path)
   task.list              {projectId?, issueId?, status?, claimable?, agentSkills?,
@@ -373,7 +393,8 @@ TASK  (all ✅ on contract-v2; create uses doubly-nested path)
   task.get               {id}
   task.create            {projectId, issueId, title, description?, assigneeId?,
                           skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}
-  task.claim             {id}                                                    # no body; principal from auth
+  task.claim             {id}                                                    # 只分配 pending→assigned; no body
+  task.start             {id}                                                    # assigned→running + 开 attempt; no body
   task.transition        {id, targetStatus}                                      # alias: task.status
   task.reassign          {id, newAssigneeId (or 'assigneeId')}
 
