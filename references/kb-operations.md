@@ -91,6 +91,8 @@ Org(组织,scope 单位)
 
 节点 ID 形态:`tn-{uuid}`。Page 通过 `kb.page_create` 间接建出对应 tree node,不走 folder_create。
 
+**⚠️ page_id ≠ node_id — 拼前端 URL 必须用 node_id,不能用 page_id。** 详见下方 [前端链接拼接](#前端链接拼接agent-易错必读) 专节。
+
 ### 页面
 
 | 状态 | 命令 | 说明 | 入参 | 真实端点 |
@@ -251,6 +253,79 @@ node src/cli/kb.js kb.page_create '{
 | KB 经验沉淀的时机和位置(`/projects/{slug}/decisions/` 等) | [记忆触发点 > 经验沉淀判断](../SKILL.md) |
 | 通用错误防护(比如不该用 curl 直接调 KB API) | [行为护栏 > 常见错误](../SKILL.md) |
 
+## 前端链接拼接（Agent 易错，必读）
+
+KB 页面有**两种 ID**,混用会导致链接打开空白或 404:
+
+| ID 类型 | 来源 | 用途 | 示例 |
+|---|---|---|---|
+| **page_id** | `kb.page_create` / `kb.page_get` 返回的 `id` | 页面内容操作（读写、revision、trash） | `019ed02a-62cc-...` |
+| **node_id** | `kb.node_get` / `kb.node_children` 返回的 `id` | 目录树操作 + **前端 URL** | `019ed02a-62d5-...` |
+
+**核心规则：前端 URL 的 `node=` 参数只接受 node_id。page_id 放进去链接会指向错误位置。**
+
+### 为什么容易搞错
+
+`kb.page_create` 会同时创建 page 和对应的 tree node,但返回值**只有 page_id,没有 node_id**:
+
+```json
+// kb.page_create 返回
+{"id": "019ed02a-62cc-...", "kb_id": "...", "title": "...", "path": "...", ...}
+//  ↑ 这是 page_id,不是 node_id
+```
+
+`kb.page_get` 同理——返回 `id`(page_id)、`kb_id`、`revision_id`,**不含 node_id**。
+
+### 正确的链接生成流程
+
+创建页面后要分享链接,**必须多走一步拿 node_id**:
+
+```bash
+# 1. 创建页面 → 拿到 page_id
+node src/cli/kb.js kb.page_create '{
+  "kbId":"<kb-uuid>",
+  "title":"设计方案",
+  "parentId":"<folder-node-id>",
+  "body":"# 方案内容..."
+}'
+# → {"id":"pg-abc123", ...}    ← page_id
+
+# 2. 用 parentId 列子节点 → 匹配 page_id → 拿到 node_id
+node src/cli/kb.js kb.node_children '{"kbId":"<kb-uuid>","parentId":"<folder-node-id>"}'
+# → [{
+#      "id": "tn-xyz789",           ← 这才是 node_id
+#      "page_id": "pg-abc123",      ← 匹配刚创建的 page
+#      "node_type": "page",
+#      ...
+#    }]
+
+# 3. 用 node_id 拼前端链接
+node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=<kb-uuid>&node=tn-xyz789"}'
+# → https://xxx/cws/knowledge?kb=...&node=tn-xyz789    ✅ 正确
+```
+
+**反面示例（错误）**:
+```bash
+# ❌ 直接拿 page_create 返回的 id 当 node 参数
+node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=<kb-uuid>&node=pg-abc123"}'
+# → 链接能打开但显示空白或指向错误位置
+```
+
+### 已有 page_id 但不知道 node_id
+
+如果只有 page_id（比如从 `kb.search` 结果拿到的）,用 `kb.page_get` 读 `path` 字段定位目录,再 `kb.node_children` 在对应 folder 下按 `page_id` 匹配。
+
+### URL 格式速查
+
+完整 URL 模板见 [`SKILL.md` 前端链接](../SKILL.md)。速查:
+
+```
+{bff_url}/cws/knowledge?kb={kb_id}&node={node_id}
+                                         ↑ 必须是 tree node_id,不是 page_id
+```
+
+可用 `core.frontend_url` CLI 一步生成,避免手拼域名和前缀出错。
+
 ## KB 专属注意事项
 
 - **org_id 必填**:每个命令都要 scope。`config.org_id` 没设就 throw。
@@ -262,3 +337,4 @@ node src/cli/kb.js kb.page_create '{
 - 跨 org 引用通过 `kb://pg-{uuid}` URI(stable ID,移动 / 重命名不变)
 - `kb.page_delete` 直接调会 404 — 必须先 `kb.page_trash`,这是 cws-kb 的三态保护链(不要绕)
 - `kb.page_restore` vs `kb.page_restore_trash` 名字像、语义完全不同,见上面"两个 restore 不是一回事"
+- **前端 URL 只接受 node_id**:`kb.page_create` 返回的 `id` 是 page_id,拼到 `?node=` 里链接会错。必须用 `kb.node_children` 拿 tree node_id。详见上方"前端链接拼接"专节
