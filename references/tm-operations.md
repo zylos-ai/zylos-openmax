@@ -46,7 +46,7 @@ CLI 位置:`src/cli/tm.js`
 
 ## 当前覆盖度速览
 
-全部 40 个命令均已对齐 cws-core BFF,可直接调用。
+全部 43 个命令均已对齐 cws-core BFF,可直接调用。
 
 | 域 | 命令数 | 状态 |
 | --- | --- | --- |
@@ -55,6 +55,7 @@ CLI 位置:`src/cli/tm.js`
 | Task | 8 | ✅ 全部可用 |
 | Blueprint | 5 | ✅ 全部可用 |
 | Attempt | 4 | ✅ 全部可用 |
+| Event Binding | 3 | ✅ 全部可用 |
 
 ## 错误处理
 
@@ -145,6 +146,22 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `attempt.transition` | 推 attempt 状态(done / failed / blocked / cancelled);Worker 用这条标记自己的执行结果 | `{id, targetStatus (or 'status'), failureReason?, blockedOnApprovalRequestIds?}` | `POST /attempts/{id}/transition` |
 
 `attempt.create` 通常不需要直接调用——`task.claim` 会自动创建 Attempt。仅在需要手动开启新一轮尝试时使用。
+
+### Event Binding (3 条)
+
+定时任务 = `EventBinding(sourceKind=timer)`：到点由平台创建 Issue 并派给 lead（你），你只是"接到一份新 Issue"，不感知自己被 cron 调起。
+
+| 状态 | 命令 | 说明 | 入参 | 端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `event-binding.create` | 创建定时任务（create-by-agent 主路径） | `{cronExpr, leadMemberId, ownerMemberId, projectId, title, description?, mode?}` | `POST /event-bindings` |
+| ✅ | `event-binding.list` | 列本 org 的定时任务 | `{}` | `GET /event-bindings` |
+| ✅ | `event-binding.get` | 取定时任务详情（看 nextTriggerAt） | `{id}` | `GET /event-bindings/{id}` |
+
+create-by-agent 护栏（cws-work 强制，违反直接报错）：
+
+- `leadMemberId` 必须 = **你自己的 member id**（agent 只能把自己设为 lead）
+- `ownerMemberId` 必须 = **对话中那个人类的 member id**，且不能是你自己（owner 是治理责任人=人类）
+- `cronExpr` 5 段（分 时 日 月 周）；`mode` 缺省 `light`
 
 ## 典型使用场景
 
@@ -258,6 +275,35 @@ node src/cli/tm.js attempt.transition '{
   "blockedOnApprovalRequestIds":["apr-1"]
 }'
 ```
+
+### 5. create-by-agent:帮人类创建定时任务
+
+人类在 DM 里说"帮我建一个定时任务"时，你（被选定的 lead agent）负责把它问清楚再建——你最清楚到点跑这个任务需要什么上下文。
+
+```bash
+# 0) 交互式问清楚（不要凭空猜，缺上下文是定时任务最大的坑）：
+#    - 多久跑一次 → 转成 5 段 cron（说清时区假设）
+#    - 归属哪个 project
+#    - 到点要做什么 → title / description，尽量把上下文问全
+#    - 轻/重模式（默认 light）
+# 1) 复述确认后创建：leadMemberId=自己，ownerMemberId=对话的人类
+node src/cli/tm.js event-binding.create '{
+  "cronExpr":"0 9 * * 1",
+  "leadMemberId":"<你自己的 member id>",
+  "ownerMemberId":"<对话人类的 member id>",
+  "projectId":"prj-1",
+  "title":"每周清理过期工件",
+  "description":"清理 7 天前的临时工件，输出清理报告",
+  "mode":"light"
+}'
+# 2) 回报结果（binding id + nextTriggerAt）
+```
+
+要点：
+
+- **owner=人类、lead=自己**是硬约束，填错直接被拒（见上方护栏）
+- **上下文不足不在创建期拦**：如果人类坚持信息不全也要建，照建；将来到点跑发现缺东西，把"缺 XX"作为产出投递回该会话，人类再改 binding
+- 这是 v0.7 的主路径（agent 直接调 API）；后续版本会改成"返回可交互卡片、人类点按钮以人类身份创建"
 
 ## 与 SKILL.md 的关系
 

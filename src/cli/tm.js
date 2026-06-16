@@ -356,6 +356,30 @@ const COMMANDS = {
     },
   ),
 
+  // =========================================================================
+  //  EVENT BINDING  (定时任务 / create-by-agent — cws-core /event-bindings)
+  //  create-by-agent: agent 必须 leadMemberId=自己、ownerMemberId=对话人类;
+  //  否则被 cws-work 护栏拒（lead≠自己 / owner 缺失或=自己）。见 SKILL.md。
+  // =========================================================================
+
+  // create-event-binding body: { cron_expr*, lead_member_id*,
+  // owner_member_id?, spec{ project_id*, title*, description?, mode } }
+  'event-binding.create': () => post(apiPath('/event-bindings'), {
+    cron_expr:       params.cronExpr,
+    lead_member_id:  params.leadMemberId,
+    owner_member_id: params.ownerMemberId,
+    spec: {
+      project_id:  params.projectId,
+      title:       params.title,
+      description: params.description,
+      mode:        params.mode ?? 'light',
+    },
+  }),
+
+  'event-binding.list': () => get(apiPath('/event-bindings')),
+
+  'event-binding.get': () => get(apiPath(`/event-bindings/${params.id}`)),
+
 };
 
 function printUsage() {
@@ -416,6 +440,12 @@ ATTEMPT  (all ✅ on contract-v2)
   attempt.list           {taskId, page?, pageSize?, orderBy?}
   attempt.transition     {id, targetStatus (or 'status'), failureReason?,
                           blockedOnApprovalRequestIds?}
+
+EVENT BINDING  (定时任务 / create-by-agent)
+  event-binding.create   {cronExpr, leadMemberId, ownerMemberId, projectId,
+                          title, description?, mode?}                            # agent: leadMemberId=自己, ownerMemberId=对话人类
+  event-binding.list     {}                                                     # 本 org 的定时任务
+  event-binding.get      {id}
 
 Environment:
   COCO_API_URL     cws-core base URL (default: http://127.0.0.1:8080)
