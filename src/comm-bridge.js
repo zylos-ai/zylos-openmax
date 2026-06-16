@@ -23,7 +23,7 @@
 import path from 'path';
 import { execFile } from 'child_process';
 
-import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName } from './lib/config.js';
+import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName, updateConfig } from './lib/config.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { recordParticipants } from './lib/mention.js';
@@ -733,6 +733,141 @@ function startFrameMetricTimer() {
 }
 
 // =============================================================================
+// Policy config events — agent.config.* → update config.json + memory
+// =============================================================================
+
+const VALID_DM_POLICIES = new Set(['open', 'allowlist', 'owner']);
+const VALID_GROUP_MODES = new Set(['smart', 'mention', 'silent']);
+
+function handleConfigUpdate(orgConfig, frame) {
+  const { event, data } = frame.payload || {};
+  if (!data) return;
+
+  if (data.agent_member_id && data.agent_member_id !== orgConfig.self?.member_id) {
+    log(`[${orgConfig.slug}] config event ${event} not for us (target=${data.agent_member_id}), skip`);
+    return;
+  }
+
+  const slug = orgConfig.slug;
+
+  switch (event) {
+    case 'agent.config.dm_policy_changed': {
+      const { policy } = data;
+      if (!VALID_DM_POLICIES.has(policy)) {
+        warn(`[${slug}] dm_policy_changed: invalid policy "${policy}"`);
+        return;
+      }
+      updateConfig(cfg => {
+        const org = cfg.orgs?.[slug];
+        if (!org) return;
+        org.access = org.access || {};
+        org.access.dmPolicy = policy;
+      });
+      log(`[${slug}] config updated: dmPolicy → ${policy} (by ${data.changed_by || '?'})`);
+      break;
+    }
+
+    case 'agent.config.dm_allowlist_changed': {
+      const { action, member_ids } = data;
+      if (!Array.isArray(member_ids) || !member_ids.length) {
+        warn(`[${slug}] dm_allowlist_changed: missing or empty member_ids`);
+        return;
+      }
+      updateConfig(cfg => {
+        const org = cfg.orgs?.[slug];
+        if (!org) return;
+        org.access = org.access || {};
+        org.access.dmAllowFrom = org.access.dmAllowFrom || [];
+        if (action === 'add') {
+          const existing = new Set(org.access.dmAllowFrom);
+          for (const id of member_ids) if (!existing.has(id)) org.access.dmAllowFrom.push(id);
+        } else if (action === 'remove') {
+          const toRemove = new Set(member_ids);
+          org.access.dmAllowFrom = org.access.dmAllowFrom.filter(id => !toRemove.has(id));
+        } else if (action === 'set') {
+          org.access.dmAllowFrom = [...member_ids];
+        } else {
+          warn(`[${slug}] dm_allowlist_changed: unknown action "${action}"`);
+          return;
+        }
+      });
+      log(`[${slug}] config updated: dmAllowFrom ${action} ${member_ids.length} member(s) (by ${data.changed_by || '?'})`);
+      break;
+    }
+
+    case 'agent.config.group_mode_changed': {
+      const { mode, conversation_id: convId } = data;
+      if (!VALID_GROUP_MODES.has(mode)) {
+        warn(`[${slug}] group_mode_changed: invalid mode "${mode}"`);
+        return;
+      }
+      if (!convId) {
+        warn(`[${slug}] group_mode_changed: missing conversation_id`);
+        return;
+      }
+      updateConfig(cfg => {
+        const org = cfg.orgs?.[slug];
+        if (!org) return;
+        org.access = org.access || {};
+        org.access.groups = org.access.groups || {};
+        if (mode === 'silent') {
+          delete org.access.groups[convId];
+        } else {
+          org.access.groups[convId] = org.access.groups[convId] || { allowFrom: ['*'] };
+          org.access.groups[convId].mode = mode;
+        }
+      });
+      log(`[${slug}] config updated: group ${convId} mode → ${mode} (by ${data.changed_by || '?'})`);
+      break;
+    }
+
+    case 'agent.config.group_allowfrom_changed': {
+      const { allow_from, conversation_id: convId } = data;
+      if (!convId) {
+        warn(`[${slug}] group_allowfrom_changed: missing conversation_id`);
+        return;
+      }
+      if (!Array.isArray(allow_from)) {
+        warn(`[${slug}] group_allowfrom_changed: allow_from is not an array`);
+        return;
+      }
+      updateConfig(cfg => {
+        const org = cfg.orgs?.[slug];
+        if (!org) return;
+        org.access = org.access || {};
+        org.access.groups = org.access.groups || {};
+        if (!org.access.groups[convId]) {
+          org.access.groups[convId] = { mode: 'mention', allowFrom: allow_from };
+        } else {
+          org.access.groups[convId].allowFrom = [...allow_from];
+        }
+      });
+      log(`[${slug}] config updated: group ${convId} allowFrom → ${JSON.stringify(allow_from)} (by ${data.changed_by || '?'})`);
+      break;
+    }
+
+    default:
+      warn(`[${slug}] unknown config event: ${event}`);
+      return;
+  }
+
+  notifyPolicyChanged(slug, event, data);
+}
+
+function notifyPolicyChanged(orgSlug, event, data) {
+  const controlPayload = JSON.stringify({
+    type: 'policy-changed',
+    org: orgSlug,
+    event,
+    changes: data,
+  });
+  const scriptPath = path.resolve(import.meta.dirname, '../../.claude/skills/comm-bridge/scripts/c4-control.js');
+  execFile('node', [scriptPath, 'enqueue', `[POLICY-CHANGED] ${controlPayload}`], (err) => {
+    if (err) warn(`[${orgSlug}] failed to enqueue policy-changed control: ${err.message}`);
+  });
+}
+
+// =============================================================================
 // System events — message recall / edit → inject a notice to the agent
 // =============================================================================
 //
@@ -759,6 +894,7 @@ function classifySystemEvent(eventName) {
   const e = String(eventName || '').toLowerCase();
   if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
   if (e === 'message.updated') return 'edit';
+  if (e.startsWith('agent.config.')) return 'config_update';
   // Defensive fallback for naming drift — does not match reaction/read/etc.
   if (e.includes('recall') || e.includes('delete')) return 'recall';
   if (e.includes('edit') || e.includes('updat')) return 'edit';
@@ -770,6 +906,11 @@ async function handleSystemEvent(orgConfig, frame) {
   const kind = classifySystemEvent(payload.event);
   if (!kind) {
     warn(`[${orgConfig.slug}] unhandled system event: ${payload.event || '(unknown)'} conv=${payload.conversation_id || '?'}`);
+    return;
+  }
+
+  if (kind === 'config_update') {
+    handleConfigUpdate(orgConfig, frame);
     return;
   }
 
