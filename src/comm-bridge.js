@@ -1197,16 +1197,19 @@ watchConfig((next) => {
   );
 });
 
-process.on('SIGTERM', () => {
-  log('SIGTERM, stopping all orgs');
+let _isShuttingDown = false;
+function shutdown(signal) {
+  if (_isShuttingDown) return;
+  _isShuttingDown = true;
+  log(`${signal}, shutting down...`);
+  if (_frameMetricTimer) { clearInterval(_frameMetricTimer); _frameMetricTimer = null; }
+  if (_ownerSyncTimer) { clearInterval(_ownerSyncTimer); _ownerSyncTimer = null; }
   for (const c of wsClients) { try { c.ws.stop(); } catch {} }
+  log('shutdown complete');
   process.exit(0);
-});
-process.on('SIGINT', () => {
-  log('SIGINT, stopping all orgs');
-  for (const c of wsClients) { try { c.ws.stop(); } catch {} }
-  process.exit(0);
-});
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 startFrameMetricTimer();
 startPeriodicOwnerSync();
