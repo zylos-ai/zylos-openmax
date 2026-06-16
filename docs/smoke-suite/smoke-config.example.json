@@ -1,0 +1,26 @@
+{
+  "_comment": "Template for the smoke-test fixtures file. Copy to ~/zylos/components/coco-workspace/smoke-config.json (same dir as the runtime config.json) and fill in real values. This file holds secrets (CF-Access service token, test-user passwords) and MUST NOT be committed — it lives outside the repo in the component data dir. Any field can also be supplied via env (COCO_API_URL, CF_ACCESS_CLIENT_ID/SECRET, SMOKE_ORG_ID, SMOKE_PROJECT_ID, SMOKE_USER).",
+  "api_url": "https://cws-int.coco.xyz",
+  "cf_access": {
+    "client_id": "<CF_ACCESS_CLIENT_ID>.access",
+    "client_secret": "<CF_ACCESS_CLIENT_SECRET>"
+  },
+  "org_id": "<COCO_ORG_UUID>",
+  "project_id": "<PROJECT_UUID>",
+  "default_user": "gavin-test-002",
+  "provision_password": "<password for throwaway accounts smoke-13 registers>",
+  "users": {
+    "gavin-test-002": {
+      "email": "gavin-test-002@example.com",
+      "password": "<PASSWORD>",
+      "role": "org-owner",
+      "member_id": "<MEMBER_UUID>"
+    },
+    "gavin-test-005": {
+      "email": "gavin-test-005@example.com",
+      "password": "<PASSWORD>",
+      "role": "org-member",
+      "member_id": "<MEMBER_UUID>"
+    }
+  }
+}
