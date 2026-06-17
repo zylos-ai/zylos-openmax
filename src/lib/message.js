@@ -177,7 +177,7 @@ function formatContextLine(m) {
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
   const rawType = (conv?.type || '').toLowerCase();
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
-  const { groupName, quotedContent, threadContext, threadRootId, smartHint, enforceSkillFlow } = opts;
+  const { groupName, quotedContent, threadContext, threadRootId, smartHint, enforceSkillFlow, orgId, orgName } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
   const safeName = escapeXml(name);
@@ -191,7 +191,9 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
 
   // Tag on its own line; the `<name> said: ...` attribution now lives inside
   // the <current-message> block (semantic parity with other C4 channels).
-  const parts = [`${tag}\n`];
+  const orgLabel = orgName || orgId || '';
+  const orgSuffix = orgLabel ? ` (org: ${escapeXml(orgLabel)})` : '';
+  const parts = [`${tag}${orgSuffix}\n`];
 
   if (threadContext && threadContext.length > 0) {
     const lines = threadContext.map(m => {

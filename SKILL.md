@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.40
+version: 1.0.41
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -175,6 +175,14 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
 - 高（验收、状态流转）→ 不确定就问
 - 中（追加指令）→ 中等置信度可先执行，错了可纠正
 - 低（查询、闲聊）→ 不需要锚定
+
+### 多组织（Multi-Org）上下文
+
+当 agent 同时服务多个组织时，每条消息的标签会注明来源组织，例如
+`[COCO DM] (org: COCO)`。**必须在该组织内操作**——查项目、KB、
+成员、创建 Issue/Task 都要使用消息对应的 org，不要跨 org 操作。
+CLI 命令可通过 JSON 参数的 `orgId` 字段或环境变量 `COCO_ORG_ID`
+指定目标组织。
 
 ### 参数解析
 

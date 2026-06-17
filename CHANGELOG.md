@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.41] - 2026-06-17
+
+### Added
+- **Org context in message envelope**: inbound messages now include the source
+  org name/id in the tag line (e.g. `[COCO DM] (org: COCO)`), so the agent
+  knows which org to operate in when serving multiple orgs simultaneously.
+- **Multi-org awareness in SKILL.md**: added guidance to always operate within
+  the org indicated by the message tag; never cross-org.
+
 ## [1.0.40] - 2026-06-17
 
 ### Added
