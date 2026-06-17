@@ -24,6 +24,7 @@ import path from 'path';
 import { execFile } from 'child_process';
 
 import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName, updateConfig } from './lib/config.js';
+import { registerConvOrg } from './lib/conv-org.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { recordParticipants } from './lib/mention.js';
@@ -694,6 +695,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     );
 
     try {
+      registerConvOrg(msg.conversation_id, orgConfig.org_id);
       await forwardToC4(endpoint, body);
       log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}`);
       markRead(orgConfig, msg.conversation_id, msg.seq);
@@ -974,6 +976,7 @@ async function handleSystemEvent(orgConfig, frame) {
     { enforceSkillFlow: false },
   );
   try {
+    registerConvOrg(conversationId, orgConfig.org_id);
     await forwardToC4(endpoint, body);
     log(`[${orgConfig.slug}] system ${kind} notice -> agent conv=${conversationId} msg=${messageId}`);
   } catch (e) {

@@ -47,6 +47,7 @@ import {
 } from '../src/lib/message.js';
 import { uploadMedia } from '../src/cli/as.js';
 import { resolveMentions } from '../src/lib/mention.js';
+import { lookupConvOrg } from '../src/lib/conv-org.js';
 
 function usage() {
   console.error('Usage: node scripts/send.js <endpoint> <message>');
@@ -169,6 +170,15 @@ async function main() {
   } catch (e) {
     console.error(JSON.stringify({ error: e.message }));
     process.exit(1);
+  }
+
+  // Multi-org: resolve the conversation's org so downstream API calls use
+  // the correct org-scoped JWT. Without this, resolveDefaultOrgId() returns
+  // empty when 2+ orgs are enabled, producing an identity-only token → 401.
+  if (!process.env.COCO_ORG_ID) {
+    const convId = ep.threadConversationId || ep.conversationId;
+    const orgId = lookupConvOrg(convId);
+    if (orgId) process.env.COCO_ORG_ID = orgId;
   }
 
   try {
