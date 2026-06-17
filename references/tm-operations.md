@@ -46,7 +46,7 @@ CLI 位置:`src/cli/tm.js`
 
 ## 当前覆盖度速览
 
-全部 43 个命令均已对齐 cws-core BFF,可直接调用。
+全部 44 个命令均已对齐 cws-core BFF,可直接调用。
 
 | 域 | 命令数 | 状态 |
 | --- | --- | --- |
@@ -55,7 +55,7 @@ CLI 位置:`src/cli/tm.js`
 | Task | 8 | ✅ 全部可用 |
 | Blueprint | 5 | ✅ 全部可用 |
 | Attempt | 4 | ✅ 全部可用 |
-| Event Binding | 3 | ✅ 全部可用 |
+| Event Binding | 4 | ✅ 全部可用 |
 
 ## 错误处理
 
@@ -147,7 +147,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 
 `attempt.create` 通常不需要直接调用——`task.claim` 会自动创建 Attempt。仅在需要手动开启新一轮尝试时使用。
 
-### Event Binding (3 条)
+### Event Binding (4 条)
 
 定时任务 = `EventBinding(sourceKind=timer)`：到点由平台创建 Issue 并派给 lead（你），你只是"接到一份新 Issue"，不感知自己被 cron 调起。
 
@@ -156,6 +156,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `event-binding.create` | 创建定时任务（create-by-agent 主路径） | `{cronExpr, leadMemberId, ownerMemberId, projectId, title, description?, mode?}` | `POST /event-bindings` |
 | ✅ | `event-binding.list` | 列本 org 的定时任务 | `{}` | `GET /event-bindings` |
 | ✅ | `event-binding.get` | 取定时任务详情（看 nextTriggerAt） | `{id}` | `GET /event-bindings/{id}` |
+| ✅ | `event-binding.delete` | 删除定时任务（停止后续触发，不影响已生成的 Issue） | `{id}` | `DELETE /event-bindings/{id}` |
 
 create-by-agent 护栏（cws-work 强制，违反直接报错）：
 
