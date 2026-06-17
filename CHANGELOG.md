@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.42] - 2026-06-17
+
+### Changed
+- **Owner and config sync moved to periodic timer (5 min)**: `syncOwnerFromCore`
+  and `syncConfigToComm` no longer run on WS connect; both execute every 5 min
+  via a single `startPeriodicSync()` timer. Avoids blocking WS setup.
+
+### Removed
+- **`notifyPolicyChanged()` removed**: policy enforcement is code-level
+  (`shouldHandleMessage`), not LLM-level; notifying the agent via C4 on
+  policy changes served no purpose.
+
 ## [1.0.41] - 2026-06-17
 
 ### Added

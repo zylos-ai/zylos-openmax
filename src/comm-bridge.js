@@ -924,20 +924,6 @@ function handleConfigUpdate(orgConfig, frame) {
       return;
   }
 
-  notifyPolicyChanged(slug, event, data);
-}
-
-function notifyPolicyChanged(orgSlug, event, data) {
-  const controlPayload = JSON.stringify({
-    type: 'policy-changed',
-    org: orgSlug,
-    event,
-    changes: data,
-  });
-  const scriptPath = path.resolve(import.meta.dirname, '../../.claude/skills/comm-bridge/scripts/c4-control.js');
-  execFile('node', [scriptPath, 'enqueue', `[POLICY-CHANGED] ${controlPayload}`], (err) => {
-    if (err) warn(`[${orgSlug}] failed to enqueue policy-changed control: ${err.message}`);
-  });
 }
 
 // =============================================================================
@@ -1271,21 +1257,21 @@ async function syncConfigToComm(orgConfig) {
   }
 }
 
-// Periodic owner sync — covers the gap where a WS connection stays alive but
-// the owner was reassigned on cws-core. Interval is conservative (5 min);
-// each round is one cheap GET per org.
-const OWNER_SYNC_INTERVAL_MS = 5 * 60 * 1000;
-let _ownerSyncTimer = null;
+// Periodic sync — owner from core + local policy to comm, every 5 min.
+const PERIODIC_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+let _periodicSyncTimer = null;
 
-function startPeriodicOwnerSync() {
-  if (_ownerSyncTimer) return;
-  _ownerSyncTimer = setInterval(() => {
+function startPeriodicSync() {
+  if (_periodicSyncTimer) return;
+  _periodicSyncTimer = setInterval(() => {
     for (const [slug, orgConfig] of activeOrgConfigs) {
       syncOwnerFromCore(orgConfig).catch(e =>
         warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
+      syncConfigToComm(orgConfig).catch(e =>
+        warn(`[${slug}] periodic config-sync failed: ${e.message}`));
     }
-  }, OWNER_SYNC_INTERVAL_MS);
-  _ownerSyncTimer.unref?.();
+  }, PERIODIC_SYNC_INTERVAL_MS);
+  _periodicSyncTimer.unref?.();
 }
 
 // =============================================================================
@@ -1340,17 +1326,9 @@ function startOrgWs(orgConfig, wsBaseUrl) {
 
     onOpen: async () => {
       log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
-      // Pull the authoritative owner from cws-core first (one cheap GET) so the
-      // owner gate is current before we replay any caught-up messages — e.g. a
-      // newly-transferred owner's queued DM must not be rejected. Errors are
-      // swallowed inside syncOwnerFromCore and never tear down the connection.
-      await syncOwnerFromCore(orgConfig);
-      // Push the agent's local policy config (DM policy, group modes) to
-      // cws-comm so the server has the current state. This is the reverse
-      // direction of the agent.config.* WS events (which push server→agent).
-      syncConfigToComm(orgConfig).catch(e =>
-        warn(`[${orgConfig.slug}] config-sync-to-comm failed: ${e.message}`));
-      // Then pull anything missed since the last persisted seq. No-op on
+      // Owner and config sync are handled by the periodic 5-min timer
+      // (startPeriodicSync) — not on connect, to avoid blocking WS setup.
+      // Pull anything missed since the last persisted seq. No-op on
       // first-ever connect (last_seq=0). Errors are caught inside
       // syncMissedEvents — they don't tear down the connection.
       syncMissedEvents(orgConfig, sessionRef, onMessage);
@@ -1488,4 +1466,4 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 startFrameMetricTimer();
-startPeriodicOwnerSync();
+startPeriodicSync();
