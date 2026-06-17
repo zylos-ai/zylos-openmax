@@ -29,8 +29,9 @@ import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
-import { getForOrg, postForOrg, apiPath } from './lib/client.js';
+import { getForOrg, postForOrg, delForOrg, apiPath } from './lib/client.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
+import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 
 const LOG_PREFIX = '[comm-bridge]';
@@ -225,7 +226,8 @@ function forwardToC4(endpoint, body) {
 }
 
 // =============================================================================
-// Receive acknowledgement — react to an inbound message on receipt
+// Receive acknowledgement — react to an inbound message on receipt, remove on
+// reply or timeout. Mirrors zylos-lark's typing-indicator pattern.
 // =============================================================================
 //
 // cws-comm allows agent principals to add reactions as of PRD v2.5 (cws-comm
@@ -237,17 +239,73 @@ function forwardToC4(endpoint, body) {
 // fire/white_check_mark). Set to "" to disable. Fire-and-forget: a failed
 // reaction must never delay or block delivering the message to the agent.
 const DEFAULT_RECEIVE_REACTION = 'eyes';
+const REACTION_TIMEOUT_MS = 120_000;
+
+// messageId → { orgId, code, timer }
+const activeReactions = new Map();
 
 function reactOnReceive(orgConfig, msg) {
   const code = config.message?.receive_reaction_code ?? DEFAULT_RECEIVE_REACTION;
   if (!code || !msg?.id) return;
-  // POST /api/v1/messages/{message_id}/reactions {reaction_code} — proxied by
-  // cws-core (transport/http/reaction.go) to cws-comm. Reactor identity (agent)
-  // is derived server-side from the auth principal.
   postForOrg(orgConfig.org_id, apiPath(`/messages/${msg.id}/reactions`), { reaction_code: code })
-    .then(() => log(`[${orgConfig.slug}] reacted '${code}' on msg=${msg.id}`))
+    .then(() => {
+      log(`[${orgConfig.slug}] reacted '${code}' on msg=${msg.id}`);
+      const timer = setTimeout(() => removeReaction(msg.id, 'timeout'), REACTION_TIMEOUT_MS);
+      timer.unref();
+      activeReactions.set(msg.id, { orgId: orgConfig.org_id, code, timer });
+    })
     .catch(e => warn(`[${orgConfig.slug}] react-on-receive failed msg=${msg.id}: ${e.message}`));
 }
+
+function removeReaction(messageId, reason) {
+  const state = activeReactions.get(messageId);
+  if (!state) return;
+  clearTimeout(state.timer);
+  activeReactions.delete(messageId);
+  delForOrg(state.orgId, apiPath(`/messages/${messageId}/reactions/${state.code}`))
+    .then(() => log(`reaction removed msg=${messageId} (${reason})`))
+    .catch(e => {
+      warn(`reaction remove failed msg=${messageId}: ${e.message}, retrying...`);
+      setTimeout(() => {
+        delForOrg(state.orgId, apiPath(`/messages/${messageId}/reactions/${state.code}`))
+          .catch(e2 => warn(`reaction remove retry failed msg=${messageId}: ${e2.message}`));
+      }, 1000);
+    });
+}
+
+// Typing-done marker directory: send.js writes `{messageId}.done` here after a
+// successful reply; the poller below picks it up and calls removeReaction.
+const TYPING_DIR = path.join(RUNTIME_DIR, 'typing');
+fs.mkdirSync(TYPING_DIR, { recursive: true });
+// Clean stale markers from a previous run.
+try { for (const f of fs.readdirSync(TYPING_DIR)) fs.unlinkSync(path.join(TYPING_DIR, f)); } catch {}
+
+const TYPING_POLL_MS = 2000;
+const TYPING_STALE_MS = 60_000;
+
+function pollTypingDone() {
+  let files;
+  try { files = fs.readdirSync(TYPING_DIR); } catch { return; }
+  const now = Date.now();
+  for (const f of files) {
+    if (!f.endsWith('.done')) continue;
+    const fp = path.join(TYPING_DIR, f);
+    const messageId = f.slice(0, -5); // strip .done
+    try {
+      const ts = parseInt(fs.readFileSync(fp, 'utf8').trim(), 10) || 0;
+      if (now - ts > TYPING_STALE_MS) {
+        fs.unlinkSync(fp);
+        continue;
+      }
+    } catch { /* file vanished between readdir and read — ignore */ }
+    try { fs.unlinkSync(fp); } catch {}
+    removeReaction(messageId, 'reply');
+  }
+}
+let _typingPollTimer = setInterval(pollTypingDone, TYPING_POLL_MS);
+
+// Export path for send.js to import.
+export { TYPING_DIR };
 
 // =============================================================================
 // Mark conversation as read — advance the agent's read cursor
@@ -1397,9 +1455,21 @@ function shutdown(signal) {
   log(`${signal}, shutting down...`);
   if (_frameMetricTimer) { clearInterval(_frameMetricTimer); _frameMetricTimer = null; }
   if (_ownerSyncTimer) { clearInterval(_ownerSyncTimer); _ownerSyncTimer = null; }
-  for (const c of wsClients) { try { c.ws.stop(); } catch {} }
-  log('shutdown complete');
-  process.exit(0);
+  if (_typingPollTimer) { clearInterval(_typingPollTimer); _typingPollTimer = null; }
+  // Remove all active processing-indicator reactions before exit.
+  const removals = [];
+  for (const [msgId, state] of activeReactions) {
+    clearTimeout(state.timer);
+    removals.push(
+      delForOrg(state.orgId, apiPath(`/messages/${msgId}/reactions/${state.code}`)).catch(() => {}),
+    );
+  }
+  activeReactions.clear();
+  Promise.allSettled(removals).then(() => {
+    for (const c of wsClients) { try { c.ws.stop(); } catch {} }
+    log('shutdown complete');
+    process.exit(0);
+  });
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
