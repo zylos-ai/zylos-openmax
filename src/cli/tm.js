@@ -24,7 +24,7 @@
  *     offset paging via {page, page_size} now.)
  */
 
-import { get, post, patch, put, apiPath } from '../lib/client.js';
+import { get, post, patch, put, del, apiPath } from '../lib/client.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -380,6 +380,9 @@ const COMMANDS = {
 
   'event-binding.get': () => get(apiPath(`/event-bindings/${params.id}`)),
 
+  // 删除 binding 只停止后续触发,不影响已触发生成的 Issue。
+  'event-binding.delete': () => del(apiPath(`/event-bindings/${params.id}`)),
+
 };
 
 function printUsage() {
@@ -446,6 +449,7 @@ EVENT BINDING  (定时任务 / create-by-agent)
                           title, description?, mode?}                            # agent: leadMemberId=自己, ownerMemberId=对话人类
   event-binding.list     {}                                                     # 本 org 的定时任务
   event-binding.get      {id}
+  event-binding.delete   {id}                                                   # 停止后续触发, 不影响已生成的 Issue
 
 Environment:
   COCO_API_URL     cws-core base URL (default: http://127.0.0.1:8080)
