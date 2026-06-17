@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.40] - 2026-06-17
+
+### Added
+- **Typing indicator via emoji reaction**: on message receive, adds 👀 reaction
+  (configurable via `message.receive_reaction_code`); reaction is removed when
+  the agent replies or after 120 s timeout. Graceful shutdown cleans up all
+  active reactions. (`src/comm-bridge.js`, `scripts/send.js`)
+
+### Fixed
+- **Reaction removal for non-reply sends**: `markTypingDone` was only triggered
+  on explicit `reply-to` sends; normal conversation sends (the default path)
+  never wrote the `.done` marker. Now uses `conversationId` as fallback key,
+  and the poller matches by both `messageId` and `conversationId`.
+
 ## [1.0.31] - 2026-06-16
 
 ### Added

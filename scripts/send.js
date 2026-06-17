@@ -37,6 +37,8 @@
  *       X-Workspace-Id header (handled by client.js).
  */
 
+import fs from 'fs';
+import path from 'path';
 import { post, apiPath } from '../src/lib/client.js';
 import {
   parseEndpoint,
@@ -48,6 +50,18 @@ import {
 import { uploadMedia } from '../src/cli/as.js';
 import { resolveMentions } from '../src/lib/mention.js';
 import { lookupConvOrg } from '../src/lib/conv-org.js';
+import { RUNTIME_DIR } from '../src/lib/session.js';
+
+const TYPING_DIR = path.join(RUNTIME_DIR, 'typing');
+
+function markTypingDone(messageId) {
+  if (!messageId) return;
+  const safe = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  try {
+    fs.mkdirSync(TYPING_DIR, { recursive: true });
+    fs.writeFileSync(path.join(TYPING_DIR, `${safe}.done`), String(Date.now()));
+  } catch {}
+}
 
 function usage() {
   console.error('Usage: node scripts/send.js <endpoint> <message>');
@@ -186,6 +200,7 @@ async function main() {
     const result = media
       ? await sendMediaMessage(ep, media.kind, media.localPath, media.caption)
       : await sendText(ep, message);
+    markTypingDone(ep.replyTo || ep.conversationId);
     console.log(JSON.stringify(result));
   } catch (e) {
     const payload = { error: e.message };
