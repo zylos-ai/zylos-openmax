@@ -200,7 +200,7 @@ async function main() {
     const result = media
       ? await sendMediaMessage(ep, media.kind, media.localPath, media.caption)
       : await sendText(ep, message);
-    if (ep.replyTo) markTypingDone(ep.replyTo);
+    markTypingDone(ep.replyTo || ep.conversationId);
     console.log(JSON.stringify(result));
   } catch (e) {
     const payload = { error: e.message };

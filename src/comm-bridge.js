@@ -241,7 +241,7 @@ function forwardToC4(endpoint, body) {
 const DEFAULT_RECEIVE_REACTION = 'eyes';
 const REACTION_TIMEOUT_MS = 120_000;
 
-// messageId → { orgId, code, timer }
+// messageId → { orgId, convId, code, timer }
 const activeReactions = new Map();
 
 function reactOnReceive(orgConfig, msg) {
@@ -252,7 +252,7 @@ function reactOnReceive(orgConfig, msg) {
       log(`[${orgConfig.slug}] reacted '${code}' on msg=${msg.id}`);
       const timer = setTimeout(() => removeReaction(msg.id, 'timeout'), REACTION_TIMEOUT_MS);
       timer.unref();
-      activeReactions.set(msg.id, { orgId: orgConfig.org_id, code, timer });
+      activeReactions.set(msg.id, { orgId: orgConfig.org_id, convId: msg.conversation_id, code, timer });
     })
     .catch(e => warn(`[${orgConfig.slug}] react-on-receive failed msg=${msg.id}: ${e.message}`));
 }
@@ -273,15 +273,22 @@ function removeReaction(messageId, reason) {
     });
 }
 
-// Typing-done marker directory: send.js writes `{messageId}.done` here after a
+// Typing-done marker directory: send.js writes `{id}.done` here after a
 // successful reply; the poller below picks it up and calls removeReaction.
+// The id can be a messageId (explicit reply-to) or a conversationId.
 const TYPING_DIR = path.join(RUNTIME_DIR, 'typing');
 fs.mkdirSync(TYPING_DIR, { recursive: true });
-// Clean stale markers from a previous run.
 try { for (const f of fs.readdirSync(TYPING_DIR)) fs.unlinkSync(path.join(TYPING_DIR, f)); } catch {}
 
 const TYPING_POLL_MS = 2000;
 const TYPING_STALE_MS = 60_000;
+
+function findReactionByConv(convId) {
+  for (const [msgId, state] of activeReactions) {
+    if (state.convId === convId) return msgId;
+  }
+  return null;
+}
 
 function pollTypingDone() {
   let files;
@@ -290,7 +297,7 @@ function pollTypingDone() {
   for (const f of files) {
     if (!f.endsWith('.done')) continue;
     const fp = path.join(TYPING_DIR, f);
-    const messageId = f.slice(0, -5); // strip .done
+    const id = f.slice(0, -5); // strip .done
     try {
       const ts = parseInt(fs.readFileSync(fp, 'utf8').trim(), 10) || 0;
       if (now - ts > TYPING_STALE_MS) {
@@ -299,7 +306,13 @@ function pollTypingDone() {
       }
     } catch { /* file vanished between readdir and read — ignore */ }
     try { fs.unlinkSync(fp); } catch {}
-    removeReaction(messageId, 'reply');
+    // Match by messageId first, then by conversationId
+    if (activeReactions.has(id)) {
+      removeReaction(id, 'reply');
+    } else {
+      const msgId = findReactionByConv(id);
+      if (msgId) removeReaction(msgId, 'reply');
+    }
   }
 }
 let _typingPollTimer = setInterval(pollTypingDone, TYPING_POLL_MS);
