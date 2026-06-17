@@ -1156,6 +1156,50 @@ function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) 
   );
 }
 
+// =============================================================================
+// Config sync to cws-comm — push local policy config on every WS (re)connect
+// =============================================================================
+// The reverse direction of agent.config.* WS events. When the agent connects,
+// it pushes its local DM policy + group mode config to cws-comm so the server
+// has the authoritative state (e.g. after an offline config.json edit or a
+// fresh install with pre-populated config). Errors are swallowed — config sync
+// is best-effort and must never tear down the connection.
+
+async function syncConfigToComm(orgConfig) {
+  const selfMemberId = orgConfig.self?.member_id;
+  if (!selfMemberId) return;
+
+  const access = orgConfig.access || {};
+
+  const groups = {};
+  if (access.groups) {
+    for (const [convId, gcfg] of Object.entries(access.groups)) {
+      groups[convId] = {
+        mode: gcfg.mode || 'mention',
+        allow_from: gcfg.allowFrom || ['*'],
+      };
+    }
+  }
+
+  const payload = {
+    dm_policy: access.dmPolicy || 'owner',
+    dm_allow_from: access.dmAllowFrom || [],
+    groups,
+  };
+
+  try {
+    await postForOrg(orgConfig.org_id, apiPath('/agents/config/sync'), payload);
+    log(`[${orgConfig.slug}] config synced to comm: dmPolicy=${payload.dm_policy}, groups=${Object.keys(groups).length}`);
+  } catch (err) {
+    // 404 = cws-comm hasn't deployed the endpoint yet; downgrade to debug
+    if (err.status === 404) {
+      log(`[${orgConfig.slug}] config-sync endpoint not available (404), skipping`);
+    } else {
+      throw err;
+    }
+  }
+}
+
 // Periodic owner sync — covers the gap where a WS connection stays alive but
 // the owner was reassigned on cws-core. Interval is conservative (5 min);
 // each round is one cheap GET per org.
@@ -1230,6 +1274,11 @@ function startOrgWs(orgConfig, wsBaseUrl) {
       // newly-transferred owner's queued DM must not be rejected. Errors are
       // swallowed inside syncOwnerFromCore and never tear down the connection.
       await syncOwnerFromCore(orgConfig);
+      // Push the agent's local policy config (DM policy, group modes) to
+      // cws-comm so the server has the current state. This is the reverse
+      // direction of the agent.config.* WS events (which push server→agent).
+      syncConfigToComm(orgConfig).catch(e =>
+        warn(`[${orgConfig.slug}] config-sync-to-comm failed: ${e.message}`));
       // Then pull anything missed since the last persisted seq. No-op on
       // first-ever connect (last_seq=0). Errors are caught inside
       // syncMissedEvents — they don't tear down the connection.
