@@ -1,10 +1,10 @@
 ---
 name: coco-workspace
-version: 1.0.42
+version: 1.0.43
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
-  确认归属项目 + 知识库 → 登记 Issue→Task（谁执行谁建）→ 执行 → 发起人验收通过才算完成/归档，
+  确认归属项目 + 知识库 → 登记 Issue→Task（谁执行谁建，Issue owner=发起人）→ 执行 → owner 发起人验收通过才算完成/归档，
   不要跳过流程直接开干。含效率捷径 / 状态机 / 行为护栏 / 记忆触发点。
   Config at ~/zylos/components/coco-workspace/config.json.
   Service: pm2 zylos-coco-workspace.
@@ -135,10 +135,10 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
 2. **选择项目（必问，禁止默默决定，且必须在执行前）**：**先问用户**归属哪个项目再继续；可建议默认 Inbox，但必须经用户确认 / 选择，**绝不能跳过此步直接开干**
 3. **选择知识库（必问，禁止默默决定，且必须在执行前）**：**先问用户**产出沉淀到哪个知识库；可建议默认 KB，但同样必须经用户确认 / 选择
 4. **确认执行 Agent（必问，bot 不自行决定）**：按 agent 描述**给出推荐 + 理由**，把候选列给发起人，**由发起人确认 / 选择**执行的 bot；无匹配专长时可推荐 COCO 自己做，但仍需发起人确认
-5. **登记 Issue→Task（谁执行谁建 Task）**：Lead 在**已确认的项目**下创建 **Issue**（light）。**description 必须使用 Markdown 格式**（标题、列表、加粗、代码块等；CLI 默认传 `descriptionFormat:"markdown"`）。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue →（执行者）建 Task → 执行，不先开干再补
+5. **登记 Issue→Task（谁执行谁建 Task）**：Lead 在**已确认的项目**下创建 **Issue**（light），并把 `ownerMemberId` 设为发起任务的人类 member id（人类 caller 可省略默认自己，Agent 代人类创建必须显式传）。**description 必须使用 Markdown 格式**（标题、列表、加粗、代码块等；CLI 默认传 `descriptionFormat:"markdown"`）。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue →（执行者）建 Task → 执行，不先开干再补
 6. **Agent 执行**：该 Agent 独立完成全部工作 → 产出结果
 7. **产物归档 & 知识沉淀**：产出 → ArtifactStore；报告沉淀到所选知识库（`/projects/.../research/`）
-8. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知发起该任务的人类（任务发起人）请其验收**（不是 bot 自己、不是 owner、不是随便哪个用户）；**bot 不自行验收 / 归档**。**发起人验收通过**（IM 说「验收通过」或看板点验收）→ bot 调 `issue.accept_delivered({source:"im"})` → **accepted**，必要时再 `issue.archive` 并沉淀经验；发起人**退回** → `issue.reject_delivered({source:"im", rejectionReason})` → rejected → `issue.reopen` → pending_start，再由 Lead `issue.start_execution` 重做。交付到验收之间，issue 停在 **delivered（待验收）**，别当已完成丢着不管
+8. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知该 Issue 的 owner 人类（通常就是任务发起人）请其验收**；**bot 不自行验收 / 不代验收 / 不自行归档**。创建 Issue 时必须让 `ownerMemberId` 指向发起人（人类 caller 可省略默认自己；Agent 代人类创建必须显式传对话人类 member id）。**owner 验收通过**（IM 说「验收通过」或看板点验收，必须由 owner 本人/其身份触发）→ Issue 进入 **accepted**，必要时再 `issue.archive` 并沉淀经验；owner **退回** → `issue.reject_delivered` → rejected → `issue.reopen` → pending_start，再由 Lead `issue.start_execution` 重做。交付到验收之间，issue 停在 **delivered（待验收）**，别当已完成丢着不管
 
 ### 复杂任务流程（Lead Agent 编排 + 多 Agent 协作，例：开发任务）
 1. **接收用户意图**：Lead Agent 解析消息，识别为工作目标（非简单问答）
@@ -155,7 +155,7 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
    - 这样看板从一开工就是完整全景：谁在跑 / 谁在「待办」等 / 卡了什么前置，且 **RUNNING 永远对应真在执行的 bot，不存在空转的「进行中」**
    - **关键看板语义：待办列 = 已规划、已建 Task 但尚未被认领（被依赖挂起）的 Step，不是「还没拆出来的步骤」。** Sub-task → Attempt → Agent 执行
 7. **产物归档 & 知识沉淀**：Agent 产出 → ArtifactStore；关键文档（报告、方案）沉淀到 KB（`/projects/.../research/`、`/projects/.../deliverables/`）
-8. **交付 & 人类验收闭环**：所有子任务 done → `issue.deliver` 到 **delivered** → **主动请发起任务的人类（任务发起人）验收**（bot 不自行验收；Worker 经 Lead 转达给发起人）→ 发起人验收通过 → `issue.accept_delivered({source:"im"})` → **accepted**，必要时 `issue.archive` 归档 + 看板同步；退回 → `issue.reject_delivered({source:"im", rejectionReason})` → rejected → `issue.reopen` → pending_start → `issue.start_execution` 重做
+8. **交付 & 人类验收闭环**：所有子任务 done → `issue.deliver` 到 **delivered** → **主动请 Issue owner 人类（通常就是任务发起人）验收**（bot 不自行验收；Worker 经 Lead 转达给 owner）→ owner 验收通过（必须由 owner 本人/其身份触发）→ **accepted**，必要时 `issue.archive` 归档 + 看板同步；退回 → rejected → `issue.reopen` → pending_start → `issue.start_execution` 重做
 
 > 说明：以上两条流程对应 coco-workspace 原型「对话」里的两个演示场景（▶ 复杂开发任务 / ▶ 简单研究报告），是产品定义的标准交互路径。
 
@@ -315,12 +315,12 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 3. **状态流转即通知**：issue/task 每次状态变更（pending_start→executing、executing→delivered、task→done、delivered→accepted/archived 等）的**当下**就通知用户，不要事后补、更不要不说。
 4. **完成即通知**：每个任务执行完**必须**主动通知用户结果，不能默默做完、让结论埋进消息流。
 5. **按优先级续做**：处理完一个任务后，**主动**按优先级接续处理下一个待办任务，而不是停下干等下一条指令（除非必须等用户输入/验收才能继续）。
-6. **人类验收闭环（交付后不自行收尾）**：出 deliverable 的任务，bot 交付（`issue.deliver`→delivered）后**必须主动请发起该任务的人类验收，且不得自行验收 / 自行归档**。验收人＝**任务发起人**（按 issue 来源会话 / `originConversationId` 识别），**不是 bot 自己、不是 owner、也不是随便哪个用户**；Worker 没有直接与人沟通权时，经 Lead 转达给发起人。先后顺序：完成内层流转（attempt→done、task→done）→ `issue.deliver` → 请发起人验收。**发起人验收通过**才由 bot 调 `issue.accept_delivered({source:"im"})` 收敛到 **accepted**，必要时再 `issue.archive` 归档；**退回**则 `issue.reject_delivered({source:"im", rejectionReason})` → `issue.reopen` → pending_start → `issue.start_execution` 重做。交付到验收之间停在 **delivered（待验收）**，别堆在「已完成」不管。**区分**：worker 把自己的 attempt/task 流转到 done 只代表「执行动作做完」；**Issue 真正进入「完成」(accepted) 和归档(archived)，都必须人类验收通过**——bot 绝不自行把任务推进到 accepted/archived。「任务做完 ≠ 结束，发起人验收通过才算完成、才能归档」。
+6. **人类验收闭环（交付后不自行收尾）**：出 deliverable 的任务，bot 交付（`issue.deliver`→delivered）后**必须主动请 Issue owner 人类验收，且不得自行验收 / 代验收 / 自行归档**。验收人＝**Issue.owner_member_id 指向的人类**，通常就是任务发起人（按 issue 来源会话 / `originConversationId` 识别）；创建 Issue 时就要把 `ownerMemberId` 填成发起人的 member id。Worker 没有直接与人沟通权时，经 Lead 转达给 owner。先后顺序：完成内层流转（attempt→done、task→done）→ `issue.deliver` → 请 owner 验收。**只有 owner 本人/其身份触发验收通过**，Issue 才收敛到 **accepted**，必要时再 `issue.archive` 归档；**退回**则 `issue.reject_delivered` → `issue.reopen` → pending_start → `issue.start_execution` 重做。交付到验收之间停在 **delivered（待验收）**，别堆在「已完成」不管。**区分**：worker 把自己的 attempt/task 流转到 done 只代表「执行动作做完」；**Issue 真正进入「完成」(accepted) 和归档(archived)，都必须 owner 人类验收通过**——bot 绝不自行把任务推进到 accepted/archived。「任务做完 ≠ 结束，owner 验收通过才算完成、才能归档」。
 7. **跨 agent 派发：双向 DM 权限确认（强制）+ 谁执行谁建 Task**：把任务交给别的 bot 前，**两个方向的 DM 权限都必须确认开通，缺一不可**：
    - **方向①（worker→你）**：把该 bot 的 member_id 加进**自己的** `dmAllowFrom`（`config.json` → `orgs.<slug>.access`，必要时 `dmPolicy=allowlist`）——否则它的完成回报 DM 被你的 comm-bridge 拦掉、你永远收不到（跨 agent 通知链头号断点）。
    - **方向②（你→worker）**：确认该 bot 的 `dmPolicy` 允许你给它发 DM——否则你的派发消息它收不到。
    - **两个方向都通了再派**；任一方向没开通，先解决或反馈给人类，**不要盲派**。
-   (b) Lead 只建 **Issue** + 给目标，**Task 由被指派的 bot 自己 `task.create` 并认领**（谁执行谁建，Lead 不替它建）；(c) 收到它的完成回报后，Lead 才调 `issue.deliver` 并转交发起人验收。
+   (b) Lead 只建 **Issue** + 给目标，**Task 由被指派的 bot 自己 `task.create` 并认领**（谁执行谁建，Lead 不替它建）；(c) 收到它的完成回报后，Lead 才调 `issue.deliver` 并转交 Issue owner 验收。
 8. **复杂任务必须先有 Blueprint（强制）**：判定为复杂任务（多步骤 / 多 agent / 子任务有依赖 / 需编排）的，**必须** heavy 模式 → 先生成 Blueprint → Lead/策略决定审批或直接启动 → 再实例化 Task 执行。需要审批时走 `blueprint.submit_for_approval` 并等通过；无需审批时走 `issue.start_execution`。**禁止**把复杂任务用 light 模式直接拆成多个 Task 绕过蓝图。顺序硬性：确认项目/KB → 起 heavy Issue → 建 Blueprint → 审批或启动决策 → 按 Step 建 Task → 执行。Blueprint 是复杂任务的施工图，无蓝图就开干 ＝ 复杂任务流程被架空。
 9. **Blueprint 启动后一次性实例化全部 Step（强制）+ 依赖步骤不带 assignee、bot 自认领推进**：审批通过或 `issue.start_execution` 后**一次性把全部 Step 建成 Task 并设 `dependsOn`**，**禁止边做边补**。**有依赖的 Step 创建时不带 `assigneeId` → 停「待办」**；前置完成后由**完成的 bot 通知下游 bot、下游自己 `task.claim`（分配）→ `task.start`（依赖闸在此校验）**进「进行中」——**不是后端自动改状态**（RUNNING 必须 = 真有 bot 在跑，杜绝空转的「进行中」）。只实例化当前一步、其余不进看板 ＝ piecemeal，违背设计预期。（详见复杂任务流程 step 5/6。）
 
@@ -356,9 +356,9 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 | 用 curl/fetch 直接调 TM/KB/AS API / 手搓 BFF REST 路径 | 一律走 CLI `src/cli/{tm,kb,as,comm,core}.js`，禁止直接 HTTP（见顶部「服务调用铁律」）；不确定先 `node src/cli/<svc>.js` 看命令或查 ops 文档，别猜路径 |
 | Task done 但 Attempt 仍在 running | 先 attempt.transition → done，再 task.transition → done |
 | 工作做完但 Issue 没有 deliver | 所有 Task done 后必须 `issue.deliver` |
-| 交付后 bot 自行验收 / 自行归档 | delivered 后必须**等发起人验收通过**，再由 bot 调 `issue.accept_delivered({source:"im"})` |
-| 找 owner / 随便哪个用户验收 | 验收人＝**发起该任务的人类**（按 issue 来源会话识别），不是 owner、不是 bot 自己 |
-| 交付后把任务堆在「已完成」不管 | delivered=待验收，主动请发起人验收；任务做完≠结束，发起人验收通过才归档 |
+| 交付后 bot 自行验收 / 自行归档 | delivered 后必须**等 Issue owner 人类验收通过**；bot 不代调验收 |
+| 找错 owner / 随便哪个用户验收 | 验收人＝**Issue.owner_member_id 指向的人类**（创建时应设为发起人），不是 bot 自己、不是随便哪个用户 |
+| 交付后把任务堆在「已完成」不管 | delivered=待验收，主动请 Issue owner 验收；任务做完≠结束，owner 验收通过才归档 |
 | 先开干再补登记 Issue/Task | 先确认项目/KB → 再登记 Issue→Task → 再执行，顺序不能颠倒 |
 | 自行决定派哪个 bot 执行 | 按 agent 描述给推荐 + 理由，由发起人确认/选择执行 bot，不自行拍板 |
 | 派任务给 bot 但没把它加进 dmAllowFrom | 派发前先把 worker member_id 加进自己的 dmAllowFrom（必要时 dmPolicy=allowlist），否则它的完成回报 DM 被拦、收不到 |

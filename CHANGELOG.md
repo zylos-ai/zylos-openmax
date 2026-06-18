@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.43] - 2026-06-18
+
+### Added
+- **Issue owner support in TM CLI**: `issue.create` now forwards optional
+  `ownerMemberId` as `owner_member_id`, aligning with cws-work issue owner /
+  owner-only acceptance semantics.
+
+### Changed
+- **TM Skill guidance now treats Issue owner as acceptance authority**:
+  create Issues with `ownerMemberId` set to the requesting human when an Agent
+  creates on their behalf; delivered Issues must be accepted/rejected by that
+  owner, not by the Agent/Lead.
+
 ## [1.0.42] - 2026-06-17
 
 ### Changed

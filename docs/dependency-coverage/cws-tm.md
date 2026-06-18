@@ -58,7 +58,7 @@
 |---|---|---|---|---|---|---|
 | 9 | `issue.list_in_project` `GET /projects/{pid}/issues` | `issue.go:159` `list-project-issues` | ✅ | "Returns issues within a project." | path:`project_id*`;query:`status`、`priority`、PageParams | `PageListResponse<issueItem>` |
 | 10 | `issue.get` `GET /issues/{id}` | `issue.go:197` `get-issue` | ✅ | "Returns detailed information about a specific issue." | path:`issue_id*` | `DataResponse<issueItem>` |
-| 11 | `issue.create` `POST /projects/{pid}/issues` | `issue.go:215` `create-issue` | ✅ | "Creates an issue within a project." | path:`project_id*`;body:`title*`(1..300)、`description?`、`mode*`(light/heavy)、`priority*`(low/medium/high)、`due_date?`、`lead_agent_id*`、`context_page_ids?`、`input_artifact_ids?`、`origin_conversation_id?`、`origin_message_id?` | `DataResponse<issueItem>` |
+| 11 | `issue.create` `POST /projects/{pid}/issues` | `issue.go:215` `create-issue` | ✅ | "Creates an issue within a project." | path:`project_id*`;body:`title*`(1..300)、`description?`、`mode*`(light/heavy)、`priority*`(low/medium/high)、`due_date?`、`lead_agent_id*`、`owner_member_id?`、`context_page_ids?`、`input_artifact_ids?`、`origin_conversation_id?`、`origin_message_id?` | `DataResponse<issueItem>` |
 | 12 | `issue.update` `PATCH /issues/{id}` | `issue.go:256` `update-issue` | ✅ | "Updates issue metadata." | path:`issue_id*`;body:`title?`、`description?`、`priority?`、`due_date?` | `DataResponse<issueItem>` |
 | 13 | `issue.transition` `POST /issues/{id}/transition` | `issue.go:282` `transition-issue` | ✅ | "Transitions an issue to a target status." | path:`issue_id*`;body:`target_status*`、`rejection_reason?` | `DataResponse<issueItem>` |
 | 14 | `issue.move_project` `POST /issues/{id}/move` | `issue.go:306` `move-issue-project` | ✅ | "Moves an issue to another project." | path:`issue_id*`;body:`new_project_id*` | `DataResponse<issueItem>` |
@@ -313,7 +313,7 @@
 
 ### `issueItem`
 
-`id`、`org_id`、`project_id`、`title`、`description`、`mode`(light/heavy)、`status`(backlog / pending_start / draft / pending_approval / executing / delivered / accepted / rejected / archived)、`priority`(low/medium/high)、`due_date?`、`assignee_kind`(internal_lead / external_via_group)、`lead_agent_id?`、`current_blueprint_id?`、`blueprint_approval_request_id?`、`origin_conversation_id?`、`origin_message_id?`、`context_page_ids[]`、`input_artifact_ids[]`、`related_issue_ids[]`、`active_approval_request_ids[]`、`acceptance_source?`(im/explicit)、`rejection_reason?`、`created_at` / `updated_at` / `accepted_at?` / `rejected_at?` / `archived_at?`
+`id`、`org_id`、`project_id`、`title`、`description`、`mode`(light/heavy)、`status`(backlog / pending_start / draft / pending_approval / executing / delivered / accepted / rejected / archived)、`priority`(low/medium/high)、`due_date?`、`assignee_kind`(internal_lead / external_via_group)、`lead_agent_id?`、`owner_member_id`、`current_blueprint_id?`、`blueprint_approval_request_id?`、`origin_conversation_id?`、`origin_message_id?`、`context_page_ids[]`、`input_artifact_ids[]`、`related_issue_ids[]`、`active_approval_request_ids[]`、`acceptance_source?`(im/explicit)、`rejection_reason?`、`created_at` / `updated_at` / `accepted_at?` / `rejected_at?` / `archived_at?`
 
 ### `taskItem`
 
@@ -363,7 +363,7 @@
 | `project.create`     | `{ name, description, icon, lead_ids, member_ids }` | `{ name*, description?, slug*, is_default, lead_member_id* }` |
 | `project.update`     | `{ description, icon, lead_ids, member_ids }`     | `{ name?, description?, lead_member_id? }` |
 | `issue.list_in_project` query | `{ status, archived, page_size, page_token }` | `{ status, priority, ...PageParams }`(归档列表传 `status=archived`)|
-| `issue.create` body | 漏 `priority` | `priority*`(low/medium/high) |
+| `issue.create` body | 漏 `priority` / `owner_member_id` | `priority*`(low/medium/high); `owner_member_id?` 为验收归属,Agent 代人类创建时应传 |
 | `issue.transition` body | `{ status }` | `{ target_status*, rejection_reason? }` |
 | `issue.move_project` body | `{ project_id }` | `{ new_project_id* }` |
 | `task.list` query | `{ ..., assignee_id, ... }` | `{ ..., claimable?, agent_skills?, ... }`(无 `assignee_id` 过滤)|

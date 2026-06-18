@@ -124,8 +124,9 @@ const COMMANDS = {
   'issue.get': () => get(apiPath(`/issues/${params.id}`)),
 
   // contract-v2 create-issue body: requires title*, mode*, priority*,
-  // lead_agent_id*; optional context_page_ids, input_artifact_ids,
-  // origin_conversation_id, origin_message_id, due_date, disposition.
+  // lead_agent_id*; optional owner_member_id, context_page_ids,
+  // input_artifact_ids, origin_conversation_id, origin_message_id,
+  // due_date, disposition.
   'issue.create': () => post(apiPath(`/projects/${params.projectId}/issues`), {
     title:                  params.title,
     description:            params.description || '',
@@ -135,6 +136,7 @@ const COMMANDS = {
     priority:               params.priority,              // low|medium|high (required)
     due_date:               params.dueDate,
     lead_agent_id:          params.leadAgentId,
+    owner_member_id:        params.ownerMemberId,
     context_page_ids:       params.contextPageIds,
     input_artifact_ids:     params.inputArtifactIds,
     origin_conversation_id: params.originConversationId,
@@ -403,9 +405,10 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.list_in_project  {projectId, status?, priority?, page?, pageSize?, orderBy?}
   issue.get              {id}
   issue.create           {projectId, title, mode, priority, leadAgentId,
+                          ownerMemberId?,
                           description?, descriptionFormat?, dueDate?, contextPageIds?,
                           inputArtifactIds?, originConversationId?, originMessageId?,
-                          disposition?}                                      # disposition: start|backlog
+                          disposition?}                                      # ownerMemberId defaults to human caller; agent create-by-human must pass it
   issue.update           {id, title?, description?, descriptionFormat?, priority?, dueDate?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
   issue.start_execution  {id}

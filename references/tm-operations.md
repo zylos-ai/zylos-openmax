@@ -91,7 +91,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | --- | --- | --- | --- | --- |
 | ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级过滤) | `{projectId, status?, priority?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
 | ✅ | `issue.get` | 取单个 issue 详情 | `{id}` | `GET /issues/{id}` |
-| ✅ | `issue.create` | 起 issue;`mode=light` 表示无 Blueprint,`mode=heavy` 表示 Blueprint 编排;`disposition=backlog` 可先记录不执行 | `{projectId, title, mode, priority, leadAgentId, description?, descriptionFormat?, disposition?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
+| ✅ | `issue.create` | 起 issue;`mode=light` 表示无 Blueprint,`mode=heavy` 表示 Blueprint 编排;`disposition=backlog` 可先记录不执行;`ownerMemberId` 是交付验收归属 | `{projectId, title, mode, priority, leadAgentId, ownerMemberId?, description?, descriptionFormat?, disposition?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
 | ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, descriptionFormat?, priority?, dueDate?}` | `PATCH /issues/{id}` |
 | ✅ | `issue.activate` | backlog → pending_start;按 source 决定是否唤醒 Lead | `{id, source?}` | `POST /issues/{id}/activate` |
 | ✅ | `issue.start_execution` | Lead 判断无需审批/已具备条件后直接开工(pending_start/draft → executing) | `{id}` | `POST /issues/{id}/start-execution` |
@@ -105,7 +105,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `issue.set_acceptance` | 兼容 wrapper;新调用优先用 `accept_delivered` / `reject_delivered` | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit`(默认 `explicit`) |
 | ✅ | `issue.terminate` | 提前终止未结论 issue → terminated;服务端级联取消非终态 Task + 发 `issue.terminated` 事件给 Lead 善后(不回滚已发生副作用) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` 默认 `lead_chat` |
 
-`mode` 取值:`light`(单 Agent/无 Blueprint)/ `heavy`(Blueprint 编排流)。是否需要审批不是 mode 的副作用,由 Lead/策略按风险、预算、权限等因素显式选择。`disposition` 取值:`start`(默认) / `backlog`。
+`mode` 取值:`light`(单 Agent/无 Blueprint)/ `heavy`(Blueprint 编排流)。是否需要审批不是 mode 的副作用,由 Lead/策略按风险、预算、权限等因素显式选择。`disposition` 取值:`start`(默认) / `backlog`。`ownerMemberId` 是 Issue 的验收 / 治理归属:人类调用可省略并默认自己;Agent 代人类创建时必须传**对话中那个人类的 member id**。`issue.accept_delivered` / `issue.reject_delivered` 只能由该 owner 触发,Lead/Agent 不能代验收。
 
 ### Task (8 条)
 
@@ -178,6 +178,7 @@ node src/cli/tm.js issue.create '{
   "projectId":"proj-1","mode":"light",
   "title":"Notion 竞品定价分析","description":"对比 5 个直接竞品的定价层级",
   "priority":"medium","leadAgentId":"agent-self",
+  "ownerMemberId":"human-requester-1",
   "contextPageIds":["pg-pricing-ref-001","pg-market-overview-002"],
   "originConversationId":"conv-1","originMessageId":"msg-42"
 }'
@@ -196,7 +197,7 @@ node src/cli/tm.js attempt.transition '{"id":"att-1","targetStatus":"done"}'
 node src/cli/tm.js task.transition    '{"id":"task-1","targetStatus":"done"}'
 node src/cli/tm.js issue.deliver      '{"id":"iss-1"}'
 
-# 4) 人类验收
+# 4) owner 人类验收(必须由 owner 本人/其身份触发;Agent 不代验收)
 node src/cli/tm.js issue.accept_delivered '{"id":"iss-1","source":"im"}'
 ```
 
@@ -206,7 +207,8 @@ node src/cli/tm.js issue.accept_delivered '{"id":"iss-1","source":"im"}'
 # 1) 创建 heavy Issue
 node src/cli/tm.js issue.create '{
   "projectId":"proj-1","mode":"heavy","priority":"high",
-  "title":"季度产品规划","leadAgentId":"agent-self"
+  "title":"季度产品规划","leadAgentId":"agent-self",
+  "ownerMemberId":"human-requester-1"
 }'
 
 # 2) 起 Blueprint 草稿(含 Steps,一次提交)
