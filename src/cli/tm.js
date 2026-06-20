@@ -221,8 +221,6 @@ const COMMANDS = {
     project_id:   params.projectId,
     issue_id:     params.issueId,
     status:       params.status,           // pending|running|done|failed|cancelled
-    claimable:    params.claimable,        // bool
-    agent_skills: params.agentSkills,      // string[] (contract-v2 query repeats)
     ...pageParams(params),
   }),
 
@@ -423,8 +421,7 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.terminate        {id, reason?, source?}                           # 提前终止 → terminated; 级联取消 Task + 发善后事件
 
 TASK  (all ✅ on contract-v2; create uses doubly-nested path)
-  task.list              {projectId?, issueId?, status?, claimable?, agentSkills?,
-                          page?, pageSize?, orderBy?}
+  task.list              {projectId?, issueId?, status?, page?, pageSize?, orderBy?}
   task.get               {id}
   task.create            {projectId, issueId, title, description?, descriptionFormat?,
                           assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}
