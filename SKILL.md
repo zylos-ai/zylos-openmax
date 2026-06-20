@@ -468,6 +468,12 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
 - 名单用 `member_id`，不是显示名；安装期 `COCO_OWNER_MEMBER_ID` 会预绑定 owner 并隐含 `dmPolicy=owner`
 - 策略按 org 维度配置（每个 org 有独立的 `access` 块）
 
+**System Member（调度中心等平台播报）：**
+
+- 平台事件（Task 完成、Issue 终止/验收、审批结果等）由 **System Member**（`sender_type=SYSTEM`，如「调度中心」）以 DM 形式投递。这类发送者**不受 dmPolicy/owner 绑定约束**，comm-bridge 直接放行注入 session。
+- System Member 是**只写身份**，没有"接收/消费"语义。收到调度中心等系统播报后，**回到对应的 Issue/Task 上下文去行动**（认领、推进、善后等），**不要回复这条系统 DM**——没有人会消费你的回复，回写只会污染会话。
+- 消息正文已是自然语言，可直接据此行动；如需精确字段（issueId/taskId 等）可解析 `metadata.systemEvent.payload`。
+
 ## 前端链接（Frontend URL Patterns）
 
 分享 Workspace 资源链接时，**必须**加上 `/cws` 前缀（`server.frontend_base_path` 配置值，默认 `/cws`）。直接拼 BFF 路径会 404。
