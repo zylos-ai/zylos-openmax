@@ -27,6 +27,7 @@ import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerN
 import { registerConvOrg } from './lib/conv-org.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
+import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, delForOrg, apiPath } from './lib/client.js';
@@ -200,22 +201,24 @@ async function sendRejectNotice(orgConfig, msg, text) {
   }
 }
 
-function forwardToC4(endpoint, body) {
+function forwardToC4(endpoint, body, priority) {
   // c4-receive.js only accepts named flags (--channel / --endpoint / --content
-  // / --json); the old positional invocation form
+  // / --json / --priority); the old positional invocation form
   // `node c4-receive.js <channel> <endpoint> <body>` now rejects with
   // "Unexpected argument: <channel>". execFile passes the array as argv
   // directly, so no shell-escape is needed for content.
+  const args = ['--channel', CHANNEL, '--endpoint', endpoint, '--json'];
+  // System events map urgent/high/normal → 1/2/3 so urgent platform messages
+  // (e.g. approval unblock) jump ahead of normal chat. Omit for normal/chat so
+  // c4-receive applies its default (3). See lib/system-message.js.
+  if (Number.isInteger(priority) && priority >= 1 && priority <= 3) {
+    args.push('--priority', String(priority));
+  }
+  args.push('--content', body);
   return new Promise((resolve, reject) => {
     execFile(
       process.execPath,
-      [
-        C4_RECEIVE,
-        '--channel', CHANNEL,
-        '--endpoint', endpoint,
-        '--json',
-        '--content', body,
-      ],
+      [C4_RECEIVE, ...args],
       { timeout: 30000 },
       (err, stdout, stderr) => {
         if (err) reject(new Error(stderr || err.message));
@@ -409,6 +412,18 @@ function shouldHandleMessage(msg, conv, orgConfig) {
   // Skip self-echo: agent's own messages within this org.
   if (msg.sender_id && selfMemberId && msg.sender_id === selfMemberId) {
     return { handle: false, reason: 'self-echo' };
+  }
+
+  // System Member (调度中心 等平台播报源) is a trusted, write-only identity —
+  // let it through unconditionally, bypassing dmPolicy / owner-binding /
+  // groupPolicy, which only exist to filter human/agent senders. Without this
+  // branch a system DM hits dmPolicy=owner and gets dropped (现象 2「agent 离开」),
+  // and a first-DM from 调度中心 would auto-bind it as the owner, dropping the
+  // human's later DMs. handle:true with no userNotice also guarantees we never
+  // post a reject notice back to a system DM (现象 5). See zylos #58 /
+  // v0.7-event-delivery-design.md §6.3.
+  if (isSystemSender(msg)) {
+    return { handle: true, reason: 'system-sender' };
   }
 
   const convType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
@@ -767,7 +782,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
 
     try {
       registerConvOrg(msg.conversation_id, orgConfig.org_id);
-      await forwardToC4(endpoint, body);
+      await forwardToC4(endpoint, body, systemEventPriority(msg));
       log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}`);
       markRead(orgConfig, msg.conversation_id, msg.seq);
     } catch (e) {
