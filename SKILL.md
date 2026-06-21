@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.47
+version: 1.0.49
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -145,15 +145,16 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
 2. **确认项目 + 知识库（必问，编排/执行前）**：查 DB 搜索关联 Project → 找到则问用户是否关联 / 未找到则让用户选已有项目或创建新项目；**同时与用户确认产出沉淀的知识库**。用户确认**项目 + KB 之后**才关联 / 创建 Project + KB 空间（`/projects/{project-name}/`）并进入后续编排——**先确认项目/KB → 再执行，简单 / 复杂任务一致**，不要先开干再补
 3. **生成 Blueprint（强制，复杂任务的必经步骤）**：Lead Agent 拆解目标 → **必须**先生成 Blueprint（执行计划），定义所有 Step 及依赖关系（KB：`/jobs/{id}/blueprints/v1.md`）。**复杂任务一定要有 Blueprint——不允许跳过蓝图、直接拆 Task 开干。** 此步在实例化任何 Sub-task 之前完成
 4. **Blueprint 审批 / 启动决策**：Lead/策略按风险、预算、权限等判断是否需要审批。需要审批 → 用户确认 → ApprovalRequest(kind: blueprint) → approved；冻结快照写入 KB；审批通过后执行。无需审批 → Lead 走 `issue.start_execution` 启动执行。审批是显式决策，不是 heavy mode 的自动副作用；但 Blueprint 本身是复杂任务从"规划"进入"施工"的硬门禁，不可省略
-5. **实例化 Sub-task（Blueprint 通过后一次性建全部 Step）**：Blueprint 审批通过后，**必须一次性把全部 Step 实例化成 Task**——**严禁边做边补 / 做一个建一个**（那会让看板只看到零散的当前步骤，丢掉问题全景）。建 Task 时按 Blueprint 依赖关系设好 `dependsOn`，并**按"是否有未满足依赖"区分是否带 assignee**：
-   - **无依赖、可立即开跑的 Step → 创建时带 `assigneeId`**（指定执行 bot）→ 自动分配给该 bot（**assigned，已分配但未开工**）；该执行 bot 随即 `task.start` 才进「进行中」真开跑
-   - **有依赖的 Step → 创建时不带 `assigneeId`** → 停在「待办」(pending)；其指定执行 bot 记在 **Blueprint step（规划层）**，**先不写进 `task.assigneeId`**，等真被认领时才落到 task 上
-   - 各 Step 的执行 bot 仍**按技能匹配给出推荐、由发起人确认 / 选择**，不自行拍板（用 `core.agent_profiles` 拉候选画像作为推荐依据）
-6. **依赖驱动的 bot 自认领推进（状态=真实执行，看板全程可见全景）**：**「进行中」必须对应"真有 bot 在执行"**——后端不会、也不应擅自把待办改成进行中（否则状态是假的）。推进由 **bot 驱动**：
-   - 无依赖 Step 已在「进行中」；有依赖 Step 在「待办」等待
-   - **前置 bot 干完**（attempt→done、task→done）后，**通知下游 bot**（bot-DM，需双向 DM 权限，见跨 agent 沟通模式）「你的前置好了，去接 task X」→ **下游 bot 自己 `task.claim`**（分配给自己，assigned）→ 再 **`task.start`**（**依赖闸在这一步**：校验 `dependsOn`，前置都 done 才放行）→ 进「进行中」→ 执行。**v0.7 起 claim 与 start 分离：claim 只把活分给自己，start 才开工建 attempt、才查依赖**
-   - 这样看板从一开工就是完整全景：谁在跑 / 谁在「待办」等 / 卡了什么前置，且 **RUNNING 永远对应真在执行的 bot，不存在空转的「进行中」**
-   - **关键看板语义：待办列 = 已规划、已建 Task 但尚未被认领（被依赖挂起）的 Step，不是「还没拆出来的步骤」。** Sub-task → Attempt → Agent 执行
+5. **实例化 Sub-task（Blueprint 通过后一次性建全部 Step）**：Blueprint 审批通过后，**必须一次性把全部 Step 实例化成 Task**——**严禁边做边补 / 做一个建一个**（那会让看板只看到零散的当前步骤，丢掉问题全景）。建 Task 时按 Blueprint 依赖关系设好 `dependsOn`，并**给每个 Step 都带 `assigneeId`**：
+   - **所有 Step 创建时都带 `assigneeId`（指定执行 bot）——有依赖的也一样。** 每个 Task 一建出来就有明确归属（落在 `task.assigneeId`，不是只记在 Blueprint），**调度中心才能在依赖就绪时把开工通知发到对应 bot**（见 step 6）。不给下游 Step 设 assignee = 调度中心没人可通知 = 依赖链断在那里。
+   - **无依赖、可立即开跑的 Step → assigned 后，该 bot 随即 `task.start`** 进「进行中」真开跑。
+   - **有依赖的 Step → 同样 assigned，但先不 `task.start`**——被依赖挂起、停在「待办」等前置完成，执行 bot 已经定死。
+   - **给 Step 选执行 bot 前，必须先读能力画像做匹配（强制，不可按名字/顺序拍脑袋）**：把任何 Step 落到某个 bot 之前，**必须先调一次 `core.agent_profiles({projectId, capabilities:true})`**，取回候选 agent 的 skills（自报）+ tags（人工标注）+ 描述 + online_status；然后**逐个 Step 把"这一步需要什么能力"和各 agent 的 tag/skill 语义匹配**，分配方案里**对每个 Step 写明"依据 TA 的哪个 tag/skill 把这步给 TA"**。**严禁**不读画像、按成员列表顺序 / 名字 / member_id 顺序直接指派——那是破窗（等于能力画像形同虚设、谁排在前面谁干第一件）。匹配出的仍是**推荐**，最终**由发起人确认 / 选择**；确无合适专长才推荐 COCO 自己做。
+6. **依赖驱动的推进：调度中心通知下游 assignee 开工（状态=真实执行，看板全程可见全景）**：**「进行中」必须对应"真有 bot 在执行"**——后端不会擅自把待办改成进行中。推进由 **调度中心事件 + bot `task.start`** 驱动：
+   - 无依赖 Step 的 assignee 已 `task.start`，在「进行中」；有依赖 Step 已 assigned、停「待办」等前置。
+   - **前置 task done 后，调度中心（cws-work 的 System Member）自动给下游 Task 的 assignee 发 DM**「[调度中心] Task《X》依赖已就绪，可以开工」→ 该 assignee 收到后调 **`task.start`**（**依赖闸在这一步**：校验 `dependsOn` 都 done 才放行）→ 进「进行中」→ 执行。**无需前置 bot 手动 DM，无需 `task.claim`（活在 step 5 已经 assigned 给它了）。v0.7 起 `start` 才开工建 attempt、才查依赖。**
+   - 这样看板从一开工就是完整全景：谁在跑 / 谁 assigned 在「待办」等前置 / 卡了什么，且 **RUNNING 永远对应真在执行的 bot，不存在空转的「进行中」**
+   - **关键看板语义：待办列 = 已建、已 assigned、被依赖挂起、等调度中心通知开工的 Step，不是「还没拆出来的步骤」。** Sub-task → Attempt → Agent 执行
 7. **产物归档 & 知识沉淀**：Agent 产出 → ArtifactStore；关键文档（报告、方案）沉淀到 KB（`/projects/.../research/`、`/projects/.../deliverables/`）
 8. **交付 & 人类验收闭环**：所有子任务 done → `issue.deliver` 到 **delivered** → **主动请 Issue owner 人类（通常就是任务发起人）验收**（bot 不自行验收；Worker 经 Lead 转达给 owner）→ owner 验收通过（必须由 owner 本人/其身份触发）→ **accepted**，必要时 `issue.archive` 归档 + 看板同步；退回 → rejected → `issue.reopen` → pending_start → `issue.start_execution` 重做
 
@@ -322,7 +323,7 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
    - **两个方向都通了再派**；任一方向没开通，先解决或反馈给人类，**不要盲派**。
    (b) Lead 只建 **Issue** + 给目标，**Task 由被指派的 bot 自己 `task.create` 并认领**（谁执行谁建，Lead 不替它建）；(c) 收到它的完成回报后，Lead 才调 `issue.deliver` 并转交 Issue owner 验收。
 8. **复杂任务必须先有 Blueprint（强制）**：判定为复杂任务（多步骤 / 多 agent / 子任务有依赖 / 需编排）的，**必须** heavy 模式 → 先生成 Blueprint → Lead/策略决定审批或直接启动 → 再实例化 Task 执行。需要审批时走 `blueprint.submit_for_approval` 并等通过；无需审批时走 `issue.start_execution`。**禁止**把复杂任务用 light 模式直接拆成多个 Task 绕过蓝图。顺序硬性：确认项目/KB → 起 heavy Issue → 建 Blueprint → 审批或启动决策 → 按 Step 建 Task → 执行。Blueprint 是复杂任务的施工图，无蓝图就开干 ＝ 复杂任务流程被架空。
-9. **Blueprint 启动后一次性实例化全部 Step（强制）+ 依赖步骤不带 assignee、bot 自认领推进**：审批通过或 `issue.start_execution` 后**一次性把全部 Step 建成 Task 并设 `dependsOn`**，**禁止边做边补**。**有依赖的 Step 创建时不带 `assigneeId` → 停「待办」**；前置完成后由**完成的 bot 通知下游 bot、下游自己 `task.claim`（分配）→ `task.start`（依赖闸在此校验）**进「进行中」——**不是后端自动改状态**（RUNNING 必须 = 真有 bot 在跑，杜绝空转的「进行中」）。只实例化当前一步、其余不进看板 ＝ piecemeal，违背设计预期。（详见复杂任务流程 step 5/6。）
+9. **Blueprint 启动后一次性实例化全部 Step（强制）+ 每个 Step 都带 assignee、调度中心驱动推进**：审批通过或 `issue.start_execution` 后**一次性把全部 Step 建成 Task、设 `dependsOn`、并给每个都带 `assigneeId`（含有依赖的）**，**禁止边做边补**。无依赖的 assignee 随即 `task.start` 进「进行中」；**有依赖的 assigned 停「待办」等前置，前置 done 后由调度中心 DM 其 assignee 通知开工 → assignee `task.start`（依赖闸在此校验）**进「进行中」——**不是后端自动改状态**（RUNNING 必须 = 真有 bot 在跑）。**不给下游 Step 设 assignee = 调度中心没人可通知 = 链断**。只实例化当前一步、其余不进看板 ＝ piecemeal，违背设计预期。（详见复杂任务流程 step 5/6。）
 
 10. **提前终止善后（收到 `issue.terminated` 事件，Lead 专属）**：当一个未结论 Issue 被 `issue.terminate` 主动停下，系统已**机械收尾**（级联取消其下非终态 Task、叫停在跑 Attempt），并给 Lead 发 `issue.terminated` 事件。Lead 收到后按以下 SOP 善后，**不要闷头处理**：
     - **不复活**：terminated 是终态，**不得**把该 Issue / Task 重新拉起或续作；善后只能是**向前补偿**（发撤回说明、清理外部记录等），不是撤销终止。
@@ -343,9 +344,10 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 | REJECTED 直接回 EXECUTING | 必须走 `issue.reopen` 到 pending_start，再由 Lead `issue.start_execution` |
 | Heavy 模式跳过 Blueprint | 复杂任务必须先建 Blueprint；是否审批由 Lead/策略显式判断 |
 | 复杂任务绕过 Blueprint 直接拆 Task 开干（用 light / 无蓝图就实例化）| 复杂（多步/多 agent/有依赖）任务必须 heavy 模式 + 先建 Blueprint，再由 Lead/策略选择审批或直接启动，才能按 Step 实例化 Task |
-| Blueprint 通过后只建当前一步 Task、边做边补（piecemeal） | 一次性把全部 Step 建成 Task + 设 dependsOn；无依赖的带 assignee 进进行中、有依赖的不带 assignee 停待办，前置完成后下游 bot 自认领推进，看板呈现完整全景 |
-| 给有依赖的 Step 建 Task 时直接带 assigneeId | 有依赖的 Step 不带 assigneeId（否则后端创建即认领、顶成「进行中」，看板看不到待办）；指定执行人记在 Blueprint，前置完成后下游 bot 自己 claim |
-| 期待后端"前置 done 自动把待办变进行中" | 后端不自动改状态；由前置 bot 通知下游、下游 task.claim（分配）→ task.start（校验依赖）才进进行中——RUNNING 必须对应真在执行的 bot |
+| 不读能力画像、按成员顺序/名字给 Step 派 bot | 派 bot 前**必须先 `core.agent_profiles({projectId,capabilities:true})`**，逐 Step 把任务需求和 agent 的 tag/skill 语义匹配，方案里写明每步选谁的依据；按顺序/名字拍脑袋＝能力画像形同虚设 |
+| Blueprint 通过后只建当前一步 Task、边做边补（piecemeal） | 一次性把全部 Step 建成 Task + 设 dependsOn + 每个都带 assignee；无依赖的进进行中、有依赖的 assigned 停待办，前置完成后调度中心通知其 assignee 开工，看板呈现完整全景 |
+| 给有依赖的 Step 建 Task 时不带 assigneeId（指望"自认领"）| **每个 Step 都要带 assigneeId**（含有依赖的）；不带则依赖就绪时调度中心没人可通知、链断在那。CreateTask 带 assigneeId 只是 assigned（不开工、不建 attempt），不会顶成「进行中」 |
+| 期待"前置 done 下游自动开工"或"前置 bot 手动 DM 下游去 claim" | 前置 done 后**调度中心自动 DM 下游 Task 的 assignee** 通知开工；assignee 收到后 `task.start`（校验依赖）才进进行中。无需手动 DM、无需 claim（已 assigned）——RUNNING 必须对应真在执行的 bot |
 | claim 完就以为开工了 / 等 attempt | v0.7 claim 只分配（assigned）；必须再 `task.start` 才进 running、才建 attempt、才查依赖 |
 | 想把已 terminated 的 Issue/Task 重新拉起 | terminated 是终态，不复活；善后只做向前补偿，且外部不可逆动作先经人类确认 |
 | 直接归档未结论的 Issue | 只有 accepted / terminated 可归档；先验收通过或 `issue.terminate` 拿到终态 |
