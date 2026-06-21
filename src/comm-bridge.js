@@ -28,6 +28,7 @@ import { registerConvOrg } from './lib/conv-org.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
+import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, delForOrg, apiPath } from './lib/client.js';
@@ -132,6 +133,33 @@ async function fetchMemberName(orgId, memberId) {
   } catch (e) {
     warn(`fetchMemberName ${memberId} failed:`, e.message);
     return null;
+  }
+}
+
+// `${orgId}:${memberId}` → { ownerId, ts }. A member's owner_member_id can
+// change via cws-core transfer-owner, so — unlike display names — this is cached
+// with a short TTL and refreshed on expiry. Empty owner ("") is cached too, to
+// avoid re-hitting cws-core for senders that legitimately have no owner.
+const MEMBER_OWNER_TTL_MS = 300_000;
+const memberOwnerCache = new Map();
+
+// fetchMemberOwner reads a member's authoritative owner_member_id from cws-core.
+// Used by the DM sibling-agent exemption: pull-based by design (we never trust a
+// WS frame for ownership), mirroring syncOwnerFromCore. Returns "" on miss/error
+// so callers treat "owner unknown" as "not a sibling" (fail-closed).
+async function fetchMemberOwner(orgId, memberId) {
+  if (!memberId) return '';
+  const key = `${orgId}:${memberId}`;
+  const hit = memberOwnerCache.get(key);
+  if (hit && Date.now() - hit.ts < MEMBER_OWNER_TTL_MS) return hit.ownerId;
+  try {
+    const m = await getForOrg(orgId, apiPath(`/members/${memberId}`));
+    const ownerId = m?.owner_member_id || '';
+    memberOwnerCache.set(key, { ownerId, ts: Date.now() });
+    return ownerId;
+  } catch (e) {
+    warn(`fetchMemberOwner ${memberId} failed:`, e.message);
+    return '';
   }
 }
 
@@ -406,7 +434,7 @@ const NOTICE_GROUP_SENDER_NOT_ALLOWED =
  * via the cws-core messages API; sync-replay frames are expected to skip the
  * notice to avoid spamming old conversations after a bug fix.
  */
-function shouldHandleMessage(msg, conv, orgConfig) {
+async function shouldHandleMessage(msg, conv, orgConfig) {
   const selfMemberId = orgConfig.self?.member_id;
 
   // Skip self-echo: agent's own messages within this org.
@@ -446,6 +474,20 @@ function shouldHandleMessage(msg, conv, orgConfig) {
       return { handle: true, reason: 'dm:owner-exempt' };
     }
     if (policy === 'open') return { handle: true, reason: 'dm:open' };
+    // Sibling-agent exemption: agents under the same owner may DM each other by
+    // default, regardless of dmPolicy. Checked here (before allowlist/owner
+    // gates, after the cheap open short-circuit) so the cws-core owner lookup
+    // only fires for AGENT senders that would otherwise be filtered. The
+    // sender's owner is read authoritatively from cws-core — never trusted from
+    // the frame — matching the pull-based ownership rule in syncOwnerFromCore.
+    const selfOwnerId = orgConfig.owner?.member_id;
+    const senderType = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
+    if (selfOwnerId && senderType === 'AGENT') {
+      const senderOwnerId = await fetchMemberOwner(orgConfig.org_id, senderId);
+      if (isSiblingAgentSender({ senderType, senderOwnerId, selfOwnerId })) {
+        return { handle: true, reason: 'dm:sibling-agent' };
+      }
+    }
     if (policy === 'allowlist') {
       const list = (access.dmAllowFrom || []).map(String);
       if (list.includes(String(senderId))) return { handle: true, reason: 'dm:allowlist' };
@@ -583,7 +625,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);
     if (conv) conv.id = conv.id || msg.conversation_id;
 
-    const decision = shouldHandleMessage(msg, conv || {}, orgConfig);
+    const decision = await shouldHandleMessage(msg, conv || {}, orgConfig);
     if (!decision.handle) {
       log(`drop [${orgConfig.slug}] msg=${msg.id}: ${decision.reason}`);
       // Send a polite refusal only when it actually helps the sender. Two
