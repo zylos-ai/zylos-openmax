@@ -1,7 +1,8 @@
 // DM access rules that are pure (no I/O), so they can be unit-tested in
-// isolation. The owner identities they compare are resolved authoritatively
-// from cws-core by the caller (comm-bridge.shouldHandleMessage) — never trusted
-// from a WS frame.
+// isolation. The owner identities they compare come from cws-core (the
+// authoritative source) via the caller (comm-bridge.shouldHandleMessage): the
+// inbound frame carries sender_type/sender_id but not the sender's owner, so
+// the caller resolves it from cws-core before calling in.
 
 /**
  * Sibling-agent DM exemption: two agents that share the same owner may DM each

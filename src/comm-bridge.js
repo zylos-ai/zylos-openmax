@@ -143,10 +143,13 @@ async function fetchMemberName(orgId, memberId) {
 const MEMBER_OWNER_TTL_MS = 300_000;
 const memberOwnerCache = new Map();
 
-// fetchMemberOwner reads a member's authoritative owner_member_id from cws-core.
-// Used by the DM sibling-agent exemption: pull-based by design (we never trust a
-// WS frame for ownership), mirroring syncOwnerFromCore. Returns "" on miss/error
-// so callers treat "owner unknown" as "not a sibling" (fail-closed).
+// fetchMemberOwner reads a member's owner_member_id from cws-core, the
+// authoritative source for ownership. Used by the DM sibling-agent exemption:
+// the inbound frame carries sender_type/sender_id (cws-comm sets them from the
+// authenticated principal, so they're trustworthy) but NOT the sender's owner,
+// so we resolve it here — the same member lookup syncOwnerFromCore already uses.
+// Returns "" on miss/error so callers treat "owner unknown" as "not a sibling"
+// (fail-closed).
 async function fetchMemberOwner(orgId, memberId) {
   if (!memberId) return '';
   const key = `${orgId}:${memberId}`;
@@ -477,9 +480,11 @@ async function shouldHandleMessage(msg, conv, orgConfig) {
     // Sibling-agent exemption: agents under the same owner may DM each other by
     // default, regardless of dmPolicy. Checked here (before allowlist/owner
     // gates, after the cheap open short-circuit) so the cws-core owner lookup
-    // only fires for AGENT senders that would otherwise be filtered. The
-    // sender's owner is read authoritatively from cws-core — never trusted from
-    // the frame — matching the pull-based ownership rule in syncOwnerFromCore.
+    // only fires for AGENT senders that would otherwise be filtered. sender_type
+    // and senderId on the frame are trustworthy (cws-comm sets them from the
+    // authenticated principal); the frame just doesn't carry the sender's owner,
+    // so we resolve it from cws-core — the same member lookup syncOwnerFromCore
+    // already uses for ownership.
     const selfOwnerId = orgConfig.owner?.member_id;
     const senderType = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
     if (selfOwnerId && senderType === 'AGENT') {
