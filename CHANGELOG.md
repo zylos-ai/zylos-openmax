@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `core.project_list` 默认按 `status=active` 过滤。按名称解析归属项目时不再匹配到已归档项目（归档同名项目会让模糊匹配产生歧义）。需要归档项目时显式传 `status:"archived"`。
+
 ## [1.0.43] - 2026-06-18
 
 ### Added

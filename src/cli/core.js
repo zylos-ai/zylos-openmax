@@ -120,10 +120,13 @@ const COMMANDS = {
   }),
   'core.platform_agent_delete': () => del(apiPath(`/platform-agents/${params.memberId}`)),
 
-  // ✅ Projects list.
+  // ✅ Projects list. Defaults to active projects: resolving a project by name
+  // (e.g. picking where to register an Issue) must not match ARCHIVED ones — a
+  // human refers to a live project, and archived duplicates would make the match
+  // ambiguous. Pass status:"archived" explicitly to list archived projects.
   // cws-core uses PageParams — `page` + `page_size`, NOT cursor/limit.
   'core.project_list': () => get(apiPath('/projects'), {
-    status:    params.status,
+    status:    params.status ?? 'active',
     page:      params.page,
     page_size: params.pageSize ?? params.limit,
     order_by:  params.orderBy,
@@ -222,7 +225,7 @@ Platform agents (lifecycle)
   core.platform_agent_delete  {memberId}
 
 Projects (directory view — workflow ops live in tm.js)
-  core.project_list        {status?, page?, pageSize?, orderBy?}    # pageSize legacy alias: limit
+  core.project_list        {status?, page?, pageSize?, orderBy?}    # default status=active (pass status:"archived" for archived); pageSize legacy alias: limit
 
 Organizations
   core.org_list            {orderBy?}
