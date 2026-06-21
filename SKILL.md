@@ -478,12 +478,14 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
 
 分享 Workspace 资源链接时，**必须**加上 `/cws` 前缀（`server.frontend_base_path` 配置值，默认 `/cws`）。直接拼 BFF 路径会 404。
 
+域名取决于环境，当前测试环境统一使用 `https://cws-int.coco.xyz`。
+
 | 资源 | URL 模板 |
 |---|---|
+| 项目 | `{bff_url}/cws/projects/{project_id}` |
+| Issue 详情 | `{bff_url}/cws/projects/{project_id}/issues/{issue_id}` |
 | KB 页面 | `{bff_url}/cws/knowledge?kb={kb_id}&node={node_id}` |
 | KB 列表 | `{bff_url}/cws/knowledge?kb={kb_id}` |
-| Issue 详情 | `{bff_url}/cws/issue/{issue_id}` |
-| 项目看板 | `{bff_url}/cws/project/{project_id}` |
 
 可用 CLI 一步生成：`node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=xxx&node=yyy"}'`，输出完整 URL。
 

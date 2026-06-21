@@ -130,7 +130,6 @@ const COMMANDS = {
   'issue.create': () => post(apiPath(`/projects/${params.projectId}/issues`), {
     title:                  params.title,
     description:            params.description || '',
-    description_format:     params.descriptionFormat || 'markdown',
     mode:                   params.mode,                  // light|heavy (required)
     disposition:            params.disposition,           // start|backlog (default: start)
     priority:               params.priority,              // low|medium|high (required)
