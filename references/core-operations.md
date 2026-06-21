@@ -34,7 +34,7 @@
 CLI 位置:`src/cli/core.js`
 调用方式:`node src/cli/core.js <command> '<json>'`
 
-状态:✅ cws-core 已实装(全部 17 个命令都能跑通)。
+状态:✅ cws-core 已实装(全部 18 个命令都能跑通)。
 
 ## 环境变量
 
@@ -68,10 +68,20 @@ CLI 位置:`src/cli/core.js`
 | ✅ | `core.member_list` | 列当前 org 的所有成员(可按 kind / status / 名字过滤) | `{kind?, status?, search?, page?, pageSize?, orderBy?}` | `GET /api/v1/members` |
 | ✅ | `core.member_get` | 取单个成员详情(含 online_status / role 等) | `{memberId}` | `GET /api/v1/members/{id}` |
 | ✅ | `core.project_members` | 列某个项目的成员(派任务前找候选) | `{projectId}` | `GET /api/v1/projects/{id}/members` |
+| ✅ | `core.agent_profiles` | agent 能力画像聚合(派发前选候选 agent),含 online_status 及可选的 skills/tags | `{projectId?, memberIds?, include?, capabilities?}` | `GET /api/v1/agent-profiles` |
 
 - `kind` 取值:`human` / `agent` / `all`(legacy alias `type`)
 - `search` 模糊匹配名字 / email(legacy alias `q`)
 - 分页参数走 cws-core 的 `PageParams`:`page` + `page_size`(CLI 同时接受 `pageSize` 或 legacy `limit`)
+
+`core.agent_profiles` 说明(Lead 编排选 agent 的能力画像):
+
+- **scope 必填**:`projectId` 和/或 `memberIds`(可传单个字符串或数组,重复 `member_id` 查询)至少给一个;都不给服务端返回 400。开放式「全 org 按能力搜」不在这里,那是未来 search 层的事。
+- `projectId` 由服务端调 cws-work 解析成该项目的成员再按 agent 过滤(可见性由 cws-work 鉴权)。
+- `capabilities:true`(或 `include:["capabilities"]`)→ 加载 **skills**(agent 自报的客观技能)+ **tags**(owner/admin 人工标注的主观能力标签,`{tag, kind: curated|freeform, note?}`);不带则只回轻量视图(member_id / display_name / status / online_status)。
+- 返回不分页(scope 天然有界)。返回字段:每个 profile 含 `member_id` / `display_name` / `kind`(恒为 agent)/ `status` / `online_status`,带 `capabilities` 时另含 `skills[]` / `tags[]`。
+- **怎么用**:Lead 不要按 skill/tag 名做精确过滤(各 agent 叫法不统一,服务端也不做硬过滤);把带 `capabilities` 的画像取回来,由 LLM 读 skills/tags/note 做语义匹配,再结合 `online_status` 选候选。最终指派仍须经发起人确认(见 SKILL.md)。
+- 示例:`node src/cli/core.js core.agent_profiles '{"projectId":"<project-uuid>","capabilities":true}'`
 
 ### 项目
 
@@ -128,10 +138,10 @@ node src/cli/core.js core.project_list '{"pageSize":50}'
 # 3. 看这个项目的成员(含 agent 和 human)
 node src/cli/core.js core.project_members '{"projectId":"<project-uuid>"}'
 
-# 4. 如果要按 agent 维度过滤,看整 org 的成员
-node src/cli/core.js core.member_list '{"kind":"agent","pageSize":50}'
+# 4. 拉候选 agent 的能力画像(skills 自报 + tags 人工标注 + online_status),给发起人做推荐依据
+node src/cli/core.js core.agent_profiles '{"projectId":"<project-uuid>","capabilities":true}'
 
-# 5. 派单(切到 tm.js)
+# 5. 派单(切到 tm.js;最终指派仍须经发起人确认)
 node src/cli/tm.js task.create '{"projectId":"<p>","issueId":"<i>","title":"...","assigneeId":"<m>"}'
 ```
 

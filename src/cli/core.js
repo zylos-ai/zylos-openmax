@@ -22,6 +22,9 @@ import { enabledOrgs, updateConfig } from '../lib/config.js';
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
+/** Normalize a scalar-or-array param into an array (drops null/undefined). */
+const toArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
+
 /**
  * Rename the agent itself (self-service display name change).
  *
@@ -91,6 +94,21 @@ const COMMANDS = {
 
   // ✅ Project member list
   'core.project_members': () => get(apiPath(`/projects/${params.projectId}/members`)),
+
+  // ✅ Agent capability profiles — cws-core BFF aggregation a Lead reads to
+  // pick a candidate agent for dispatch. A scope is REQUIRED: pass projectId
+  // (resolved to the project's agents via cws-work) and/or memberIds
+  // (repeatable agent member IDs). `include:["capabilities"]` (or the
+  // `capabilities:true` shorthand) loads skills (agent self-reported) + tags
+  // (human-declared); omit for the lightweight view. online_status is always
+  // enriched. Open-ended org-wide capability search is intentionally NOT here.
+  'core.agent_profiles': () => get(apiPath('/agent-profiles'), {
+    project_id: params.projectId || params.project_id,
+    member_id:  toArray(params.memberIds ?? params.memberId ?? params.member_id),
+    include:    params.capabilities
+      ? Array.from(new Set([...toArray(params.include), 'capabilities']))
+      : toArray(params.include),
+  }),
 
   // ✅ Platform agents — manage agent member lifecycle.
   // POST /api/v1/platform-agents      body {display_name, ...}
@@ -195,6 +213,9 @@ Members (humans + agents in one directory)
                            # search legacy alias: q;  pageSize legacy alias: limit
   core.member_get          {memberId}
   core.project_members     {projectId}
+  core.agent_profiles      {projectId?, memberIds?, include?, capabilities?}
+                           # agent 能力画像聚合（派发前选候选）。scope 必填：projectId 和/或 memberIds(可数组)
+                           # capabilities:true 或 include:["capabilities"] → 含 skills(自报)+tags(人工标注)；不带则轻量视图
 
 Platform agents (lifecycle)
   core.platform_agent_create  {displayName, description?, metadata?}
