@@ -26,8 +26,10 @@ import { loadConfig } from './config.js';
  */
 export function cfAccessHeaders(cfg) {
   const ca = (cfg || loadConfig())?.cf_access || {};
+  const id     = process.env.COCO_CF_ACCESS_CLIENT_ID     || ca.client_id;
+  const secret = process.env.COCO_CF_ACCESS_CLIENT_SECRET || ca.client_secret;
   const headers = {};
-  if (ca.client_id)     headers['CF-Access-Client-Id']     = ca.client_id;
-  if (ca.client_secret) headers['CF-Access-Client-Secret'] = ca.client_secret;
+  if (id)     headers['CF-Access-Client-Id']     = id;
+  if (secret) headers['CF-Access-Client-Secret'] = secret;
   return headers;
 }

@@ -66,7 +66,7 @@ function withInflight(key, factory) {
 // ── config helpers ────────────────────────────────────────────────────────────
 
 function resolveApiKey() {
-  return loadConfig().agent?.api_key || '';
+  return process.env.COCO_API_KEY || loadConfig().agent?.api_key || '';
 }
 
 function resolveCoreUrl() {
