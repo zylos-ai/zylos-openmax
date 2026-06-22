@@ -83,7 +83,6 @@ const COMMANDS = {
   'project.create': () => post(apiPath('/projects'), {
     name:               params.name,
     description:        params.description,
-    description_format: params.descriptionFormat || 'markdown',
     slug:               params.slug,
     is_default:         params.isDefault,
     lead_member_id:     params.leadMemberId,
@@ -95,7 +94,6 @@ const COMMANDS = {
   'project.update': () => patch(apiPath(`/projects/${params.id}`), {
     name:               params.name,
     description:        params.description,
-    description_format: params.descriptionFormat || 'markdown',
     lead_member_id:     params.leadMemberId,
   }),
 
@@ -148,7 +146,6 @@ const COMMANDS = {
     {
       title:              params.title,
       description:        params.description,
-      description_format: params.descriptionFormat || 'markdown',
       priority:           params.priority,
       due_date:           params.dueDate,
     },
@@ -234,7 +231,6 @@ const COMMANDS = {
     {
       title:              params.title,
       description:        params.description || '',
-      description_format: params.descriptionFormat || 'markdown',
       assignee_id:        params.assigneeId,
       skill_tags:         params.skillTags,
       blueprint_step_id:  params.blueprintStepId,
