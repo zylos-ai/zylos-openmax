@@ -872,8 +872,7 @@ function startFrameMetricTimer() {
 // =============================================================================
 
 const VALID_DM_POLICIES = new Set(['open', 'allowlist', 'owner']);
-const VALID_GROUP_SCOPES = new Set(['all', 'allowlist', 'none']);
-const SCOPE_TO_GROUP_POLICY = { all: 'all', allowlist: 'allowlist', none: 'disabled' };
+const VALID_GROUP_SCOPES = new Set(['open', 'allowlist', 'disabled']);
 const VALID_GROUP_MODES = new Set(['smart', 'mention', 'silent']);
 
 function handleConfigUpdate(orgConfig, frame) {
@@ -989,14 +988,13 @@ function handleConfigUpdate(orgConfig, frame) {
         warn(`[${slug}] group_scope_changed: invalid scope "${scope}"`);
         return;
       }
-      const configValue = SCOPE_TO_GROUP_POLICY[scope];
       updateConfig(cfg => {
         const org = cfg.orgs?.[slug];
         if (!org) return;
         org.access = org.access || {};
-        org.access.groupPolicy = configValue;
+        org.access.groupPolicy = scope;
       });
-      log(`[${slug}] config updated: groupPolicy → ${configValue} (scope=${scope}, by ${data.changed_by || '?'})`);
+      log(`[${slug}] config updated: groupPolicy → ${scope} (by ${data.changed_by || '?'})`);
       break;
     }
 
@@ -1362,7 +1360,7 @@ async function syncConfigToComm(orgConfig) {
   const payload = {
     dm_policy: access.dmPolicy || 'owner',
     dm_allowlist: access.dmAllowFrom || [],
-    group_scope: (access.groupPolicy === 'disabled' ? 'none' : access.groupPolicy) || 'allowlist',
+    group_scope: access.groupPolicy || 'allowlist',
     group_allowlist: groupAllowlist,
     groups,
   };
