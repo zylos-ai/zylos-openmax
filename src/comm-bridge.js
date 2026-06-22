@@ -31,7 +31,7 @@ import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
-import { getForOrg, postForOrg, delForOrg, apiPath } from './lib/client.js';
+import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath } from './lib/client.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
@@ -1290,29 +1290,33 @@ async function syncConfigToComm(orgConfig) {
 
   const access = orgConfig.access || {};
 
-  const groups = {};
+  const groups = [];
+  const groupAllowlist = [];
   if (access.groups) {
     for (const [convId, gcfg] of Object.entries(access.groups)) {
-      groups[convId] = {
+      groupAllowlist.push(convId);
+      groups.push({
+        conversation_id: convId,
         mode: gcfg.mode || 'mention',
         allow_from: gcfg.allowFrom || ['*'],
-      };
+      });
     }
   }
 
   const payload = {
     dm_policy: access.dmPolicy || 'owner',
-    dm_allow_from: access.dmAllowFrom || [],
+    dm_allowlist: access.dmAllowFrom || [],
+    group_scope: access.groupPolicy || 'allowlist',
+    group_allowlist: groupAllowlist,
     groups,
   };
 
   try {
-    await postForOrg(orgConfig.org_id, apiPath('/agents/config/sync'), payload);
-    log(`[${orgConfig.slug}] config synced to comm: dmPolicy=${payload.dm_policy}, groups=${Object.keys(groups).length}`);
+    await putForOrg(orgConfig.org_id, apiPath(`/agents/${selfMemberId}/reported-policy`), payload);
+    log(`[${orgConfig.slug}] policy reported: dmPolicy=${payload.dm_policy}, groupScope=${payload.group_scope}, groups=${groups.length}`);
   } catch (err) {
-    // 404 = cws-comm hasn't deployed the endpoint yet; downgrade to debug
     if (err.status === 404) {
-      log(`[${orgConfig.slug}] config-sync endpoint not available (404), skipping`);
+      log(`[${orgConfig.slug}] reported-policy endpoint not available (404), skipping`);
     } else {
       throw err;
     }
