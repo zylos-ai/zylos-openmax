@@ -1040,6 +1040,17 @@ function handleConfigUpdate(orgConfig, frame) {
       return;
   }
 
+  // updateConfig() persists to disk and updates currentConfig, but
+  // shouldHandleMessage reads from activeOrgConfigs — a separate Map of
+  // live references captured at boot. The watchConfig file watcher is
+  // supposed to bridge the two, but fs.watch breaks after the first
+  // atomic rename (inode change). Sync the live reference directly so
+  // policy changes take effect immediately without a service restart.
+  const live = activeOrgConfigs.get(slug);
+  if (live) {
+    const updated = loadConfig().orgs?.[slug];
+    if (updated?.access) live.access = updated.access;
+  }
 }
 
 // =============================================================================
