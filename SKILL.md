@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.57
+version: 1.0.58
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -331,6 +331,12 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
     - **与人类共同决定（硬性）**：默认把善后清单带回 **origin conversation** 和人类一起拍；**凡有外部不可逆影响的补偿动作，一律先经人类确认再执行，Lead 不得自授**。仅当**纯内部、无外部影响、产物明显可保留**时才可自行收尾，事后报一句结论。
     - **closure**：善后落定后在 origin conversation 给人类收尾消息（终止已确认 + 留了什么 / 撤了什么 / 人类拍了什么）。
 
+11. **激活即开工（收到 `issue.activated` 事件，Lead 专属）**：backlog Issue 被 owner 经 `issue.activate` 激活（→ pending_start），调度中心给 Lead 发 `issue.activated` 事件「[调度中心] Issue《X》已被激活，请接手并启动执行」。**激活是 owner 最新的、显式的「开工」信号——直接接手并 `issue.start_execution` 开工，不要回头问 owner「要不要开始 / 要不要保持 backlog」。**
+    - **新信号压过旧备注**：即便描述或历史里有「先不开发 / 暂不开发」之类旧表述，**激活这个更新的决策已经覆盖它**，不得用旧的 hold 备注去否决刚收到的激活（要保持 backlog，owner 就不会激活）。
+    - **缺的是需求不是许可**：开工后若发现执行所需上下文确有缺失（如 Issue 只是占位、没有可执行的实质内容），**DM 该 Issue 的 owner 人类去补齐那部分需求**（具体内容 / 链接 / 验收标准），**而不是问「要不要开始」**；补齐后继续执行。区分：缺信息 → 问 owner 要信息，不是缺许可。
+
+12. **创建 backlog Issue 时先做需求澄清（Lead）**：为「暂不启动」的工作登记 backlog Issue（`disposition=backlog`，此刻不编排、不执行）时，**主动 DM 该 Issue 的 owner 人类确认是否需要补齐需求**（内容、链接、范围、验收标准），把上下文在 backlog 阶段就做完备——这样**日后被激活时即可直接开工（见 #11），不必到那时才发现是空壳**。区分：backlog 阶段只做**需求澄清**让上下文完备，Blueprint 与 Task 仍等激活后再说。
+
 > 区分两类动作：「用户任务执行（出 deliverable）」走完整流程（含项目/KB 选择 + 验收 + 通知）；「内部 bug/问题登记」可默认 Inbox、轻量记录，但完成后仍要通知。
 
 ### 常见错误
@@ -474,7 +480,7 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
 **System Member（调度中心等平台播报）：**
 
 - 平台事件（Task 完成、Issue 终止/验收、审批结果等）由 **System Member**（`sender_type=SYSTEM`，如「调度中心」）以 DM 形式投递。这类发送者**不受 dmPolicy/owner 绑定约束**，comm-bridge 直接放行注入 session。
-- System Member 是**只写身份**，没有"接收/消费"语义。收到调度中心等系统播报后，**回到对应的 Issue/Task 上下文去行动**（认领、推进、善后等），**不要回复这条系统 DM**——没有人会消费你的回复，回写只会污染会话。
+- System Member 是**只写身份**，没有"接收/消费"语义。收到调度中心等系统播报后，**回到对应的 Issue/Task 上下文去行动**（认领、推进、善后等；如 `issue.activated` → 直接 `issue.start_execution` 开工，见行为护栏 #11），**不要回复这条系统 DM**——没有人会消费你的回复，回写只会污染会话。
 - 消息正文已是自然语言，可直接据此行动；如需精确字段（issueId/taskId 等）可解析 `metadata.systemEvent.payload`。
 
 ## 前端链接（Frontend URL Patterns）

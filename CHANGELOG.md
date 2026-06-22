@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Skill 行为护栏 #11/#12：激活即开工 + backlog 创建即澄清**。收到 `issue.activated`（owner 经 `issue.activate` 激活 backlog Issue）后，Lead **直接 `issue.start_execution` 开工**，不再回头问 owner「要不要开始 / 保持 backlog」——激活是 owner 最新的显式开工信号，压过描述里旧的「先不开发」备注；执行中若上下文确有缺失，DM owner 补**需求**（而非问许可）。配套：创建 backlog Issue 时主动 DM owner 做需求澄清，让上下文在 backlog 阶段就完备，激活后即可直接执行。
+
 ### Changed
 
 - `core.project_list` 默认按 `status=active` 过滤。按名称解析归属项目时不再匹配到已归档项目（归档同名项目会让模糊匹配产生歧义）。需要归档项目时显式传 `status:"archived"`。
