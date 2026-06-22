@@ -872,6 +872,8 @@ function startFrameMetricTimer() {
 // =============================================================================
 
 const VALID_DM_POLICIES = new Set(['open', 'allowlist', 'owner']);
+const VALID_GROUP_SCOPES = new Set(['all', 'allowlist', 'none']);
+const SCOPE_TO_GROUP_POLICY = { all: 'all', allowlist: 'allowlist', none: 'disabled' };
 const VALID_GROUP_MODES = new Set(['smart', 'mention', 'silent']);
 
 function handleConfigUpdate(orgConfig, frame) {
@@ -978,6 +980,60 @@ function handleConfigUpdate(orgConfig, frame) {
         }
       });
       log(`[${slug}] config updated: group ${convId} allowFrom → ${JSON.stringify(allow_from)} (by ${data.changed_by || '?'})`);
+      break;
+    }
+
+    case 'agent.config.group_scope_changed': {
+      const { scope } = data;
+      if (!VALID_GROUP_SCOPES.has(scope)) {
+        warn(`[${slug}] group_scope_changed: invalid scope "${scope}"`);
+        return;
+      }
+      const configValue = SCOPE_TO_GROUP_POLICY[scope];
+      updateConfig(cfg => {
+        const org = cfg.orgs?.[slug];
+        if (!org) return;
+        org.access = org.access || {};
+        org.access.groupPolicy = configValue;
+      });
+      log(`[${slug}] config updated: groupPolicy → ${configValue} (scope=${scope}, by ${data.changed_by || '?'})`);
+      break;
+    }
+
+    case 'agent.config.group_allowlist_changed': {
+      const { action, conversation_ids: convIds } = data;
+      if (!Array.isArray(convIds)) {
+        warn(`[${slug}] group_allowlist_changed: conversation_ids is not an array`);
+        return;
+      }
+      if (!['add', 'remove', 'set'].includes(action)) {
+        warn(`[${slug}] group_allowlist_changed: unknown action "${action}"`);
+        return;
+      }
+      updateConfig(cfg => {
+        const org = cfg.orgs?.[slug];
+        if (!org) return;
+        org.access = org.access || {};
+        org.access.groups = org.access.groups || {};
+        if (action === 'add') {
+          for (const id of convIds) {
+            if (!org.access.groups[id]) {
+              org.access.groups[id] = { mode: 'mention', allowFrom: ['*'] };
+            }
+          }
+        } else if (action === 'remove') {
+          for (const id of convIds) {
+            delete org.access.groups[id];
+          }
+        } else if (action === 'set') {
+          const old = org.access.groups;
+          org.access.groups = {};
+          for (const id of convIds) {
+            org.access.groups[id] = old[id] || { mode: 'mention', allowFrom: ['*'] };
+          }
+        }
+      });
+      log(`[${slug}] config updated: group_allowlist ${action} ${convIds.length} conversation(s) (by ${data.changed_by || '?'})`);
       break;
     }
 
@@ -1306,7 +1362,7 @@ async function syncConfigToComm(orgConfig) {
   const payload = {
     dm_policy: access.dmPolicy || 'owner',
     dm_allowlist: access.dmAllowFrom || [],
-    group_scope: access.groupPolicy || 'allowlist',
+    group_scope: (access.groupPolicy === 'disabled' ? 'none' : access.groupPolicy) || 'allowlist',
     group_allowlist: groupAllowlist,
     groups,
   };
