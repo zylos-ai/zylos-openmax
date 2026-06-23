@@ -485,16 +485,23 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
 
 ## 前端链接（Frontend URL Patterns）
 
-分享 Workspace 资源链接时，**必须**加上 `/cws` 前缀（`server.frontend_base_path` 配置值，默认 `/cws`）。直接拼 BFF 路径会 404。
+分享 Workspace 资源链接时，**必须**加上 `/cws` 前缀（Next.js `basePath`，见 `cws-fe/apps/web/next.config.ts`）。直接拼 BFF 路径会 404。
 
 域名取决于环境，当前测试环境统一使用 `https://cws-int.coco.xyz`。
 
-| 资源 | URL 模板 |
-|---|---|
-| 项目 | `{bff_url}/cws/projects/{project_id}` |
-| Issue 详情 | `{bff_url}/cws/projects/{project_id}/issues/{issue_id}` |
-| KB 页面 | `{bff_url}/cws/knowledge?kb={kb_id}&node={node_id}` |
-| KB 列表 | `{bff_url}/cws/knowledge?kb={kb_id}` |
+| 资源 | URL 模板 | 来源 |
+|---|---|---|
+| 项目列表 | `{domain}/cws/projects` | sidebar.tsx |
+| 项目详情 | `{domain}/cws/projects/{project_id}` | projects/[id]/page.tsx |
+| Issue 详情 | `{domain}/cws/projects/{project_id}/issues/{issue_id}` | projects/[id]/issues/[iid]/page.tsx |
+| 任务列表 | `{domain}/cws/tasks` | sidebar.tsx |
+| KB 列表 | `{domain}/cws/knowledge` | sidebar.tsx |
+| KB 详情 | `{domain}/cws/knowledge?kb={kb_id}` | knowledge/page.tsx |
+| KB 页面 | `{domain}/cws/knowledge?kb={kb_id}&node={tree_node_id}` | knowledge/page.tsx |
+
+- `{domain}` = 环境域名，如 `https://cws-int.coco.xyz`
+- KB 的 `node` 参数是**树节点 ID**（tree node id），不是 page content id。通过 KB tree API 获取，或在 `kb.get_tree` 返回的节点中取 `id` 字段。
+- 任务没有单独详情页；点击任务会跳转到其关联 Issue（`/projects/{project_id}/issues/{issue_id}`）。
 
 可用 CLI 一步生成：`node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=xxx&node=yyy"}'`，输出完整 URL。
 
