@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Skill 行为护栏：绝不隐式创建 Project**。项目归属只能"选已有"或"用户明确要求时新建"——即便用户提到某个项目名而 bot 查不到同名项目，也禁止擅自建一个兜底，必须回过头问用户（指哪个已有项目，还是要新建）。`project.create` 仅在人类明确指示新建时才调。动机：bot 隐式新建项目会让随后建的 Issue/Task/产出全落到错的项目上下文，前功尽弃（concurrent-roles 探针实测复现：lead 找不到指定项目就自建同名项目，工作落到游离项目里）。
 - **Skill 行为护栏 #11/#12：激活即开工 + backlog 创建即澄清**。收到 `issue.activated`（owner 经 `issue.activate` 激活 backlog Issue）后，Lead **直接 `issue.start_execution` 开工**，不再回头问 owner「要不要开始 / 保持 backlog」——激活是 owner 最新的显式开工信号，压过描述里旧的「先不开发」备注；执行中若上下文确有缺失，DM owner 补**需求**（而非问许可）。配套：创建 backlog Issue 时主动 DM owner 做需求澄清，让上下文在 backlog 阶段就完备，激活后即可直接执行。
 
 ### Changed
