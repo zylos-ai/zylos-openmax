@@ -247,10 +247,10 @@ export class WsClient {
  * Best-effort — fs errors are swallowed and the deduper degrades to in-memory.
  * `opts.maxEntries` (default 5000): retained-id count; must exceed
  * SYNC_MAX_EVENTS so a full catch-up sweep is always covered.
- * (`ttlMs` is accepted for call-site backward-compat but no longer used for
- * eviction — retention is purely count-based.)
  */
-export function createDeduper(ttlMs = 300000, opts = {}) {
+export function createDeduper(optsOrLegacyTtl = {}, legacyOpts) {
+  // Backward compat: old call-sites passed (ttlMs, opts); new ones pass (opts).
+  const opts = typeof optsOrLegacyTtl === 'object' ? optsOrLegacyTtl : (legacyOpts || {});
   const { persistPath = null, maxEntries = 5000 } = opts;
   const seen = new Map();   // id -> first-seen ts(ms); Map insertion order = age
 

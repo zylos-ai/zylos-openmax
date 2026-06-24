@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.62] — 2026-06-24
+
+### Fixed
+
+- **fix(comm-bridge): sync 游标修正 + dedup 加固 — 根治消息重放** (Issue #8ffdac40)。cws-comm 有两套独立 seq：per-conversation 消息 seq 和 per-user org-wide inbox seq。sync API 期望 inbox seq 但 coco-workspace 一直存 per-conversation 的消息 seq 作为 `last_seq`，导致重启后游标指向错误位置，拉回大量已处理消息。改动：
+  - **P0**: 新增 `sync_seq` 字段（inbox seq）替代 `last_seq`；`syncMissedEvents` 只从 sync response 的 `ev.seq` 更新游标，不再被实时 WS 消息的 per-conversation seq 污染；首次连接通过 `initSyncSeq` 初始化游标位置
+  - **P1**: dedup 窗口 500→3000（覆盖 SYNC_MAX_EVENTS 的 1.5×）
+  - **P2**: 新增 `ackSync` — sync 完成后向 cws-comm 确认已处理的最高 seq
+  - **P3**: 移除 `createDeduper` 的 `ttlMs` 死参数；清理 `last_seq` 相关注释
+  - 向后兼容：首次升级自动从 `last_seq` 迁移到 `sync_seq`
+
 ## [Unreleased]
 
 ### Added

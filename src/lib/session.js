@@ -1,9 +1,10 @@
 /**
  * WebSocket runtime-state persistence (multi-org).
  *
- * Each enabled org has its own WS connection and its own `last_seq`. We
- * persist them as a single file keyed by org slug so warm-restarts can
- * resume each org's stream without re-syncing the full backlog.
+ * Each enabled org has its own WS connection and its own `sync_seq`
+ * (per-user org-wide inbox sequence from cws-comm). We persist them as
+ * a single file keyed by org slug so warm-restarts can resume each
+ * org's stream without re-syncing the full backlog.
  *
  * File: ~/zylos/components/coco-workspace/runtime/session.json
  *
@@ -11,7 +12,7 @@
  *   {
  *     "<orgSlug>": {
  *       org_id:     string,
- *       last_seq:   number,
+ *       sync_seq:   number,   // per-user org-wide inbox seq (sync API cursor)
  *       updated_at: number    // local epoch ms
  *     }
  *   }

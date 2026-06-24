@@ -43,8 +43,8 @@ const CHANNEL = 'coco-workspace';
 // may override either; if absent, these apply. Operator-edited config.json
 // files don't need to mention `message` at all.
 const DEFAULT_CONTEXT_MESSAGES = 5;
-const DEFAULT_DEDUP_TTL_MS     = 5 * 60 * 1000;   // 300_000
-const DEFAULT_DEDUP_MAX_ENTRIES = 500;
+// (DEFAULT_DEDUP_TTL_MS removed — deduper is count-based, ttlMs was dead code)
+const DEFAULT_DEDUP_MAX_ENTRIES = 3000;
 
 // Hardcoded WS operational defaults. `config.server.{reconnect_max_delay,
 // heartbeat_interval}` may override either; if absent, these apply.
@@ -66,17 +66,13 @@ function warn(...a) { console.warn(LOG_PREFIX, ...a); }
 let config = loadConfig();
 // Persist the deduper's seen-id window to disk (runtime/dedup.json) so a
 // restart/reconnect catch-up re-pull is deduped by message_id. Retention is
-// count-based: keep the most recent `maxEntries` ids. A reconnect/restart
-// catch-up can re-pull up to SYNC_MAX_EVENTS (2000) events at once, so the
-// window must be large enough to span a whole catch-up — otherwise ids beyond
-// the window age out mid-catch-up and the tail replays as "new" messages.
-// Overridable via `config.message.dedup_max_entries`; default 500 covers normal
-// restarts and typical catch-ups. Raise toward SYNC_MAX_EVENTS for longer outages.
+// count-based: keep the most recent `maxEntries` ids (default 3000, covering
+// 1.5× SYNC_MAX_EVENTS). Overridable via `config.message.dedup_max_entries`.
 const DEDUP_PATH = path.join(RUNTIME_DIR, 'dedup.json');
-const dedupe = createDeduper(
-  config.message?.dedup_ttl ?? DEFAULT_DEDUP_TTL_MS,
-  { persistPath: DEDUP_PATH, maxEntries: config.message?.dedup_max_entries ?? DEFAULT_DEDUP_MAX_ENTRIES },
-);
+const dedupe = createDeduper({
+  persistPath: DEDUP_PATH,
+  maxEntries: config.message?.dedup_max_entries ?? DEFAULT_DEDUP_MAX_ENTRIES,
+});
 
 // org_id → cached Conversation row (response_mode no longer used for filter
 // but other fields like `type` are still useful)
@@ -609,8 +605,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     // get-message envelope nests scalar message fields under `message`; for
     // real-time WS frames the notification already carries sender_id/seq/type
     // at the top level, but sync catch-up frames don't. Hoist them so
-    // downstream consumers (shouldHandleMessage, last_seq update, msgType
-    // detection) see a uniform shape regardless of arrival path.
+    // downstream consumers (shouldHandleMessage, msgType detection) see a
+    // uniform shape regardless of arrival path.
     if (!msg.sender_id   && msg.message?.sender_id)   msg.sender_id   = msg.message.sender_id;
     if (msg.seq == null  && msg.message?.seq != null) msg.seq         = msg.message.seq;
     if (!msg.type        && msg.message?.type)        msg.type        = msg.message.type;
@@ -618,14 +614,6 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     if (!msg.parent_message_id && msg.message?.parent_message_id) {
       msg.parent_message_id = msg.message.parent_message_id;
     }
-
-    // NOTE: a global seq-floor gate was tried in 1.0.10 and REVERTED here —
-    // `seq` is per-conversation, not a per-org monotonic cursor, so gating on a
-    // single org-wide last_seq dropped live messages from any conversation whose
-    // seq sat below the global max (caused a message-delivery outage). Duplicate
-    // suppression relies on the id-based deduper only (which IS persisted across
-    // restarts via dedup.json — that part is safe). last_seq is still advanced
-    // below purely as the catch-up cursor.
 
     const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);
     if (conv) conv.id = conv.id || msg.conversation_id;
@@ -665,11 +653,6 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       bindOwner(orgConfig.slug, memberId, displayName);
       // Mutate the captured orgConfig so subsequent decisions see the new owner.
       orgConfig.owner = { member_id: memberId, name: displayName || '' };
-    }
-
-    if (msg.seq && msg.seq > (sessionRef.last_seq || 0)) {
-      sessionRef.last_seq = msg.seq;
-      saveOrgSession(orgConfig.slug, { org_id: orgConfig.org_id, last_seq: msg.seq });
     }
 
     let recent = [];
@@ -1212,14 +1195,14 @@ const SYNC_MAX_EVENTS = 2000;
 const _syncInFlight = new Set();
 
 async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
-  if (!sessionRef.last_seq) return;  // first-ever connect → nothing to catch up
+  if (!sessionRef.sync_seq) return;  // first-ever connect → nothing to catch up
   if (_syncInFlight.has(orgConfig.slug)) {
     log(`[${orgConfig.slug}] sync already in flight, skipping`);
     return;
   }
   _syncInFlight.add(orgConfig.slug);
   try {
-    const startSeq = sessionRef.last_seq;
+    const startSeq = sessionRef.sync_seq;
     let sinceSeq = startSeq;
     let totalSynced = 0;
     let hasMore = true;
@@ -1240,7 +1223,6 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
           id:              String(ev.message_id),
           conversation_id: ev.conversation_id,
           seq:             ev.seq,
-          // mark synthetic so it's clear in logs which path produced it
           _via:            'sync',
         });
         if (typeof ev.seq === 'number' && ev.seq > sinceSeq) sinceSeq = ev.seq;
@@ -1248,14 +1230,76 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
       totalSynced += events.length;
     }
 
+    // Persist the sync cursor (inbox seq) so the next reconnect resumes here.
+    if (sinceSeq > startSeq) {
+      sessionRef.sync_seq = sinceSeq;
+      saveOrgSession(orgConfig.slug, { sync_seq: sinceSeq });
+    }
+
     if (totalSynced > 0) {
-      log(`[${orgConfig.slug}] sync caught up ${totalSynced} event(s) since seq=${startSeq}` +
+      log(`[${orgConfig.slug}] sync caught up ${totalSynced} event(s) since seq=${startSeq}, new sync_seq=${sinceSeq}` +
           (hasMore && totalSynced >= SYNC_MAX_EVENTS ? ` (hit per-sweep cap, more on next reconnect)` : ''));
     }
+    // Ack the highest processed seq to cws-comm (best-effort).
+    if (sinceSeq > 0) ackSync(orgConfig, sinceSeq);
   } catch (err) {
     warn(`[${orgConfig.slug}] sync failed: ${err.message} — will retry on next reconnect`);
   } finally {
     _syncInFlight.delete(orgConfig.slug);
+  }
+}
+
+// =============================================================================
+// First-connect sync_seq initialization
+// =============================================================================
+// On first-ever connect (sync_seq=0), seek to the END of the inbox so
+// subsequent reconnects only catch up events that arrive after this point.
+// We page through the entire inbox (discarding events) to find the max
+// cursor — one-time cost per new bot, avoids pulling full history later.
+
+async function initSyncSeq(orgConfig, sessionRef) {
+  try {
+    let cursor = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
+        since_seq: cursor,
+        device_id: config.agent?.device_id || '',
+        limit:     SYNC_PAGE_SIZE,
+      });
+      const events = Array.isArray(res?.events) ? res.events : [];
+      hasMore = res?.has_more === true;
+      if (events.length > 0) {
+        cursor = Number(res?.next_cursor) || events[events.length - 1].seq;
+      } else {
+        break;
+      }
+    }
+    if (cursor > 0) {
+      sessionRef.sync_seq = cursor;
+      saveOrgSession(orgConfig.slug, { org_id: orgConfig.org_id, sync_seq: cursor });
+      log(`[${orgConfig.slug}] init sync_seq=${cursor} (seeked to inbox end)`);
+    }
+  } catch (err) {
+    warn(`[${orgConfig.slug}] initSyncSeq failed: ${err.message}`);
+  }
+}
+
+// =============================================================================
+// AckSync — tell cws-comm how far we've consumed (best-effort)
+// =============================================================================
+
+async function ackSync(orgConfig, seq) {
+  try {
+    await postForOrg(orgConfig.org_id, apiPath('/sync/ack'), {
+      device_id:   config.agent?.device_id || '',
+      seq,
+      platform:    'agent',
+      app_version: config.agent?.app_version || '',
+    });
+    log(`[${orgConfig.slug}] ack sync_seq=${seq}`);
+  } catch (err) {
+    warn(`[${orgConfig.slug}] ackSync failed: ${err.message}`);
   }
 }
 
@@ -1435,9 +1479,11 @@ async function bootstrapOrgToken(orgConfig) {
 
 function startOrgWs(orgConfig, wsBaseUrl) {
   const session = loadOrgSession(orgConfig.slug) || {};
-  const sessionRef = { last_seq: session.last_seq || 0 };
-  if (sessionRef.last_seq) {
-    log(`[${orgConfig.slug}] warm-restart: lastSeq=${sessionRef.last_seq}`);
+  // Backward compat: migrate last_seq → sync_seq on first boot after upgrade.
+  const syncSeq = session.sync_seq ?? session.last_seq ?? 0;
+  const sessionRef = { sync_seq: syncSeq };
+  if (sessionRef.sync_seq) {
+    log(`[${orgConfig.slug}] warm-restart: sync_seq=${sessionRef.sync_seq}`);
   }
 
   const onMessage = makeOrgMessageHandler(orgConfig, sessionRef);
@@ -1457,12 +1503,13 @@ function startOrgWs(orgConfig, wsBaseUrl) {
 
     onOpen: async () => {
       log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
-      // Owner and config sync are handled by the periodic 5-min timer
-      // (startPeriodicSync) — not on connect, to avoid blocking WS setup.
-      // Pull anything missed since the last persisted seq. No-op on
-      // first-ever connect (last_seq=0). Errors are caught inside
-      // syncMissedEvents — they don't tear down the connection.
-      syncMissedEvents(orgConfig, sessionRef, onMessage);
+      if (!sessionRef.sync_seq) {
+        // First-ever connect: initialize sync_seq from current inbox position.
+        await initSyncSeq(orgConfig, sessionRef);
+      } else {
+        // Reconnect: catch up missed events since last sync_seq.
+        syncMissedEvents(orgConfig, sessionRef, onMessage);
+      }
     },
 
     onMessage: onFrame,
@@ -1471,10 +1518,9 @@ function startOrgWs(orgConfig, wsBaseUrl) {
       log(`[${orgConfig.slug}] closed code=${code} reason="${reason || ''}" reconnect=${willReconnect}`);
       if (code === 4003) {
         // Session expired: drop the cached JWT/ticket so urlProvider mints a
-        // fresh one on the next connect. Keep `last_seq` — the conversation
-        // sequence is independent of the WS session, and we need it so the
-        // post-reconnect sync sweep can catch up.
-        log(`[${orgConfig.slug}] session expired; invalidating token cache (last_seq preserved for sync)`);
+        // fresh one on the next connect. Keep sync_seq so the post-reconnect
+        // sync sweep can catch up from the right position.
+        log(`[${orgConfig.slug}] session expired; invalidating token cache (sync_seq preserved)`);
         invalidateToken(orgConfig.org_id);
       }
     },
@@ -1576,7 +1622,7 @@ function shutdown(signal) {
   _isShuttingDown = true;
   log(`${signal}, shutting down...`);
   if (_frameMetricTimer) { clearInterval(_frameMetricTimer); _frameMetricTimer = null; }
-  if (_ownerSyncTimer) { clearInterval(_ownerSyncTimer); _ownerSyncTimer = null; }
+  if (_periodicSyncTimer) { clearInterval(_periodicSyncTimer); _periodicSyncTimer = null; }
   if (_typingPollTimer) { clearInterval(_typingPollTimer); _typingPollTimer = null; }
   // Remove all active processing-indicator reactions before exit.
   const removals = [];
