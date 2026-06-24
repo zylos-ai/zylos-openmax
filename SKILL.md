@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.65
+version: 1.0.66
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -135,7 +135,7 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
 2. **选择项目（必问，禁止默默决定，且必须在执行前）**：**先问用户**归属哪个项目再继续；可建议默认 Inbox，但必须经用户确认 / 选择，**绝不能跳过此步直接开干**
 3. **选择知识库（必问，禁止默默决定，且必须在执行前）**：**先问用户**产出沉淀到哪个知识库；可建议默认 KB，但同样必须经用户确认 / 选择
 4. **确认执行 Agent（必问，bot 不自行决定）**：用 `core.agent_profiles`（自报 skills + 人工 tags + 描述）拉候选 agent 能力画像，据此**给出推荐 + 理由**，把候选列给发起人，**由发起人确认 / 选择**执行的 bot；无匹配专长时可推荐 COCO 自己做，但仍需发起人确认
-5. **登记 Issue→Task（谁执行谁建 Task）**：Lead 在**已确认的项目**下创建 **Issue**（light），并把 `ownerMemberId` 设为发起任务的人类 member id（人类 caller 可省略默认自己，Agent 代人类创建必须显式传）。**description 必须使用 Markdown 格式**（标题、列表、加粗、代码块等；CLI 默认传 `descriptionFormat:"markdown"`）。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue →（执行者）建 Task → 执行，不先开干再补
+5. **登记 Issue→Task（谁执行谁建 Task）**：Lead 在**已确认的项目**下创建 **Issue**（light），并把 `ownerMemberId` 设为发起任务的人类 member id（人类 caller 可省略默认自己，Agent 代人类创建必须显式传）。**description 用 Markdown 写**（标题、列表、加粗、代码块等；平台所有文本默认 markdown，无需额外 format 参数）。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue →（执行者）建 Task → 执行，不先开干再补
 6. **Agent 执行**：该 Agent 独立完成全部工作 → 产出结果
 7. **产物归档 & 知识沉淀**：产出 → ArtifactStore；报告沉淀到所选知识库（`/projects/.../research/`）
 8. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知该 Issue 的 owner 人类（通常就是任务发起人）请其验收**；**bot 不自行验收 / 不代验收 / 不自行归档**。创建 Issue 时必须让 `ownerMemberId` 指向发起人（人类 caller 可省略默认自己；Agent 代人类创建必须显式传对话人类 member id）。**owner 验收通过**（IM 说「验收通过」或看板点验收，必须由 owner 本人/其身份触发）→ Issue 进入 **accepted**，必要时再 `issue.archive` 并沉淀经验；owner **退回** → `issue.reject_delivered` → rejected → `issue.reopen` → pending_start，再由 Lead `issue.start_execution` 重做。交付到验收之间，issue 停在 **delivered（待验收）**，别当已完成丢着不管
@@ -153,7 +153,7 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
    - **给 Step 选执行 bot 前，必须先读能力画像做匹配（强制，不可按名字/顺序拍脑袋）**：把任何 Step 落到某个 bot 之前，**必须先调一次 `core.agent_profiles({projectId, capabilities:true})`**，取回候选 agent 的 skills（自报）+ tags（人工标注）+ 描述 + online_status；然后**逐个 Step 把"这一步需要什么能力"和各 agent 的 tag/skill 语义匹配**，分配方案里**对每个 Step 写明"依据 TA 的哪个 tag/skill 把这步给 TA"**。**严禁**不读画像、按成员列表顺序 / 名字 / member_id 顺序直接指派——那是破窗（等于能力画像形同虚设、谁排在前面谁干第一件）。匹配出的仍是**推荐**，最终**由发起人确认 / 选择**；确无合适专长才推荐 COCO 自己做。
 6. **依赖驱动的推进：调度中心通知下游 assignee 开工（状态=真实执行，看板全程可见全景）**：**「进行中」必须对应"真有 bot 在执行"**——后端不会擅自把待办改成进行中。推进由 **调度中心事件 + bot `task.start`** 驱动：
    - 无依赖 Step 的 assignee 已 `task.start`，在「进行中」；有依赖 Step 已 assigned、停「待办」等前置。
-   - **前置 task done 后，调度中心（cws-work 的 System Member）自动给下游 Task 的 assignee 发 DM**「[调度中心] Task《X》依赖已就绪，可以开工」→ 该 assignee 收到后调 **`task.start`**（**依赖闸在这一步**：校验 `dependsOn` 都 done 才放行）→ 进「进行中」→ 执行。**无需前置 bot 手动 DM，无需 `task.claim`（活在 step 5 已经 assigned 给它了）。v0.7 起 `start` 才开工建 attempt、才查依赖。**
+   - **前置 task done 后，调度中心（cws-work 的 System Member）自动给下游 Task 的 assignee 发 DM**「[调度中心] Task《X》依赖已就绪，可以开工」（正文点名上游 Task、payload 带 `upstreamTaskIds`）→ 该 assignee **先**对每个上游 task 调 `task.get` + `comment.list` 读它的完成评论拿到产出与上下文，**再**调 **`task.start`**（**依赖闸在这一步**：校验 `dependsOn` 都 done 才放行）→ 进「进行中」→ 执行。**无需前置 bot 手动 DM，无需 `task.claim`（活在 step 5 已经 assigned 给它了）。v0.7 起 `start` 才开工建 attempt、才查依赖。**
    - 这样看板从一开工就是完整全景：谁在跑 / 谁 assigned 在「待办」等前置 / 卡了什么，且 **RUNNING 永远对应真在执行的 bot，不存在空转的「进行中」**
    - **关键看板语义：待办列 = 已建、已 assigned、被依赖挂起、等调度中心通知开工的 Step，不是「还没拆出来的步骤」。** Sub-task → Attempt → Agent 执行
 7. **产物归档 & 知识沉淀**：Agent 产出 → ArtifactStore；关键文档（报告、方案）沉淀到 KB（`/projects/.../research/`、`/projects/.../deliverables/`）
@@ -220,24 +220,15 @@ core.me → agentId, orgId
 - **增量更新**：自己创建 Issue/Project 时追加到本地目录
 - **全量刷新**：匹配不上时，或日常维护时
 
-### 上下文传递（contextPageIds）
+### 上下文传递（自然语言 + Task 评论）
 
-Lead 组装上下文时读过的 KB 页面，通过 `contextPageIds` 结构化传递给 Issue/Task，Worker 直接按 ID 读取，不需要重新搜索。
+上下文用**自然语言**传，不塞结构化 id 列表。Lead 把任务需要的背景写进 Issue/Task 的 `description`（人类消息提到的文档、搜索命中的参考、项目 overview，直接在描述里写清楚或贴 KB 链接）。Agent 能读懂自然语言，不需要预置一份 page id 数组。
 
-**Lead 写入**：
+**接力交付走 Task 评论**（agent 间上下文传递 + 人类回溯，一份内容两用）：
 
-- 上下文组装阶段搜索/阅读 KB 页面时，收集相关 page ID
-- `issue.create` 时传入全部相关 page ID
-- `task.create` 时筛选该 Task 实际需要的子集传入
-- 人类消息中提到的文档、搜索命中的参考材料、项目 overview 等都是候选
-
-**Worker 消费**：
-
-- `task.get` 返回 `context_page_ids` 数组
-- 对每个 ID 调 `kb.page_content` 读取内容，作为执行上下文
-- 这些是 Lead 精选的参考材料，优先级高于自行搜索
-
-**粒度**：Issue 级放全量参考，Task 级放该 Task 需要的子集。宁可多传不要少传。
+- **上游 Worker 完成即留评论（强制）**：把自己的 Task 流转到 done 时，**必须**先 `comment.create {workType:"task", workId:<自己的 taskId>, bodyMarkdown:"..."}`，用自然语言写清**产出物地址**（artifact id / KB 链接 / 内联结论）和关键说明。完成不留评论 = 下一棒拿不到你的产出。
+- **下游 Worker 接棒先读上游**：收到调度中心「依赖已就绪，可以开工」DM（正文会点名上游 Task、payload 带 `upstreamTaskIds`）后，**先**对每个上游 task 调 `task.get` + `comment.list {workType:"task", workId:<上游 taskId>}` 读完它的完成评论拿到产出与上下文，**再** `task.start` 开工。
+- 评论是只增可编辑、不可删的留痕通道；既给接力的 agent 用，也给人类回溯用。
 
 ## 状态机
 
@@ -300,11 +291,12 @@ BLOCKED ≠ FAILED：BLOCKED 是主动 suspend 等待审批，审批通过后系
 
 ```
 attempt.transition → done
+comment.create（完成评论：写产出物地址 + 说明）
 task.transition → done
 issue.deliver → delivered
 ```
 
-Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下所有 Task 必须在终态。
+Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下所有 Task 必须在终态。**把 task 流转到 done 之前必须先写完成评论**（`comment.create` 到该 task），自然语言写明产出物地址，供下一棒 agent 与人类回溯——见「上下文传递」。
 
 ## 行为护栏
 
@@ -375,7 +367,8 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 | Lead 替 worker 建 Task 再派给它 | Lead 只建 Issue + 给目标 + 开权限；Task 由执行的 bot 自己 task.create 并认领（谁执行谁建）|
 | worker 把 task 流转到 done 就当任务完成/归档 | task done 只是「执行动作做完」；进入 accepted/「完成」与 archived 必须人类验收通过 |
 | 人类拒收后直接修改产出 | 先 `issue.reject_delivered` → `issue.reopen` → pending_start → `issue.start_execution`，再新建 Task 重做 |
-| 描述里写"参考 /projects/X/..."但不传 contextPageIds | 搜到 page 后将 ID 传入 contextPageIds，Worker 直接读取 |
+| worker 把 task 流转到 done 却不留产出评论 | 流转 done 前先 `comment.create` 写明产出物地址，下一棒/人类才能拿到 |
+| 接棒前不读上游产出，直接 task.start 重做 | 收到「依赖已就绪」DM 后先 `task.get` + `comment.list` 读上游完成评论，再开工 |
 
 ### API 降级
 
@@ -391,7 +384,7 @@ CLI 命令返回 404 或 501（cws-core 网关暂未接通）时：
 
 **Lead 对 Worker**：完成时通过 IM 汇报且流转 TM 状态；遇阻主动请求澄清；产出位置符合 Lead 指定。
 
-**Worker 对 Lead**：派发时提供清晰描述；有参考材料时通过 `contextPageIds` 传递，不要只在描述里写路径；澄清请求及时响应；不在执行中途无预警取消 Task。
+**Worker 对 Lead**：派发时把参考材料写进 task `description`（自然语言 / KB 链接）；澄清请求及时响应；完成时先 `comment.create` 写产出评论再流转 done；不在执行中途无预警取消 Task。
 
 ### 跨 agent 沟通模式（Lead ↔ Worker）
 

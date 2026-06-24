@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.66] — 2026-06-25
+
+### Added
+
+- **feat(tm): comment CLI 命令 + agent 间接力交付走 Task 评论**（落地 cws-work 设计 001 §3/§4）。
+  - 新增 `comment.create {workType, workId, bodyMarkdown}` / `comment.get {id}` / `comment.list {workType, workId}`，对接 cws-core BFF `/comments`。
+  - SKILL 硬规则：worker 把 task 流转到 done 前**必须**先 `comment.create` 写完成评论（自然语言写产出物地址）；下一棒收到「依赖已就绪」DM（正文点名上游 Task、payload 带 `upstreamTaskIds`）后**先** `task.get` + `comment.list` 读上游产出再 `task.start`。
+
+### Changed
+
+- **去掉已删除的结构化字段参数**（cws-work 已删字段）：`task.create` 移除 `skillTags` / `contextPageIds`；`issue.create` / `issue.update` 移除 `dueDate` / `contextPageIds` / `inputArtifactIds`；priority 改为可选（默认 medium）。上下文改由自然语言 description + task 评论承载。
+- 移除幽灵参数 `descriptionFormat`：平台所有文本默认 markdown，不再记格式。
+
+> 注：`references/tm-operations.md` 等共享参考文档由各服务团队维护，其中对已删参数的描述需相应服务团队同步更新。
+
 ## [1.0.65] — 2026-06-24
 
 ### Changed

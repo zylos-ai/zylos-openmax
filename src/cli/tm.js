@@ -121,33 +121,29 @@ const COMMANDS = {
   // Flat path, no project prefix.
   'issue.get': () => get(apiPath(`/issues/${params.id}`)),
 
-  // contract-v2 create-issue body: requires title*, mode*, priority*,
-  // lead_agent_id*; optional owner_member_id, context_page_ids,
-  // input_artifact_ids, origin_conversation_id, origin_message_id,
-  // due_date, disposition.
+  // create-issue body: requires title*, mode*, lead_agent_id*; optional
+  // priority (default medium), owner_member_id, origin_conversation_id,
+  // origin_message_id, disposition. Context for the work goes in description
+  // (natural language) and later in task comments — not in id lists.
   'issue.create': () => post(apiPath(`/projects/${params.projectId}/issues`), {
     title:                  params.title,
     description:            params.description || '',
     mode:                   params.mode,                  // light|heavy (required)
     disposition:            params.disposition,           // start|backlog (default: start)
-    priority:               params.priority,              // low|medium|high (required)
-    due_date:               params.dueDate,
+    priority:               params.priority,              // low|medium|high (optional, default medium)
     lead_agent_id:          params.leadAgentId,
     owner_member_id:        params.ownerMemberId,
-    context_page_ids:       params.contextPageIds,
-    input_artifact_ids:     params.inputArtifactIds,
     origin_conversation_id: params.originConversationId,
     origin_message_id:      params.originMessageId,
   }),
 
-  // Flat path; body: { title?, description?, priority?, due_date? }.
+  // Flat path; body: { title?, description?, priority? }.
   'issue.update': () => patch(
     apiPath(`/issues/${params.id}`),
     {
       title:              params.title,
       description:        params.description,
       priority:           params.priority,
-      due_date:           params.dueDate,
     },
   ),
 
@@ -222,20 +218,20 @@ const COMMANDS = {
 
   'task.get': () => get(apiPath(`/tasks/${params.id}`)),
 
-  // contract-v2 create-task path: /projects/{pid}/issues/{iid}/tasks
-  // body: { title*, description?, assignee_id?, skill_tags?,
-  //         blueprint_step_id?, depends_on?, context_page_ids? }
+  // create-task path: /projects/{pid}/issues/{iid}/tasks
+  // body: { title*, description?, assignee_id?, blueprint_step_id?, depends_on? }
   // (mode / priority / status are NOT accepted — those live on issue.)
+  // depends_on entries MUST be upstream Task ids (task.id). What a task needs
+  // goes in description (natural language); upstream deliverables arrive via the
+  // upstream task's comments, not a context id list.
   'task.create': () => post(
     apiPath(`/projects/${params.projectId}/issues/${params.issueId}/tasks`),
     {
       title:              params.title,
       description:        params.description || '',
       assignee_id:        params.assigneeId,
-      skill_tags:         params.skillTags,
       blueprint_step_id:  params.blueprintStepId,
       depends_on:         params.dependsOn,
-      context_page_ids:   params.contextPageIds,
     },
   ),
 
@@ -265,6 +261,31 @@ const COMMANDS = {
     apiPath(`/tasks/${params.id}/reassign`),
     { new_assignee_id: params.assigneeId ?? params.newAssigneeId },
   ),
+
+  // =========================================================================
+  //  COMMENT  (issue/task discussion + the agent-to-agent handoff channel.
+  //  A worker writes a completion comment on its task — natural-language
+  //  deliverable address/summary — when finishing; the next assignee reads the
+  //  upstream task's comments to pick up context. Author is derived from the
+  //  auth principal; body is markdown.)
+  // =========================================================================
+
+  // body: { work_type ('issue'|'task'), work_id, body_markdown }
+  'comment.create': () => post(apiPath('/comments'), {
+    work_type:     params.workType,
+    work_id:       params.workId,
+    body_markdown: params.bodyMarkdown ?? params.body,
+  }),
+
+  // Each comment is addressable: GET /comments/{id}.
+  'comment.get': () => get(apiPath(`/comments/${params.id}`)),
+
+  // List a work item's comments (time-ordered). Requires workType + workId.
+  'comment.list': () => get(apiPath('/comments'), {
+    work_type: params.workType,
+    work_id:   params.workId,
+    ...pageParams(params),
+  }),
 
   // =========================================================================
   //  BLUEPRINT  (✅ all 4 in contract-v2 — create / get / list / set-steps;
@@ -397,12 +418,11 @@ PROJECT  (all ✅ on contract-v2)
 ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{pid}/issues/{id})
   issue.list_in_project  {projectId, status?, priority?, page?, pageSize?, orderBy?}
   issue.get              {id}
-  issue.create           {projectId, title, mode, priority, leadAgentId,
-                          ownerMemberId?,
-                          description?, descriptionFormat?, dueDate?, contextPageIds?,
-                          inputArtifactIds?, originConversationId?, originMessageId?,
-                          disposition?}                                      # ownerMemberId defaults to human caller; agent create-by-human must pass it
-  issue.update           {id, title?, description?, descriptionFormat?, priority?, dueDate?}
+  issue.create           {projectId, title, mode, leadAgentId,
+                          ownerMemberId?, priority?,
+                          description?, originConversationId?, originMessageId?,
+                          disposition?}                                      # priority default medium; ownerMemberId defaults to human caller; agent create-by-human must pass it
+  issue.update           {id, title?, description?, priority?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
   issue.start_execution  {id}
   issue.deliver          {id}
@@ -418,12 +438,17 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
 TASK  (all ✅ on contract-v2; create uses doubly-nested path)
   task.list              {projectId?, issueId?, status?, page?, pageSize?, orderBy?}
   task.get               {id}
-  task.create            {projectId, issueId, title, description?, descriptionFormat?,
-                          assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}
+  task.create            {projectId, issueId, title, description?,
+                          assigneeId?, blueprintStepId?, dependsOn?}            # dependsOn entries are upstream task.id
   task.claim             {id}                                                    # 只分配 pending→assigned; no body
   task.start             {id}                                                    # assigned→running + 开 attempt; no body
   task.transition        {id, targetStatus}                                      # alias: task.status
   task.reassign          {id, newAssigneeId (or 'assigneeId')}
+
+COMMENT  (issue/task discussion + agent-to-agent handoff channel)
+  comment.create         {workType ('issue'|'task'), workId, bodyMarkdown}       # author from auth; markdown body
+  comment.get            {id}                                                    # comments are addressable
+  comment.list           {workType, workId, page?, pageSize?}
 
 BLUEPRINT  (all ✅ on contract-v2)
   blueprint.create                  {issueId, authorAgentId, steps[], estimatedBudget?, notes?}
