@@ -11,9 +11,10 @@
  *   - `server.*` holds the cws-core / cws-comm / cws-kb / cws-as endpoints
  *     and WS connection knobs.
  *
- *   - `orgs.<slug>` is a user-chosen key (e.g. "team-alpha"). The slug has
- *     no meaning to cws-* services; only `orgs.<slug>.org_id` is the real
- *     COCO org UUID. Slugs make the config human-readable.
+ *   - `orgs.<key>` is keyed by the full COCO org UUID (e.g.
+ *     "019ea63a-c01b-7ca6-8463-e8d455bfd537"). Legacy configs may still
+ *     use human-readable slugs (e.g. "org-019ea63a", "team-alpha");
+ *     the runtime is key-agnostic — only `orgs.<key>.org_id` matters.
  *
  * Access control mirrors zylos-lark's model:
  *
@@ -90,8 +91,8 @@ export const DEFAULT_CONFIG = {
   // bootstraps a placeholder org block). At runtime, comm-bridge opens one
   // WebSocket per enabled org.
   //
-  // The map key (e.g. 'default', 'team-alpha') is a human-readable slug
-  // chosen by the operator. The COCO org UUID lives in `org_id`.
+  // The map key is the full COCO org UUID (matching `org_id`). Legacy
+  // configs may use human-readable slugs; the runtime is key-agnostic.
   //
   // Per-org block:
   //   - `self`   : agent's own member identity within THIS org

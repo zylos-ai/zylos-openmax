@@ -182,7 +182,7 @@ function seedOrg(orgId, opts = {}) {
     ownerName     = '',
     selfName      = '',
   } = opts;
-  const slug = `org-${orgId.slice(0, 8)}`;
+  const slug = orgId;
   // Field-for-field aligned with cws-agent-manager-sdk-go's
   // CoCoWorkspaceChannelAuth proto (server.{bff_url,ws_url} are in `server`,
   // api_key in agent.api_key, org_id + org_name + owner.{member_id,name} +

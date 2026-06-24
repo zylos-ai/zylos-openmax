@@ -173,6 +173,28 @@ for (const [slug, org] of Object.entries(config.orgs)) {
   if (touched) legacyKeysSeen.push(`orgs.${slug}: member_id/display_name → self.*, owner.bound dropped`);
 }
 
+// ── orgs key normalisation: old-style slug → full org_id ────────────────────
+//
+// Earlier versions used human-readable slugs as keys (e.g. "org-019ea63a",
+// "coco-test2", "default"). The canonical key is now the full org_id UUID.
+// Rename any entry whose key does not match its own org_id.
+{
+  const renames = [];
+  for (const [slug, org] of Object.entries(config.orgs)) {
+    if (!org || typeof org !== 'object' || !org.org_id) continue;
+    if (slug !== org.org_id) renames.push([slug, org.org_id]);
+  }
+  for (const [oldKey, newKey] of renames) {
+    if (config.orgs[newKey]) {
+      legacyKeysSeen.push(`orgs.${oldKey}: skipped rename → ${newKey} (key already exists)`);
+      continue;
+    }
+    config.orgs[newKey] = config.orgs[oldKey];
+    delete config.orgs[oldKey];
+    legacyKeysSeen.push(`orgs.${oldKey} → orgs.${newKey} (key normalised to full org_id)`);
+  }
+}
+
 // ── drop workspace_id entirely ──────────────────────────────────────────────
 if (config.workspace_id !== undefined) {
   legacyKeysSeen.push('workspace_id (dropped — no replacement)');

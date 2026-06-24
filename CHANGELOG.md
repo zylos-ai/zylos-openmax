@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.64] — 2026-06-24
+
+### Changed
+
+- **refactor(config): orgs key 使用完整 org_id，org_name 使用真实组织名**。
+  - `post-install` 新建 org 时 key 从 `org-${id.slice(0,8)}` 改为完整 org_id UUID
+  - `post-upgrade` 自动迁移旧 key（如 `org-019ea63a`、`coco-test2`）到完整 org_id
+  - 消息头 `(org: X)` 已使用 `org_name` 原值，无拼接，不受影响
+  - 完全向后兼容：旧 config 中的任何 key 格式在 runtime 中正常工作
+
 ## [1.0.63] — 2026-06-24
 
 ### Fixed
