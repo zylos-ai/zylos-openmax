@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.63] — 2026-06-24
+
+### Fixed
+
+- **fix(comm-bridge): handleConfigUpdate 即时同步 + 错误日志修正**。收到 system 事件（group_mode_changed 等）更新本地 config 后，立即调 `syncConfigToComm()` 回报 cws-comm，不再只依赖 5 分钟定时兜底。同时将 `syncConfigToComm` 的 404 响应和 `makeOrgFrameDispatcher` 的 unknown frame type 从 `log()` 改为 `warn()`，确保异常写入 error.log。
+
 ## [1.0.62] — 2026-06-24
 
 ### Fixed

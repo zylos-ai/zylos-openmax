@@ -1034,6 +1034,12 @@ function handleConfigUpdate(orgConfig, frame) {
     const updated = loadConfig().orgs?.[slug];
     if (updated?.access) live.access = updated.access;
   }
+
+  // Immediately report the updated policy back to cws-comm so the server
+  // reflects the change without waiting for the 5-minute periodic sync.
+  const syncTarget = live || orgConfig;
+  syncConfigToComm(syncTarget).catch(e =>
+    warn(`[${slug}] immediate config sync to comm failed: ${e.message}`));
 }
 
 // =============================================================================
@@ -1175,7 +1181,7 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
       case 'read_state_update':
         break;
       default:
-        log(`[${orgConfig.slug}] unknown frame type:`, type);
+        warn(`[${orgConfig.slug}] unknown frame type:`, type);
     }
   };
 }
@@ -1425,7 +1431,7 @@ async function syncConfigToComm(orgConfig) {
     log(`[${orgConfig.slug}] policy reported: dmPolicy=${payload.dm_policy}, groupScope=${payload.group_scope}, groups=${groups.length}`);
   } catch (err) {
     if (err.status === 404) {
-      log(`[${orgConfig.slug}] reported-policy endpoint not available (404), skipping`);
+      warn(`[${orgConfig.slug}] reported-policy endpoint not available (404), skipping`);
     } else {
       throw err;
     }
