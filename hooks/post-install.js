@@ -397,6 +397,48 @@ if (!useEnvPath) {
   }
 }
 
+// ── org_name resolution from API ────────────────────────────────────────────
+// Fetch real org names from cws-core for any newly seeded org. Ensures
+// org_name matches the server's canonical name regardless of what
+// COCO_ORG_NAME was (or wasn't) set to. Best-effort: failures are logged
+// but never block the install.
+
+if (config.agent?.api_key && config.server?.bff_url) {
+  const bffUrl = config.server.bff_url.replace(/\/$/, '');
+  const apiKey = config.agent.api_key;
+  const cfH = {};
+  if (config.cf_access?.client_id) {
+    cfH['CF-Access-Client-Id'] = config.cf_access.client_id;
+    cfH['CF-Access-Client-Secret'] = config.cf_access.client_secret;
+  }
+
+  for (const [key, org] of Object.entries(config.orgs)) {
+    if (!org?.org_id) continue;
+    try {
+      const tokenRes = await fetch(`${bffUrl}/auth/agent/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, ...cfH },
+        body: JSON.stringify({ org_id: org.org_id }),
+      });
+      if (!tokenRes.ok) continue;
+      const jwt = (await tokenRes.json())?.data?.access_token;
+      if (!jwt) continue;
+
+      const orgRes = await fetch(`${bffUrl}/api/v1/organizations/${org.org_id}`, {
+        headers: { Authorization: `Bearer ${jwt}`, ...cfH },
+      });
+      if (!orgRes.ok) continue;
+      const realName = (await orgRes.json())?.data?.name;
+      if (realName && realName !== org.org_name) {
+        console.log(`[install] org_name for ${org.org_id}: "${org.org_name || '(empty)'}" → "${realName}" (from API)`);
+        org.org_name = realName;
+      }
+    } catch (e) {
+      console.log(`[install] org_name fetch for ${org.org_id}: ${e.message} (skipped)`);
+    }
+  }
+}
+
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
 console.log('[install] config.json written');
 

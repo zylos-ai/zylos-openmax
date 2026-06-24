@@ -214,6 +214,49 @@ if (config.agent.participant_id === '' || config.agent.participant_id === undefi
   delete config.agent.participant_id;
 }
 
+// ── org_name resolution from API ────────────────────────────────────────────
+//
+// Fetch real org names from cws-core for every enabled org. Overwrites any
+// stale or concatenated org_name with the server's canonical name. Best-effort:
+// network failures are logged but never block the upgrade.
+
+if (config.agent?.api_key && config.server?.bff_url) {
+  const bffUrl = config.server.bff_url.replace(/\/$/, '');
+  const apiKey = config.agent.api_key;
+  const cfH = {};
+  if (config.cf_access?.client_id) {
+    cfH['CF-Access-Client-Id'] = config.cf_access.client_id;
+    cfH['CF-Access-Client-Secret'] = config.cf_access.client_secret;
+  }
+
+  for (const [key, org] of Object.entries(config.orgs)) {
+    if (!org?.org_id) continue;
+    try {
+      const tokenRes = await fetch(`${bffUrl}/auth/agent/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, ...cfH },
+        body: JSON.stringify({ org_id: org.org_id }),
+      });
+      if (!tokenRes.ok) { console.log(`[post-upgrade] token exchange for ${org.org_id}: HTTP ${tokenRes.status}, skip`); continue; }
+      const jwt = (await tokenRes.json())?.data?.access_token;
+      if (!jwt) continue;
+
+      const orgRes = await fetch(`${bffUrl}/api/v1/organizations/${org.org_id}`, {
+        headers: { Authorization: `Bearer ${jwt}`, ...cfH },
+      });
+      if (!orgRes.ok) continue;
+      const realName = (await orgRes.json())?.data?.name;
+      if (realName && realName !== org.org_name) {
+        const old = org.org_name || '(empty)';
+        org.org_name = realName;
+        legacyKeysSeen.push(`orgs.${key}.org_name: "${old}" → "${realName}" (from API)`);
+      }
+    } catch (e) {
+      console.log(`[post-upgrade] org_name fetch for ${org.org_id}: ${e.message}`);
+    }
+  }
+}
+
 // ── write back if anything changed ──────────────────────────────────────────
 if (legacyKeysSeen.length > 0) {
   const tmp = `${CONFIG_PATH}.tmp.${process.pid}.${Date.now()}`;

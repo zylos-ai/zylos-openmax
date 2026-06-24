@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.65] — 2026-06-24
+
+### Changed
+
+- **fix(hooks): post-install 和 post-upgrade 从 API 拉真实 org_name**。安装和升级时自动调 `GET /api/v1/organizations/{org_id}` 获取组织真实名称，写回 `org_name`，无需依赖 `COCO_ORG_NAME` 环境变量。Best-effort：API 不通时跳过，不影响流程。
+
 ## [1.0.64] — 2026-06-24
 
 ### Changed
