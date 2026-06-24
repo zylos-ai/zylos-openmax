@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.60
+version: 1.0.61
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -146,6 +146,7 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
 3. **生成 Blueprint（强制，复杂任务的必经步骤）**：Lead Agent 拆解目标 → **必须**先生成 Blueprint（执行计划），定义所有 Step 及依赖关系（KB：`/jobs/{id}/blueprints/v1.md`）。**复杂任务一定要有 Blueprint——不允许跳过蓝图、直接拆 Task 开干。** 此步在实例化任何 Sub-task 之前完成
 4. **提交 Blueprint 开工（统一入口，不分叉）**：Blueprint 编排好后，Lead **统一调 `issue.start_execution`** 把它交给平台开工。**要不要审批由平台策略决定，Lead 不自己判断，也没有「提交审批」这个动作**——v0.7 平台默认免审（fail-open），提交后 issue 直接进入 executing。（未来平台策略上线后，若判定需审批，会把裁决告知 Lead，由 Lead 改 Blueprint 或在对话内发审批卡片给人类点批，再开工；agent 的提交动作始终是 `issue.start_execution` 这一个，不变。）Blueprint 本身是复杂任务从"规划"进入"施工"的硬门禁，不可省略
 5. **实例化 Sub-task（进入 executing 后一次性建全部 Step）**：issue 进入 executing 后，**必须一次性把全部 Step 实例化成 Task**——**严禁边做边补 / 做一个建一个**（那会让看板只看到零散的当前步骤，丢掉问题全景）。建 Task 时按 Blueprint 依赖关系设好 `dependsOn`，并**给每个 Step 都带 `assigneeId`**：
+   - **`dependsOn` 必须使用上游 Task 的 `task.id`（强制）。** `dependsOn` 描述的是 Task→Task 依赖，调度中心的「依赖就绪」开工通知和 `task.start` 开工闸都按 `task.id` 匹配。所以**先建上游 Task、拿到它返回的 `task.id`，再用这个 id 设下游的 `dependsOn`**。用错 id 会让依赖边失效——下游 Task 收不到开工通知、过不了开工闸，无报错地永久卡在 assigned。
    - **所有 Step 创建时都带 `assigneeId`（指定执行 bot）——有依赖的也一样。** 每个 Task 一建出来就有明确归属（落在 `task.assigneeId`，不是只记在 Blueprint），**调度中心才能在依赖就绪时把开工通知发到对应 bot**（见 step 6）。不给下游 Step 设 assignee = 调度中心没人可通知 = 依赖链断在那里。
    - **无依赖、可立即开跑的 Step → assigned 后，该 bot 随即 `task.start`** 进「进行中」真开跑。
    - **有依赖的 Step → 同样 assigned，但先不 `task.start`**——被依赖挂起、停在「待办」等前置完成，执行 bot 已经定死。
