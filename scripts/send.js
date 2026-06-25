@@ -39,7 +39,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { post, apiPath } from '../src/lib/client.js';
+import { post, getForOrg, apiPath } from '../src/lib/client.js';
+import { enabledOrgs } from '../src/lib/config.js';
 import {
   parseEndpoint,
   looksLikeMarkdown,
@@ -49,7 +50,7 @@ import {
 } from '../src/lib/message.js';
 import { uploadMedia } from '../src/cli/as.js';
 import { resolveMentions } from '../src/lib/mention.js';
-import { lookupConvOrg } from '../src/lib/conv-org.js';
+import { lookupConvOrg, registerConvOrg } from '../src/lib/conv-org.js';
 import { RUNTIME_DIR } from '../src/lib/session.js';
 
 const TYPING_DIR = path.join(RUNTIME_DIR, 'typing');
@@ -191,7 +192,21 @@ async function main() {
   // empty when 2+ orgs are enabled, producing an identity-only token → 401.
   if (!process.env.COCO_ORG_ID) {
     const convId = ep.threadConversationId || ep.conversationId;
-    const orgId = lookupConvOrg(convId);
+    let orgId = lookupConvOrg(convId);
+
+    // Fallback: outbound-first DMs have no map entry yet. Reverse-lookup by
+    // trying each enabled org until one can access the conversation.
+    if (!orgId) {
+      for (const org of enabledOrgs()) {
+        try {
+          await getForOrg(org.org_id, apiPath(`/conversations/${convId}`));
+          orgId = org.org_id;
+          registerConvOrg(convId, orgId);
+          break;
+        } catch { /* 401/403/404 → try next org */ }
+      }
+    }
+
     if (orgId) process.env.COCO_ORG_ID = orgId;
   }
 
