@@ -1107,6 +1107,23 @@ async function handleSystemEvent(orgConfig, frame) {
 
   const orgId = orgConfig.org_id;
   const actorId = data.recalled_by || data.edited_by || data.sender_id || '';
+
+  // Resolve conversation type and apply the same policy check as regular
+  // messages. Without this, edit/recall events from groups not in the
+  // allowlist would bypass shouldHandleMessage and reach the agent.
+  const conv = await fetchConversation(orgId, conversationId);
+  const convType = (conv?.type || '').toLowerCase() || 'dm';
+  const syntheticMsg = {
+    conversation_id: conversationId,
+    sender_id: actorId,
+    sender_type: data.sender_type || 'HUMAN',
+  };
+  const decision = await shouldHandleMessage(syntheticMsg, conv || {}, orgConfig);
+  if (!decision.handle) {
+    log(`drop [${orgConfig.slug}] system ${kind} msg=${messageId}: ${decision.reason}`);
+    return;
+  }
+
   const actorName = (await fetchMemberName(orgId, actorId)) || actorId || '对方';
 
   let notice;
@@ -1120,7 +1137,6 @@ async function handleSystemEvent(orgConfig, frame) {
       ? `[Message Recalled] Do not act on it. (Original: ${originalText})`
       : `[Message Recalled] A message was recalled. Do not act on it.`;
   } else {
-    // Edit: fetch the updated message to get the new full content.
     let newText = '';
     if (messageId) {
       const detail = await fetchMessageDetail(orgId, conversationId, messageId);
@@ -1137,12 +1153,10 @@ async function handleSystemEvent(orgConfig, frame) {
       : `[Message Edited] A message was edited. Use the latest content.`;
   }
 
-  // Inject as a standalone inbound notice (no skill-flow directive — this is a
-  // system event, not a user task). conv type defaults to dm; the endpoint is
-  // keyed by conversationId so routing is correct regardless of dm/group.
-  const endpoint = formatEndpoint({ type: 'dm', conversationId });
+  const convName = conv?.name || conv?.display_name || '';
+  const endpoint = formatEndpoint({ type: convType, conversationId });
   const body = formatInboundForC4(
-    { type: 'dm', id: conversationId },
+    { type: convType, id: conversationId, name: convName },
     { displayName: actorName },
     { content: notice, type: 'text' },
     [],
