@@ -36,23 +36,31 @@ function ensureClientMsgId(id) {
 }
 
 /**
- * Resolve the target org block for owner commands. Accepts `org` as a config
- * slug or an org UUID; with neither, defaults to the single enabled org.
- * Returns { slug, org_id, self, owner } or throws a helpful error.
+ * Resolve the target org block. Accepts `org` as a config key (org_id),
+ * org UUID, or org_name (case-insensitive); with neither, defaults to the
+ * single enabled org.
+ * Returns { slug, org_id, org_name, self, owner, ... } where `slug` is the
+ * config key (used for config writes).
  */
 function resolveOrgConfig(p) {
   const key = p.org || p.orgSlug || p.orgId || p.org_id;
   const enabled = enabledOrgs();
   if (key) {
-    const bySlug = enabled.find((o) => o.slug === key);
-    if (bySlug) return bySlug;
+    const byKey = enabled.find((o) => o.slug === key);
+    if (byKey) return byKey;
     const byId = getOrgByOrgId(key);
     if (byId) return byId;
-    throw new Error(`org not found in config: "${key}" (known slugs: ${enabled.map((o) => o.slug).join(', ') || 'none'})`);
+    const norm = (s) => s?.toLowerCase().replace(/[-_ ]/g, '');
+    const keyNorm = norm(key);
+    const byName = enabled.find((o) => norm(o.org_name) === keyNorm);
+    if (byName) return byName;
+    const names = enabled.map((o) => o.org_name || o.slug).join(', ');
+    throw new Error(`org not found in config: "${key}" (known: ${names || 'none'})`);
   }
   if (enabled.length === 1) return enabled[0];
   if (enabled.length === 0) throw new Error('no enabled orgs in config.orgs');
-  throw new Error(`multiple enabled orgs — pass {"org":"<slug>"} (one of: ${enabled.map((o) => o.slug).join(', ')})`);
+  const names = enabled.map((o) => o.org_name || o.slug).join(', ');
+  throw new Error(`multiple enabled orgs — pass {"org":"<name>"} (one of: ${names})`);
 }
 
 // Read this agent's own member record from cws-core for the given org; the
@@ -120,20 +128,6 @@ function buildSendBody(params) {
   };
 }
 
-function resolveOrg(p) {
-  const cfg = loadConfig();
-  const orgs = cfg.orgs || {};
-  if (p.org) {
-    if (orgs[p.org]) return { slug: p.org, org: orgs[p.org] };
-    const byId = Object.entries(orgs).find(([, o]) => o.org_id === p.org);
-    if (byId) return { slug: byId[0], org: byId[1] };
-    throw new Error(`Org not found: ${p.org}`);
-  }
-  const enabled = enabledOrgs();
-  if (enabled.length === 1) return { slug: enabled[0].slug, org: orgs[enabled[0].slug] };
-  if (enabled.length === 0) throw new Error('No enabled orgs in config');
-  throw new Error(`Multiple orgs enabled — specify org slug: ${enabled.map(o => o.slug).join(', ')}`);
-}
 
 const COMMANDS = {
   // ---- Conversation collection -------------------------------------------------
@@ -226,21 +220,21 @@ const COMMANDS = {
   // ---- DM access control (local config, hot-reloaded) -----------------------
 
   'comm.dm_policy': () => {
-    const { slug, org } = resolveOrg(params);
+    const org = resolveOrgConfig(params);
     const access = org.access || {};
     if (params.policy) {
       const valid = ['open', 'allowlist', 'owner'];
       if (!valid.includes(params.policy)) throw new Error(`Invalid policy: ${params.policy}. Must be one of: ${valid.join(', ')}`);
-      updateConfig(cfg => { cfg.orgs[slug].access = { ...cfg.orgs[slug].access, dmPolicy: params.policy }; });
-      return { org: slug, dmPolicy: params.policy, applied: true };
+      updateConfig(cfg => { cfg.orgs[org.slug].access = { ...cfg.orgs[org.slug].access, dmPolicy: params.policy }; });
+      return { org: org.org_name || org.slug, dmPolicy: params.policy, applied: true };
     }
-    return { org: slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
+    return { org: org.org_name || org.slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
   },
 
   'comm.dm_list': () => {
-    const { slug, org } = resolveOrg(params);
+    const org = resolveOrgConfig(params);
     const access = org.access || {};
-    return { org: slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
+    return { org: org.org_name || org.slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
   },
 
   'comm.dm_allow': () => {
@@ -248,14 +242,14 @@ const COMMANDS = {
       ? [].concat(params.memberIds || params.memberId)
       : [];
     if (!ids.length) throw new Error('memberIds (or memberId) required');
-    const { slug } = resolveOrg(params);
+    const org = resolveOrgConfig(params);
     const result = updateConfig(cfg => {
-      const access = cfg.orgs[slug].access = cfg.orgs[slug].access || {};
+      const access = cfg.orgs[org.slug].access = cfg.orgs[org.slug].access || {};
       const list = new Set(access.dmAllowFrom || []);
       for (const id of ids) list.add(id);
       access.dmAllowFrom = [...list];
     });
-    return { org: slug, dmAllowFrom: result.orgs[slug].access.dmAllowFrom, added: ids };
+    return { org: org.org_name || org.slug, dmAllowFrom: result.orgs[org.slug].access.dmAllowFrom, added: ids };
   },
 
   'comm.dm_revoke': () => {
@@ -263,13 +257,13 @@ const COMMANDS = {
       ? [].concat(params.memberIds || params.memberId)
       : [];
     if (!ids.length) throw new Error('memberIds (or memberId) required');
-    const { slug } = resolveOrg(params);
+    const org = resolveOrgConfig(params);
     const result = updateConfig(cfg => {
-      const access = cfg.orgs[slug].access = cfg.orgs[slug].access || {};
+      const access = cfg.orgs[org.slug].access = cfg.orgs[org.slug].access || {};
       const remove = new Set(ids.map(String));
       access.dmAllowFrom = (access.dmAllowFrom || []).filter(id => !remove.has(String(id)));
     });
-    return { org: slug, dmAllowFrom: result.orgs[slug].access.dmAllowFrom, removed: ids };
+    return { org: org.org_name || org.slug, dmAllowFrom: result.orgs[org.slug].access.dmAllowFrom, removed: ids };
   },
 };
 
