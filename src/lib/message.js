@@ -235,8 +235,18 @@ When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
   parts.push(`<current-message>\n${safeName} said: ${safeContent}${directiveSuffix}\n</current-message>`);
 
   let line = parts.join('');
-  if (current?.mediaLocalPath) {
-    const kind = current.type === 'image' ? 'image' : 'file';
+  const kind = current.type === 'image' ? 'image' : 'file';
+  if (Array.isArray(current?.mediaItems) && current.mediaItems.length > 0) {
+    for (const item of current.mediaItems) {
+      if (item.localPath) {
+        line += ` ---- ${kind}: ${escapeXml(item.localPath)}`;
+        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
+      } else if (item.id) {
+        line += ` ---- artifact_id: ${escapeXml(item.id)}`;
+        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
+      }
+    }
+  } else if (current?.mediaLocalPath) {
     line += ` ---- ${kind}: ${escapeXml(current.mediaLocalPath)}`;
     if (current.mediaFileName) line += ` name="${escapeXml(current.mediaFileName)}"`;
   } else if (current?.mediaId) {

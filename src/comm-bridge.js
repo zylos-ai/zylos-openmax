@@ -21,7 +21,6 @@
  */
 
 import path from 'path';
-import crypto from 'crypto';
 import { execFile } from 'child_process';
 
 import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName, updateConfig } from './lib/config.js';
@@ -669,21 +668,31 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       // sort ascending by seq so <group-context> reads chronologically
       // (oldest→newest).
       const ctxAsc = [...ctx].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
-      recent = await Promise.all(ctxAsc.map(async m => ({
-        // Resolve the sender's display name; fall back to the raw id only when
-        // cws-core gives us neither an inline name nor a resolvable member.
-        senderName: m.sender_display_name
+      recent = await Promise.all(ctxAsc.map(async m => {
+        const senderName = m.sender_display_name
                  || m.senderName
                  || (await fetchMemberName(orgConfig.org_id, m.sender_id))
-                 || m.sender_id,
-        // list-messages returns a flat string in `m.content` (the canonical
-        // top-level fallback_text); get-message instead returns a structured
-        // object at `m.content.body.text`. Cover both for forward-compat.
-        content:    m.content?.body?.text
+                 || m.sender_id;
+        const mStructured = (m.content && typeof m.content === 'object') ? m.content : {};
+        const text = mStructured.body?.text
                  || (typeof m.content === 'string' ? m.content : '')
                  || m.content_text
-                 || '',
-      })));
+                 || '';
+        const mType = (m.type || m.message?.type || '').toLowerCase();
+        const mAttachments = Array.isArray(mStructured.attachments) ? mStructured.attachments
+                           : Array.isArray(m.attachments) ? m.attachments : [];
+        const mIsImage = mType === 'image' || mType === 'agent_card';
+        const mIsFile = !mIsImage && (mType === 'file' || mAttachments.length > 0);
+        let content = text;
+        if ((mIsImage || mIsFile) && mAttachments.length > 0) {
+          const kind = mIsImage ? 'image' : 'file';
+          const labels = mAttachments.map(a => `[${kind}: ${a.artifact_id} | ${a.file_name || 'unknown'}]`);
+          content = labels.join(' ') + (text ? ' ' + text : '');
+        } else if (mIsImage) {
+          content = '[image]' + (text ? ' ' + text : '');
+        }
+        return { senderName, content };
+      }));
     }
 
     // After `msg = { ...notification, ...detail }`, where detail is the
@@ -700,26 +709,31 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
      || (typeof msg.content === 'string' ? msg.content : '')
      || '';
 
-    let mediaLocalPath;
-    const firstAttachment = Array.isArray(structured.attachments) ? structured.attachments[0] : null;
-    // attachment shape per cws-core: {artifact_id, file_name, content_type, size_bytes}
-    const mediaId = firstAttachment?.artifact_id || structured.media_id; // structured.media_id kept as legacy fallback
-    const mediaFileName = firstAttachment?.file_name || structured.filename;
-    // In groups: skip download when bot is not @mentioned and mode is not smart.
-    // The artifact_id is still preserved in the message so it can be resolved
-    // later (e.g. when someone replies with an @mention referencing this file).
-    const shouldDownload = mediaId && (convType === 'dm' || decision.mentioned || decision.mode === 'smart');
-    if (shouldDownload) {
-      try {
-        const { url } = await getMediaUrl(mediaId, orgConfig.org_id);
-        if (url) {
-          const ext = mediaFileName ? path.extname(mediaFileName) : '';
-          const uuidName = crypto.randomUUID() + ext;
-          mediaLocalPath = await downloadMedia(url, uuidName);
+    const allAttachments = Array.isArray(structured.attachments) ? structured.attachments : [];
+    // Legacy fallback: if no structured attachments, synthesize one from flat fields.
+    if (!allAttachments.length && (structured.media_id || structured.filename)) {
+      allAttachments.push({ artifact_id: structured.media_id, file_name: structured.filename });
+    }
+    const shouldDownload = allAttachments.length > 0 && (convType === 'dm' || decision.mentioned || decision.mode === 'smart');
+    const mediaItems = [];
+    for (const att of allAttachments) {
+      const attId = att.artifact_id;
+      if (!attId) continue;
+      const attFileName = att.file_name;
+      const item = { id: attId, fileName: attFileName };
+      if (shouldDownload) {
+        try {
+          const { url } = await getMediaUrl(attId, orgConfig.org_id);
+          if (url) {
+            const ext = attFileName ? path.extname(attFileName) : '';
+            const saveName = attId + ext;
+            item.localPath = await downloadMedia(url, saveName);
+          }
+        } catch (e) {
+          warn('media fetch failed:', attId, e.message);
         }
-      } catch (e) {
-        warn('media fetch failed:', e.message);
       }
+      mediaItems.push(item);
     }
 
     // Prefer an inline display name from the message; otherwise resolve the
@@ -768,26 +782,31 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         // the agent can actually READ the quoted media (not just know it exists).
         const qType = (q.message?.type || '').toLowerCase();
         const qIsImage = qType === 'image' || qType === 'agent_card';
-        const qAtt = Array.isArray(qStructured.attachments) ? qStructured.attachments[0] : null;
-        const qMediaId = qAtt?.artifact_id || qStructured.media_id;
-        if (!qText && (qIsImage || qMediaId)) {
-          qText = qIsImage ? '[image]' : `[file${qAtt?.file_name ? ': ' + qAtt.file_name : ''}]`;
+        const qAllAtts = Array.isArray(qStructured.attachments) ? qStructured.attachments : [];
+        if (!qAllAtts.length && qStructured.media_id) {
+          qAllAtts.push({ artifact_id: qStructured.media_id, file_name: qStructured.filename });
         }
-        if (qMediaId) {
+        const qKind = qIsImage ? 'image' : 'file';
+        if (!qText && (qIsImage || qAllAtts.length > 0)) {
+          qText = qAllAtts.map(a => `[${qKind}${a?.file_name ? ': ' + a.file_name : ''}]`).join(' ') || `[${qKind}]`;
+        }
+        for (const qAtt of qAllAtts) {
+          const qMediaId = qAtt?.artifact_id;
+          if (!qMediaId) continue;
           try {
             const { url } = await getMediaUrl(qMediaId, orgConfig.org_id);
             if (url) {
               const qOrigName = qAtt?.file_name;
               const qExt = qOrigName ? path.extname(qOrigName) : '';
-              const qUuidName = crypto.randomUUID() + qExt;
-              const qPath = await downloadMedia(url, qUuidName);
+              const qSaveName = qMediaId + qExt;
+              const qPath = await downloadMedia(url, qSaveName);
               if (qPath) {
-                qText += ` ---- ${qIsImage ? 'image' : 'file'}: ${qPath}`;
+                qText += ` ---- ${qKind}: ${qPath}`;
                 if (qOrigName) qText += ` name="${qOrigName}"`;
               }
             }
           } catch (e) {
-            warn('quoted media fetch failed:', e.message);
+            warn('quoted media fetch failed:', qMediaId, e.message);
           }
         }
         const qSenderId = q.message?.sender_id;
@@ -799,18 +818,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       }
     }
 
-    // Build a human-readable media label for the message body so an image/file
-    // message isn't delivered as an empty `said:`. Mirrors other C4 channels:
-    // the body carries `[image]` / `[file: name]` (plus any caption), while the
-    // `---- <kind>: <path>` suffix (emitted by formatInboundForC4) still gives
-    // the agent the local path when it needs to process the media.
     const isImage = msgType === 'image' || msgType === 'agent_card';
-    const isFile = !isImage && !!mediaId;
+    const isFile = !isImage && mediaItems.length > 0;
     let displayContent = text;
-    if (isImage) {
-      displayContent = `[image]${text ? ' ' + text : ''}`;
-    } else if (isFile) {
-      displayContent = `[file${mediaFileName ? ': ' + mediaFileName : ''}]${text ? ' ' + text : ''}`;
+    if (isImage || isFile) {
+      const kind = isImage ? 'image' : 'file';
+      const labels = mediaItems.map(it => `[${kind}${it.fileName ? ': ' + it.fileName : ''}]`);
+      displayContent = labels.join(' ') + (text ? ' ' + text : '');
     }
 
     const body = formatInboundForC4(
@@ -819,9 +833,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       {
         content: displayContent,
         type: isImage ? 'image' : (isFile ? 'file' : 'text'),
-        mediaLocalPath,
-        mediaFileName,
-        mediaId: mediaId && !mediaLocalPath ? mediaId : undefined,
+        mediaItems,
       },
       recent,
       { groupName, smartHint, quotedContent, enforceSkillFlow: config.message?.enforceSkillFlow ?? true, orgId: orgConfig.org_id, orgName: orgConfig.org_name },
