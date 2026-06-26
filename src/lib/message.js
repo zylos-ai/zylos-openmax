@@ -238,6 +238,10 @@ When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
   if (current?.mediaLocalPath) {
     const kind = current.type === 'image' ? 'image' : 'file';
     line += ` ---- ${kind}: ${escapeXml(current.mediaLocalPath)}`;
+    if (current.mediaFileName) line += ` name="${escapeXml(current.mediaFileName)}"`;
+  } else if (current?.mediaId) {
+    line += ` ---- artifact_id: ${escapeXml(current.mediaId)}`;
+    if (current.mediaFileName) line += ` name="${escapeXml(current.mediaFileName)}"`;
   }
   return line;
 }

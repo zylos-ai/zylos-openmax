@@ -21,6 +21,7 @@
  */
 
 import path from 'path';
+import crypto from 'crypto';
 import { execFile } from 'child_process';
 
 import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName, updateConfig } from './lib/config.js';
@@ -704,10 +705,18 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     // attachment shape per cws-core: {artifact_id, file_name, content_type, size_bytes}
     const mediaId = firstAttachment?.artifact_id || structured.media_id; // structured.media_id kept as legacy fallback
     const mediaFileName = firstAttachment?.file_name || structured.filename;
-    if (mediaId) {
+    // In groups: skip download when bot is not @mentioned and mode is not smart.
+    // The artifact_id is still preserved in the message so it can be resolved
+    // later (e.g. when someone replies with an @mention referencing this file).
+    const shouldDownload = mediaId && (convType === 'dm' || decision.mentioned || decision.mode === 'smart');
+    if (shouldDownload) {
       try {
         const { url } = await getMediaUrl(mediaId, orgConfig.org_id);
-        if (url) mediaLocalPath = await downloadMedia(url, mediaFileName || mediaId);
+        if (url) {
+          const ext = mediaFileName ? path.extname(mediaFileName) : '';
+          const uuidName = crypto.randomUUID() + ext;
+          mediaLocalPath = await downloadMedia(url, uuidName);
+        }
       } catch (e) {
         warn('media fetch failed:', e.message);
       }
@@ -768,8 +777,14 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
           try {
             const { url } = await getMediaUrl(qMediaId, orgConfig.org_id);
             if (url) {
-              const qPath = await downloadMedia(url, qAtt?.file_name || qMediaId);
-              if (qPath) qText += ` ---- ${qIsImage ? 'image' : 'file'}: ${qPath}`;
+              const qOrigName = qAtt?.file_name;
+              const qExt = qOrigName ? path.extname(qOrigName) : '';
+              const qUuidName = crypto.randomUUID() + qExt;
+              const qPath = await downloadMedia(url, qUuidName);
+              if (qPath) {
+                qText += ` ---- ${qIsImage ? 'image' : 'file'}: ${qPath}`;
+                if (qOrigName) qText += ` name="${qOrigName}"`;
+              }
             }
           } catch (e) {
             warn('quoted media fetch failed:', e.message);
@@ -805,6 +820,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         content: displayContent,
         type: isImage ? 'image' : (isFile ? 'file' : 'text'),
         mediaLocalPath,
+        mediaFileName,
+        mediaId: mediaId && !mediaLocalPath ? mediaId : undefined,
       },
       recent,
       { groupName, smartHint, quotedContent, enforceSkillFlow: config.message?.enforceSkillFlow ?? true, orgId: orgConfig.org_id, orgName: orgConfig.org_name },
