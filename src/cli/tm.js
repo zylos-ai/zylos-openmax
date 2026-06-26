@@ -174,6 +174,12 @@ const COMMANDS = {
   // above; cws-core no longer exposes POST /issues/{id}/transition.
   'issue.transition': issueTransitionCompat,
 
+  // Body field is new_owner_member_id (mirrors task.reassign pattern).
+  'issue.reassign_owner': () => post(
+    apiPath(`/issues/${params.id}/reassign-owner`),
+    { new_owner_member_id: params.ownerMemberId ?? params.newOwnerMemberId },
+  ),
+
   // Flat path; body field is `new_project_id` (not `project_id`).
   'issue.move_project': () => post(
     apiPath(`/issues/${params.id}/move`),
@@ -431,6 +437,7 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.accept_delivered {id, source?}                                        # source: im|explicit
   issue.reject_delivered {id, source?, rejectionReason?}
   issue.transition       {id, targetStatus (or 'status'), rejectionReason?}    # compatibility shim only
+  issue.reassign_owner   {id, newOwnerMemberId (or 'ownerMemberId')}          # change issue owner
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
   issue.set_acceptance   {id, accepted, source?, rejectionReason?}        # compat wrapper; prefer accept/reject_delivered
   issue.terminate        {id, reason?, source?}                           # 提前终止 → terminated; 级联取消 Task + 发善后事件

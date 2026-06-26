@@ -101,6 +101,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `issue.accept_delivered` | delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` — `source` 取 `im` / `explicit`(默认 `explicit`) |
 | ✅ | `issue.reject_delivered` | delivered → rejected | `{id, source?, rejectionReason?}` | `POST /issues/{id}/reject-delivered` |
 | ✅ | `issue.transition` | 旧脚本兼容 shim;新调用优先用上面的语义命令 | `{id, targetStatus (or 'status'), rejectionReason?}` | 映射到语义端点 |
+| ✅ | `issue.reassign_owner` | 修改 issue 负责人(ownerMemberId);archived 状态不可改 | `{id, newOwnerMemberId (or 'ownerMemberId')}` | `POST /issues/{id}/reassign-owner` |
 | ✅ | `issue.move_project` | 把 issue 整体迁到另一个项目 | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
 | ✅ | `issue.set_acceptance` | 兼容 wrapper;新调用优先用 `accept_delivered` / `reject_delivered` | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit`(默认 `explicit`) |
 | ✅ | `issue.terminate` | 提前终止未结论 issue → terminated;服务端级联取消非终态 Task + 发 `issue.terminated` 事件给 Lead 善后(不回滚已发生副作用) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` 默认 `lead_chat` |
