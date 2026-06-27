@@ -113,7 +113,7 @@ const COMMANDS = {
   // =========================================================================
 
   'issue.list_in_project': () => get(apiPath(`/projects/${params.projectId}/issues`), {
-    status:   params.status,     // enum (backlog / pending_start / ... / archived)
+    status:   params.status,     // enum (backlog / pending_plan / in_progress / ... / archived)
     priority: params.priority,   // enum: low|medium|high
     ...pageParams(params),
   }),
@@ -154,9 +154,37 @@ const COMMANDS = {
     apiPath(`/issues/${params.id}/activate`),
     { source: params.source ?? 'lead_chat' },
   ),
+  'issue.submit_plan': () => {
+    if (!params.blueprintId) {
+      throw new Error('issue.submit_plan requires blueprintId; create a one-step Blueprint for simple tasks');
+    }
+    return post(
+      apiPath(`/issues/${params.id}/submit-plan`),
+      {
+        plan_text:       params.planText ?? params.plan,
+        blueprint_id:    params.blueprintId,
+        source:          params.source ?? 'lead_chat',
+        card_message_id: params.cardMessageId,
+      },
+    );
+  },
+  // Temporary text-card simulation: when a human replies "接受计划", Lead may
+  // proxy that card click with source=text_card_proxy. Real interactive cards
+  // should call the same endpoint as the human principal.
+  'issue.accept_plan': () => post(
+    apiPath(`/issues/${params.id}/accept-plan`),
+    { source: params.source ?? 'text_card_proxy' },
+  ),
   'issue.start_execution': () => post(apiPath(`/issues/${params.id}/start-execution`)),
   'issue.deliver':         () => post(apiPath(`/issues/${params.id}/deliver`)),
   'issue.reopen':          () => post(apiPath(`/issues/${params.id}/reopen`)),
+  'issue.resume':          () => post(
+    apiPath(`/issues/${params.id}/resume`),
+    {
+      reason: params.reason ?? params.feedback,
+      source: params.source ?? 'lead_chat',
+    },
+  ),
   'issue.archive':         () => post(apiPath(`/issues/${params.id}/archive`)),
   'issue.accept_delivered': () => post(
     apiPath(`/issues/${params.id}/accept-delivered`),
@@ -430,16 +458,19 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
                           disposition?}                                      # priority default medium; ownerMemberId defaults to human caller; agent create-by-human must pass it
   issue.update           {id, title?, description?, priority?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
-  issue.start_execution  {id}
+  issue.submit_plan      {id, planText, blueprintId, source?, cardMessageId?}
+  issue.accept_plan      {id, source?}                                        # default source=text_card_proxy
+  issue.start_execution  {id}                                                 # legacy execution path
   issue.deliver          {id}
-  issue.reopen           {id}                                                 # rejected → pending_start
+  issue.reopen           {id}                                                 # legacy rejected → pending_start
+  issue.resume           {id, reason?, source?}                               # feedback → in_progress
   issue.archive          {id}
-  issue.accept_delivered {id, source?}                                        # source: im|explicit
+  issue.accept_delivered {id, source?}                                        # source: im|explicit|text_card_proxy
   issue.reject_delivered {id, source?, rejectionReason?}
   issue.transition       {id, targetStatus (or 'status'), rejectionReason?}    # compatibility shim only
   issue.reassign_owner   {id, newOwnerMemberId (or 'ownerMemberId')}          # change issue owner
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
-  issue.set_acceptance   {id, accepted, source?, rejectionReason?}        # compat wrapper; prefer accept/reject_delivered
+  issue.set_acceptance   {id, accepted, source?, rejectionReason?}        # compat wrapper; prefer accept_delivered/resume
   issue.terminate        {id, reason?, source?}                           # 提前终止 → terminated; 级联取消 Task + 发善后事件
 
 TASK  (all ✅ on contract-v2; create uses doubly-nested path)
@@ -462,7 +493,7 @@ BLUEPRINT  (all ✅ on contract-v2)
   blueprint.get                     {id, includeSteps?}
   blueprint.list                    {issueId, page?, pageSize?, orderBy?}
   blueprint.set_steps               {blueprintId (or 'id'), steps[]}             # replaces ALL steps
-  blueprint.submit_for_approval     {blueprintId (or 'id')}                       # attaches blueprint to issue; advances issue draft→pending_approval
+  blueprint.submit_for_approval     {blueprintId (or 'id')}                       # legacy approval path; new plan confirmation uses issue.submit_plan
 
 ATTEMPT  (all ✅ on contract-v2)
   attempt.create         {taskId}                                                # attempt_number auto-increments

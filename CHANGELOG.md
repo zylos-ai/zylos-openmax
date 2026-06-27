@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **feat(tm): Issue 执行计划确认与交付反馈循环命令**。
+  - 新增 `issue.submit_plan` / `issue.accept_plan` / `issue.resume`，对接 cws-core BFF 的 cws-work 内部计划确认流程。
+  - SKILL 和 TM 参考文档改为文本卡片模拟路径：Lead 发计划/交付消息，人类回复接受后 Lead 用 `source:"text_card_proxy"` 代点；人类不接受时先对话澄清，再 `issue.resume` 回到执行中并重新计划。
+
+### Changed
+
+- **所有 Issue 计划统一落 Blueprint**：简单任务也先创建单 step Blueprint，`issue.submit_plan` 新流程要求传 `blueprintId`；Issue comment 记录人类看到的计划说明，Blueprint 作为计划事实源和未来 workflow 固化来源。
+
 ## [1.0.66] — 2026-06-25
 
 ### Added
