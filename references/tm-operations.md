@@ -4,7 +4,7 @@
 
 **何时加载本文档**:
 
-- 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,决定 `light`(单 Agent/单 step Blueprint)还是 `heavy`(多 step Blueprint 编排流),再创建 Blueprint 并走计划确认
+- 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,创建 Issue,再创建单 step 或多 step Blueprint 并走计划确认
 - 需要派 task 给别人或自己接活时,查 `task.create` / `task.claim` → `task.start`(接活两步:claim 分配、start 开工)
 - 需要提前停掉一个还没结论的 issue 时,查 `issue.terminate`(终止 + 善后)
 - 工作做完准备收尾时,查 `attempt.transition` → `task.transition` → `issue.deliver` → `accept_delivered` 的顺序;人类不接受时,不要先调 reject,先对话澄清后 `issue.resume`
@@ -27,8 +27,6 @@
 
 > 完整的参数依赖树(`core.me → project.list → issue.create → blueprint.create → issue.submit_plan → task.create → ...`)见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)。本文档不重复,只补 TM 命令级细节。
 
----
-
 > Layer 3 操作参考。本文档与 `src/cli/tm.js` dispatch 表保持 1:1 对应。
 > 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
 
@@ -46,14 +44,15 @@ CLI 位置:`src/cli/tm.js`
 
 ## 当前覆盖度速览
 
-全部 47 个命令均已对齐 cws-core BFF,可直接调用。
+全部 45 个命令均已对齐 cws-core BFF,可直接调用。
 
 | 域 | 命令数 | 状态 |
 | --- | --- | --- |
 | Project | 8 | ✅ 全部可用 |
-| Issue | 18 | ✅ 全部可用 |
+| Issue | 14 | ✅ 全部可用 |
 | Task | 8 | ✅ 全部可用 |
-| Blueprint | 5 | ✅ 全部可用 |
+| Comment | 3 | ✅ 全部可用 |
+| Blueprint | 4 | ✅ 全部可用 |
 | Attempt | 4 | ✅ 全部可用 |
 | Event Binding | 4 | ✅ 全部可用 |
 
@@ -83,33 +82,28 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `project.unarchive` | `restore` 别名,行为完全一致 | `{id}` | `POST /projects/{id}/restore` |
 | ✅ | `project.members` | 列项目成员(从 cws-work 拉) | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
 
-### Issue (18 条)
+### Issue (14 条)
 
-写路径使用 flat path `/issues/{id}`,不使用 `/projects/{pid}/issues/{id}`。每个状态变更是一个带不变量校验和副作用的语义化动作;通用 `POST /issues/{id}/transition` 已被删除,`issue.transition` 仅作旧脚本兼容 shim。
+写路径使用 flat path `/issues/{id}`,不使用 `/projects/{pid}/issues/{id}`。每个状态变更是一个带不变量校验和副作用的语义化动作;通用 `POST /issues/{id}/transition` 以及旧验收拒绝接口已删除。
 
 | 状态 | 命令 | 说明 | 入参 | 端点 |
 | --- | --- | --- | --- | --- |
 | ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级过滤) | `{projectId, status?, priority?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
 | ✅ | `issue.get` | 取单个 issue 详情 | `{id}` | `GET /issues/{id}` |
-| ✅ | `issue.create` | 起 issue;`mode=light` 表示单 Agent / 单 step Blueprint,`mode=heavy` 表示多 step Blueprint 编排;`disposition=backlog` 可先记录不执行;`ownerMemberId` 是交付验收归属 | `{projectId, title, mode, priority, leadAgentId, ownerMemberId?, description?, descriptionFormat?, disposition?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
+| ✅ | `issue.create` | 起 issue;默认进入 `in_progress`,`backlog=true` 时先记录不执行;`ownerMemberId` 是交付验收归属 | `{projectId, title, leadAgentId, ownerMemberId?, priority?, description?, originConversationId?, originMessageId?, backlog?}` | `POST /projects/{pid}/issues` |
 | ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, descriptionFormat?, priority?, dueDate?}` | `PATCH /issues/{id}` |
-| ✅ | `issue.activate` | backlog → pending_start;按 source 决定是否唤醒 Lead | `{id, source?}` | `POST /issues/{id}/activate` |
+| ✅ | `issue.activate` | backlog → in_progress;按 source 决定是否唤醒 Lead | `{id, source?}` | `POST /issues/{id}/activate` |
 | ✅ | `issue.submit_plan` | Lead 把执行计划提交给人类确认,写 Issue comment,状态 → pending_plan;新流程必须带 `blueprintId` | `{id, planText, blueprintId, source?, cardMessageId?}` | `POST /issues/{id}/submit-plan` |
 | ✅ | `issue.accept_plan` | 人类接受执行计划;文本卡片模拟期由 Lead 代点,默认 `source=text_card_proxy`;状态 → in_progress | `{id, source?}` | `POST /issues/{id}/accept-plan` |
-| ✅ | `issue.start_execution` | 旧执行入口兼容: pending_start/draft/pending_plan → executing | `{id}` | `POST /issues/{id}/start-execution` |
-| ✅ | `issue.deliver` | in_progress/executing → delivered | `{id}` | `POST /issues/{id}/deliver` |
-| ✅ | `issue.reopen` | 旧返工入口兼容: rejected → pending_start | `{id}` | `POST /issues/{id}/reopen` |
-| ✅ | `issue.resume` | 人类反馈后继续对话、重新计划或返工;pending_plan/delivered/rejected → in_progress | `{id, reason?, source?}` | `POST /issues/{id}/resume` |
+| ✅ | `issue.deliver` | in_progress → delivered | `{id}` | `POST /issues/{id}/deliver` |
+| ✅ | `issue.resume` | 人类反馈后继续对话、重新计划或返工;pending_plan/delivered → in_progress | `{id, reason?, source?}` | `POST /issues/{id}/resume` |
 | ✅ | `issue.archive` | 归档 issue(**仅终态 accepted / terminated 可归档**;级联归档其 Task) | `{id}` | `POST /issues/{id}/archive` |
 | ✅ | `issue.accept_delivered` | delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` — `source` 取 `im` / `explicit` / `text_card_proxy`(默认 `explicit`) |
-| ✅ | `issue.reject_delivered` | delivered → rejected;兼容旧流程,新流程优先对话后 `issue.resume` | `{id, source?, rejectionReason?}` | `POST /issues/{id}/reject-delivered` |
-| ✅ | `issue.transition` | 旧脚本兼容 shim;新调用优先用上面的语义命令 | `{id, targetStatus (or 'status'), rejectionReason?}` | 映射到语义端点 |
 | ✅ | `issue.reassign_owner` | 修改 issue 负责人(ownerMemberId);archived 状态不可改 | `{id, newOwnerMemberId (or 'ownerMemberId')}` | `POST /issues/{id}/reassign-owner` |
 | ✅ | `issue.move_project` | 把 issue 整体迁到另一个项目 | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
-| ✅ | `issue.set_acceptance` | 兼容 wrapper;新调用优先用 `accept_delivered` / `resume` | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit` / `text_card_proxy`(默认 `explicit`) |
 | ✅ | `issue.terminate` | 提前终止未结论 issue → terminated;服务端级联取消非终态 Task + 发 `issue.terminated` 事件给 Lead 善后(不回滚已发生副作用) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` 默认 `lead_chat` |
 
-`mode` 取值:`light`(单 Agent / 单 step Blueprint)/ `heavy`(多 step Blueprint 编排流)。`disposition` 取值:`start`(默认) / `backlog`。`ownerMemberId` 是 Issue 的验收 / 治理归属:人类调用可省略并默认自己;Agent 代人类创建时必须传**对话中那个人类的 member id**。文本卡片模拟期允许 Lead 使用 `source=text_card_proxy` 代人类点击 `accept_plan` / `accept_delivered`;代码中已把它标成临时路径,真实卡片上线后应由人类 principal 调同一语义接口。
+`ownerMemberId` 是 Issue 的验收 / 治理归属:人类调用可省略并默认自己;Agent 代人类创建时必须传**对话中那个人类的 member id**。文本卡片模拟期允许 Lead 使用 `source=text_card_proxy` 代人类点击 `accept_plan` / `accept_delivered`;代码中已把它标成临时路径,真实卡片上线后应由人类 principal 调同一语义接口。人类不接受计划或交付时,不要调拒绝接口;Lead 先继续对话理解反馈,再 `issue.resume` 回到 `in_progress`,改 Blueprint / Task 后重新 `issue.submit_plan`。
 
 ### Task (8 条)
 
@@ -128,7 +122,17 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 
 `task.claim` / `task.start` 均无 body,principal 从 auth header 推断。v0.7 起 claim 与 start 分离:**claim 只把 task 分给自己(assigned),start 才真正开工并建 Attempt**。Worker 接活的标准两步是 `task.claim` → `task.start`。
 
-### Blueprint (5 条)
+### Comment (3 条)
+
+Issue / Task 的对话、计划说明、状态变更说明和 agent 交接上下文都写 comment。状态变化本身由语义接口完成,comment 用于回溯「为什么这么变」。
+
+| 状态 | 命令 | 说明 | 入参 | 端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `comment.create` | 给 Issue 或 Task 写 Markdown 评论 | `{workType, workId, bodyMarkdown}` | `POST /comments` |
+| ✅ | `comment.get` | 取单条评论 | `{id}` | `GET /comments/{id}` |
+| ✅ | `comment.list` | 列某个 Issue / Task 的评论 | `{workType, workId, page?, pageSize?, orderBy?}` | `GET /comments` |
+
+### Blueprint (4 条)
 
 `blueprint.create` 和 `blueprint.list` 使用 issue 嵌套路径;`blueprint.set_steps` 是全量替换语义(PUT),不是追加。
 
@@ -138,7 +142,6 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `blueprint.get` | 取 blueprint(含/不含 steps) | `{id, includeSteps?}` | `GET /blueprints/{id}` |
 | ✅ | `blueprint.list` | 列 issue 下的 blueprint 版本(看修订历史) | `{issueId, page?, pageSize?, orderBy?}` | `GET /issues/{iid}/blueprints` |
 | ✅ | `blueprint.set_steps` | 整批替换 steps(全量,不是 append) | `{blueprintId (or 'id'), steps[]}` | `PUT /blueprints/{id}/steps` |
-| ✅ | `blueprint.submit_for_approval` | 旧审批入口;v0.7 执行计划确认不走 cws-core Approval,新流程用 `issue.submit_plan` | `{id (or 'blueprintId')}` | `POST /blueprints/{id}/submit-for-approval` |
 
 ### Attempt (4 条)
 
@@ -157,7 +160,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 
 | 状态 | 命令 | 说明 | 入参 | 端点 |
 | --- | --- | --- | --- | --- |
-| ✅ | `event-binding.create` | 创建定时任务（create-by-agent 主路径） | `{cronExpr, leadMemberId, ownerMemberId, projectId, title, description?, mode?}` | `POST /event-bindings` |
+| ✅ | `event-binding.create` | 创建定时任务（create-by-agent 主路径） | `{cronExpr, leadMemberId, ownerMemberId, projectId, title, description?}` | `POST /event-bindings` |
 | ✅ | `event-binding.list` | 列本 org 的定时任务 | `{}` | `GET /event-bindings` |
 | ✅ | `event-binding.get` | 取定时任务详情（看 nextTriggerAt） | `{id}` | `GET /event-bindings/{id}` |
 | ✅ | `event-binding.delete` | 删除定时任务（停止后续触发，不影响已生成的 Issue） | `{id}` | `DELETE /event-bindings/{id}` |
@@ -166,20 +169,20 @@ create-by-agent 护栏（cws-work 强制，违反直接报错）：
 
 - `leadMemberId` 必须 = **你自己的 member id**（agent 只能把自己设为 lead）
 - `ownerMemberId` 必须 = **对话中那个人类的 member id**，且不能是你自己（owner 是治理责任人=人类）
-- `cronExpr` 5 段（分 时 日 月 周）；`mode` 缺省 `light`
+- `cronExpr` 5 段（分 时 日 月 周）
 
 ## 典型使用场景
 
-### 1. Lead 接 light 模式 Issue 且自做
+### 1. Lead 接简单 Issue 且自做
 
 ```bash
 # 0) 上下文组装:搜 KB 找参考材料,收集 page ID
 node src/cli/kb.js kb.search '{"query":"竞品定价","folderId":"tn-projects-growth"}'
 # -> 命中 pg-pricing-ref-001, pg-market-overview-002
 
-# 1) 创建 light Issue(进入 pending_start)
+# 1) 创建 Issue(默认进入 in_progress)
 node src/cli/tm.js issue.create '{
-  "projectId":"proj-1","mode":"light",
+  "projectId":"proj-1",
   "title":"Notion 竞品定价分析","description":"对比 5 个直接竞品的定价层级",
   "priority":"medium","leadAgentId":"agent-self",
   "ownerMemberId":"human-requester-1",
@@ -215,12 +218,12 @@ node src/cli/tm.js issue.deliver      '{"id":"iss-1"}'
 node src/cli/tm.js issue.accept_delivered '{"id":"iss-1","source":"text_card_proxy"}'
 ```
 
-### 2. Lead heavy 模式 Blueprint 编排
+### 2. Lead 编排复杂 Blueprint
 
 ```bash
-# 1) 创建 heavy Issue
+# 1) 创建 Issue
 node src/cli/tm.js issue.create '{
-  "projectId":"proj-1","mode":"heavy","priority":"high",
+  "projectId":"proj-1","priority":"high",
   "title":"季度产品规划","leadAgentId":"agent-self",
   "ownerMemberId":"human-requester-1"
 }'
@@ -302,7 +305,6 @@ node src/cli/tm.js attempt.transition '{
 #    - 多久跑一次 → 转成 5 段 cron（说清时区假设）
 #    - 归属哪个 project
 #    - 到点要做什么 → title / description，尽量把上下文问全
-#    - 轻/重模式（默认 light）
 # 1) 复述确认后创建：leadMemberId=自己，ownerMemberId=对话的人类
 node src/cli/tm.js event-binding.create '{
   "cronExpr":"0 9 * * 1",
@@ -310,8 +312,7 @@ node src/cli/tm.js event-binding.create '{
   "ownerMemberId":"<对话人类的 member id>",
   "projectId":"prj-1",
   "title":"每周清理过期工件",
-  "description":"清理 7 天前的临时工件，输出清理报告",
-  "mode":"light"
+  "description":"清理 7 天前的临时工件，输出清理报告"
 }'
 # 2) 回报结果（binding id + nextTriggerAt）
 ```

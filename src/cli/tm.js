@@ -38,36 +38,6 @@ function pageParams(p) {
   };
 }
 
-// Backward-compat shim for the removed generic transition endpoint. cws-core
-// no longer exposes POST /issues/{id}/transition; map the requested target
-// status onto the corresponding semantic action endpoint. Note `reopened` is
-// an old target name — it now lands the issue in `pending_start` via /reopen.
-function issueTransitionCompat() {
-  const target = params.status ?? params.targetStatus;
-  switch (target) {
-    case 'executing':
-      return post(apiPath(`/issues/${params.id}/start-execution`));
-    case 'delivered':
-      return post(apiPath(`/issues/${params.id}/deliver`));
-    case 'reopened':
-    case 'pending_start':
-      return post(apiPath(`/issues/${params.id}/reopen`));
-    case 'archived':
-      return post(apiPath(`/issues/${params.id}/archive`));
-    case 'accepted':
-      return post(apiPath(`/issues/${params.id}/accept-delivered`), {
-        source: params.source ?? 'explicit',
-      });
-    case 'rejected':
-      return post(apiPath(`/issues/${params.id}/reject-delivered`), {
-        source:           params.source ?? 'explicit',
-        rejection_reason: params.rejectionReason,
-      });
-    default:
-      throw new Error(`issue.transition compatibility shim cannot map target status: ${target}`);
-  }
-}
-
 const COMMANDS = {
   // =========================================================================
   //  PROJECT  (✅ all 7 in contract-v2)
@@ -121,15 +91,14 @@ const COMMANDS = {
   // Flat path, no project prefix.
   'issue.get': () => get(apiPath(`/issues/${params.id}`)),
 
-  // create-issue body: requires title*, mode*, lead_agent_id*; optional
-  // priority (default medium), owner_member_id, origin_conversation_id,
-  // origin_message_id, disposition. Context for the work goes in description
+  // create-issue body: requires title*, lead_agent_id*; optional priority
+  // (default medium), owner_member_id, origin_conversation_id,
+  // origin_message_id, backlog. Context for the work goes in description
   // (natural language) and later in task comments — not in id lists.
   'issue.create': () => post(apiPath(`/projects/${params.projectId}/issues`), {
     title:                  params.title,
     description:            params.description || '',
-    mode:                   params.mode,                  // light|heavy (required)
-    disposition:            params.disposition,           // start|backlog (default: start)
+    backlog:                params.backlog,
     priority:               params.priority,              // low|medium|high (optional, default medium)
     lead_agent_id:          params.leadAgentId,
     owner_member_id:        params.ownerMemberId,
@@ -175,9 +144,7 @@ const COMMANDS = {
     apiPath(`/issues/${params.id}/accept-plan`),
     { source: params.source ?? 'text_card_proxy' },
   ),
-  'issue.start_execution': () => post(apiPath(`/issues/${params.id}/start-execution`)),
   'issue.deliver':         () => post(apiPath(`/issues/${params.id}/deliver`)),
-  'issue.reopen':          () => post(apiPath(`/issues/${params.id}/reopen`)),
   'issue.resume':          () => post(
     apiPath(`/issues/${params.id}/resume`),
     {
@@ -190,17 +157,6 @@ const COMMANDS = {
     apiPath(`/issues/${params.id}/accept-delivered`),
     { source: params.source ?? 'explicit' },
   ),
-  'issue.reject_delivered': () => post(
-    apiPath(`/issues/${params.id}/reject-delivered`),
-    {
-      source:           params.source ?? 'explicit',
-      rejection_reason: params.rejectionReason,
-    },
-  ),
-
-  // Backward-compat alias for older scripts. Prefer the semantic commands
-  // above; cws-core no longer exposes POST /issues/{id}/transition.
-  'issue.transition': issueTransitionCompat,
 
   // Body field is new_owner_member_id (mirrors task.reassign pattern).
   'issue.reassign_owner': () => post(
@@ -212,17 +168,6 @@ const COMMANDS = {
   'issue.move_project': () => post(
     apiPath(`/issues/${params.id}/move`),
     { new_project_id: params.targetProjectId ?? params.newProjectId },
-  ),
-
-  // Compatibility wrapper: POST /issues/{id}/acceptance. Prefer the semantic
-  // issue.accept_delivered / issue.reject_delivered commands for new calls.
-  'issue.set_acceptance': () => post(
-    apiPath(`/issues/${params.id}/acceptance`),
-    {
-      accepted:         params.accepted,
-      source:           params.source ?? 'explicit',
-      rejection_reason: params.rejectionReason,
-    },
   ),
 
   // 提前终止(v0.7): 把一个未结论 Issue 主动停下 → terminated。服务端会级联
@@ -254,7 +199,7 @@ const COMMANDS = {
 
   // create-task path: /projects/{pid}/issues/{iid}/tasks
   // body: { title*, description?, assignee_id?, blueprint_step_id?, depends_on? }
-  // (mode / priority / status are NOT accepted — those live on issue.)
+  // (priority / status are NOT accepted — those live on issue.)
   // depends_on entries MUST be upstream Task ids (task.id). What a task needs
   // goes in description (natural language); upstream deliverables arrive via the
   // upstream task's comments, not a context id list.
@@ -368,17 +313,6 @@ const COMMANDS = {
     { steps: params.steps },
   ),
 
-  // Added 2026-06-05 (cws-core MR !118 / issue #77): BFF proxy to
-  // cws-work BlueprintService.SubmitForApproval. After this returns 200
-  // the parent issue's `current_blueprint_id` points at the submitted
-  // blueprint and issue.status advances `draft → pending_approval` —
-  // the previously-missing transition that left Smoke 2 #6 / Smoke 3
-  // phase 2 forever stuck.
-  'blueprint.submit_for_approval': () => post(
-    apiPath(`/blueprints/${params.blueprintId ?? params.id}/submit-for-approval`),
-    {},
-  ),
-
   // =========================================================================
   //  ATTEMPT  (contract-v2: create / get / list / transition)
   // =========================================================================
@@ -413,7 +347,7 @@ const COMMANDS = {
   // =========================================================================
 
   // create-event-binding body: { cron_expr*, lead_member_id*,
-  // owner_member_id?, spec{ project_id*, title*, description?, mode } }
+  // owner_member_id?, spec{ project_id*, title*, description? } }
   'event-binding.create': () => post(apiPath('/event-bindings'), {
     cron_expr:       params.cronExpr,
     lead_member_id:  params.leadMemberId,
@@ -422,7 +356,6 @@ const COMMANDS = {
       project_id:  params.projectId,
       title:       params.title,
       description: params.description,
-      mode:        params.mode ?? 'light',
     },
   }),
 
@@ -452,25 +385,20 @@ PROJECT  (all ✅ on contract-v2)
 ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{pid}/issues/{id})
   issue.list_in_project  {projectId, status?, priority?, page?, pageSize?, orderBy?}
   issue.get              {id}
-  issue.create           {projectId, title, mode, leadAgentId,
+  issue.create           {projectId, title, leadAgentId,
                           ownerMemberId?, priority?,
                           description?, originConversationId?, originMessageId?,
-                          disposition?}                                      # priority default medium; ownerMemberId defaults to human caller; agent create-by-human must pass it
+                          backlog?}                                          # priority default medium; backlog=true starts in backlog
   issue.update           {id, title?, description?, priority?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
   issue.submit_plan      {id, planText, blueprintId, source?, cardMessageId?}
   issue.accept_plan      {id, source?}                                        # default source=text_card_proxy
-  issue.start_execution  {id}                                                 # legacy execution path
   issue.deliver          {id}
-  issue.reopen           {id}                                                 # legacy rejected → pending_start
-  issue.resume           {id, reason?, source?}                               # feedback → in_progress
+  issue.resume           {id, reason?, source?}                               # human feedback → in_progress
   issue.archive          {id}
   issue.accept_delivered {id, source?}                                        # source: im|explicit|text_card_proxy
-  issue.reject_delivered {id, source?, rejectionReason?}
-  issue.transition       {id, targetStatus (or 'status'), rejectionReason?}    # compatibility shim only
   issue.reassign_owner   {id, newOwnerMemberId (or 'ownerMemberId')}          # change issue owner
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
-  issue.set_acceptance   {id, accepted, source?, rejectionReason?}        # compat wrapper; prefer accept_delivered/resume
   issue.terminate        {id, reason?, source?}                           # 提前终止 → terminated; 级联取消 Task + 发善后事件
 
 TASK  (all ✅ on contract-v2; create uses doubly-nested path)
@@ -493,7 +421,6 @@ BLUEPRINT  (all ✅ on contract-v2)
   blueprint.get                     {id, includeSteps?}
   blueprint.list                    {issueId, page?, pageSize?, orderBy?}
   blueprint.set_steps               {blueprintId (or 'id'), steps[]}             # replaces ALL steps
-  blueprint.submit_for_approval     {blueprintId (or 'id')}                       # legacy approval path; new plan confirmation uses issue.submit_plan
 
 ATTEMPT  (all ✅ on contract-v2)
   attempt.create         {taskId}                                                # attempt_number auto-increments
@@ -504,7 +431,7 @@ ATTEMPT  (all ✅ on contract-v2)
 
 EVENT BINDING  (定时任务 / create-by-agent)
   event-binding.create   {cronExpr, leadMemberId, ownerMemberId, projectId,
-                          title, description?, mode?}                            # agent: leadMemberId=自己, ownerMemberId=对话人类
+                          title, description?}                                   # agent: leadMemberId=自己, ownerMemberId=对话人类
   event-binding.list     {}                                                     # 本 org 的定时任务
   event-binding.get      {id}
   event-binding.delete   {id}                                                   # 停止后续触发, 不影响已生成的 Issue
