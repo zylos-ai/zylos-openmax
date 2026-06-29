@@ -22,6 +22,7 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
   const filePath = path.join(RUNTIME_DIR, `inbox-${orgSlug}.json`);
 
   let ackedSeq = 0;
+  let lastAckedSeq = 0;
   const received = new Set();
   let oldestGapTs = null;
   let persistTimer = null;
@@ -91,8 +92,9 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
   }
 
   function tick() {
-    const advanced = advanceWatermark();
-    if (advanced) {
+    advanceWatermark();
+    if (ackedSeq > lastAckedSeq) {
+      lastAckedSeq = ackedSeq;
       persist();
       if (onAck) onAck(ackedSeq);
     }
@@ -139,7 +141,7 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
   function setAckedSeq(seq) {
     if (typeof seq === 'number' && seq > ackedSeq) {
       ackedSeq = seq;
-      // Prune anything at or below the new watermark
+      lastAckedSeq = seq;
       for (const s of received) {
         if (s <= ackedSeq) received.delete(s);
       }
