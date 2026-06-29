@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.76
+version: 1.0.77
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——

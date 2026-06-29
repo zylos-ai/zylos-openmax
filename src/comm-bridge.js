@@ -1186,6 +1186,16 @@ function handleConfigUpdate(orgConfig, frame) {
       break;
     }
 
+    case 'agent.config.owner_changed': {
+      const { old_owner_member_id: oldOwner, new_owner_member_id: newOwner, changed_by, reason } = data;
+      log(`[${slug}] owner_changed event: ${oldOwner || '(none)'} → ${newOwner || '(none)'} by=${changed_by || '?'} reason=${reason || '?'}`);
+      if (oldOwner) memberOwnerCache.delete(`${orgConfig.org_id}:${oldOwner}`);
+      if (newOwner) memberOwnerCache.delete(`${orgConfig.org_id}:${newOwner}`);
+      syncOwnerFromCore(orgConfig).catch(e =>
+        warn(`[${slug}] owner_changed sync failed: ${e.message}`));
+      return; // skip the access-sync epilogue — owner is not an access field
+    }
+
     default:
       warn(`[${slug}] unknown config event: ${event}`);
       return;
