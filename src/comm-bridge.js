@@ -35,6 +35,7 @@ import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath } from './lib/clie
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
+import { createInboxLedger } from './lib/inbox-ledger.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
 
 const LOG_PREFIX = '[comm-bridge]';
@@ -592,7 +593,7 @@ async function shouldHandleMessage(msg, conv, orgConfig) {
 // Per-org inbound message handler
 // =============================================================================
 
-function makeOrgMessageHandler(orgConfig, sessionRef) {
+function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger) {
   return async function handleIncomingMessage(payload) {
     const notification = payload?.payload || payload;
     const notifId = notification?.id;
@@ -608,6 +609,23 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
     const msg = { ...notification, ...(detail || {}) };
     cacheMessageText(notification.id, msg.content?.body?.text);
+
+    // Inbox-seq ledger: record the inbox_seq for continuous-ack tracking.
+    // Sources (in priority order):
+    //   1. Sync catch-up events: notification.seq IS the inbox seq (from /sync)
+    //   2. GetMessage response: detail.inbox_seq (when cws-comm deploys it)
+    // When absent (WS realtime before server deploys inbox_seq), silently
+    // skip — existing sync logic still works as fallback.
+    const inboxSeq = (notification._via === 'sync' && typeof notification.seq === 'number')
+      ? notification.seq
+      : (detail?.inbox_seq ?? detail?.message?.inbox_seq ?? null);
+    if (inboxLedger && inboxSeq != null) {
+      if (!inboxLedger.record(inboxSeq)) {
+        log(`[ws] [${orgConfig.slug}] msg=${notifId} inbox_seq=${inboxSeq} already recorded, skipping`);
+        return;
+      }
+    }
+
     // get-message envelope nests scalar message fields under `message`; for
     // real-time WS frames the notification already carries sender_id/seq/type
     // at the top level, but sync catch-up frames don't. Hoist them so
@@ -1624,6 +1642,7 @@ function startPeriodicSync() {
 // =============================================================================
 
 const wsClients = [];
+const inboxLedgers = [];
 let liveOrgCount = 0;
 
 // Live per-org config snapshots. `makeOrgMessageHandler` captures the
@@ -1656,7 +1675,27 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     log(`[${orgConfig.slug}] warm-restart: sync_seq=${sessionRef.sync_seq}`);
   }
 
-  const onMessage = makeOrgMessageHandler(orgConfig, sessionRef);
+  // Inbox-seq ledger: continuous-ack watermark + gap detection.
+  // The ledger's acked_seq is seeded from session.sync_seq so it starts at
+  // the same position as the existing sync cursor.
+  const inboxLedger = createInboxLedger(orgConfig.slug, {
+    log: (...a) => log(`[${orgConfig.slug}]`, ...a),
+    onAck: (ackedSeq) => {
+      // Sync the session cursor so reconnect /sync starts from the ledger's
+      // watermark rather than the old sync_seq.
+      sessionRef.sync_seq = ackedSeq;
+      saveOrgSession(orgConfig.slug, { sync_seq: ackedSeq });
+      ackSync(orgConfig, ackedSeq);
+    },
+    onGapSync: (sinceSeq) => {
+      // Gap detected — run /sync to fill missing inbox entries.
+      syncMissedEvents(orgConfig, sessionRef, onMessage);
+    },
+  });
+  if (syncSeq > 0) inboxLedger.setAckedSeq(syncSeq);
+  inboxLedger.start();
+
+  const onMessage = makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger);
   const onFrame = makeOrgFrameDispatcher(orgConfig, onMessage);
 
   const ws = new WsClient({
@@ -1676,8 +1715,11 @@ function startOrgWs(orgConfig, wsBaseUrl) {
       if (!sessionRef.sync_seq) {
         // First-ever connect: initialize sync_seq from current inbox position.
         await initSyncSeq(orgConfig, sessionRef);
+        // Seed ledger from the initialized sync_seq.
+        if (sessionRef.sync_seq) inboxLedger.setAckedSeq(sessionRef.sync_seq);
       } else {
-        // Reconnect: catch up missed events since last sync_seq.
+        // Reconnect: catch up missed events since last sync_seq (which is now
+        // kept fresh by the inbox ledger during online operation).
         syncMissedEvents(orgConfig, sessionRef, onMessage);
       }
     },
@@ -1709,6 +1751,7 @@ function startOrgWs(orgConfig, wsBaseUrl) {
   });
 
   wsClients.push({ slug: orgConfig.slug, ws });
+  inboxLedgers.push(inboxLedger);
   activeOrgConfigs.set(orgConfig.slug, orgConfig);
   liveOrgCount += 1;
   ws.start();
@@ -1805,6 +1848,7 @@ function shutdown(signal) {
   activeReactions.clear();
   Promise.allSettled(removals).then(() => {
     for (const c of wsClients) { try { c.ws.stop(); } catch {} }
+    for (const l of inboxLedgers) { try { l.stop(); } catch {} }
     log('shutdown complete');
     process.exit(0);
   });
