@@ -1,13 +1,13 @@
-# zylos-coco-workspace
+# zylos-openmax
 
-COCO Workspace integration plugin for [Zylos](https://git.coco.xyz/zylos-ai/zylos-core) agents.
+OpenMax integration plugin for [Zylos](https://git.coco.xyz/zylos-ai/zylos-core) agents.
 
 Provides unified IM communication (WebSocket bridge), service CLIs (TM/KB/AS/Comm/Core), and Lead/Worker behavioral lifecycle via progressive skill loading.
 
 ## Quick Start
 
 ```bash
-zylos install coco-workspace
+zylos install openmax
 ```
 
 ## Architecture

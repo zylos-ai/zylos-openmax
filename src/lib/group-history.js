@@ -1,5 +1,5 @@
 /**
- * In-memory + file-backed group message history for coco-workspace.
+ * In-memory + file-backed group message history for openmax.
  *
  * Mirrors zylos-telegram's context.js pattern:
  *   - Every group message (handled or not) is recorded via logAndRecord()
@@ -7,7 +7,7 @@
  *   - ensureReplay() populates memory from log files on cold start
  *   - API fetch is the final fallback (caller's responsibility)
  *
- * Log files: ~/zylos/components/coco-workspace/runtime/group-logs/{conversationId}.log
+ * Log files: ~/zylos/components/openmax/runtime/group-logs/{conversationId}.log
  * Format: NDJSON, one HistoryEntry per line.
  */
 

@@ -33,7 +33,7 @@ const TS = Date.now();
 const NS = `Smoke14-${TS}`;
 const unwrapList = (r) => Array.isArray(r) ? r : (r.items || r.data || r.results || []);
 
-const COMM_CLI = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/comm.js');
+const COMM_CLI = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/comm.js');
 async function comm(cmd, p = {}) {
   const { stdout } = await execp('node', [COMM_CLI, cmd, JSON.stringify(p)], { env: process.env, maxBuffer: 8*1024*1024 });
   const r = JSON.parse(stdout); return r.data ?? r;

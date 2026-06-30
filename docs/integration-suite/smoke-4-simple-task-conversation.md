@@ -6,7 +6,7 @@
 > 这些卡片背后产生的真实状态变更:在「默认项目」下创建问题、产物存进「默认
 > 知识库」、最终 issue 状态进入 closed/accepted 并落到 项目归档 tab。
 >
-> 对照设计:wiki `coco-workspace-v0.5-features-20260524-latest`
+> 对照设计:wiki `openmax-v0.5-features-20260524-latest`
 > 表格行 23–27(对话 · 简单任务 · P0)。
 >
 > **关系**:Smoke 4 是产品语义层的冒烟,**关心 agent 怎么"说"** —— 看
@@ -69,7 +69,7 @@
 | Agent runtime 加载 v0.5 卡片渲染 skill | 否则 Phase 2 / 4 / 6 / 8 的卡片断言会挂 |
 
 > **重要前提**:`smoke-4` 的"卡片"断言假设 agent runtime 已经按 v0.5 设计
-> 在 coco-workspace skill 里实现了 5 张卡片的渲染。如果 agent 这边还是按
+> 在 openmax skill 里实现了 5 张卡片的渲染。如果 agent 这边还是按
 > Smoke 1/2/3 那样发纯文本日志,Smoke 4 会在 Phase 2 卡住直到超时 —— 这
 > **正是**这条用例的价值:它把"会做 tm.js 调用"和"会按 v0.5 UX 说话"
 > 两件事**分开度量**。
@@ -168,7 +168,7 @@ CF_ACCESS_CLIENT_SECRET=<...>
 ## 5. 跑法
 
 ```bash
-cd ~/zylos/workspace/zylos-coco-workspace
+cd ~/zylos/workspace/zylos-openmax
 
 COCO_API_URL=https://cws-int.coco.xyz \
 TEST_USER_TOKEN=<...> \
@@ -195,7 +195,7 @@ node docs/smoke-tests/smoke-4-simple-task-conversation.test.js
 |---|---|---|
 | 指令风格 | 显式列出每一步 tm 调用 | 一段自然语言,让 agent 决策 |
 | 关注 | 状态机正确性 | UX 卡片正确性 + 自动决策正确性 |
-| 卡片渲染 | 不要求 | **要求**(由 coco-workspace v0.5 skill 实现) |
+| 卡片渲染 | 不要求 | **要求**(由 openmax v0.5 skill 实现) |
 | 默认项目/KB 选用 | 必须显式传 | 必须 agent 自动选 |
 | 用户多轮交互 | 0–1 次 | **2 次**(确认 + 验收) |
 | 失败定位 | 通常是 tm/RPC 层 bug | 通常是 prompt / 卡片模板 bug |

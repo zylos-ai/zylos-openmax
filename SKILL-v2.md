@@ -2,7 +2,7 @@
 name: coco-agent
 version: 0.2.0
 description: >-
-  COCO Workspace 统一 Agent 行为 Skill。消息级角色检测 + Lead/Worker
+  OpenMax 统一 Agent 行为 Skill。消息级角色检测 + Lead/Worker
   程序性行为流程 + 决策框架 + 状态机感知。首次行为决策时加载。
 ---
 

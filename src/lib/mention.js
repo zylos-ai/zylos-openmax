@@ -1,5 +1,5 @@
 /**
- * Outbound @-mention resolution for COCO Workspace messages.
+ * Outbound @-mention resolution for OpenMax messages.
  *
  * cws-fe highlights a mention purely client-side: it scans a message's text for
  * `@<participant display_name>` and wraps matches in a highlight chip
@@ -26,7 +26,7 @@ import fs from 'fs';
 import path from 'path';
 
 const HOME = process.env.HOME || '/tmp';
-const REG_PATH = path.join(HOME, 'zylos/components/coco-workspace/mention-registry.json');
+const REG_PATH = path.join(HOME, 'zylos/components/openmax/mention-registry.json');
 
 // Bound the per-conversation name set so a busy group can't grow the file
 // unbounded. LRU-ish: we just cap the number of distinct names retained.

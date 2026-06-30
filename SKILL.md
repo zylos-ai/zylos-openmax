@@ -1,22 +1,22 @@
 ---
-name: coco-workspace
-version: 1.0.78
+name: openmax
+version: 2.0.0
 description: >-
-  COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
+  OpenMax 任务代理 (Guided Autonomy)。凡通过 openmax 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
   确认归属项目 + 知识库 → 登记 Issue→Task（谁执行谁建，Issue owner=发起人）→ 执行 → owner 发起人验收通过才算完成，
   不要跳过流程直接开干。含效率捷径 / 状态机 / 行为护栏 / 记忆触发点。
-  Config at ~/zylos/components/coco-workspace/config.json.
-  Service: pm2 zylos-coco-workspace.
+  Config at ~/zylos/components/openmax/config.json.
+  Service: pm2 zylos-openmax.
 type: communication
 
 lifecycle:
   npm: true
   service:
     type: pm2
-    name: zylos-coco-workspace
+    name: zylos-openmax
     entry: src/comm-bridge.js
-  data_dir: ~/zylos/components/coco-workspace
+  data_dir: ~/zylos/components/openmax
   hooks:
     post-install: hooks/post-install.js
     post-upgrade: hooks/post-upgrade.js
@@ -27,7 +27,7 @@ lifecycle:
     - runtime/
 
 upgrade:
-  repo: gitlab:coco-workspace/zylos-coco-workspace
+  repo: github:zylos-ai/zylos-openmax
   branch: main
 
 config:
@@ -109,14 +109,14 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.submit_plan
 
 ## 服务调用铁律（TM / KB / AS / Comm / Core 一律走 CLI）
 
-**所有 Workspace 服务操作——Issue / Task / Attempt / Blueprint、知识库(KB)、文件(AS)、主动 IM(Comm)、成员/项目/组织查询(Core)——必须通过 coco-workspace 的 CLI 调用：`src/cli/{tm,kb,as,comm,core}.js`。严禁手搓 BFF REST（curl / fetch / 直接拼 HTTP 路径）。**
+**所有 Workspace 服务操作——Issue / Task / Attempt / Blueprint、知识库(KB)、文件(AS)、主动 IM(Comm)、成员/项目/组织查询(Core)——必须通过 openmax 的 CLI 调用：`src/cli/{tm,kb,as,comm,core}.js`。严禁手搓 BFF REST（curl / fetch / 直接拼 HTTP 路径）。**
 
 - **不确定命令/参数时**：先跑 `node src/cli/<svc>.js`（无参看命令清单），或查 `references/<svc>-operations.md`——**不要凭 REST 惯例猜路径**（确切端点/字段以 CLI 与 ops 文档为准）。
 - 这是**硬性约束、不是建议**：绕过 CLI 直连 BFF = 破窗。
 
 ## 任务分类与执行流程
 
-**触发（每条消息都要做）**：凡是通过 coco-workspace 组件收到的用户消息，先判断它**是不是一个"任务"（工作目标）**，而不是简单问答 / 闲聊。
+**触发（每条消息都要做）**：凡是通过 openmax 组件收到的用户消息，先判断它**是不是一个"任务"（工作目标）**，而不是简单问答 / 闲聊。
 
 - **不是任务**（简单问答、闲聊、查询）→ 直接回答，不走下面的流程。
 - **是任务** → 下面两件事**必须立刻做、不得省略，且不因任务"简单"而豁免**：
@@ -160,7 +160,7 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.submit_plan
 7. **产物归档 & 知识沉淀**：Agent 产出 → ArtifactStore；关键文档（报告、方案）沉淀到 KB（`/projects/.../research/`、`/projects/.../deliverables/`）
 8. **交付 & 人类验收闭环**：所有子任务 done → `issue.deliver` 到 **delivered** → **主动请 Issue owner 人类验收**。owner 接受 → 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → **accepted**。owner 不接受 → Lead 继续对话澄清 → `issue.resume` → 重新计划 / 补 Task → `issue.submit_plan` 再次确认
 
-> 说明：以上两条流程对应 coco-workspace 原型「对话」里的两个演示场景（▶ 复杂开发任务 / ▶ 简单研究报告），是产品定义的标准交互路径。
+> 说明：以上两条流程对应 openmax 原型「对话」里的两个演示场景（▶ 复杂开发任务 / ▶ 简单研究报告），是产品定义的标准交互路径。
 
 ## 效率捷径
 

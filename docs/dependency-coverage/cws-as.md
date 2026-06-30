@@ -1,6 +1,6 @@
 # cws-as 依赖接口覆盖清单
 
-本文档列出 **zylos-coco-workspace** 当前依赖的 cws-as HTTP 接口,逐项说明:
+本文档列出 **zylos-openmax** 当前依赖的 cws-as HTTP 接口,逐项说明:
 
 - 该接口在 **cws-as** 中是否已实现
 - 该接口在 **cws-core** 中是否有转发定义
@@ -8,7 +8,7 @@
 - 入参(path + query + body)
 - 出参(响应 body)
 
-依赖端来源:仅 `src/cli/as.js`。coco-workspace 中所有调用 cws-as 的入口都通过 `src/lib/client.js` 的 `asClient()` 走这一个文件。
+依赖端来源:仅 `src/cli/as.js`。openmax 中所有调用 cws-as 的入口都通过 `src/lib/client.js` 的 `asClient()` 走这一个文件。
 
 服务端来源:
 

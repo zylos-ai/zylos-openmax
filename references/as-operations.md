@@ -32,7 +32,7 @@
 CLI 位置:`src/cli/as.js`
 调用方式:`node src/cli/as.js <command> '<json>'`
 
-> `as.js` 在 zylos-coco-workspace 里有**双重角色**:
+> `as.js` 在 zylos-openmax 里有**双重角色**:
 > - 作为 CLI:Agent 显式调用 `node src/cli/as.js <cmd>`
 > - 作为库:`scripts/send.js`、`src/comm-bridge.js`、`src/cli/kb.js` 都从这个文件 `import` `uploadMedia` / `getMediaUrl` / `downloadMedia` —— 仓库**唯一**的上传 / 下载实现入口
 >
@@ -59,7 +59,7 @@ CLI 位置:`src/cli/as.js`
 |---|---|---|
 | **聊天 / 会话里发图、发文件**(用户给 agent / agent 给用户) | **IM 上传** | `as.upload {filePath, conversationId, mediaType:"image"/"file"}` —— **必须带 conversationId** |
 | **归档资料到 KB**(项目交付物、研究笔记附件) | **KB 上传** | `kb.upload {kbId, filePath, parentId?}` 或 `as.upload {filePath, parentId?}` —— **不带 conversationId** |
-| Agent 出站发媒体消息(`scripts/send.js [MEDIA:image]/path`) | **IM 上传**(send.js 内部自动选)| 直接 `c4-send.js coco-workspace "<conv>" "[MEDIA:image]/path"` |
+| Agent 出站发媒体消息(`scripts/send.js [MEDIA:image]/path`) | **IM 上传**(send.js 内部自动选)| 直接 `c4-send.js openmax "<conv>" "[MEDIA:image]/path"` |
 
 ### 服务端路径对照
 
@@ -143,7 +143,7 @@ v5 把上传按"用途"拆成两条并行流,共享同一个 prepare → PUT →
 | --- | --- | --- | --- | --- |
 | ✅ | `as.upload` | 双模上传:有 `conversationId` 走 IM(会话附件),没有走 KB(归档进 KB 树) | `{filePath, conversationId?, parentId?, mediaType?, contentType?, filename?}` | 双模 prepare/finalize(见上面流程图) |
 | ✅ | `as.url` | 拿单个 artifact 的预签名下载 URL(默认 attachment,可选 inline 预览) | `{artifactId\|uri, inline?}` | `POST /api/v1/artifacts/resolve`(取第一条 `download_url`) |
-| ✅ | `as.download` | `as.url` + 字节 GET,下载到 `~/zylos/components/coco-workspace/media/<filename>` | `{artifactId\|uri, filename?}` | `as.url` + 字节下载到本地 |
+| ✅ | `as.download` | `as.url` + 字节 GET,下载到 `~/zylos/components/openmax/media/<filename>` | `{artifactId\|uri, filename?}` | `as.url` + 字节下载到本地 |
 | ✅ | `as.resolve` | 批量解析 `artifact://<id>` URI 数组拿预签名 URL(服务间调用用) | `{uris:["artifact://<id>", ...], inline?}` | `POST /api/v1/artifacts/resolve` |
 
 > **v5 BFF 主动收窄**:旧版 cws-as 直连的 artifact CRUD(`as.list / as.get / as.update / as.delete / as.abort`,对应 `GET\|PATCH\|DELETE /artifacts/{id}` + `POST /artifacts/{id}/abort`)**v5 已经不再通过 cws-core BFF 暴露**——这些端点都返回 404。如果以后要恢复某项能力,要先在 cws-core BFF 加路由再补 CLI。Artifact 字节不可变,正常工作流是 `as.upload` 重新建一条新的,旧的留作历史。
@@ -192,7 +192,7 @@ KB 模式额外带 `nodeId` + `treeNode` 字段。`mediaId` 是 `artifactId` 的
 | `artifactId` / `uri` | string | 必填 |
 | `filename` | string | 落地文件名,默认从 artifact 元数据取 |
 
-返回 `{localPath}`,落到 `~/zylos/components/coco-workspace/media/<filename>`。内部 = `as.url` + 字节 GET。Agent 拿到 `localPath` 即可作为 vision / 文件读取输入。
+返回 `{localPath}`,落到 `~/zylos/components/openmax/media/<filename>`。内部 = `as.url` + 字节 GET。Agent 拿到 `localPath` 即可作为 vision / 文件读取输入。
 
 ### `as.resolve` 详细
 
@@ -210,7 +210,7 @@ node src/cli/as.js as.resolve '{"uris":["artifact://art_y","artifact://art_z"]}'
 ```bash
 # 通过 C4 出站:
 node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js \
-  coco-workspace '<conv-uuid>' '[MEDIA:image]/tmp/chart.png'
+  openmax '<conv-uuid>' '[MEDIA:image]/tmp/chart.png'
 ```
 
 `scripts/send.js` 内部:
@@ -224,7 +224,7 @@ node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js \
 WS 推过来一帧 `{content:{media_id:"art_xyz"}, ...}`,comm-bridge 内部:
 
 1. `as.getMediaUrl("art_xyz")` → `{url:"https://storage.googleapis.com/.../signed?...", expiresAt}`
-2. `as.downloadMedia(url, filename)` → `/home/cocoai/zylos/components/coco-workspace/media/<file>`
+2. `as.downloadMedia(url, filename)` → `/home/cocoai/zylos/components/openmax/media/<file>`
 3. 把本地路径塞进 C4 出站文本里 `---- image: <localPath>` —— Agent 看见 tag 自动调用 vision
 
 ### Agent 主动调用 CLI
@@ -245,7 +245,7 @@ node src/cli/as.js as.url '{"artifactId":"art_..."}'
 
 # 下到本地做分析
 node src/cli/as.js as.download '{"artifactId":"art_..."}'
-# -> {localPath:"/home/cocoai/zylos/components/coco-workspace/media/<filename>"}
+# -> {localPath:"/home/cocoai/zylos/components/openmax/media/<filename>"}
 
 # 批量解析多个 URI(给服务间调用用)
 node src/cli/as.js as.resolve '{"uris":["artifact://art_a","artifact://art_b"]}'

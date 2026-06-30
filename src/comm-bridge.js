@@ -39,7 +39,7 @@ import { createInboxLedger } from './lib/inbox-ledger.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
 
 const LOG_PREFIX = '[comm-bridge]';
-const CHANNEL = 'coco-workspace';
+const CHANNEL = 'openmax';
 
 // Hardcoded message defaults (aligned with zylos-lark). `config.message.*`
 // may override either; if absent, these apply. Operator-edited config.json
@@ -1791,7 +1791,7 @@ if (!config.agent?.api_key) {
 const orgs = enabledOrgs();
 if (orgs.length === 0) {
   warn('no enabled orgs in config.orgs — add at least one org block and restart.');
-  warn('See ~/zylos/components/coco-workspace/config.json (post-install / post-upgrade printed the format).');
+  warn('See ~/zylos/components/openmax/config.json (post-install / post-upgrade printed the format).');
   // Stay alive so PM2 doesn't crash-loop the service; operator just needs to
   // edit config.json and restart.
   setInterval(() => {}, 1 << 30).unref?.();

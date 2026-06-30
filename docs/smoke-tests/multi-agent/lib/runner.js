@@ -169,7 +169,7 @@ export async function getWorkerJwt(env, { force = false } = {}) {
 
 function resolveTmCli() {
   if (process.env.COCO_TM_CLI) return process.env.COCO_TM_CLI;
-  const installed = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/tm.js');
+  const installed = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/tm.js');
   if (fs.existsSync(installed)) return installed;
   const here = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(here, '../../../..', 'src/cli/tm.js');

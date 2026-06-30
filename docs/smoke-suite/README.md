@@ -73,7 +73,7 @@ gate on it.
 (pick per ops preference):
 
 - **post-upgrade hook** (`hooks/post-upgrade.js`): kick off `run-smoke.js` in
-  the background after `zylos upgrade coco-workspace`, report the summary via C4.
+  the background after `zylos upgrade openmax`, report the summary via C4.
 - **scheduler task**: schedule a one-shot smoke run after a deploy event.
 
 Note: multi-agent cases require the WORKER runtime (agent-gavin3) to be online.

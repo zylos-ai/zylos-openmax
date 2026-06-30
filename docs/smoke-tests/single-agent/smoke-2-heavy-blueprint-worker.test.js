@@ -63,7 +63,7 @@ const execp = promisify(execFile);
 
 function resolveKbCli() {
   if (process.env.COCO_KB_CLI) return process.env.COCO_KB_CLI;
-  const installed = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/kb.js');
+  const installed = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/kb.js');
   if (fs.existsSync(installed)) return installed;
   return path.resolve(path.dirname(import.meta.url.replace('file://','')), '../../../src/cli/kb.js');
 }

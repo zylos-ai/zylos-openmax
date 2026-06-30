@@ -1,4 +1,4 @@
-# Smoke Tests — COCO Workspace
+# Smoke Tests — OpenMax
 
 > 端到端冒烟测试目录,按 agent 维度组织。每个子目录是一个独立分类,共享同一套
 > `lib/runner.js` 风格的 NL 驱动 + 卡片体短语校验 + 后端旁路状态比对的三段式架构。
@@ -26,4 +26,4 @@
 - 单 agent 用例:[`single-agent/README.md`](./single-agent/README.md)
 - 多 agent 用例:[`multi-agent/README.md`](./multi-agent/README.md)
 
-设计文档(分类源头):[`cws-deploy/docs/smoke-test-design.md`](https://git.coco.xyz/coco-workspace/cws-deploy/-/blob/main/docs/smoke-test-design.md)
+设计文档(分类源头):[`cws-deploy/docs/smoke-test-design.md`](https://git.coco.xyz/openmax/cws-deploy/-/blob/main/docs/smoke-test-design.md)

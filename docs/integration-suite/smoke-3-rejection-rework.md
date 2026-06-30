@@ -106,7 +106,7 @@ test 脚本直接编排:
 ## 4. 跑法
 
 ```bash
-cd ~/zylos/workspace/zylos-coco-workspace
+cd ~/zylos/workspace/zylos-openmax
 
 # 同 Smoke 1 / 2 的 env vars
 node docs/smoke-tests/smoke-3-rejection-rework.test.js
@@ -208,7 +208,7 @@ node docs/smoke-tests/smoke-3-rejection-rework.test.js
 | Phase 3 抛错但错误码不对 | 状态机抛了 panic / 500 而不是 4xx | 看具体错误响应,理论上应该 409 Conflict 或 400 BadRequest |
 | Phase 2 set_acceptance 没切到 `rejected` | tm.js set_acceptance(false) 路径或入参 schema 漂移 | 看 tm.js cli + cws-core /api/v1/issues/{id}/acceptance contract |
 | Phase 5 多发出来的 task 是又一个 blueprint step | agent 自作主张又建了 blueprint | 看指令是否清楚说"不要重新建 blueprint";看 agent 的 blueprint.create 调用日志 |
-| Phase 5 没收到第二轮指令 | C4 dispatcher 没把第二条消息送给 agent | `pm2 logs zylos-coco-workspace --lines 100` 看 [ws] message frame 是否有第二条 |
+| Phase 5 没收到第二轮指令 | C4 dispatcher 没把第二条消息送给 agent | `pm2 logs zylos-openmax --lines 100` 看 [ws] message frame 是否有第二条 |
 | 整个 issue.status 一直是 `delivered` 没动 | agent 收第二轮指令后只 do nothing | 看 agent 是否在等更多输入;检查 round-2 指令是否清楚提到"状态已被 test client 推到 executing,你接着做" |
 
 ---

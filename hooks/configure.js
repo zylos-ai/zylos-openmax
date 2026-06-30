@@ -2,7 +2,7 @@
 
 /**
  * Configure hook — narrow responsibility: persist the values prompted by
- * `zylos add coco-workspace` into config.json's `server` block. Does NOT
+ * `zylos add openmax` into config.json's `server` block. Does NOT
  * register the agent or seed orgs — those steps belong to the post-install
  * hook so that the interactive (TTY) flow can ask for BYO agent identity
  * and org_ids without being short-circuited by an api_key that this hook
@@ -44,7 +44,7 @@ import path from 'node:path';
 import { DEFAULT_CONFIG } from '../src/lib/config.js';
 
 const HOME = process.env.HOME;
-const DATA_DIR    = path.join(HOME, 'zylos/components/coco-workspace');
+const DATA_DIR    = path.join(HOME, 'zylos/components/openmax');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 
 let raw = '';

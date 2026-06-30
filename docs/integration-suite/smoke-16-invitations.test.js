@@ -33,7 +33,7 @@ const NS = `Smoke16-${TS}`;
 const unwrapList = (r) => Array.isArray(r) ? r : (r.items || r.data || r.results || []);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
-const CORE_CLI = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/core.js');
+const CORE_CLI = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/core.js');
 async function core(cmd, p = {}) {
   const { stdout } = await execp('node', [CORE_CLI, cmd, JSON.stringify(p)], { env: process.env, maxBuffer: 8*1024*1024 });
   const r = JSON.parse(stdout); return r.data ?? r;

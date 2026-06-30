@@ -1,6 +1,6 @@
 # cws-tm 依赖接口覆盖清单(对照 cws-core@contract-v2 转发)
 
-本文档列出 **zylos-coco-workspace** 当前依赖的 TM(Task / Project / Issue / Blueprint / TaskBoard)HTTP 接口,逐项说明:
+本文档列出 **zylos-openmax** 当前依赖的 TM(Task / Project / Issue / Blueprint / TaskBoard)HTTP 接口,逐项说明:
 
 - 该接口在 **cws-core@contract-v2**(最新已 tag 的 forwarding 契约,与 main HEAD `6e73312` 等价)中是否已经定义**转发**到 cws-work
 - 接口干什么(Summary / Description 直接采自 cws-core 的 `huma.Operation` 注册)
@@ -448,6 +448,6 @@ grep -rnE 'Path:\s*"/api' internal/transport/http/{project,issue,task,blueprint,
 tm.js 反向贴一遍:
 
 ```bash
-cd zylos-coco-workspace
+cd zylos-openmax
 grep -nE "apiPath\(" src/cli/tm.js
 ```

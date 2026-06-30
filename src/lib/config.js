@@ -42,7 +42,7 @@ import fs from 'fs';
 import path from 'path';
 
 const HOME = process.env.HOME;
-const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json');
+const CONFIG_PATH = path.join(HOME, 'zylos/components/openmax/config.json');
 
 export const DEFAULT_CONFIG = {
   enabled: true,
@@ -133,10 +133,10 @@ export const DEFAULT_CONFIG = {
   // files don't need to mention them at all.
   //
   // `message.enforceSkillFlow` (boolean, default TRUE) — when on, every inbound
-  // envelope leads with a <coco-workspace> directive telling the agent to load
-  // the coco-workspace skill and run its task flow before handling (enforcement
+  // envelope leads with a <openmax> directive telling the agent to load
+  // the openmax skill and run its task flow before handling (enforcement
   // L1, see SKILL_FLOW_DIRECTIVE in src/lib/message.js). Set to false to suppress
-  // the injected directive (e.g. a bot that never runs the coco-workspace skill).
+  // the injected directive (e.g. a bot that never runs the openmax skill).
 };
 
 let currentConfig = null;

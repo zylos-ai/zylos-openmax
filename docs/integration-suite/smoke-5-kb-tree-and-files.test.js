@@ -36,7 +36,7 @@ const TS = Date.now();
 const NS = `Smoke5-${TS}`;
 
 // -- KB CLI (裁判视角,不让 agent 跑,test client 自己跑只读检查) ---------
-const KB = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/kb.js');
+const KB = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/kb.js');
 async function kb(cmd, p = {}) {
   const { stdout } = await execp('node', [KB, cmd, JSON.stringify(p)], { env: process.env, maxBuffer: 8*1024*1024 });
   const r = JSON.parse(stdout); return r.data || r;

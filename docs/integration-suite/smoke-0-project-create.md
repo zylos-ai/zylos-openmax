@@ -80,7 +80,7 @@ CF_ACCESS_CLIENT_SECRET=<...>        # 同上
 ## 4. 跑法
 
 ```bash
-cd ~/zylos/workspace/zylos-coco-workspace
+cd ~/zylos/workspace/zylos-openmax
 
 COCO_API_URL=https://cws-int.coco.xyz \
 TEST_EMAIL=gavin-test-002@example.com \

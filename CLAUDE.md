@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Development guidelines for zylos-coco-workspace.
+Development guidelines for zylos-openmax.
 
 ## Project Conventions
 

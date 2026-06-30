@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# init-coco-workspace.sh
-# Reads env vars and writes ~/zylos/components/coco-workspace/config.json.
+# init-openmax.sh
+# Reads env vars and writes ~/zylos/components/openmax/config.json.
 # Reentrant: re-running with new env vars updates the matching fields
 # without losing existing org blocks. Does not start the pm2 service —
 # run `pm2 start <skill>/ecosystem.config.cjs` afterwards.
@@ -38,13 +38,13 @@ set -euo pipefail
 CF_ACCESS_CLIENT_ID="${COCO_CF_ACCESS_CLIENT_ID:-}"
 CF_ACCESS_CLIENT_SECRET="${COCO_CF_ACCESS_CLIENT_SECRET:-}"
 
-DATA_DIR="$HOME/zylos/components/coco-workspace"
-SKILL_DIR="$HOME/zylos/.claude/skills/coco-workspace"
+DATA_DIR="$HOME/zylos/components/openmax"
+SKILL_DIR="$HOME/zylos/.claude/skills/openmax"
 CONFIG="$DATA_DIR/config.json"
 mkdir -p "$DATA_DIR"
 
 # -------- prereqs --------
-[[ -d "$SKILL_DIR" ]] || { echo "✗ skill not installed at $SKILL_DIR (install zylos-coco-workspace first)"; exit 1; }
+[[ -d "$SKILL_DIR" ]] || { echo "✗ skill not installed at $SKILL_DIR (install zylos-openmax first)"; exit 1; }
 command -v node >/dev/null || { echo "✗ node not on PATH"; exit 1; }
 
 # -------- required env --------
@@ -161,4 +161,4 @@ echo
 echo "Done. Config written to $CONFIG"
 echo "Start the service manually when ready:"
 echo "  pm2 start $SKILL_DIR/ecosystem.config.cjs"
-echo "  pm2 logs zylos-coco-workspace --lines 30"
+echo "  pm2 logs zylos-openmax --lines 30"

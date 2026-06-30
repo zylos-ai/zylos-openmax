@@ -42,7 +42,7 @@ import { loadConfig, resolveDefaultOrgId, updateConfig } from './config.js';
 import { cfAccessHeaders } from './cf-access.js';
 
 const HOME = process.env.HOME || '/tmp';
-const TOKEN_DIR = path.join(HOME, 'zylos/components/coco-workspace/runtime/tokens');
+const TOKEN_DIR = path.join(HOME, 'zylos/components/openmax/runtime/tokens');
 const REFRESH_MARGIN_MS = 60_000;   // refresh when <60 s remain on access_token
 
 const LOG = '[token]';

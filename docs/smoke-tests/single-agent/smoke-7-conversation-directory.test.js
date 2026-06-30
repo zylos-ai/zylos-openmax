@@ -29,7 +29,7 @@ const env = {
 process.env.COCO_AUTH_TOKEN = env.COCO_AUTH_TOKEN;
 process.env.COCO_RPC_LOG = '0';
 
-const SKILL_BIN = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli');
+const SKILL_BIN = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli');
 async function cli(bin, cmd, p = {}) {
   const { stdout } = await execp('node', [path.join(SKILL_BIN, bin), cmd, JSON.stringify(p)], { env: process.env, maxBuffer: 8*1024*1024 });
   const r = JSON.parse(stdout); return r.data || r;

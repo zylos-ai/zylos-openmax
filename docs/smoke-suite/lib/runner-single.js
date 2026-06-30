@@ -10,7 +10,7 @@
 //      (top-level `type`, single `content` object with `content_type` + body
 //      object + attachments array). The older draft posted the deprecated
 //      `{content: [{type, body}], reply_to}` shape that cws-core now 422s
-//      against (see zylos-coco-workspace MR !31).
+//      against (see zylos-openmax MR !31).
 //
 //   2. sendInstruction injects CF-Access-Client-Id / CF-Access-Client-Secret
 //      headers when the cws-int gateway is fronted by Cloudflare Access. The
@@ -19,8 +19,8 @@
 //      so this runner also works against a plain (non-CF) deployment.
 //
 //   3. tm() shells out to a real tm.js binary. By default it points at the
-//      installed coco-workspace skill copy
-//      (~/zylos/.claude/skills/coco-workspace/src/cli/tm.js) because that
+//      installed openmax skill copy
+//      (~/zylos/.claude/skills/openmax/src/cli/tm.js) because that
 //      copy carries the cf-access.js + multi-org client wiring agents use in
 //      production. The repo-local copy is wired identically on main now, so
 //      either works; override with COCO_TM_CLI when needed.
@@ -87,7 +87,7 @@ export function loadEnv() {
 
 function resolveTmCli() {
   if (process.env.COCO_TM_CLI) return process.env.COCO_TM_CLI;
-  const installed = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/tm.js');
+  const installed = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/tm.js');
   if (fs.existsSync(installed)) return installed;
   // fallback to repo-local (this file lives at
   // docs/smoke-tests/single-agent/lib/runner.js, so REPO_ROOT is four levels up)

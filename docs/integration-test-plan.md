@@ -1,11 +1,11 @@
 # 集成测试方案
 
-coco-workspace · cws-core · cws-work · cws-comm · cws-kb · comm-kb 跨服务集成测试方案。
+openmax · cws-core · cws-work · cws-comm · cws-kb · comm-kb 跨服务集成测试方案。
 
 ## 1. 服务拓扑
 
 ```
-Client (coco-workspace / cws-fe)
+Client (openmax / cws-fe)
    │  HTTPS REST + WSS
    ▼
 cws-core (:8080)  ── 唯一外部网关，JWT 鉴权，路由代理

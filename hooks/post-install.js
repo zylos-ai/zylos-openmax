@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Post-install hook for zylos-coco-workspace.
+ * Post-install hook for zylos-openmax.
  *
  * Two modes, picked by whether stdin is a TTY:
  *
@@ -66,7 +66,7 @@ import readline from 'readline';
 import { DEFAULT_CONFIG } from '../src/lib/config.js';
 
 const HOME = process.env.HOME;
-const DATA_DIR    = path.join(HOME, 'zylos/components/coco-workspace');
+const DATA_DIR    = path.join(HOME, 'zylos/components/openmax');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 
 // CF-Access headers for install-time calls (e.g. /auth/register/agent). Read
@@ -85,7 +85,7 @@ function cfAccessHeaders() {
 const isInteractive = process.stdin.isTTY === true;
 
 // Path selection — gated on COCO_API_KEY (borrowing the env-var keys from
-// scripts/init-coco-workspace.sh):
+// scripts/init-openmax.sh):
 //   - COCO_API_KEY present → take EVERYTHING from env and write config, no
 //     prompts (even on a TTY). The non-interactive block below already reads
 //     all values from env.
@@ -105,7 +105,7 @@ function ask(question) {
   });
 }
 
-console.log('[install] zylos-coco-workspace');
+console.log('[install] zylos-openmax');
 
 for (const d of ['logs', 'media', 'runtime', 'runtime/tokens']) {
   fs.mkdirSync(path.join(DATA_DIR, d), { recursive: true });
@@ -218,7 +218,7 @@ function deriveWsUrl(bffUrl) {
 if (!useEnvPath) {
   console.log('');
   console.log('========================================');
-  console.log('  COCO Workspace — initial setup');
+  console.log('  OpenMax — initial setup');
   console.log('========================================');
 
   // Step 1: endpoints
@@ -447,5 +447,5 @@ if (isInteractive) {
   console.log('');
   console.log('Next steps:');
   console.log('  - Start the service:  pm2 start ecosystem.config.cjs');
-  console.log('  - Watch the bootstrap: pm2 logs zylos-coco-workspace --lines 50');
+  console.log('  - Watch the bootstrap: pm2 logs zylos-openmax --lines 50');
 }

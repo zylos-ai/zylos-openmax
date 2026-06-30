@@ -43,7 +43,7 @@
 |---|---|
 | 测试 Org 默认 KB(`TEST_DEFAULT_KB_ID`)已 init | tree 操作前置 |
 | `TEST_CONV_ID` user ↔ agent DM 已存在 | 3 轮 NL 走它 |
-| Agent runtime 在线,coco-workspace skill 已加载 KB 操作能力 | 否则 Phase 2 就 timeout |
+| Agent runtime 在线,openmax skill 已加载 KB 操作能力 | 否则 Phase 2 就 timeout |
 
 ### Env
 

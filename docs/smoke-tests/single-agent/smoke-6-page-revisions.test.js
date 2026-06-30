@@ -33,7 +33,7 @@ process.env.COCO_RPC_LOG = '0';
 const TS = Date.now();
 const NS = `Smoke6-${TS}`;
 
-const KB = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/kb.js');
+const KB = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/kb.js');
 async function kb(cmd, p = {}) {
   const { stdout } = await execp('node', [KB, cmd, JSON.stringify(p)], { env: process.env, maxBuffer: 8*1024*1024 });
   const r = JSON.parse(stdout); return r.data || r;

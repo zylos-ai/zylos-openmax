@@ -2,7 +2,7 @@
 
 /**
  * ArtifactStore — canonical interface for all file upload / download in
- * zylos-coco-workspace. Talks to cws-core (contract-v5).
+ * zylos-openmax. Talks to cws-core (contract-v5).
  *
  * v5 collapsed the old cws-as endpoints. The only artifact API that
  * remains is:
@@ -53,7 +53,7 @@ import { fileURLToPath } from 'url';
 import { post, apiPath, putBytes, getBytes } from '../lib/client.js';
 
 const HOME = process.env.HOME || '/tmp';
-const TMP_DIR = path.join(HOME, 'zylos/components/coco-workspace/media');
+const TMP_DIR = path.join(HOME, 'zylos/components/openmax/media');
 
 const MIME_BY_KIND = {
   image:   'image/png',

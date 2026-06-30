@@ -6,7 +6,7 @@
  * a single file keyed by org slug so warm-restarts can resume each
  * org's stream without re-syncing the full backlog.
  *
- * File: ~/zylos/components/coco-workspace/runtime/session.json
+ * File: ~/zylos/components/openmax/runtime/session.json
  *
  * Schema:
  *   {
@@ -24,7 +24,7 @@ import fs from 'fs';
 import path from 'path';
 
 const HOME = process.env.HOME || '/tmp';
-const RUNTIME_DIR = path.join(HOME, 'zylos/components/coco-workspace/runtime');
+const RUNTIME_DIR = path.join(HOME, 'zylos/components/openmax/runtime');
 const SESSION_PATH = path.join(RUNTIME_DIR, 'session.json');
 
 function readAll() {

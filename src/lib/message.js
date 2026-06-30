@@ -38,11 +38,11 @@ const VALID_TYPES = new Set(['dm', 'group', 'thread']);
 // (config.message.enforceSkillFlow, default true). Placed post-user-content
 // (not as a leading namespace-style tag) on purpose: recency + co-location with
 // the actual ask maximize the chance the agent acts on it, whereas a leading
-// `<coco-workspace>` envelope tends to be read as ignorable metadata and skipped.
-// The rule travels with the component: upgrade coco-workspace → every inbound
+// `<openmax>` envelope tends to be read as ignorable metadata and skipped.
+// The rule travels with the component: upgrade openmax → every inbound
 // human task is forced through the skill flow, with no per-bot instruction edits.
 const SKILL_FLOW_DIRECTIVE =
-`[SYSTEM · DO FIRST] If the above is a task from a human (do-it-for-me / review / analyze / develop / integrate / research — anything that produces a deliverable): you MUST follow the coco-workspace skill — register Issue→Blueprint→Task and run the plan-confirmation flow before acting. Simple tasks use a one-step Blueprint; complex tasks use a multi-step / dependency Blueprint. Do NOT answer it as casual chat. Only pure Q&A / chit-chat may be answered directly. The skill is the source of truth.`;
+`[SYSTEM · DO FIRST] If the above is a task from a human (do-it-for-me / review / analyze / develop / integrate / research — anything that produces a deliverable): you MUST follow the openmax skill — register Issue→Blueprint→Task and run the plan-confirmation flow before acting. Simple tasks use a one-step Blueprint; complex tasks use a multi-step / dependency Blueprint. Do NOT answer it as casual chat. Only pure Q&A / chit-chat may be answered directly. The skill is the source of truth.`;
 
 /**
  * Generate a client-side idempotency key for SendMessageRequest.client_msg_id.

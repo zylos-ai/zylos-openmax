@@ -17,7 +17,7 @@ import fs from 'fs';
 import path from 'path';
 
 const HOME = process.env.HOME;
-const MAP_PATH = path.join(HOME, 'zylos/components/coco-workspace/runtime/conv-org-map.json');
+const MAP_PATH = path.join(HOME, 'zylos/components/openmax/runtime/conv-org-map.json');
 
 const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 

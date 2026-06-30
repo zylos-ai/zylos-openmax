@@ -1,6 +1,6 @@
 # cws-kb 依赖接口覆盖清单
 
-本文档列出 **zylos-coco-workspace** 当前依赖的 cws-kb HTTP 接口,逐项说明:
+本文档列出 **zylos-openmax** 当前依赖的 cws-kb HTTP 接口,逐项说明:
 
 - 该接口在 **cws-kb** 中是否已实现
 - 该接口在 **cws-core** 中是否有转发定义
@@ -8,7 +8,7 @@
 - 入参(path + query + body / header)
 - 出参(响应 body)
 
-依赖端来源:仅 `src/cli/kb.js`。coco-workspace 中所有调用 cws-kb 的入口都通过 `src/lib/client.js` 的 `kbClient()` 走这一个文件。
+依赖端来源:仅 `src/cli/kb.js`。openmax 中所有调用 cws-kb 的入口都通过 `src/lib/client.js` 的 `kbClient()` 走这一个文件。
 
 服务端来源:
 
@@ -85,7 +85,7 @@
 - **cws-kb 侧** 28/28 全部实现。
 - **cws-core 侧** 0/28 —— `grep -rn "kbs\|/pages\|/tree\|/relations\|/search/pages" cws-core/` 0 命中,没有 handler、没有 proxy、router 也没注册。
 
-cws-kb 还暴露但 **coco-workspace 没用** 的接口(供后续参考):
+cws-kb 还暴露但 **openmax 没用** 的接口(供后续参考):
 
 - `GET /api/v1/orgs/{org_id}/tree` —— 全树嵌套 JSON
 - `POST /api/v1/orgs/{org_id}/pages/{page_id}/freeze` —— 冻结页

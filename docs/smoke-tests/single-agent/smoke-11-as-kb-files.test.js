@@ -38,8 +38,8 @@ const KB_ID = env.TEST_DEFAULT_KB_ID;
 const unwrapList = (r) => Array.isArray(r) ? r : (r.items || r.data || r.results || []);
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
-const KB_CLI = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/kb.js');
-const AS_CLI = path.join(os.homedir(), 'zylos/.claude/skills/coco-workspace/src/cli/as.js');
+const KB_CLI = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/kb.js');
+const AS_CLI = path.join(os.homedir(), 'zylos/.claude/skills/openmax/src/cli/as.js');
 async function runCli(cli, cmd, p = {}) {
   const { stdout } = await execp('node', [cli, cmd, JSON.stringify(p)], { env: process.env, maxBuffer: 8*1024*1024 });
   const r = JSON.parse(stdout); return r.data ?? r;

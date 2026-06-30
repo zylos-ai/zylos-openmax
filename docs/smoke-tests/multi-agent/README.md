@@ -1,6 +1,6 @@
 # Smoke Tests — Multi Agent (NL-driven, user-invisible)
 
-> 多 agent runtime 端到端冒烟测试。两个真 agent 都跑各自的 zylos-coco-workspace runtime,**测试客户端只触发一次 user → LEAD 的自然语言**,之后 LEAD 自主通过跟 WORKER 的 bot↔bot DM 协调完成整个生命周期 — user 全程不感知中间步骤。runner 不查 agent 内部状态,只轮服务端真实状态 + 检查 bot DM 里双向 agent_text 消息证明做断言。
+> 多 agent runtime 端到端冒烟测试。两个真 agent 都跑各自的 zylos-openmax runtime,**测试客户端只触发一次 user → LEAD 的自然语言**,之后 LEAD 自主通过跟 WORKER 的 bot↔bot DM 协调完成整个生命周期 — user 全程不感知中间步骤。runner 不查 agent 内部状态,只轮服务端真实状态 + 检查 bot DM 里双向 agent_text 消息证明做断言。
 
 ## 范式演进
 
@@ -67,11 +67,11 @@ export TEST_USER_TOKEN=<owner JWT,用来代表用户向两个 conv 发消息>
 export TEST_ORG_ID=<目标 org uuid>
 export TEST_PROJECT_ID=<smoke 跑在哪个 project>
 
-# Lead agent (本机 zylos-coco-workspace runtime)
+# Lead agent (本机 zylos-openmax runtime)
 export TEST_CONV_ID=<lead 与 user 的 DM conv id>
 export TEST_AGENT_ID=<lead agent member_id>
 
-# Worker agent (另一台服务器上的 zylos-coco-workspace runtime)
+# Worker agent (另一台服务器上的 zylos-openmax runtime)
 export TEST_WORKER_CONV_ID=<worker 与 user 的 DM conv id (仅历史保留,v2 已不再用)>
 export TEST_WORKER_API_KEY=<worker cwsk_... — runner 用它换 JWT,member_id 从 JWT claims 取>
 
@@ -87,7 +87,7 @@ export CF_ACCESS_CLIENT_SECRET=...
 ## 跑
 
 ```bash
-cd ~/zylos/workspace/zylos-coco-workspace
+cd ~/zylos/workspace/zylos-openmax
 source .env.smoke-multi-agent.local       # TEST_USER_TOKEN 15min TTL,跑多个 case 之前重新签发
 
 # 正向
@@ -109,7 +109,7 @@ NL 单 case 跑时长 3-7 分钟(双 agent NL 各处理一次或多次)。smoke-
 
 ## 设计来源
 
-[`cws-deploy/docs/smoke-test-design.md`](https://git.coco.xyz/coco-workspace/cws-deploy/-/blob/main/docs/smoke-test-design.md) § **Smoke 2: Heavy 多 Agent 编排** 是 case 2 的源,case 3-5 在 v2 PR 中扩,case 6-11 在 expanded-cases PR 中扩。
+[`cws-deploy/docs/smoke-test-design.md`](https://git.coco.xyz/openmax/cws-deploy/-/blob/main/docs/smoke-test-design.md) § **Smoke 2: Heavy 多 Agent 编排** 是 case 2 的源,case 3-5 在 v2 PR 中扩,case 6-11 在 expanded-cases PR 中扩。
 
 ## 已知服务端依赖
 

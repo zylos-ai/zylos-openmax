@@ -1,7 +1,7 @@
 # Smoke 1 — Light 单 Agent 全生命周期(基线)
 
 > **验证目标**:用户经 IM(WS 链路)给 agent 下达自然语言指令,agent
-> **完全自主决策**调用 zylos-coco-workspace 的 tm.js 完成 Light Issue 的
+> **完全自主决策**调用 zylos-openmax 的 tm.js 完成 Light Issue 的
 > 最简生命周期(创建直达 `executing` → 自做 task 跑到 attempt done →
 > task done → issue delivered → `set_acceptance(accepted=true)` → 终态
 > `accepted`)。测试 client 只负责**触发指令**与**外部断言 TM 状态**,
@@ -105,7 +105,7 @@ CF_ACCESS_CLIENT_SECRET=<...>        # 同上
 ## 4. 跑法
 
 ```bash
-cd ~/zylos/workspace/zylos-coco-workspace
+cd ~/zylos/workspace/zylos-openmax
 
 export COCO_API_URL=https://cws-int.coco.xyz
 export TEST_USER_TOKEN=<test user bearer>
@@ -174,7 +174,7 @@ node docs/smoke-tests/smoke-1-light-single-agent.test.js
 | `sendInstruction HTTP 302 / Location: cloudflareaccess` | 缺 CF Access 头 | 设 `CF_ACCESS_CLIENT_ID` + `CF_ACCESS_CLIENT_SECRET` |
 | `sendInstruction HTTP 422 ... expected required property type` | runner 被改回了旧 cws-core schema | 对齐 `runner.js:sendInstruction` 的 body 形状 |
 | `sendInstruction HTTP 401/403` | `TEST_USER_TOKEN` 失效 | 重 `/auth/login` 拿新 token |
-| `waitForCompletion timed out` | agent 没收到 / 卡某一步 | runner 自动 dump 最后观测;另看 `pm2 logs zylos-coco-workspace` |
+| `waitForCompletion timed out` | agent 没收到 / 卡某一步 | runner 自动 dump 最后观测;另看 `pm2 logs zylos-openmax` |
 | `firstObservedStatus ≠ executing` | TM 在 light 模式下也插了 draft 中转态 | 查 `cws-work` issue 状态机定义 |
 | `acceptance_source ≠ explicit` | agent 没传 source 或传错值 | 看 agent 调用 `issue.set_acceptance` 时的 params(指令明确要求 `source=explicit`) |
 | `task.blueprint_step_id ≠ null` | agent 自作主张建了 blueprint | 看指令是否清楚说了"不要 blueprint" |

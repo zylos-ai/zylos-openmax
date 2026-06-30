@@ -58,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **fix(comm-bridge): sync 游标修正 + dedup 加固 — 根治消息重放** (Issue #8ffdac40)。cws-comm 有两套独立 seq：per-conversation 消息 seq 和 per-user org-wide inbox seq。sync API 期望 inbox seq 但 coco-workspace 一直存 per-conversation 的消息 seq 作为 `last_seq`，导致重启后游标指向错误位置，拉回大量已处理消息。改动：
+- **fix(comm-bridge): sync 游标修正 + dedup 加固 — 根治消息重放** (Issue #8ffdac40)。cws-comm 有两套独立 seq：per-conversation 消息 seq 和 per-user org-wide inbox seq。sync API 期望 inbox seq 但 openmax 一直存 per-conversation 的消息 seq 作为 `last_seq`，导致重启后游标指向错误位置，拉回大量已处理消息。改动：
   - **P0**: 新增 `sync_seq` 字段（inbox seq）替代 `last_seq`；`syncMissedEvents` 只从 sync response 的 `ev.seq` 更新游标，不再被实时 WS 消息的 per-conversation seq 污染；首次连接通过 `initSyncSeq` 初始化游标位置
   - **P1**: dedup 窗口 500→3000（覆盖 SYNC_MAX_EVENTS 的 1.5×）
   - **P2**: 新增 `ackSync` — sync 完成后向 cws-comm 确认已处理的最高 seq
@@ -214,14 +214,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manually present in `dmAllowFrom`. The group branch already had an owner
   exemption (`senderIsOwner && mentioned`); the DM branch did not. Added a
   `dm:owner-exempt` short-circuit at the top of the DM branch to mirror it.
-  Matches KB "CWS Issue 汇总 — 2026-06-09" #34 (GitLab coco-workspace #81).
+  Matches KB "CWS Issue 汇总 — 2026-06-09" #34 (GitLab openmax #81).
   The auto-bind path (first-ever DM under `owner` policy with no bound owner)
   is unchanged.
 
 ## [1.0.17] - 2026-06-11
 
 ### Changed
-- **Reworked the skill-flow injection: moved from a leading `<coco-workspace>`
+- **Reworked the skill-flow injection: moved from a leading `<openmax>`
   tag to an imperative directive placed INSIDE `<current-message>`, right after
   the user's words** (`src/lib/message.js`). Motivation: a leading
   component-named XML tag tends to be read as ignorable envelope/metadata
@@ -283,10 +283,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DAG of an issue from the start (what's running / waiting / blocked). Documents
   the board semantic: **待办 = planned-but-dependency-blocked steps**, not
   not-yet-decomposed steps. Added a matching row to the 常见错误 table.
-- **Renamed the skill from `coco-agent` to `coco-workspace`** for naming
+- **Renamed the skill from `coco-agent` to `openmax`** for naming
   consistency — frontmatter `name`, and the per-message injected directive tag
-  `<coco-agent>` → `<coco-workspace>` (src/lib/message.js; directive body
-  already referenced "coco-workspace skill"). No code parses the tag literally,
+  `<coco-agent>` → `<openmax>` (src/lib/message.js; directive body
+  already referenced "openmax skill"). No code parses the tag literally,
   so the rename is behavior-neutral.
 - **Trimmed redundant skill text (conservative dedup; 3-layer reinforcement
   structure kept):** removed the redundant "强制加载提示" note (enforcement lives
@@ -335,7 +335,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **post-install now gates env-vs-interactive on `COCO_API_KEY`.** Previously the
   hook chose its path purely by TTY (interactive on a terminal, env-driven
   without one). Now: if `COCO_API_KEY` has a value, the hook takes **everything**
-  from env vars (borrowing the same env keys as `scripts/init-coco-workspace.sh`:
+  from env vars (borrowing the same env keys as `scripts/init-openmax.sh`:
   `COCO_BFF_URL` / `COCO_WS_URL` / `COCO_IDENTITY_ID` / `COCO_MEMBER_ID` /
   `COCO_ORG_ID` / `COCO_ORG_NAME` / `COCO_OWNER_*` / `COCO_SELF_NAME` /
   `COCO_CF_ACCESS_*`) and writes config with **no prompts — even on a TTY**.
@@ -389,7 +389,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set_acceptance/archive; bidirectional DM-permission check before cross-agent
   dispatch. The block is deliberately terse (a pointer, not the full skill) to
   keep per-message token cost minimal. The rule **travels with the component**:
-  upgrading coco-workspace on any bot auto-applies it, no per-bot instruction
+  upgrading openmax on any bot auto-applies it, no per-bot instruction
   edits. Toggle off via `config.message.enforceSkillFlow = false`. Note: still
   strong guidance, not a hard gate — a true 100% gate needs server-side
   enforcement at task intake (cws-core). Revives the approach from PR #18
@@ -426,7 +426,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signal the model uses to decide whether to load a skill, and it's **always in
   context** (auto-discovered, prompt-cached) and **travels with the component**
   (no per-bot CLAUDE.md edits). It now says: any message received via
-  coco-workspace → before handling a task, **must load and obey this skill** →
+  openmax → before handling a task, **must load and obey this skill** →
   judge task vs. chat; if a task, run the full flow (confirm project + KB →
   register Issue→Task [whoever executes creates it] → execute → initiator
   acceptance before completion/archive). Cost: the full skill loads at most once
@@ -638,10 +638,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **`forwardToC4` was calling `c4-receive.js` with positional args
   (`<channel> <endpoint> <body>`), which `c4-receive.js` now rejects with
-  `Error: Unexpected argument: coco-workspace`.** The comm-bridge interface
+  `Error: Unexpected argument: openmax`.** The comm-bridge interface
   switched to named flags (`--channel` / `--endpoint` / `--content` /
   `--json`) and zylos-telegram / zylos-lark already use the new form;
-  zylos-coco-workspace never followed. The breakage was masked until
+  zylos-openmax never followed. The breakage was masked until
   v0.3.7 because the case-sensitivity bug in `shouldHandleMessage` was
   dropping every inbound DM before it ever reached the C4 forward step.
   - Switched `forwardToC4` to the named-flag form
@@ -788,9 +788,9 @@ whether to add it.
 
 ### Migration
 - If you upgraded to v0.3.2 and the auto-register fired against your will,
-  your `~/zylos/components/coco-workspace/config.json` already holds the
+  your `~/zylos/components/openmax/config.json` already holds the
   unintended `agent.identity_id` + `api_key`. Two ways to recover:
-  1. Delete config.json and re-run `zylos add coco-workspace`. The BYO
+  1. Delete config.json and re-run `zylos add openmax`. The BYO
      prompt will fire correctly under v0.3.3+.
   2. Manually replace `config.agent.{identity_id, api_key}` with the values
      from your pre-provisioned agent, then set
@@ -906,7 +906,7 @@ whether to add it.
   hits the self-echo / @-mention filter. Failures are non-fatal — the WS
   urlProvider retries through the usual backoff loop.
 - **Structured bootstrap logs** with `[install] / [bootstrap] / [token] /
-  [ticket] / [ws]` prefixes; visible via `pm2 logs zylos-coco-workspace`.
+  [ticket] / [ws]` prefixes; visible via `pm2 logs zylos-openmax`.
 
 ### Changed
 - Registration failure during install is now a **hard failure** (exit 1,
@@ -928,18 +928,18 @@ whether to add it.
 
 ### Added
 - `SKILL.md` frontmatter now declares the full lifecycle (modeled after
-  `zylos-lark`), so `zylos add coco-workspace` drives the install
+  `zylos-lark`), so `zylos add openmax` drives the install
   end-to-end instead of stopping after download + register:
   - `type: communication`
   - `lifecycle.npm: true` → triggers `npm install --omit=dev`
   - `lifecycle.service.{type, name, entry}` → registers
-    `pm2 zylos-coco-workspace` pointing at `src/comm-bridge.js`
+    `pm2 zylos-openmax` pointing at `src/comm-bridge.js`
   - `lifecycle.hooks.{post-install, post-upgrade, configure}` → wires
     the three hooks already in `hooks/`
   - `lifecycle.preserve: [config.json, logs/, runtime/]` → upgrade-safe
     fields
   - `lifecycle.data_dir` → declares the data root path explicitly
-  - `upgrade.{repo, branch}` → `gitlab:coco-workspace/zylos-coco-workspace`
+  - `upgrade.{repo, branch}` → `gitlab:openmax/zylos-openmax`
     on `main` (works with the existing zylos-core local patch that maps
     `gitlab:` repos to git.coco.xyz tarballs)
   - `config.required` → five fields (`COCO_BFF_URL`, `COCO_AGENT_TICKET`
@@ -956,14 +956,14 @@ whether to add it.
 ### Behaviour after this version
 
 ```
-zylos add coco-workspace --branch main
+zylos add openmax --branch main
   → download from gitlab
   → npm install --omit=dev
   → prompt operator for 5 config fields
   → run hooks/configure.js (writes config.json via post-install)
   → run hooks/post-install.js again (idempotent no-op — api_key already
     set so registration is skipped)
-  → start pm2 zylos-coco-workspace
+  → start pm2 zylos-openmax
 ```
 
 ## [0.2.4] - 2026-06-02

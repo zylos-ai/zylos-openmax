@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Post-upgrade hook for zylos-coco-workspace.
+ * Post-upgrade hook for zylos-openmax.
  *
  * Handles the v0.3 → v0.4 (multi-org) schema migration:
  *   - top-level `workspace_id`                  → DROPPED
@@ -32,7 +32,7 @@ import fs from 'fs';
 import path from 'path';
 
 const HOME = process.env.HOME;
-const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json');
+const CONFIG_PATH = path.join(HOME, 'zylos/components/openmax/config.json');
 
 let raw = '';
 try {
@@ -280,7 +280,7 @@ if (legacyKeysSeen.length > 0) {
   console.log('    4. orgs.<slug>.owner — set on first DM under dmPolicy=owner (auto-bind);');
   console.log('       empty owner.member_id == unbound.');
   console.log('');
-  console.log('  Service must be restarted after editing:  pm2 restart zylos-coco-workspace');
+  console.log('  Service must be restarted after editing:  pm2 restart zylos-openmax');
 } else {
   console.log('[post-upgrade] config.json already on multi-org schema — nothing to migrate.');
 }

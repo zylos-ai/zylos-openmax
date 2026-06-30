@@ -26,13 +26,13 @@ import path from 'node:path';
 // Smoke fixtures (CF-Access service token, test-user passwords, org/project)
 // are NOT hardcoded in source. They live in a default config file at the same
 // level as the runtime config.json:
-//     ~/zylos/components/coco-workspace/smoke-config.json
+//     ~/zylos/components/openmax/smoke-config.json
 // (override the path with SMOKE_CONFIG_PATH). A committed template with the
 // expected shape lives at docs/smoke/smoke-config.example.json. Individual
 // fields can still be overridden by env (COCO_API_URL, CF_ACCESS_CLIENT_ID /
 // CF_ACCESS_CLIENT_SECRET, SMOKE_ORG_ID, SMOKE_PROJECT_ID, SMOKE_USER).
 const SMOKE_CONFIG_PATH = process.env.SMOKE_CONFIG_PATH
-  || path.join(process.env.HOME || '', 'zylos/components/coco-workspace/smoke-config.json');
+  || path.join(process.env.HOME || '', 'zylos/components/openmax/smoke-config.json');
 
 function loadSmokeFile() {
   try { return JSON.parse(fs.readFileSync(SMOKE_CONFIG_PATH, 'utf8')); }
@@ -72,12 +72,12 @@ function decodeJwt(tok) {
   catch { return {}; }
 }
 
-// Resolve "self" — the bot running this suite — from the coco-workspace runtime
+// Resolve "self" — the bot running this suite — from the openmax runtime
 // config. This is the LEAD: whoever is told to run the smoke is lead.
 export function resolveSelf() {
   if (process.env.SMOKE_LEAD_MEMBER_ID) return { name: 'self', member_id: process.env.SMOKE_LEAD_MEMBER_ID };
   try {
-    const cfgPath = path.join(process.env.HOME || '', 'zylos/components/coco-workspace/config.json');
+    const cfgPath = path.join(process.env.HOME || '', 'zylos/components/openmax/config.json');
     const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
     const orgs = cfg.orgs || {};
     const key = Object.keys(orgs).find(k => orgs[k]?.org_id === ORG_ID) || Object.keys(orgs)[0];

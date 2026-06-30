@@ -1,7 +1,7 @@
 {
-  "name": "zylos-coco-workspace",
-  "version": "1.0.78",
-  "description": "COCO Workspace native communication and service integration",
+  "name": "zylos-openmax",
+  "version": "2.0.0",
+  "description": "OpenMax native communication and service integration",
   "type": "module",
   "main": "src/comm-bridge.js",
   "scripts": {
@@ -10,12 +10,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://git.coco.xyz/coco-workspace/zylos-coco-workspace.git"
+    "url": "https://github.com/zylos-ai/zylos-openmax.git"
   },
   "keywords": [
     "zylos",
-    "coco",
-    "workspace",
+    "openmax",
     "agent"
   ],
   "author": "COCO Team",

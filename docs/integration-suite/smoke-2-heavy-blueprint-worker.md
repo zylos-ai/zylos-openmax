@@ -101,7 +101,7 @@ TEST CLIENT                                 ↓
 ## 4. 跑法
 
 ```bash
-cd ~/zylos/workspace/zylos-coco-workspace
+cd ~/zylos/workspace/zylos-openmax
 
 # 同 Smoke 1 的 env vars
 node docs/smoke-tests/smoke-2-heavy-blueprint-worker.test.js
