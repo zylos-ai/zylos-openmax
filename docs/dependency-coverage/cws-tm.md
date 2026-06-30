@@ -1,6 +1,6 @@
-# cws-tm 依赖接口覆盖清单(对照 cws-core@contract-v2 转发)
+# cws-tm 依赖接口覆盖清单
 
-本文档列出 **zylos-openmax** 当前依赖的 TM(Task / Project / Issue / Blueprint / TaskBoard)HTTP 接口,逐项说明:
+本文档列出 **zylos-openmax** 依赖的 TM(Task / Project / Issue / Blueprint)HTTP 接口,逐项说明:
 
 - 该接口在 **cws-core@contract-v2**(最新已 tag 的 forwarding 契约,与 main HEAD `6e73312` 等价)中是否已经定义**转发**到 cws-work
 - 接口干什么(Summary / Description 直接采自 cws-core 的 `huma.Operation` 注册)
@@ -14,9 +14,9 @@
 - **cws-core**@`contract-v2` tag:`internal/transport/http/{project,issue,task,blueprint,attempt}.go`
 - 与 cws-as / cws-kb 文档不同的是:**TM 整条链路是 cws-core 主动转发(proxy)给 cws-work 的**,不是直连。所以"是否覆盖"看的是 cws-core 这一层是否定义了 forwarding endpoint(以及 connect-rpc 对应调用),而不是 cws-work 是否实现 —— 后者只在 cws-work 已经支持、但 cws-core 还没暴露时才相关(见文末 F-historical F3)。
 
-> 文档生成时间 2026-05-28。**接口描述与参数定义以 cws-core@contract-v2 为准**。cws-core 路由表有变更时需重新生成本文。
+> 文档初版生成时间 2026-05-28；2026-07-01 已补充 v0.7 Issue / Task 状态与归档语义。**接口描述与参数定义以当前 cws-core BFF + cws-work SDK 为准**。cws-core 路由表有变更时需重新生成本文。
 >
-> 📌 **当前状态**:`src/cli/tm.js` 已经在 `fix/tm-align-with-core-contract-v2` 分支(commit `bdc5a7b`)上对齐 contract-v2。下文表格直接反映**修复后的状态**;原来发现的协议错位归档在 [F-historical](#f-historical) 一节。
+> 📌 **当前状态**:`src/cli/tm.js` 已在 contract-v2 基础上继续适配 v0.7 语义化 Issue 动作、Task claim/start 拆分、Project 级联归档和 Issue / Task `archived` 状态移除。下文历史审计区只用于回溯早期错位,不要按旧状态机开发。
 
 ---
 
@@ -34,7 +34,7 @@
 
 ## Coverage Summary
 
-下表按域分组,共 **24 条**依赖(原始 35 条 → 减 2 条 cws-work 也没的 `task.archive` / `task.subtask_create` → 再减 9 条 cws-core 没转发的 blueprint 细粒度 + taskboard)。"入参 / 出参"列只展示关键字段简写(`*` 标记 required;完整字段表见 [逐项详解](#逐项详解))。
+下表是早期 contract-v2 审计时的依赖快照。"入参 / 出参"列只展示关键字段简写(`*` 标记 required;完整字段表见 [逐项详解](#逐项详解))。当前 `tm.js` 已新增语义化 Issue 动作、Comment、Attempt、Event Binding 等命令,不要把本节数量当作当前命令总数。
 
 > 状态列含义(post-fix):
 > - ✅ — cws-core@contract-v2 有完全对齐的 path + method + body / query;`tm.js` 已对应。当前所有保留命令均为此状态。
@@ -56,7 +56,7 @@
 
 | # | tm.js 命令 | cws-core@contract-v2 | 状态 | 接口描述 | 入参 | 出参 |
 |---|---|---|---|---|---|---|
-| 9 | `issue.list_in_project` `GET /projects/{pid}/issues` | `issue.go:159` `list-project-issues` | ✅ | "Returns issues within a project." | path:`project_id*`;query:`status`、`priority`、PageParams | `PageListResponse<issueItem>` |
+| 9 | `issue.list_in_project` `GET /projects/{pid}/issues` | `issue.go` `list-project-issues` | ✅ | "Returns issues within a project." | path:`project_id*`;query:`status`、`statuses`、`priority`、`include_archived`、PageParams | `PageListResponse<issueItem>` |
 | 10 | `issue.get` `GET /issues/{id}` | `issue.go:197` `get-issue` | ✅ | "Returns detailed information about a specific issue." | path:`issue_id*` | `DataResponse<issueItem>` |
 | 11 | `issue.create` `POST /projects/{pid}/issues` | `issue.go:215` `create-issue` | ✅ | "Creates an issue within a project." | path:`project_id*`;body:`title*`(1..300)、`description?`、`mode*`(light/heavy)、`priority*`(low/medium/high)、`due_date?`、`lead_agent_id*`、`owner_member_id?`、`context_page_ids?`、`input_artifact_ids?`、`origin_conversation_id?`、`origin_message_id?` | `DataResponse<issueItem>` |
 | 12 | `issue.update` `PATCH /issues/{id}` | `issue.go:256` `update-issue` | ✅ | "Updates issue metadata." | path:`issue_id*`;body:`title?`、`description?`、`priority?`、`due_date?` | `DataResponse<issueItem>` |
@@ -67,10 +67,10 @@
 
 | # | tm.js 命令 | cws-core@contract-v2 | 状态 | 接口描述 | 入参 | 出参 |
 |---|---|---|---|---|---|---|
-| 15 | `task.list` `GET /tasks` | `task.go:102` `list-tasks` | ✅ | "Returns filtered tasks." | query:`project_id?`、`issue_id?`、`status?`、`claimable?`、`agent_skills?`、PageParams | `PageListResponse<taskItem>` |
+| 15 | `task.list` `GET /tasks` | `task.go` `list-tasks` | ✅ | "Returns filtered tasks." | query:`project_id?`、`issue_id?`、`status?`、`include_archived?`、PageParams | `PageListResponse<taskItem>` |
 | 16 | `task.get` `GET /tasks/{id}` | `task.go:173` `get-task` | ✅ | "Returns a task by ID." | path:`task_id*` | `DataResponse<taskItem>` |
 | 17 | `task.create` `POST /projects/{pid}/issues/{iid}/tasks` | `task.go:191` `create-task` | ✅ | "Creates a task within an issue." | path:`project_id*` + `issue_id*`;body:`title*`(1..300)、`description?`、`assignee_id?`、`skill_tags?`、`blueprint_step_id?`、`depends_on?`、`context_page_ids?` | `DataResponse<taskItem>` |
-| 18 | `task.transition` `POST /tasks/{id}/transition` | `task.go:247` `transition-task` | ✅ | "Transitions a task to a target status." | path:`task_id*`;body:`target_status*`(pending/running/done/failed/cancelled) | `DataResponse<taskItem>` |
+| 18 | `task.transition` `POST /tasks/{id}/transition` | `task.go` `transition-task` | ✅ | "Transitions a task to a target status." | path:`task_id*`;body:`target_status*`(pending/assigned/running/done/failed/cancelled) | `DataResponse<taskItem>` |
 | 19 | `task.status`(alias of `task.transition`)| 同上 | ✅ | — | — | — |
 | 20 | `task.reassign` `POST /tasks/{id}/reassign` | `task.go:270` `reassign-task` | ✅ | "Reassigns a task to another member." | path:`task_id*`;body:`new_assignee_id*` | `DataResponse<taskItem>` |
 
@@ -85,7 +85,7 @@
 
 ### TASKBOARD
 
-原 `taskboard.list` 在 commit `123bb46` 中已删除,cws-core@contract-v2 无对应 forwarding。临时替代:`GET /tasks?claimable=true&agent_skills=...`(`list-tasks` 已支持这俩 query)。
+原 `taskboard.list` 已删除。当前没有 project/global TaskBoard 场景,也不再用 `claimable` / `agent_skills` 作为 `task.list` 的替代过滤条件。
 
 ---
 
@@ -105,7 +105,7 @@
 | Task      | 6 | ✅ |
 | Blueprint | 4 | ✅ |
 
-**结论**:`src/cli/tm.js` 当前所有命令(24 个)都对齐 cws-core@contract-v2 的 forwarding。Blueprint 域只保留 4 个核心操作(create / get / list / set_steps);8 个细粒度修改(单 step 改/删、budget、notes、markdown、submit、amend)和 TaskBoard 列表都已删除,等 cws-core 后续补 forwarding 时再加回。
+**结论**:`src/cli/tm.js` 当前命令以 cws-core BFF 暴露面为准。Blueprint 域保留 create / get / list / set_steps 核心操作；TaskBoard 列表已删除,当前无替代入口。
 
 ---
 
@@ -203,7 +203,7 @@
 #### 12. `POST /api/v1/issues/{issue_id}/transition` —— transition-issue
 
 - path: `issue_id*`
-- body: `target_status*`(enum 9 种)、`rejection_reason?`
+- body: `target_status*` 已改为语义化动作接口,不要再使用通用 issue transition
 - 出参 data: `issueItem`
 
 #### 13. `POST /api/v1/issues/{issue_id}/move` —— move-issue-project
@@ -218,7 +218,7 @@
 
 #### 14. `GET /api/v1/tasks` —— list-tasks
 
-- query: `project_id?`、`issue_id?`、`status?`(pending/running/done/failed/cancelled)、`claimable?`(bool)、`agent_skills?`(string[])、PageParams
+- query: `project_id?`、`issue_id?`、`status?`(pending/assigned/running/done/failed/cancelled)、`include_archived?`(bool)、PageParams
 - 出参 data: `taskItem[]`
 
 #### 15. `GET /api/v1/tasks/{task_id}` —— get-task
@@ -308,11 +308,11 @@
 
 ### `issueItem`
 
-`id`、`org_id`、`project_id`、`title`、`description`、`mode`(light/heavy)、`status`(backlog / pending_start / draft / pending_approval / executing / delivered / accepted / rejected / archived)、`priority`(low/medium/high)、`due_date?`、`assignee_kind`(internal_lead / external_via_group)、`lead_agent_id?`、`owner_member_id`、`current_blueprint_id?`、`blueprint_approval_request_id?`、`origin_conversation_id?`、`origin_message_id?`、`context_page_ids[]`、`input_artifact_ids[]`、`related_issue_ids[]`、`active_approval_request_ids[]`、`acceptance_source?`(im/explicit)、`rejection_reason?`、`created_at` / `updated_at` / `accepted_at?` / `rejected_at?` / `archived_at?`
+`id`、`org_id`、`project_id`、`title`、`description`、`status`(backlog / in_progress / pending_plan / delivered / accepted / terminated)、`priority`(low/medium/high)、`assignee_kind`(internal_lead / external_via_group)、`lead_agent_id?`、`owner_member_id`、`current_blueprint_id?`、`origin_conversation_id?`、`origin_message_id?`、`acceptance_source?`(im/explicit/text_card_proxy)、`termination_reason?`、`created_at` / `updated_at` / `accepted_at?` / `terminated_at?` / `archived_at?`
 
 ### `taskItem`
 
-`id`、`org_id`、`project_id`、`issue_id`、`title`、`description`、`status`(pending/running/done/failed/cancelled)、`assignee_id?`、`skill_tags[]`、`blueprint_step_id?`、`depends_on[]`、`current_attempt_number`(int32)、`context_page_ids[]`、`runtime_session_id?`、`created_at` / `updated_at` / `started_at?` / `finished_at?`
+`id`、`org_id`、`project_id`、`issue_id`、`title`、`description`、`status`(pending/assigned/running/done/failed/cancelled)、`assignee_id?`、`blueprint_step_id?`、`depends_on[]`、`current_attempt_number`(int32)、`runtime_session_id?`、`created_at` / `updated_at` / `started_at?` / `finished_at?`
 
 ### `blueprintItem`
 
@@ -361,7 +361,7 @@
 | `issue.create` body | 漏 `priority` / `owner_member_id` | `priority*`(low/medium/high); `owner_member_id?` 为验收归属,Agent 代人类创建时应传 |
 | `issue.transition` body | `{ status }` | `{ target_status*, rejection_reason? }` |
 | `issue.move_project` body | `{ project_id }` | `{ new_project_id* }` |
-| `task.list` query | `{ ..., assignee_id, ... }` | `{ ..., claimable?, agent_skills?, ... }`(无 `assignee_id` 过滤)|
+| `task.list` query | `{ ..., assignee_id, ... }` | `{ project_id?, issue_id?, status?, include_archived?, ...PageParams }`；当前没有 `claimable` / `agent_skills` 过滤 |
 | `task.create` body | 多发 `mode` / `priority` / `status` | 不接(task 没有 mode/priority,status 由 transition 走)|
 | `task.transition` body | `{ status }` | `{ target_status* }` |
 | `task.reassign` body | `{ assignee_id }` | `{ new_assignee_id* }` |
@@ -391,7 +391,7 @@
 | `blueprint.render_markdown`      | `GET /api/blueprints/{id}/markdown`(`blueprint.go:279`,RPC `RenderMarkdown`) |
 | `blueprint.submit_for_approval`  | `POST /api/blueprints/{id}/submit`(`blueprint.go:295`,RPC `SubmitForApproval`) |
 | `blueprint.create_amendment`     | `POST /api/blueprints/amend`(`blueprint.go:309`,RPC `CreateAmendment`) |
-| `taskboard.list`                 | `GET /api/task-board`(cws-work `task.go:211`,RPC `TaskService.ListTaskBoard`);临时替代 `GET /tasks?claimable=...&agent_skills=...` |
+| `taskboard.list`                 | 已删除；当前没有 project/global task list 场景，也没有 `claimable` / `agent_skills` 替代入口 |
 
 > 注意 cws-work HTTP 用 `/api/...` 前缀,**没有 `v1`**;cws-core 转发时会暴露成 `/api/v1/...`。等 cws-core 加上对应 forwarding endpoint 后,把上面这 9 行按对齐后的 cws-core 签名加回 `tm.js` 即可。
 
