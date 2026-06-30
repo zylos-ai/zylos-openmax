@@ -160,39 +160,37 @@ assertEq(issueIAfter.projectId || issueIAfter.project_id, projB.id,
     `11. issue 已挪到 B (projectId == ${projB.id})`);
 
 // ---------- Round 3 ----------
-log('[Round 3] 改主项目元数据 + 看人 + 归档闭环');
+log('[Round 3] 改主项目元数据 + 看人 + 归档项目');
 const NL3 = `顺手再做几件:
 1. 我们 Smoke Suite 这个项目的描述改成 "${NS} metadata edges round"
 2. 列一下 Smoke Suite 这个项目里现在都有哪些 member(顺带说一下你是不是 lead)
 3. "${NS}/move-target" 这个项目实验差不多了,先归档掉
-4. 哎,等等,我还想再用一下,**立马**给我恢复回来
 
 每一步一行简短日志。`;
 await sendInstruction(env, NL3);
 
 const r3 = await waitForCard({
   label: 'round3', sinceSeq: cursor,
-  matchAny: ['描述', '归档', '恢复', 'member', '已改', 'archive', 'restore'],
+  matchAny: ['描述', '归档', 'member', '已改', 'archive'],
   maxMs: 120 * 1000,
 });
 cursor = Number(r3.msg.seq);
 
 assertTrue(/member|成员/.test(r3.text), `5a. round3 回复含 member/成员 语义`);
 assertTrue(/归档|archive/i.test(r3.text), `5b. round3 回复含 归档`);
-assertTrue(/恢复|restore/i.test(r3.text), `5c. round3 回复含 恢复`);
 assertTrue(/描述|description/i.test(r3.text), `6. round3 回复表达描述已改`);
-assertTrue(/active|恢复|可用/.test(r3.text), `7. round3 回复表达 B 已恢复 active`);
+assertTrue(/已归档|归档|archived|archive/i.test(r3.text), `7. round3 回复表达 B 已归档`);
 
 // 旁路:project A description 含 metadata edges
 const projAAfter = await tm('project.get', { id: env.TEST_PROJECT_ID });
 assertTrue((projAAfter.description || '').includes('metadata edges'),
     `12. project A description 含 'metadata edges' (got "${(projAAfter.description||'').slice(0,80)}")`);
 
-// 旁路:project B status active(归档后已恢复)
+// 旁路:project B status archived
 const projBAfter = await tm('project.get', { id: projB.id });
 const projBStatus = (projBAfter.status || '').toLowerCase();
-assertTrue(projBStatus === 'active' || !projBAfter.archived,
-    `13. project B status == active(已恢复) (got "${projBStatus}")`);
+assertTrue(projBStatus === 'archived' || !!projBAfter.archived_at,
+    `13. project B status == archived (got "${projBStatus}")`);
 
 // 旁路:project.members 路径调通(warn-only on empty)
 try {
@@ -211,16 +209,12 @@ try {
 log('');
 log(`✅ Smoke 8 (NL) PASS (14 / 14)`);
 log(`   project A   = ${env.TEST_PROJECT_ID} (description updated)`);
-log(`   project B   = ${projB.id} (created, archive→restore round-trip)`);
+log(`   project B   = ${projB.id} (created, archived)`);
 log(`   issue   I   = ${issueI.id} (moved A→B, priority=high)`);
 
 // ---- Cleanup ---------------------------------------------------------------
 log('');
 log('[Cleanup] 清理测试数据');
-try {
-  await tm('issue.archive', { id: issueI.id });
-  ok(`cleanup: issue ${issueI.id} archived`);
-} catch (e) { warn(`cleanup: issue archive failed: ${e.message}`); }
 try {
   await tm('project.archive', { id: projB.id });
   ok(`cleanup: project ${projB.id} archived`);

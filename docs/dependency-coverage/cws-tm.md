@@ -39,7 +39,7 @@
 > 状态列含义(post-fix):
 > - ✅ — cws-core@contract-v2 有完全对齐的 path + method + body / query;`tm.js` 已对应。当前所有保留命令均为此状态。
 
-### PROJECT(8 条 — 全 ✅)
+### PROJECT(6 条 — 全 ✅)
 
 | # | tm.js 命令 | cws-core@contract-v2 | 状态 | 接口描述(cws-core)| 入参 | 出参 |
 |---|---|---|---|---|---|---|
@@ -48,9 +48,9 @@
 | 3 | `project.get` `GET /projects/{id}` | `project.go:132` `get-project` | ✅ | "Returns detailed information about a specific project." | path:`project_id*`(uuid) | `DataResponse<projectItem>` |
 | 4 | `project.update` `PATCH /projects/{id}` | `project.go:177` `update-project` | ✅ | "Updates project metadata." | path:`project_id*`;body:`name?`、`description?`、`lead_member_id?` | `DataResponse<projectItem>` |
 | 5 | `project.archive` `POST /projects/{id}/archive` | `project.go:198` `archive-project` | ✅ | "Archives a project. Frontend delete button maps to this." | path:`project_id*` | `DataResponse<projectItem>` |
-| 6 | `project.restore` `POST /projects/{id}/restore` | `project.go:216` `restore-project` | ✅ | "Restores an archived project back to active." | path:`project_id*` | `DataResponse<projectItem>` |
-| 7 | `project.unarchive`(alias of restore)| 同上 | ✅ | — | — | — |
-| 8 | `project.members` `GET /projects/{id}/members` | `project.go:279` `list-project-members` | ✅ | "Returns project members from cws-work." | path:`project_id*`;query:PageParams | `PageListResponse<projectMemberItem>` |
+| 6 | `project.members` `GET /projects/{id}/members` | `project.go:279` `list-project-members` | ✅ | "Returns project members from cws-work." | path:`project_id*`;query:PageParams | `PageListResponse<projectMemberItem>` |
+
+`POST /projects/{id}/restore` 已禁用，cws-core 返回 `412 project restore is disabled`；zylos 不暴露 `project.restore` / `project.unarchive` 命令。
 
 ### ISSUE(6 条 — 全 ✅,写路径已从 `/projects/{pid}/issues/{id}/...` 改成 cws-core 的 flat `/issues/{id}/...`)
 
@@ -154,12 +154,7 @@
 - path: `project_id*`
 - 出参 data: `projectItem`
 
-#### 6. `POST /api/v1/projects/{project_id}/restore` —— restore-project
-
-- path: `project_id*`
-- 出参 data: `projectItem`
-
-#### 7. `GET /api/v1/projects/{project_id}/members` —— list-project-members
+#### 6. `GET /api/v1/projects/{project_id}/members` —— list-project-members
 
 - path: `project_id*`;query: PageParams
 - 出参 data: `projectMemberItem[]`
@@ -171,7 +166,7 @@
 #### 8. `GET /api/v1/projects/{project_id}/issues` —— list-project-issues
 
 - path: `project_id*`
-- query: `status`(enum 9 种,见 `issueItem` 状态机)、`priority`(low/medium/high)、PageParams
+- query: `status`(单状态)、`statuses`(逗号分隔 inclusion)、`priority`(low/medium/high)、`include_archived`(归档 Project / 跨 Project 历史列表使用)、PageParams
 - 出参 data: `issueItem[]`
 
 #### 9. `GET /api/v1/issues/{issue_id}` —— get-issue
@@ -362,7 +357,7 @@
 |---|---|---|
 | `project.create`     | `{ name, description, icon, lead_ids, member_ids }` | `{ name*, description?, slug*, is_default, lead_member_id* }` |
 | `project.update`     | `{ description, icon, lead_ids, member_ids }`     | `{ name?, description?, lead_member_id? }` |
-| `issue.list_in_project` query | `{ status, archived, page_size, page_token }` | `{ status, priority, ...PageParams }`(归档列表传 `status=archived`)|
+| `issue.list_in_project` query | `{ status, archived, page_size, page_token }` | `{ status, statuses, priority, include_archived, ...PageParams }`;归档维度传 `include_archived=true`,不要把归档映射成 `status=archived` |
 | `issue.create` body | 漏 `priority` / `owner_member_id` | `priority*`(low/medium/high); `owner_member_id?` 为验收归属,Agent 代人类创建时应传 |
 | `issue.transition` body | `{ status }` | `{ target_status*, rejection_reason? }` |
 | `issue.move_project` body | `{ project_id }` | `{ new_project_id* }` |
