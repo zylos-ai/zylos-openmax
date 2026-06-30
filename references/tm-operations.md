@@ -22,8 +22,8 @@
 
 - 调用前先 `core.me` 确认当前 `member_id` 跟意图中的身份匹配
 - 创建 issue 前通常先 `project.list` 拿目标 projectId
-- 给 task 配 `contextPageIds` 时,KB page id 先用 `kb.search` 拉到
-- Worker 调 `task.list?claimable=true` 找活之前,确保自己的 `skillTags` 已经登记到 member 资料
+- 需要引用 KB 时,先用 `kb.search` 找到页面,再把链接 / 摘要写进 Issue/Task 描述或评论
+- Worker 接收指派后按 `task.claim` → `task.start` 两步开工；当前不通过任务池抢活
 
 > 完整的参数依赖树(`core.me → project.list → issue.create → blueprint.create → issue.submit_plan → task.create → ...`)见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)。本文档不重复,只补 TM 命令级细节。
 
@@ -44,12 +44,12 @@ CLI 位置:`src/cli/tm.js`
 
 ## 当前覆盖度速览
 
-全部 45 个命令均已对齐 cws-core BFF,可直接调用。
+全部 42 个命令均已对齐 cws-core BFF,可直接调用。
 
 | 域 | 命令数 | 状态 |
 | --- | --- | --- |
-| Project | 8 | ✅ 全部可用 |
-| Issue | 14 | ✅ 全部可用 |
+| Project | 6 | ✅ 全部可用 |
+| Issue | 13 | ✅ 全部可用 |
 | Task | 8 | ✅ 全部可用 |
 | Comment | 3 | ✅ 全部可用 |
 | Blueprint | 4 | ✅ 全部可用 |
@@ -69,7 +69,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 
 ## 命令清单
 
-### Project (8 条)
+### Project (6 条)
 
 | 状态 | 命令 | 说明 | 入参 | 端点 |
 | --- | --- | --- | --- | --- |
@@ -78,17 +78,15 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `project.get` | 取单个项目详情 | `{id}` | `GET /projects/{id}` |
 | ✅ | `project.update` | 改项目名 / 描述 / lead | `{id, name?, description?, descriptionFormat?, leadMemberId?}` | `PATCH /projects/{id}` |
 | ✅ | `project.archive` | 归档项目(前端"删除"映射到这条,不做硬删) | `{id}` | `POST /projects/{id}/archive` |
-| ✅ | `project.restore` | 把归档项目恢复 active | `{id}` | `POST /projects/{id}/restore` |
-| ✅ | `project.unarchive` | `restore` 别名,行为完全一致 | `{id}` | `POST /projects/{id}/restore` |
 | ✅ | `project.members` | 列项目成员(从 cws-work 拉) | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
 
-### Issue (14 条)
+### Issue (13 条)
 
 写路径使用 flat path `/issues/{id}`,不使用 `/projects/{pid}/issues/{id}`。每个状态变更是一个带不变量校验和副作用的语义化动作;通用 `POST /issues/{id}/transition` 以及旧验收拒绝接口已删除。
 
 | 状态 | 命令 | 说明 | 入参 | 端点 |
 | --- | --- | --- | --- | --- |
-| ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级过滤) | `{projectId, status?, priority?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
+| ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级 / 归档维度过滤) | `{projectId, status?, statuses?, priority?, includeArchived?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
 | ✅ | `issue.get` | 取单个 issue 详情 | `{id}` | `GET /issues/{id}` |
 | ✅ | `issue.create` | 起 issue;默认进入 `in_progress`,`backlog=true` 时先记录不执行;`ownerMemberId` 是交付验收归属 | `{projectId, title, leadAgentId, ownerMemberId?, priority?, description?, originConversationId?, originMessageId?, backlog?}` | `POST /projects/{pid}/issues` |
 | ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, descriptionFormat?, priority?, dueDate?}` | `PATCH /issues/{id}` |
@@ -97,9 +95,8 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `issue.accept_plan` | 人类接受执行计划;文本卡片模拟期由 Lead 代点,默认 `source=text_card_proxy`;状态 → in_progress | `{id, source?}` | `POST /issues/{id}/accept-plan` |
 | ✅ | `issue.deliver` | in_progress → delivered | `{id}` | `POST /issues/{id}/deliver` |
 | ✅ | `issue.resume` | 人类反馈后继续对话、重新计划或返工;pending_plan/delivered → in_progress | `{id, reason?, source?}` | `POST /issues/{id}/resume` |
-| ✅ | `issue.archive` | 归档 issue(**仅终态 accepted / terminated 可归档**;级联归档其 Task) | `{id}` | `POST /issues/{id}/archive` |
 | ✅ | `issue.accept_delivered` | delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` — `source` 取 `im` / `explicit` / `text_card_proxy`(默认 `explicit`) |
-| ✅ | `issue.reassign_owner` | 修改 issue 负责人(ownerMemberId);archived 状态不可改 | `{id, newOwnerMemberId (or 'ownerMemberId')}` | `POST /issues/{id}/reassign-owner` |
+| ✅ | `issue.reassign_owner` | 修改 issue 负责人(ownerMemberId);已归档对象不可改 | `{id, newOwnerMemberId (or 'ownerMemberId')}` | `POST /issues/{id}/reassign-owner` |
 | ✅ | `issue.move_project` | 把 issue 整体迁到另一个项目 | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
 | ✅ | `issue.terminate` | 提前终止未结论 issue → terminated;服务端级联取消非终态 Task + 发 `issue.terminated` 事件给 Lead 善后(不回滚已发生副作用) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` 默认 `lead_chat` |
 
@@ -111,9 +108,9 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 
 | 状态 | 命令 | 说明 | 入参 | 端点 |
 | --- | --- | --- | --- | --- |
-| ✅ | `task.list` | 列任务(可过滤 claimable + skillTags 找待领取的活) | `{projectId?, issueId?, status?, claimable?, agentSkills?, page?, pageSize?, orderBy?}` | `GET /tasks` |
-| ✅ | `task.get` | 取单个 task 详情(返回里有 `context_page_ids`,Worker 接活后逐个 kb.page_content 读) | `{id}` | `GET /tasks/{id}` |
-| ✅ | `task.create` | 派 task;带 `assigneeId` 直接进 assigned(已分配,待 start),不带则 pending 等人 claim | `{projectId, issueId, title, description?, descriptionFormat?, assigneeId?, skillTags?, blueprintStepId?, dependsOn?, contextPageIds?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
+| ✅ | `task.list` | 列任务(可按 project / issue / 后端状态 / 归档维度过滤) | `{projectId?, issueId?, status?, includeArchived?, page?, pageSize?, orderBy?}` | `GET /tasks` |
+| ✅ | `task.get` | 取单个 task 详情 | `{id}` | `GET /tasks/{id}` |
+| ✅ | `task.create` | 派 task;带 `assigneeId` 直接进 assigned(已分配,待 start),不带则 pending 等人 claim | `{projectId, issueId, title, description?, assigneeId?, blueprintStepId?, dependsOn?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
 | ✅ | `task.claim` | 自己接 task,**只分配**(pending → assigned);不再自动建 attempt,接完要 `task.start` | `{id}` | `POST /tasks/{id}/claim` |
 | ✅ | `task.start` | 开工(assigned → running)并开 attempt;依赖闸(dependsOn 全 done)在此校验 | `{id}` | `POST /tasks/{id}/start` |
 | ✅ | `task.transition` | 推 task 终态(done / failed / cancelled);所有 attempt 必须先到终态 | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
@@ -202,7 +199,7 @@ node src/cli/tm.js blueprint.create '{
 node src/cli/tm.js issue.submit_plan '{"id":"iss-1","blueprintId":"bp-1","planText":"1. 完成竞品定价分析\\n2. 输出结论到 KB","source":"lead_chat"}'
 node src/cli/tm.js issue.accept_plan '{"id":"iss-1","source":"text_card_proxy"}'
 
-# 2) 按单 step Blueprint 创建 Task 并认领(自做时 contextPageIds 可省略,自己已读过)
+# 2) 按单 step Blueprint 创建 Task 并认领
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-1","blueprintStepId":"step-1",
   "title":"竞品定价分析","assigneeId":"agent-self"
@@ -254,24 +251,22 @@ node src/cli/tm.js issue.accept_plan '{"id":"iss-2","source":"text_card_proxy"}'
 # 5) 计划接受后,按 Step 派 Worker
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-2",
-  "blueprintStepId":"step-1","title":"用户访谈","assigneeId":"worker-1",
-  "contextPageIds":["pg-user-persona-001"]
+  "blueprintStepId":"step-1","title":"用户访谈","assigneeId":"worker-1"
 }'
 ```
 
-### 3. Worker 认领并执行任务
+### 3. Worker 执行已指派任务
 
 ```bash
-# 1) 浏览匹配技能的待认领任务
-node src/cli/tm.js task.list '{"claimable":true,"agentSkills":["research"]}'
+# 1) 收到调度中心或 Lead 通知后读取任务
+node src/cli/tm.js task.get '{"id":"task-7"}'
 
-# 2) 认领
+# 2) 未分配时先认领；已是 ASSIGNED 给自己时可跳过
 node src/cli/tm.js task.claim '{"id":"task-7"}'
 
-# 3) 读取 Lead 传递的上下文页面
-node src/cli/tm.js task.get '{"id":"task-7"}'
-# -> context_page_ids: ["pg-user-persona-001"]
-node src/cli/kb.js kb.page_content '{"pageId":"pg-user-persona-001"}'
+# 3) 依赖满足后开工，进入 RUNNING 并创建 Attempt
+node src/cli/tm.js task.start '{"id":"task-7"}'
+node src/cli/tm.js comment.list '{"workType":"task","workId":"upstream-task-1"}'
 
 # 4) 查看当前 Attempt 信息
 node src/cli/tm.js attempt.list '{"taskId":"task-7"}'
@@ -333,7 +328,7 @@ node src/cli/tm.js event-binding.create '{
 | Worker 自己流转 task / attempt 的契约 | [角色模型 > Worker 状态流转的明确边界](../SKILL.md) |
 | Issue / Task / Attempt 状态机完整图 | [状态机](../SKILL.md) |
 | 通用的"常见错误"清单(15 条) | [行为护栏 > 常见错误](../SKILL.md) |
-| 参数依赖树 / 上下文锚定 / contextPageIds | [效率捷径](../SKILL.md) |
+| 参数依赖树 / 上下文锚定 | [效率捷径](../SKILL.md) |
 | 记忆持久化的时机 | [记忆触发点](../SKILL.md) |
 
 也就是说:**SKILL.md 讲行为,本文档讲机制**,两份配套使用。
@@ -342,7 +337,7 @@ node src/cli/tm.js event-binding.create '{
 
 下面几条是 SKILL.md "常见错误"没单独覆盖的 TM 命令级细节:
 
-- **不要**把 IM 消息原文整段复制进 task description / 评论 —— 通过会话锚定 + `contextPageIds` 引用就够了
+- **不要**把 IM 消息原文整段复制进 task description / 评论 —— 只写必要背景、KB 链接和产出地址
 - **不要**直接调 `attempt.create` 来代替 `task.claim` —— `claim` 已内置建 attempt,手动 create 会撞冲突
 - **不要**忘记 `task.reassign` 后老 attempt 已自动 cancelled —— 新 assignee 走的是新 attempt,旧 attempt 不要再操作
 - **description 必须使用 Markdown 格式**：Project / Issue / Task 的 description 字段均支持 Markdown。CLI 默认传 `description_format: "markdown"`,前端按此渲染富文本。写 description 时使用标题(`##`)、列表(`-`)、加粗(`**`)、代码块(`` ``` ``)、链接(`[text](url)`)等标准 Markdown 语法。示例：
@@ -352,10 +347,8 @@ node src/cli/tm.js event-binding.create '{
 
 ## 后续版本计划
 
-以下功能在 0.5 中不可用(cws-core 尚未转发),计划在后续版本加入:
+以下功能不在当前 zylos 操作面中:
 
-- Comment(评论追加 / 列表)
 - Link(WorkConversationLink 锚定)
 - System(工作区初始化 / 审批决策 / 自动归档)
-- TaskBoard(专用看板视图,当前可用 `task.list?claimable=true` 替代)
 - Blueprint 细粒度操作(单 Step 增删改、预算/备注设置、修订版创建)

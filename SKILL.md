@@ -1,10 +1,10 @@
 ---
 name: coco-workspace
-version: 1.0.77
+version: 1.0.78
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
-  确认归属项目 + 知识库 → 登记 Issue→Task（谁执行谁建，Issue owner=发起人）→ 执行 → owner 发起人验收通过才算完成/归档，
+  确认归属项目 + 知识库 → 登记 Issue→Task（谁执行谁建，Issue owner=发起人）→ 执行 → owner 发起人验收通过才算完成，
   不要跳过流程直接开干。含效率捷径 / 状态机 / 行为护栏 / 记忆触发点。
   Config at ~/zylos/components/coco-workspace/config.json.
   Service: pm2 zylos-coco-workspace.
@@ -139,7 +139,7 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.submit_plan
 6. **提交计划确认**：Lead 把人类可读的 Markdown 计划通过 `issue.submit_plan {blueprintId}` 提交；人类回复「接受计划」后，文本卡片模拟期由 Lead 调 `issue.accept_plan {source:"text_card_proxy"}`。计划说明写入 Issue comment，Blueprint 是计划事实源。
 7. **按 Blueprint Step 建 Task 并执行**：计划接受后，按这个单 step Blueprint 创建一个 Task。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue → 建 Blueprint → `submit_plan` → 人类接受 →（执行者）建 Task → 执行，不先开干再补。
 8. **产物归档 & 知识沉淀**：产出 → ArtifactStore；报告沉淀到所选知识库（`/projects/.../research/`）
-9. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知该 Issue 的 owner 人类（通常就是任务发起人）请其验收**；创建 Issue 时必须让 `ownerMemberId` 指向发起人。**owner 验收通过**（IM 说「接受交付」或看板点验收）→ 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → Issue 进入 **accepted**，必要时再 `issue.archive`。owner **不接受**时不要先机械 reject；先继续对话理解问题,再 `issue.resume {reason:"..."}` 回到 **in_progress**,重新计划、必要时补 Blueprint step / Task,再 `issue.submit_plan` 给人类确认。交付到验收之间,issue 停在 **delivered（待验收）**，别当已完成丢着不管
+9. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知该 Issue 的 owner 人类（通常就是任务发起人）请其验收**；创建 Issue 时必须让 `ownerMemberId` 指向发起人。**owner 验收通过**（IM 说「接受交付」或看板点验收）→ 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → Issue 进入 **accepted**。owner **不接受**时不要先机械 reject；先继续对话理解问题,再 `issue.resume {reason:"..."}` 回到 **in_progress**,重新计划、必要时补 Blueprint step / Task,再 `issue.submit_plan` 给人类确认。交付到验收之间,issue 停在 **delivered（待验收）**，别当已完成丢着不管
 
 ### 复杂任务流程（Lead Agent 编排 + 多 Agent 协作，例：开发任务）
 1. **接收用户意图**：Lead Agent 解析消息，识别为工作目标（非简单问答）
@@ -149,16 +149,16 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.submit_plan
 5. **实例化 Sub-task（计划接受后一次性建全部 Step）**：issue 进入 in_progress 后，**必须一次性把全部 Step 实例化成 Task**——**严禁边做边补 / 做一个建一个**。建 Task 时按 Blueprint 依赖关系设好 `dependsOn`，并**给每个 Step 都带 `assigneeId`**：
    - **`dependsOn` 必须使用上游 Task 的 `task.id`（强制）。** `dependsOn` 描述的是 Task→Task 依赖，调度中心的「依赖就绪」开工通知和 `task.start` 开工闸都按 `task.id` 匹配。所以**先建上游 Task、拿到它返回的 `task.id`，再用这个 id 设下游的 `dependsOn`**。用错 id 会让依赖边失效——下游 Task 收不到开工通知、过不了开工闸，无报错地永久卡在 assigned。
    - **所有 Step 创建时都带 `assigneeId`（指定执行 bot）——有依赖的也一样。** 每个 Task 一建出来就有明确归属（落在 `task.assigneeId`，不是只记在 Blueprint），**调度中心才能在依赖就绪时把开工通知发到对应 bot**（见 step 6）。不给下游 Step 设 assignee = 调度中心没人可通知 = 依赖链断在那里。
-   - **无依赖、可立即开跑的 Step → assigned 后，该 bot 随即 `task.start`** 进「进行中」真开跑。
-   - **有依赖的 Step → 同样 assigned，但先不 `task.start`**——被依赖挂起、停在「待办」等前置完成，执行 bot 已经定死。
+   - **无依赖、可立即开跑的 Step → assigned 后，该 bot 随即 `task.start`** 进入 **RUNNING** 真开跑。
+   - **有依赖的 Step → 同样 assigned，但先不 `task.start`**——保持 **ASSIGNED** 等前置完成，执行 bot 已经定死。
    - **给 Step 选执行 bot 前，必须先读能力画像做匹配（强制，不可按名字/顺序拍脑袋）**：把任何 Step 落到某个 bot 之前，**必须先调一次 `core.agent_profiles({projectId, capabilities:true})`**，取回候选 agent 的 skills（自报）+ tags（人工标注）+ 描述 + online_status；然后**逐个 Step 把"这一步需要什么能力"和各 agent 的 tag/skill 语义匹配**，分配方案里**对每个 Step 写明"依据 TA 的哪个 tag/skill 把这步给 TA"**。**严禁**不读画像、按成员列表顺序 / 名字 / member_id 顺序直接指派——那是破窗（等于能力画像形同虚设、谁排在前面谁干第一件）。匹配出的仍是**推荐**，最终**由发起人确认 / 选择**；确无合适专长才推荐 COCO 自己做。
-6. **依赖驱动的推进：调度中心通知下游 assignee 开工（状态=真实执行，看板全程可见全景）**：**「进行中」必须对应"真有 bot 在执行"**——后端不会擅自把待办改成进行中。推进由 **调度中心事件 + bot `task.start`** 驱动：
-   - 无依赖 Step 的 assignee 已 `task.start`，在「进行中」；有依赖 Step 已 assigned、停「待办」等前置。
-   - **前置 task done 后，调度中心（cws-work 的 System Member）自动给下游 Task 的 assignee 发 DM**「[调度中心] Task《X》依赖已就绪，可以开工」（正文点名上游 Task、payload 带 `upstreamTaskIds`）→ 该 assignee **先**对每个上游 task 调 `task.get` + `comment.list` 读它的完成评论拿到产出与上下文，**再**调 **`task.start`**（**依赖闸在这一步**：校验 `dependsOn` 都 done 才放行）→ 进「进行中」→ 执行。**无需前置 bot 手动 DM，无需 `task.claim`（活在 step 5 已经 assigned 给它了）。v0.7 起 `start` 才开工建 attempt、才查依赖。**
-   - 这样看板从一开工就是完整全景：谁在跑 / 谁 assigned 在「待办」等前置 / 卡了什么，且 **RUNNING 永远对应真在执行的 bot，不存在空转的「进行中」**
-   - **关键看板语义：待办列 = 已建、已 assigned、被依赖挂起、等调度中心通知开工的 Step，不是「还没拆出来的步骤」。** Sub-task → Attempt → Agent 执行
+6. **依赖驱动的推进：调度中心通知下游 assignee 开工（后端状态=真实执行）**：**RUNNING 必须对应"真有 bot 在执行"**——后端不会擅自把 ASSIGNED 改成 RUNNING。推进由 **调度中心事件 + bot `task.start`** 驱动：
+   - 无依赖 Step 的 assignee 已 `task.start`，状态是 **RUNNING**；有依赖 Step 已 assigned、状态保持 **ASSIGNED** 等前置。
+   - **前置 task done 后，调度中心（cws-work 的 System Member）自动给下游 Task 的 assignee 发 DM**「[调度中心] Task《X》依赖已就绪，可以开工」（正文点名上游 Task、payload 带 `upstreamTaskIds`）→ 该 assignee **先**对每个上游 task 调 `task.get` + `comment.list` 读它的完成评论拿到产出与上下文，**再**调 **`task.start`**（**依赖闸在这一步**：校验 `dependsOn` 都 done 才放行）→ 进入 **RUNNING** → 执行。**无需前置 bot 手动 DM，无需 `task.claim`（活在 step 5 已经 assigned 给它了）。v0.7 起 `start` 才开工建 attempt、才查依赖。**
+   - 这样看板从一开工就是完整全景：谁是 RUNNING / 谁是 ASSIGNED 且等待前置 / 卡了什么，且 **RUNNING 永远对应真在执行的 bot**
+   - **关键看板语义：展示后端原始状态，不做“未开始 / 执行中 / 已结束”聚合。** Sub-task → Attempt → Agent 执行
 7. **产物归档 & 知识沉淀**：Agent 产出 → ArtifactStore；关键文档（报告、方案）沉淀到 KB（`/projects/.../research/`、`/projects/.../deliverables/`）
-8. **交付 & 人类验收闭环**：所有子任务 done → `issue.deliver` 到 **delivered** → **主动请 Issue owner 人类验收**。owner 接受 → 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → **accepted**，必要时 `issue.archive`。owner 不接受 → Lead 继续对话澄清 → `issue.resume` → 重新计划 / 补 Task → `issue.submit_plan` 再次确认
+8. **交付 & 人类验收闭环**：所有子任务 done → `issue.deliver` 到 **delivered** → **主动请 Issue owner 人类验收**。owner 接受 → 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → **accepted**。owner 不接受 → Lead 继续对话澄清 → `issue.resume` → 重新计划 / 补 Task → `issue.submit_plan` 再次确认
 
 > 说明：以上两条流程对应 coco-workspace 原型「对话」里的两个演示场景（▶ 复杂开发任务 / ▶ 简单研究报告），是产品定义的标准交互路径。
 
@@ -236,12 +236,12 @@ core.me → agentId, orgId
 ### Issue 状态
 
 ```
-默认路径: (create) → IN_PROGRESS → PENDING_PLAN → IN_PROGRESS → DELIVERED → ACCEPTED → ARCHIVED
+默认路径: (create) → IN_PROGRESS → PENDING_PLAN → IN_PROGRESS → DELIVERED → ACCEPTED
                                       ↘ 人类反馈 → IN_PROGRESS → PENDING_PLAN（循环）
 
 可选: backlog=true 时 (create) → BACKLOG ──activate──→ IN_PROGRESS → ...（同上）
 
-任意未结论态 ──terminate──→ TERMINATED ──archive──→ ARCHIVED   （提前终止）
+任意未结论态 ──terminate──→ TERMINATED   （提前终止）
 ```
 
 | 状态 | 含义 | Lead 可做 |
@@ -250,11 +250,10 @@ core.me → agentId, orgId
 | PENDING_PLAN | 等待人类确认执行计划 | 人类接受后 accept_plan;不接受则对话后 resume |
 | IN_PROGRESS | 执行中 / 返工中 | 创建 Task、监控、交付;需求变化时重新 submit_plan |
 | DELIVERED | 已交付 | 等待人类接受交付;不接受则对话后 resume |
-| ACCEPTED | 人类验收通过（终态）| 经验沉淀 → ARCHIVED |
-| TERMINATED | 提前终止（终态）| `issue.terminate` 推到此；善后后 → ARCHIVED |
-| ARCHIVED | 封存（终态）| **仅 ACCEPTED / TERMINATED 可归档** |
+| ACCEPTED | 人类验收通过（终态）| 经验沉淀 |
+| TERMINATED | 提前终止（终态）| `issue.terminate` 推到此；Lead 做善后 |
 
-**归档只接受终态**（ACCEPTED 或 TERMINATED）：还在跑或等待验收的 Issue 不能直接归档，必须先验收通过或 `issue.terminate`。提前终止见行为护栏「提前终止善后」。
+**归档是项目级维度**：Agent 不单独归档 Issue / Task。`project.archive` 由项目级管理动作触发，服务端级联设置 Issue / Task 的 `archived_at`，不改写 Issue / Task 的终态。提前终止见行为护栏「提前终止善后」。
 
 ### Task 状态
 
@@ -302,17 +301,17 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 
 1. **先安排再动手（每次处理都必须先创建 Blueprint 和 Task）**：每一次处理工作目标，**都必须先在 TM 里建好对应的 Issue 和 Blueprint，计划被人类接受后再建 Task**（需要时认领/指派）再开始执行——**没有「小事顺手做、不建 Task / Blueprint」的例外**（纯问答/闲聊除外）。安排即「把要做的事登记成 Blueprint Step 和 Task」，让进度可见、可流转、可验收，也为未来 workflow 固化留下计划事实源；不要绕过 TM 直接埋头做。**这是「任务流程未被触发」的头号根因：收到任务直接开干、跳过 Issue→Blueprint→Task 登记——务必先登记再动手。**
 2. **项目/知识库选择必经（简单任务同样适用）**：执行任何「产出 deliverable 的用户任务」（研究 / 分析 / 开发等，**无论简单还是复杂**）前，**必须**让用户确认归属项目 + 产出 KB，不可默默用默认 Inbox/默认 KB。**不要因为任务"简单 / 一个 agent 就能做完"而跳过——简单研究 / 分析报告同样必须先问项目和 KB。** 唯一可跳过：用户已明确指定、纯查询/闲聊、或「内部 bug/问题登记」。**同理，执行任务的 bot 也必须经发起人确认**（可基于 agent 描述给推荐 + 理由），**不可自行拍板指派**。**绝不隐式创建 Project（强制）**：项目归属只能"选已有"或"用户明确要求时新建"。即便用户提到某个项目名而你查不到，也**禁止**擅自建同名项目兜底——**找不到就问用户**，弄错项目上下文会让后面建的 Issue/Task/产出全落到错地方、前功尽弃。`project.create` 仅在**人类明确指示新建**时才调。
-3. **状态流转即通知**：issue/task 每次状态变更（in_progress→pending_plan、pending_plan→in_progress、in_progress→delivered、task→done、delivered→accepted/archived 等）的**当下**就通知用户，不要事后补、更不要不说。
+3. **状态流转即通知**：issue/task 每次状态变更（in_progress→pending_plan、pending_plan→in_progress、in_progress→delivered、task→done、delivered→accepted 等）的**当下**就通知用户，不要事后补、更不要不说。
 4. **完成即通知**：每个任务执行完**必须**主动通知用户结果，不能默默做完、让结论埋进消息流。
 5. **按优先级续做**：处理完一个任务后，**主动**按优先级接续处理下一个待办任务，而不是停下干等下一条指令（除非必须等用户输入/验收才能继续）。
-6. **人类验收闭环（交付后不自行收尾）**：出 deliverable 的任务，bot 交付（`issue.deliver`→delivered）后**必须主动请 Issue owner 人类验收，且不得自行归档**。验收人＝**Issue.owner_member_id 指向的人类**，通常就是任务发起人；创建 Issue 时就要把 `ownerMemberId` 填成发起人的 member id。先后顺序：完成内层流转（attempt→done、task→done）→ `issue.deliver` → 请 owner 验收。文本卡片模拟期,owner 明确回复「接受交付」后 Lead 可调 `issue.accept_delivered {source:"text_card_proxy"}` 代点；owner 不接受则继续对话理解问题,再 `issue.resume` 回到 in_progress,重新计划并 `issue.submit_plan`。交付到验收之间停在 **delivered（待验收）**，别堆在「已完成」不管。**区分**：worker 把自己的 attempt/task 流转到 done 只代表「执行动作做完」；**Issue 真正进入「完成」(accepted) 和归档(archived)，都必须 owner 人类验收通过**。
+6. **人类验收闭环（交付后不自行收尾）**：出 deliverable 的任务，bot 交付（`issue.deliver`→delivered）后**必须主动请 Issue owner 人类验收，且不得自行归档 Issue / Task**。验收人＝**Issue.owner_member_id 指向的人类**，通常就是任务发起人；创建 Issue 时就要把 `ownerMemberId` 填成发起人的 member id。先后顺序：完成内层流转（attempt→done、task→done）→ `issue.deliver` → 请 owner 验收。文本卡片模拟期,owner 明确回复「接受交付」后 Lead 可调 `issue.accept_delivered {source:"text_card_proxy"}` 代点；owner 不接受则继续对话理解问题,再 `issue.resume` 回到 in_progress,重新计划并 `issue.submit_plan`。交付到验收之间停在 **delivered（待验收）**，别堆在「已完成」不管。**区分**：worker 把自己的 attempt/task 流转到 done 只代表「执行动作做完」；**Issue 真正进入「完成」(accepted) 必须 owner 人类验收通过**。
 7. **跨 agent 派发：双向 DM 权限确认（强制）+ 谁执行谁建 Task**：把任务交给别的 bot 前，**两个方向的 DM 权限都必须确认开通，缺一不可**：
    - **方向①（worker→你）**：把该 bot 的 member_id 加进**自己的** `dmAllowFrom`（`config.json` → `orgs.<slug>.access`，必要时 `dmPolicy=allowlist`）——否则它的完成回报 DM 被你的 comm-bridge 拦掉、你永远收不到（跨 agent 通知链头号断点）。
    - **方向②（你→worker）**：确认该 bot 的 `dmPolicy` 允许你给它发 DM——否则你的派发消息它收不到。
    - **两个方向都通了再派**；任一方向没开通，先解决或反馈给人类，**不要盲派**。
    (b) Lead 只建 **Issue** + 给目标，**Task 由被指派的 bot 自己 `task.create` 并认领**（谁执行谁建，Lead 不替它建）；(c) 收到它的完成回报后，Lead 才调 `issue.deliver` 并转交 Issue owner 验收。
 8. **所有 Issue 必须先有 Blueprint（强制）**：简单任务也必须先生成单 step Blueprint；复杂任务生成多 step / 依赖 Blueprint。随后 `issue.submit_plan {blueprintId}` 给人类确认 → `issue.accept_plan` 后再实例化 Task 执行。执行计划确认不走 cws-core Approval。顺序硬性：确认项目/KB → 起 Issue → 建 Blueprint → `submit_plan` → 人类接受 → 按 Step 建 Task → 执行。
-9. **计划接受后一次性实例化全部 Step（强制）+ 每个 Step 都带 assignee、调度中心驱动推进**：`issue.accept_plan` 进入 in_progress 后**一次性把全部 Step 建成 Task、设 `dependsOn`、并给每个都带 `assigneeId`（含有依赖的）**，**禁止边做边补**。无依赖的 assignee 随即 `task.start` 进「进行中」；**有依赖的 assigned 停「待办」等前置，前置 done 后由调度中心 DM 其 assignee 通知开工 → assignee `task.start`（依赖闸在此校验）**进「进行中」。**不给下游 Step 设 assignee = 调度中心没人可通知 = 链断**。
+9. **计划接受后一次性实例化全部 Step（强制）+ 每个 Step 都带 assignee、调度中心驱动推进**：`issue.accept_plan` 进入 in_progress 后**一次性把全部 Step 建成 Task、设 `dependsOn`、并给每个都带 `assigneeId`（含有依赖的）**，**禁止边做边补**。无依赖的 assignee 随即 `task.start` 进入 **RUNNING**；**有依赖的 Task 保持 ASSIGNED 等前置，前置 done 后由调度中心 DM 其 assignee 通知开工 → assignee `task.start`（依赖闸在此校验）**进入 **RUNNING**。**不给下游 Step 设 assignee = 调度中心没人可通知 = 链断**。
 
 10. **提前终止善后（收到 `issue.terminated` 事件，Lead 专属）**：当一个未结论 Issue 被 `issue.terminate` 主动停下，系统已**机械收尾**（级联取消其下非终态 Task、叫停在跑 Attempt），并给 Lead 发 `issue.terminated` 事件。Lead 收到后按以下 SOP 善后，**不要闷头处理**：
     - **不复活**：terminated 是终态，**不得**把该 Issue / Task 重新拉起或续作；善后只能是**向前补偿**（发撤回说明、清理外部记录等），不是撤销终止。
@@ -341,12 +340,12 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 | 复杂任务绕过 Blueprint 直接拆 Task 开干 | 复杂（多步/多 agent/有依赖）任务必须先建多 step Blueprint，计划接受后才能按 Step 实例化 Task |
 | agent 自己判断「要不要审批」/ 走 cws-core Approval | 执行计划确认不走 cws-core Approval：建好 Blueprint 一律 `issue.submit_plan` 给人类确认 |
 | 不读能力画像、按成员顺序/名字给 Step 派 bot | 派 bot 前**必须先 `core.agent_profiles({projectId,capabilities:true})`**，逐 Step 把任务需求和 agent 的 tag/skill 语义匹配，方案里写明每步选谁的依据；按顺序/名字拍脑袋＝能力画像形同虚设 |
-| Blueprint 通过后只建当前一步 Task、边做边补（piecemeal） | 一次性把全部 Step 建成 Task + 设 dependsOn + 每个都带 assignee；无依赖的进进行中、有依赖的 assigned 停待办，前置完成后调度中心通知其 assignee 开工，看板呈现完整全景 |
-| 给有依赖的 Step 建 Task 时不带 assigneeId（指望"自认领"）| **每个 Step 都要带 assigneeId**（含有依赖的）；不带则依赖就绪时调度中心没人可通知、链断在那。CreateTask 带 assigneeId 只是 assigned（不开工、不建 attempt），不会顶成「进行中」 |
-| 期待"前置 done 下游自动开工"或"前置 bot 手动 DM 下游去 claim" | 前置 done 后**调度中心自动 DM 下游 Task 的 assignee** 通知开工；assignee 收到后 `task.start`（校验依赖）才进进行中。无需手动 DM、无需 claim（已 assigned）——RUNNING 必须对应真在执行的 bot |
+| Blueprint 通过后只建当前一步 Task、边做边补（piecemeal） | 一次性把全部 Step 建成 Task + 设 dependsOn + 每个都带 assignee；无依赖的进入 RUNNING，有依赖的保持 ASSIGNED，前置完成后调度中心通知其 assignee 开工，看板呈现后端原始状态 |
+| 给有依赖的 Step 建 Task 时不带 assigneeId（指望"自认领"）| **每个 Step 都要带 assigneeId**（含有依赖的）；不带则依赖就绪时调度中心没人可通知、链断在那。CreateTask 带 assigneeId 只是 assigned（不开工、不建 attempt），不会顶成 RUNNING |
+| 期待"前置 done 下游自动开工"或"前置 bot 手动 DM 下游去 claim" | 前置 done 后**调度中心自动 DM 下游 Task 的 assignee** 通知开工；assignee 收到后 `task.start`（校验依赖）才进入 RUNNING。无需手动 DM、无需 claim（已 assigned）——RUNNING 必须对应真在执行的 bot |
 | claim 完就以为开工了 / 等 attempt | v0.7 claim 只分配（assigned）；必须再 `task.start` 才进 running、才建 attempt、才查依赖 |
 | 想把已 terminated 的 Issue/Task 重新拉起 | terminated 是终态，不复活；善后只做向前补偿，且外部不可逆动作先经人类确认 |
-| 直接归档未结论的 Issue | 只有 accepted / terminated 可归档；先验收通过或 `issue.terminate` 拿到终态 |
+| 单独归档 Issue / Task | 不允许单独归档；归档只从 `project.archive` 级联发生，Issue / Task 用 `archived_at` 表达归档维度 |
 | Worker 自行创建新 Attempt 重试 | 汇报失败，等 Lead 决定 |
 | CreateTask 不带 projectId | 必须传 issueId 或 projectId |
 | 对 ⏳ 命令反复重试 | 404/501 → 降级到对话流 |
@@ -361,7 +360,7 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 | 自行决定派哪个 bot 执行 | 按 agent 描述给推荐 + 理由，由发起人确认/选择执行 bot，不自行拍板 |
 | 派任务给 bot 但没把它加进 dmAllowFrom | 派发前先把 worker member_id 加进自己的 dmAllowFrom（必要时 dmPolicy=allowlist），否则它的完成回报 DM 被拦、收不到 |
 | Lead 替 worker 建 Task 再派给它 | Lead 只建 Issue + 给目标 + 开权限；Task 由执行的 bot 自己 task.create 并认领（谁执行谁建）|
-| worker 把 task 流转到 done 就当任务完成/归档 | task done 只是「执行动作做完」；进入 accepted/「完成」与 archived 必须人类验收通过 |
+| worker 把 task 流转到 done 就当任务完成 | task done 只是「执行动作做完」；进入 accepted/「完成」必须人类验收通过 |
 | 人类拒收后直接修改产出 | 先对话澄清 → `issue.resume` → 重新 plan → `issue.submit_plan`，再补 Task 重做 |
 | worker 把 task 流转到 done 却不留产出评论 | 流转 done 前先 `comment.create` 写明产出物地址，下一棒/人类才能拿到 |
 | 接棒前不读上游产出，直接 task.start 重做 | 收到「依赖已就绪」DM 后先 `task.get` + `comment.list` 读上游完成评论，再开工 |
@@ -400,7 +399,7 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
    `comm.send({conversationId, content})` 用 markdown 写清**目标、所属 Issue ID、KB 产出位置、退回触发词、判断标准**。**Task 由被指派的 worker 自己在该 Issue 下 `task.create` 并认领执行**——Lead 只建 Issue + 给目标 + 开权限，**不替 worker 建 Task / 不预先 `task.create({assigneeId})`**。
 
 5. **等 worker 回报并转交验收**：
-   不要轮询 `comm.get_messages`。worker 完成后通过 bot DM 回报；**该回报只有在第 2 步开放权限后才会进 Lead 的输入流**。收到回报 → Lead 调 `issue.deliver` → **转交发起人（人类）验收**（见护栏规则 6，验收通过才 accepted/archived）。
+   不要轮询 `comm.get_messages`。worker 完成后通过 bot DM 回报；**该回报只有在第 2 步开放权限后才会进 Lead 的输入流**。收到回报 → Lead 调 `issue.deliver` → **转交发起人（人类）验收**（见护栏规则 6，验收通过才 accepted）。
 
 **用 TM action 而非聊**：重派用 `task.reassign({newAssigneeId})`；状态流转 worker 自己走 attempt/task transition。但**澄清需求、上下文同步、判断分歧**这些"对话"性质的事，**必须**走 bot DM。
 

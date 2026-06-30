@@ -40,7 +40,7 @@ function pageParams(p) {
 
 const COMMANDS = {
   // =========================================================================
-  //  PROJECT  (✅ all 7 in contract-v2)
+  //  PROJECT
   // =========================================================================
 
   'project.list': () => get(apiPath('/projects'), {
@@ -68,9 +68,6 @@ const COMMANDS = {
   }),
 
   'project.archive':   () => post(apiPath(`/projects/${params.id}/archive`)),
-  'project.restore':   () => post(apiPath(`/projects/${params.id}/restore`)),
-  // backward-compat alias for older scripts.
-  'project.unarchive': () => post(apiPath(`/projects/${params.id}/restore`)),
 
   'project.members': () => get(
     apiPath(`/projects/${params.id}/members`),
@@ -83,8 +80,10 @@ const COMMANDS = {
   // =========================================================================
 
   'issue.list_in_project': () => get(apiPath(`/projects/${params.projectId}/issues`), {
-    status:   params.status,     // enum (backlog / pending_plan / in_progress / ... / archived)
-    priority: params.priority,   // enum: low|medium|high
+    status:           params.status,     // single backend status
+    statuses:         params.statuses,   // comma-separated inclusion list
+    priority:         params.priority,   // enum: low|medium|high
+    include_archived: params.includeArchived,
     ...pageParams(params),
   }),
 
@@ -152,7 +151,6 @@ const COMMANDS = {
       source: params.source ?? 'lead_chat',
     },
   ),
-  'issue.archive':         () => post(apiPath(`/issues/${params.id}/archive`)),
   'issue.accept_delivered': () => post(
     apiPath(`/issues/${params.id}/accept-delivered`),
     { source: params.source ?? 'explicit' },
@@ -189,9 +187,10 @@ const COMMANDS = {
   // =========================================================================
 
   'task.list': () => get(apiPath('/tasks'), {
-    project_id:   params.projectId,
-    issue_id:     params.issueId,
-    status:       params.status,           // pending|running|done|failed|cancelled
+    project_id:       params.projectId,
+    issue_id:         params.issueId,
+    status:           params.status,           // pending|assigned|running|done|failed|cancelled
+    include_archived: params.includeArchived,
     ...pageParams(params),
   }),
 
@@ -379,11 +378,10 @@ PROJECT  (all ✅ on contract-v2)
   project.get            {id}
   project.update         {id, name?, description?, descriptionFormat?, leadMemberId?}
   project.archive        {id}
-  project.restore        {id}                                                    # alias: project.unarchive
   project.members        {id, page?, pageSize?, orderBy?}
 
 ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{pid}/issues/{id})
-  issue.list_in_project  {projectId, status?, priority?, page?, pageSize?, orderBy?}
+  issue.list_in_project  {projectId, status?, statuses?, priority?, includeArchived?, page?, pageSize?, orderBy?}
   issue.get              {id}
   issue.create           {projectId, title, leadAgentId,
                           ownerMemberId?, priority?,
@@ -395,14 +393,13 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.accept_plan      {id, source?}                                        # default source=text_card_proxy
   issue.deliver          {id}
   issue.resume           {id, reason?, source?}                               # human feedback → in_progress
-  issue.archive          {id}
   issue.accept_delivered {id, source?}                                        # source: im|explicit|text_card_proxy
   issue.reassign_owner   {id, newOwnerMemberId (or 'ownerMemberId')}          # change issue owner
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
   issue.terminate        {id, reason?, source?}                           # 提前终止 → terminated; 级联取消 Task + 发善后事件
 
 TASK  (all ✅ on contract-v2; create uses doubly-nested path)
-  task.list              {projectId?, issueId?, status?, page?, pageSize?, orderBy?}
+  task.list              {projectId?, issueId?, status?, includeArchived?, page?, pageSize?, orderBy?}
   task.get               {id}
   task.create            {projectId, issueId, title, description?,
                           assigneeId?, blueprintStepId?, dependsOn?}            # dependsOn entries are upstream task.id
