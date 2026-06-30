@@ -159,10 +159,7 @@ assertTrue(workerAdded >= 1, `14b. WORKER replied ≥ 1 agent_text in bot DM dur
 // ---- Cleanup ---------------------------------------------------------------
 log('');
 log('[Cleanup] 清理测试数据');
-try {
-  await tm('issue.archive', { id: ISSUE.id }, { actor: 'lead' });
-  ok(`cleanup: issue ${ISSUE.id} archived`);
-} catch (e) { log(`   ⚠ cleanup: issue archive failed: ${e.message}`); }
+log(`   · issue ${ISSUE.id} left accepted; single issue archive is no longer supported`);
 try {
   const allPages = await tm('kb.pages', { limit: 200 }, { actor: 'lead' });
   const items = Array.isArray(allPages) ? allPages : (allPages.data || allPages.pages || []);
