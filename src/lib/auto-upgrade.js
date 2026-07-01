@@ -23,7 +23,7 @@ const MARKER_PATH = path.join(RUNTIME_DIR, 'upgrade-marker.json');
 const ZYLOS_BIN = path.join(HOME, 'zylos/zylos');
 const SEND_SCRIPT = path.resolve(new URL('../../scripts/send.js', import.meta.url).pathname);
 const GITHUB_REPO = 'zylos-ai/zylos-openmax';
-const INITIAL_DELAY_MS = 60 * 1000;
+export const INITIAL_DELAY_MS = 60 * 1000;
 
 const log  = (...a) => console.log('[auto-upgrade]', ...a);
 const warn = (...a) => console.warn('[auto-upgrade]', ...a);
@@ -150,7 +150,7 @@ function runUpgrade() {
   });
 }
 
-async function checkAndUpgrade() {
+export async function checkAndUpgrade() {
   const current = readPkgVersion();
   log(`checking for updates (current: v${current})...`);
   try {
@@ -169,28 +169,4 @@ async function checkAndUpgrade() {
   } catch (e) {
     warn(`check failed: ${e.message}`);
   }
-}
-
-let _timer = null;
-
-export function startAutoUpgrade(config) {
-  const settings = config?.autoUpgrade || {};
-  if (settings.enabled === false) {
-    log('disabled in config');
-    return;
-  }
-  const intervalMs = (settings.intervalHours || 24) * 60 * 60 * 1000;
-  const delay = Math.max(INITIAL_DELAY_MS, settings.initialDelayMs || INITIAL_DELAY_MS);
-
-  log(`scheduled: first check in ${Math.round(delay / 1000)}s, then every ${Math.round(intervalMs / 3600000)}h`);
-
-  setTimeout(() => {
-    checkAndUpgrade();
-    _timer = setInterval(checkAndUpgrade, intervalMs);
-    _timer.unref?.();
-  }, delay).unref?.();
-}
-
-export function stopAutoUpgrade() {
-  if (_timer) { clearInterval(_timer); _timer = null; }
 }
