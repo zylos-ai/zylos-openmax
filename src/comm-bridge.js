@@ -37,6 +37,8 @@ import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
+import { checkAndUpgrade, INITIAL_DELAY_MS as UPGRADE_DELAY_MS, notifyOwners } from './lib/auto-upgrade.js';
+import TaskRegistry from './lib/task-registry.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'openmax';
@@ -53,6 +55,8 @@ const DEFAULT_DEDUP_MAX_ENTRIES = 3000;
 // heartbeat_interval}` may override either; if absent, these apply.
 const DEFAULT_WS_RECONNECT_MAX_MS = 30 * 1000;    // 30_000
 const DEFAULT_WS_HEARTBEAT_MS     = 30 * 1000;    // 30_000
+
+const tasks = new TaskRegistry();
 
 const C4_RECEIVE = path.join(
   process.env.HOME || '',
@@ -352,7 +356,8 @@ function pollTypingDone() {
     }
   }
 }
-let _typingPollTimer = setInterval(pollTypingDone, TYPING_POLL_MS);
+tasks.register('typing-poll', pollTypingDone, TYPING_POLL_MS);
+tasks.start('typing-poll');
 
 // Export path for send.js to import.
 export { TYPING_DIR };
@@ -995,8 +1000,6 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger) {
 
 const _frameTypeCounts = Object.create(null);
 const WS_METRIC_INTERVAL_MS = 5 * 60 * 1000;
-let _frameMetricTimer = null;
-
 function recordFrameType(slug, type) {
   const k = `${slug}/${type || '(missing-type)'}`;
   _frameTypeCounts[k] = (_frameTypeCounts[k] || 0) + 1;
@@ -1012,11 +1015,6 @@ function dumpFrameMetrics() {
   log(`ws frame metric (cumulative since boot): ${entries.map(([k, n]) => `${k}=${n}`).join(' ')}`);
 }
 
-function startFrameMetricTimer() {
-  if (_frameMetricTimer) return;
-  _frameMetricTimer = setInterval(dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
-  _frameMetricTimer.unref?.();
-}
 
 // =============================================================================
 // Policy config events — agent.config.* → update config.json + memory
@@ -1632,19 +1630,14 @@ async function syncConfigToComm(orgConfig) {
 
 // Periodic sync — owner from core + local policy to comm, every 5 min.
 const PERIODIC_SYNC_INTERVAL_MS = 5 * 60 * 1000;
-let _periodicSyncTimer = null;
 
-function startPeriodicSync() {
-  if (_periodicSyncTimer) return;
-  _periodicSyncTimer = setInterval(() => {
-    for (const [slug, orgConfig] of activeOrgConfigs) {
-      syncOwnerFromCore(orgConfig).catch(e =>
-        warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
-      syncConfigToComm(orgConfig).catch(e =>
-        warn(`[${slug}] periodic config-sync failed: ${e.message}`));
-    }
-  }, PERIODIC_SYNC_INTERVAL_MS);
-  _periodicSyncTimer.unref?.();
+function periodicSync() {
+  for (const [slug, orgConfig] of activeOrgConfigs) {
+    syncOwnerFromCore(orgConfig).catch(e =>
+      warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
+    syncConfigToComm(orgConfig).catch(e =>
+      warn(`[${slug}] periodic config-sync failed: ${e.message}`));
+  }
 }
 
 // =============================================================================
@@ -1805,6 +1798,18 @@ if (orgs.length === 0) {
     for (const orgConfig of orgs) {
       startOrgWs(orgConfig, wsBaseUrl);
     }
+    notifyOwners(activeOrgConfigs, postForOrg, apiPath).catch(e =>
+      warn(`upgrade notification error: ${e.message}`));
+    const upgradeSettings = config?.autoUpgrade || {};
+    if (upgradeSettings.enabled !== false) {
+      const intervalMs = (upgradeSettings.intervalHours || 24) * 3600_000;
+      const delay = Math.max(UPGRADE_DELAY_MS, upgradeSettings.initialDelayMs || UPGRADE_DELAY_MS);
+      tasks.register('auto-upgrade', checkAndUpgrade, intervalMs, { delay, runOnStart: true });
+      tasks.start('auto-upgrade');
+      log(`auto-upgrade scheduled: first check in ${Math.round(delay / 1000)}s, then every ${Math.round(intervalMs / 3600_000)}h`);
+    } else {
+      log('auto-upgrade disabled in config');
+    }
   })();
 }
 
@@ -1844,9 +1849,7 @@ function shutdown(signal) {
   if (_isShuttingDown) return;
   _isShuttingDown = true;
   log(`${signal}, shutting down...`);
-  if (_frameMetricTimer) { clearInterval(_frameMetricTimer); _frameMetricTimer = null; }
-  if (_periodicSyncTimer) { clearInterval(_periodicSyncTimer); _periodicSyncTimer = null; }
-  if (_typingPollTimer) { clearInterval(_typingPollTimer); _typingPollTimer = null; }
+  tasks.stopAll();
   // Remove all active processing-indicator reactions before exit.
   const removals = [];
   for (const [msgId, state] of activeReactions) {
@@ -1866,5 +1869,7 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-startFrameMetricTimer();
-startPeriodicSync();
+tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
+tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
+tasks.start('frame-metrics');
+tasks.start('owner-config-sync');
