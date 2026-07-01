@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] — 2026-07-01
+
 ### Added
 
 - **feat(tm): Issue 执行计划确认与交付反馈循环命令**。
@@ -20,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **所有 Issue 计划统一落 Blueprint**：简单任务也先创建单 step Blueprint，`issue.submit_plan` 新流程要求传 `blueprintId`；Issue comment 记录人类看到的计划说明，Blueprint 作为计划事实源和未来 workflow 固化来源。
 - `core.project_list` 默认按 `status=active` 过滤。按名称解析归属项目时不再匹配到已归档项目。
+- **前端链接规则同步 cws-fe 融合页**：项目/Issue URL 从嵌套路径（`/projects/{id}`, `/projects/{id}/issues/{iid}`）改为 query 参数（`/projects?project={id}&issue={iid}`）。删除已移除的 `/tasks` 页面。旧路径自动重定向。
 
 ## [2.1.0] — 2026-07-01
 
