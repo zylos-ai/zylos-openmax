@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **所有 Issue 计划统一落 Blueprint**：简单任务也先创建单 step Blueprint，`issue.submit_plan` 新流程要求传 `blueprintId`；Issue comment 记录人类看到的计划说明，Blueprint 作为计划事实源和未来 workflow 固化来源。
 - `core.project_list` 默认按 `status=active` 过滤。按名称解析归属项目时不再匹配到已归档项目。
 
+## [2.1.0] — 2026-07-01
+
+### Added
+
+- **feat(comm-bridge): auto-upgrade with owner notification** (`src/lib/auto-upgrade.js`)。comm-bridge.js 启动后定期（默认每 24 小时）通过 GitHub Releases API 检查 zylos-openmax 最新版本。发现新版本时自动执行 `zylos upgrade openmax`，升级完成 PM2 重启后通过 DM 通知 owner（包含版本号和 release notes 摘要）。
+  - 首次检查延迟 60 秒（避免启动竞争）
+  - 升级标记文件 `runtime/upgrade-marker.json` 跨重启传递版本信息
+  - 通知通过 `POST /conversations/dm` 获取 owner DM 会话 + `scripts/send.js` 发送
+  - 可通过 `config.json` 配置：`autoUpgrade.enabled`（默认 true）、`autoUpgrade.intervalHours`（默认 24）
+
 ## [2.0.1] — 2026-07-01
 
 ### Changed

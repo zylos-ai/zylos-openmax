@@ -37,6 +37,7 @@ import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
+import { startAutoUpgrade, stopAutoUpgrade, notifyOwners } from './lib/auto-upgrade.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'openmax';
@@ -1805,6 +1806,9 @@ if (orgs.length === 0) {
     for (const orgConfig of orgs) {
       startOrgWs(orgConfig, wsBaseUrl);
     }
+    notifyOwners(activeOrgConfigs, postForOrg, apiPath).catch(e =>
+      warn(`upgrade notification error: ${e.message}`));
+    startAutoUpgrade(config);
   })();
 }
 
@@ -1847,6 +1851,7 @@ function shutdown(signal) {
   if (_frameMetricTimer) { clearInterval(_frameMetricTimer); _frameMetricTimer = null; }
   if (_periodicSyncTimer) { clearInterval(_periodicSyncTimer); _periodicSyncTimer = null; }
   if (_typingPollTimer) { clearInterval(_typingPollTimer); _typingPollTimer = null; }
+  stopAutoUpgrade();
   // Remove all active processing-indicator reactions before exit.
   const removals = [];
   for (const [msgId, state] of activeReactions) {
