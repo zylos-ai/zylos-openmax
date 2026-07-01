@@ -44,7 +44,11 @@ Each service team contributes a pair of files: `src/cli/xx.js` + `references/xx-
 
 ## Release Process
 
-Update version in both `package.json` and `SKILL.md` frontmatter in the same commit.
+Every release PR must update these three files in the same commit:
+
+- `package.json` — `version` field
+- `SKILL.md` — frontmatter `version`
+- `CHANGELOG.md` — new version entry describing the changes
 
 ## References
 
