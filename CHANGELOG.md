@@ -31,6 +31,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 通知通过 `POST /conversations/dm` 获取 owner DM 会话 + `scripts/send.js` 发送
   - 可通过 `config.json` 配置：`autoUpgrade.enabled`（默认 true）、`autoUpgrade.intervalHours`（默认 24）
 
+### Changed
+
+- **refactor(comm-bridge): TaskRegistry 统一管理定时任务** (`src/lib/task-registry.js`)。4 个应用级定时任务（typing-poll / frame-metrics / owner-config-sync / auto-upgrade）通过 `TaskRegistry` 集中注册、启动、停止。`shutdown()` 从 4 段清理代码简化为 `tasks.stopAll()` 一行。执行逻辑不变，`list()` 方法预留健康检查扩展。
+
 ## [2.0.1] — 2026-07-01
 
 ### Changed
