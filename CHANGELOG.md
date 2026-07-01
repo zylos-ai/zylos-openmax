@@ -12,10 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **feat(tm): Issue 执行计划确认与交付反馈循环命令**。
   - 新增 `issue.submit_plan` / `issue.accept_plan` / `issue.resume`，对接 cws-core BFF 的 cws-work 内部计划确认流程。
   - SKILL 和 TM 参考文档改为文本卡片模拟路径：Lead 发计划/交付消息，人类回复接受后 Lead 用 `source:"text_card_proxy"` 代点；人类不接受时先对话澄清，再 `issue.resume` 回到执行中并重新计划。
+- **Skill 强制：`dependsOn` 必须使用上游 Task 的 `task.id`**。实例化 Sub-task 时，下游 Task 的 `dependsOn` 要用先建出来的上游 Task 返回的 `task.id`（先建上游、拿到 id、再设下游）。调度中心的「依赖就绪」开工通知与 `task.start` 开工闸都按 task.id 匹配；用错 id 会让依赖边失效——下游 Task 永不被通知、过不了开工闸、无报错地永久卡在 assigned。动机：concurrent-roles 探针实测复现，并已在 cws-work 侧加 `CreateTask` 校验兜底（!87）。
+- **Skill 行为护栏：绝不隐式创建 Project**。项目归属只能"选已有"或"用户明确要求时新建"——即便用户提到某个项目名而 bot 查不到同名项目，也禁止擅自建一个兜底，必须回过头问用户（指哪个已有项目，还是要新建）。`project.create` 仅在人类明确指示新建时才调。
+- **Skill 行为护栏 #11/#12：激活即开工 + backlog 创建即澄清**。收到 `issue.activated`（owner 经 `issue.activate` 激活 backlog Issue）后，Lead **直接 `issue.start_execution` 开工**，不再回头问 owner「要不要开始 / 保持 backlog」。
 
 ### Changed
 
 - **所有 Issue 计划统一落 Blueprint**：简单任务也先创建单 step Blueprint，`issue.submit_plan` 新流程要求传 `blueprintId`；Issue comment 记录人类看到的计划说明，Blueprint 作为计划事实源和未来 workflow 固化来源。
+- `core.project_list` 默认按 `status=active` 过滤。按名称解析归属项目时不再匹配到已归档项目。
+
+## [2.0.1] — 2026-07-01
+
+### Changed
+
+- **docs(tm): 刷新 TM 依赖覆盖文档至 v0.7 合约** (PR #2)。Issue 状态更新为 `backlog/in_progress/pending_plan/delivered/accepted/terminated`；Task 状态新增 `assigned`；移除过时的 `claimable`/`agent_skills` 引用；新增 `include_archived`/`statuses` 参数；issueItem/taskItem schema 清理（移除 `mode`、`skill_tags`、`context_page_ids` 等已删字段）；TaskBoard 章节更新为已完全删除。
+- **fix(tm): 移除 smoke 文档中已禁用的 archive/restore 流程** (PR #1)。
+
+### Removed
+
+- **删除 `SKILL-v2.md`** (PR #4)。根目录冗余的 SKILL 草稿文件，仅保留 `SKILL.md`。
 
 ## [1.0.66] — 2026-06-25
 
@@ -64,18 +79,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **P2**: 新增 `ackSync` — sync 完成后向 cws-comm 确认已处理的最高 seq
   - **P3**: 移除 `createDeduper` 的 `ttlMs` 死参数；清理 `last_seq` 相关注释
   - 向后兼容：首次升级自动从 `last_seq` 迁移到 `sync_seq`
-
-## [Unreleased]
-
-### Added
-
-- **Skill 强制：`dependsOn` 必须使用上游 Task 的 `task.id`**。实例化 Sub-task 时，下游 Task 的 `dependsOn` 要用先建出来的上游 Task 返回的 `task.id`（先建上游、拿到 id、再设下游）。调度中心的「依赖就绪」开工通知与 `task.start` 开工闸都按 task.id 匹配；用错 id 会让依赖边失效——下游 Task 永不被通知、过不了开工闸、无报错地永久卡在 assigned。动机：concurrent-roles 探针实测复现，并已在 cws-work 侧加 `CreateTask` 校验兜底（!87）。
-- **Skill 行为护栏：绝不隐式创建 Project**。项目归属只能"选已有"或"用户明确要求时新建"——即便用户提到某个项目名而 bot 查不到同名项目，也禁止擅自建一个兜底，必须回过头问用户（指哪个已有项目，还是要新建）。`project.create` 仅在人类明确指示新建时才调。动机：bot 隐式新建项目会让随后建的 Issue/Task/产出全落到错的项目上下文，前功尽弃（concurrent-roles 探针实测复现：lead 找不到指定项目就自建同名项目，工作落到游离项目里）。
-- **Skill 行为护栏 #11/#12：激活即开工 + backlog 创建即澄清**。收到 `issue.activated`（owner 经 `issue.activate` 激活 backlog Issue）后，Lead **直接 `issue.start_execution` 开工**，不再回头问 owner「要不要开始 / 保持 backlog」——激活是 owner 最新的显式开工信号，压过描述里旧的「先不开发」备注；执行中若上下文确有缺失，DM owner 补**需求**（而非问许可）。配套：创建 backlog Issue 时主动 DM owner 做需求澄清，让上下文在 backlog 阶段就完备，激活后即可直接执行。
-
-### Changed
-
-- `core.project_list` 默认按 `status=active` 过滤。按名称解析归属项目时不再匹配到已归档项目（归档同名项目会让模糊匹配产生歧义）。需要归档项目时显式传 `status:"archived"`。
 
 ## [1.0.43] - 2026-06-18
 
