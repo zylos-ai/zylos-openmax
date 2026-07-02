@@ -1247,6 +1247,7 @@ function classifySystemEvent(eventName) {
   if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
   if (e === 'message.updated') return 'edit';
   if (e.startsWith('agent.config.')) return 'config_update';
+  if (e.startsWith('connection.')) return 'connection';
   // Defensive fallback for naming drift — does not match reaction/read/etc.
   if (e.includes('recall') || e.includes('delete')) return 'recall';
   if (e.includes('edit') || e.includes('updat')) return 'edit';
@@ -1263,6 +1264,12 @@ async function handleSystemEvent(orgConfig, frame) {
 
   if (kind === 'config_update') {
     handleConfigUpdate(orgConfig, frame);
+    return;
+  }
+
+  if (kind === 'connection') {
+    handleConnectionEvent(orgConfig, frame).catch(e =>
+      warn(`[${orgConfig.slug}] handleConnectionEvent: ${e.message}`));
     return;
   }
 
@@ -1345,6 +1352,105 @@ async function handleSystemEvent(orgConfig, frame) {
     log(`[${orgConfig.slug}] system ${kind} notice -> agent conv=${conversationId} msg=${messageId}`);
   } catch (e) {
     warn(`[${orgConfig.slug}] system ${kind} notice failed: ${e.message}`);
+  }
+}
+
+// =============================================================================
+// Connection events — cws-connect credential lifecycle
+// =============================================================================
+
+const CREDENTIALS_DIR = path.join(RUNTIME_DIR, 'credentials');
+
+function ensureCredentialsDir() {
+  fs.mkdirSync(CREDENTIALS_DIR, { recursive: true });
+}
+
+function credentialPath(connectionId) {
+  return path.join(CREDENTIALS_DIR, `${connectionId}.json`);
+}
+
+function saveCredentialCache(connectionId, data) {
+  ensureCredentialsDir();
+  fs.writeFileSync(credentialPath(connectionId), JSON.stringify(data, null, 2));
+}
+
+function deleteCredentialCache(connectionId) {
+  try { fs.unlinkSync(credentialPath(connectionId)); } catch {}
+}
+
+async function acquireCredential(orgId, connectionId, agentMemberId) {
+  return postForOrg(
+    orgId,
+    apiPath(`/connect/connections/${connectionId}/credential?agent_member_id=${encodeURIComponent(agentMemberId)}`),
+  );
+}
+
+function isEventForMe(data, selfMemberId) {
+  if (data.agent_member_id) return data.agent_member_id === selfMemberId;
+  if (Array.isArray(data.agent_member_ids)) return data.agent_member_ids.includes(selfMemberId);
+  return true;
+}
+
+async function handleConnectionEvent(orgConfig, frame) {
+  const { event, data } = frame.payload || {};
+  if (!event || !data) return;
+
+  const slug = orgConfig.slug;
+  const selfId = orgConfig.self?.member_id;
+  const connectionId = data.connection_id;
+
+  if (!connectionId) {
+    warn(`[${slug}] connection event ${event}: missing connection_id`);
+    return;
+  }
+
+  if (!isEventForMe(data, selfId)) {
+    log(`[${slug}] connection event ${event} not for us (conn=${connectionId}), skip`);
+    return;
+  }
+
+  const orgId = orgConfig.org_id;
+
+  switch (event) {
+    case 'connection.authorized': {
+      log(`[${slug}] connection.authorized conn=${connectionId} mode=${data.credential_mode || '?'}`);
+      try {
+        const cred = await acquireCredential(orgId, connectionId, selfId);
+        saveCredentialCache(connectionId, cred);
+        log(`[${slug}] credential acquired + cached conn=${connectionId} mode=${cred.credential_mode}`);
+      } catch (e) {
+        warn(`[${slug}] credential acquire failed conn=${connectionId}: ${e.message}`);
+      }
+      break;
+    }
+
+    case 'connection.revoked':
+    case 'connection.disconnected': {
+      log(`[${slug}] ${event} conn=${connectionId}`);
+      deleteCredentialCache(connectionId);
+      log(`[${slug}] credential cache cleared conn=${connectionId}`);
+      break;
+    }
+
+    case 'connection.credential_updated': {
+      log(`[${slug}] credential_updated conn=${connectionId}`);
+      try {
+        const cred = await acquireCredential(orgId, connectionId, selfId);
+        saveCredentialCache(connectionId, cred);
+        log(`[${slug}] credential re-acquired conn=${connectionId} mode=${cred.credential_mode}`);
+      } catch (e) {
+        warn(`[${slug}] credential re-acquire failed conn=${connectionId}: ${e.message}`);
+      }
+      break;
+    }
+
+    case 'connection.reauth_needed': {
+      warn(`[${slug}] reauth_needed conn=${connectionId} app=${data.application_id || '?'} trigger=${data.trigger || '?'}`);
+      break;
+    }
+
+    default:
+      warn(`[${slug}] unknown connection event: ${event}`);
   }
 }
 

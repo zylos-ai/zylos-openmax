@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] — 2026-07-02
+
+### Added
+
+- **feat(comm-bridge): cws-connect WS event handling**. Handles `connection.authorized`, `connection.revoked`, `connection.disconnected`, `connection.credential_updated`, and `connection.reauth_needed` system events. On authorization, acquires credentials from cws-core BFF and caches them locally at `runtime/credentials/{id}.json`. Revoke/disconnect clears the cache; credential_updated re-acquires. Events are filtered by agent member_id.
+- **feat(cli): conn.js — Connection management CLI**. New CLI module (`src/cli/conn.js`) with 6 commands: `conn.list` (available connections), `conn.acquire` (credential acquisition), `conn.proxy` (proxy-mode request forwarding), `conn.status` (connection details), `conn.cached` (local credential cache), `conn.clear_cache` (cache cleanup).
+- **docs: conn-operations.md** — Operation reference for the connection CLI, including credential modes (direct/proxy), WS event flow, and BFF endpoint mapping.
+
 ## [2.3.1] — 2026-07-02
 
 ### Fixed
