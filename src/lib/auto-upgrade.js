@@ -20,7 +20,7 @@ import { execFile } from 'child_process';
 const HOME = process.env.HOME || '/tmp';
 const RUNTIME_DIR = path.join(HOME, 'zylos/components/openmax/runtime');
 const MARKER_PATH = path.join(RUNTIME_DIR, 'upgrade-marker.json');
-const ZYLOS_BIN = path.join(HOME, 'zylos/zylos');
+const ZYLOS_BIN = process.env.ZYLOS_BIN || 'zylos';
 const SEND_SCRIPT = path.resolve(new URL('../../scripts/send.js', import.meta.url).pathname);
 const GITHUB_REPO = 'zylos-ai/zylos-openmax';
 export const INITIAL_DELAY_MS = 60 * 1000;

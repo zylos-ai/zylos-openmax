@@ -42,10 +42,10 @@ function buildPayload(dashboard) {
     resources: {
       cpu_pct:   sys.cpu_pct ?? null,
       mem_pct:   sys.mem_pct ?? null,
-      mem_total: sys.mem_total_bytes ?? null,
-      mem_used:  sys.mem_used_bytes ?? null,
-      disk_pct:  sys.disk_pct ?? null,
-      disk_free: sys.disk_free_bytes ?? null,
+      mem_total_bytes: sys.mem_total_bytes ?? null,
+      mem_used_bytes:  sys.mem_used_bytes ?? null,
+      disk_pct:        sys.disk_pct ?? null,
+      disk_free_bytes: sys.disk_free_bytes ?? null,
     },
     runtime: {
       state:       dashboard.state ?? 'UNKNOWN',
@@ -60,7 +60,6 @@ function buildPayload(dashboard) {
       weekly:  dashboard.weekly_cost ?? null,
     },
     rate_limit_pct: dashboard.rate_limit_pct ?? null,
-    reported_at: new Date().toISOString(),
   };
 }
 
