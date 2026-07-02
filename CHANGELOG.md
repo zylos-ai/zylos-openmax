@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] — 2026-07-02
+
+### Added
+
+- **feat(comm-bridge): runtime metrics reporting to cws-core**. Periodically reads agent runtime metrics (CPU, memory, disk, context, cost, state, model) from zylos-dashboard's `/api/state` and reports them to cws-core via `PUT /agents/{id}/runtime-metrics`. Registered as a 60s periodic task, configurable via `config.metricsReport`. Dashboard 404 is silently skipped (endpoint not yet deployed on cws-core).
+
 ## [2.2.0] — 2026-07-01
 
 ### Added

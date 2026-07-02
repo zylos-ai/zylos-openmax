@@ -38,6 +38,7 @@ import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
 import { checkAndUpgrade, INITIAL_DELAY_MS as UPGRADE_DELAY_MS, notifyOwners } from './lib/auto-upgrade.js';
+import { createMetricsReporter } from './lib/metrics-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
 
 const LOG_PREFIX = '[comm-bridge]';
@@ -1640,6 +1641,10 @@ function periodicSync() {
   }
 }
 
+// Metrics reporting — read from zylos-dashboard, push to cws-core, every 60s.
+const METRICS_REPORT_INTERVAL_MS = (config.metricsReport?.intervalSeconds || 60) * 1000;
+const METRICS_REPORT_INITIAL_DELAY_MS = 15_000;
+
 // =============================================================================
 // WS pool — one connection per enabled org
 // =============================================================================
@@ -1871,5 +1876,12 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
 tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
+if (config.metricsReport?.enabled !== false) {
+  const reportMetrics = createMetricsReporter(activeOrgConfigs, { log, warn });
+  tasks.register('metrics-report', reportMetrics, METRICS_REPORT_INTERVAL_MS, {
+    delay: METRICS_REPORT_INITIAL_DELAY_MS,
+  });
+}
 tasks.start('frame-metrics');
 tasks.start('owner-config-sync');
+if (config.metricsReport?.enabled !== false) tasks.start('metrics-report');
