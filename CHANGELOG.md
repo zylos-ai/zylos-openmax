@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.1] — 2026-07-02
+
+### Fixed
+
+- **fix(auto-upgrade): ZYLOS_BIN path resolution**. Hardcoded `~/zylos/zylos` path fails when zylos is installed via npm (nvm PATH). Now uses `process.env.ZYLOS_BIN || 'zylos'` for PATH-based lookup.
+- **fix(metrics-reporter): field name mismatch with cws-core schema**. Renamed `mem_total` → `mem_total_bytes`, `mem_used` → `mem_used_bytes`, `disk_free` → `disk_free_bytes` to match cws-core's `reportRuntimeMetricsRequest` struct. Removed `reported_at` from PUT body (server-side field).
+
 ## [2.3.0] — 2026-07-02
 
 ### Added
