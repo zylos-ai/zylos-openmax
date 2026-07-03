@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.1] — 2026-07-03
+
+### Fixed
+
+- **fix(auto-upgrade): owner DM notification** — `notifyOwners` read `res?.data?.id` but POST /conversations/dm returns `{ conversation: { id } }`; fixed to `res?.conversation?.id`.
+- **fix(auto-upgrade): runUpgrade flags** — added `--yes` (skip interactive confirmation in non-TTY) and `--mode overwrite` to the `zylos upgrade` invocation.
+
 ## [2.4.0] — 2026-07-02
 
 ### Added
