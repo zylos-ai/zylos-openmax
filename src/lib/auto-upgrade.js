@@ -128,7 +128,7 @@ export async function notifyOwners(enabledOrgConfigs, postForOrgFn, apiPathFn) {
     try {
       const res = await postForOrgFn(orgConfig.org_id,
         apiPathFn('/conversations/dm'), { peer_member_id: ownerMemberId });
-      const convId = res?.data?.id;
+      const convId = res?.conversation?.id;
       if (!convId) {
         warn(`[${slug}] could not resolve owner DM conversation`);
         continue;
@@ -143,7 +143,7 @@ export async function notifyOwners(enabledOrgConfigs, postForOrgFn, apiPathFn) {
 
 function runUpgrade() {
   return new Promise((resolve, reject) => {
-    execFile(ZYLOS_BIN, ['upgrade', 'openmax'], { timeout: 120000 }, (err, stdout, stderr) => {
+    execFile(ZYLOS_BIN, ['upgrade', 'openmax', '--yes', '--mode', 'overwrite'], { timeout: 120000 }, (err, stdout, stderr) => {
       if (err) reject(new Error(stderr || err.message));
       else resolve(stdout);
     });
