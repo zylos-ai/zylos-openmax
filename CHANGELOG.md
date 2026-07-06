@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.3] — 2026-07-06
+
+### Fixed
+
+- **fix(auto-upgrade): disable self-upgrade execution**. The auto-upgrade timer was calling `zylos upgrade openmax` from within the openmax process — a suicide upgrade that stops its own PM2 service mid-execution, leaving the service stopped and files potentially unupdated. Now the timer only detects new versions and notifies owners via DM with the manual upgrade command. The `notifyUpgradeComplete` startup hook is preserved for external upgrades that leave a marker.
+
 ## [2.4.2] — 2026-07-06
 
 ### Fixed
