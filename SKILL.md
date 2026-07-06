@@ -474,20 +474,18 @@ Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-b
 
 ## 前端链接（Frontend URL Patterns）
 
-分享 Workspace 资源链接时，**必须**加上 `/cws` 前缀（Next.js `basePath`，见 `cws-fe/apps/web/next.config.ts`）。直接拼 BFF 路径会 404。
-
-域名取决于环境，当前测试环境统一使用 `https://cws-int.coco.xyz`。
+分享 Workspace 资源链接时，**必须**加上 `/workspace` 前缀（Next.js `basePath`，见 `cws-fe/apps/web/src/lib/base-path.ts`）。直接拼 BFF 路径会 404。
 
 | 资源 | URL 模板 | 来源 |
 |---|---|---|
-| 项目列表 | `{domain}/cws/projects` | sidebar.tsx |
-| 项目详情（选中项目） | `{domain}/cws/projects?project={project_id}` | projects/page.tsx (fusion page) |
-| Issue 详情（选中项目+Issue） | `{domain}/cws/projects?project={project_id}&issue={issue_id}` | projects/page.tsx (fusion page) |
-| KB 列表 | `{domain}/cws/knowledge` | sidebar.tsx |
-| KB 详情 | `{domain}/cws/knowledge?kb={kb_id}` | knowledge/page.tsx |
-| KB 页面 | `{domain}/cws/knowledge?kb={kb_id}&node={tree_node_id}` | knowledge/page.tsx |
+| 项目列表 | `{domain}/workspace/projects` | sidebar.tsx |
+| 项目详情（选中项目） | `{domain}/workspace/projects?project={project_id}` | projects/page.tsx (fusion page) |
+| Issue 详情（选中项目+Issue） | `{domain}/workspace/projects?project={project_id}&issue={issue_id}` | projects/page.tsx (fusion page) |
+| KB 列表 | `{domain}/workspace/knowledge` | sidebar.tsx |
+| KB 详情 | `{domain}/workspace/knowledge?kb={kb_id}` | knowledge/page.tsx |
+| KB 页面 | `{domain}/workspace/knowledge?kb={kb_id}&node={tree_node_id}` | knowledge/page.tsx |
 
-- `{domain}` = 环境域名，如 `https://cws-int.coco.xyz`
+- `{domain}` = 环境域名
 - 项目和 Issue 现在是**融合页**（fusion page），通过 query 参数选择当前项目和 Issue，不再用嵌套路径。
 - 旧路径自动重定向：`/projects/{id}` → `/projects?project={id}`，`/projects/{id}/issues/{iid}` → `/projects?project={id}&issue={iid}`，`/issues` → `/projects`。
 - 任务没有单独页面；任务在 Issue 详情内以看板/列表形式展示。
