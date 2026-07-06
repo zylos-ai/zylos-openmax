@@ -80,8 +80,13 @@ function writeMarker(data) {
 export function readAndClearMarker() {
   try {
     const raw = fs.readFileSync(MARKER_PATH, 'utf-8');
+    const data = JSON.parse(raw);
+    // Don't consume 'running' markers — the detached executor owns them
+    // and will write the terminal result. zylos upgrade restarts this
+    // service mid-upgrade, so startup must not treat 'running' as terminal.
+    if (data.status === 'running') return null;
     fs.unlinkSync(MARKER_PATH);
-    return JSON.parse(raw);
+    return data;
   } catch {
     return null;
   }
@@ -154,8 +159,9 @@ export async function notifyUpgradeComplete(enabledOrgConfigs, postForOrgFn, api
   if (!marker) return;
 
   if (marker.status === 'running') {
-    marker.completed = false;
-    marker.error = 'Upgrade process was interrupted (marker still in running state on restart)';
+    // readAndClearMarker now skips 'running' markers, so this is
+    // unreachable. Defensive: if somehow reached, don't treat as failed.
+    return;
   }
 
   const label = marker.completed ? 'completed' : 'failed';
@@ -227,6 +233,10 @@ export async function checkForUpdates(enabledOrgConfigs, postForOrgFn, apiPathFn
     log('upgrade in progress, skipping check');
     return;
   }
+
+  // The executor may have written a terminal marker after the post-restart
+  // startup already ran notifyUpgradeComplete. Pick it up here.
+  await notifyUpgradeComplete(enabledOrgConfigs, postForOrgFn, apiPathFn);
 
   const current = readPkgVersion();
   log(`checking for updates (current: v${current})...`);
