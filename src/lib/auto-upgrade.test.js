@@ -1,39 +1,36 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'auto-upgrade-test-'));
-const MARKER_PATH = path.join(tmpDir, 'upgrade-marker.json');
+const runtimeDir = path.join(tmpDir, 'zylos/components/openmax/runtime');
+fs.mkdirSync(runtimeDir, { recursive: true });
+const MARKER_PATH = path.join(runtimeDir, 'upgrade-marker.json');
+const FAILED_VERSION_PATH = path.join(runtimeDir, 'upgrade-failed-version');
 
-// Patch the module-level MARKER_PATH by importing the functions and
-// overriding the marker file location via a temp-dir symlink trick.
-// Since the module uses a hardcoded path, we test the exported functions
-// by calling them after writing markers to the real path.  Instead,
-// test the logic directly with inline implementations that mirror the
-// production code.
+const originalHome = process.env.HOME;
+process.env.HOME = tmpDir;
+const mod = await import(`./auto-upgrade.js?test=${process.pid}`);
+process.env.HOME = originalHome;
 
-afterEach(() => {
-  try { fs.unlinkSync(MARKER_PATH); } catch {}
-});
+const {
+  readAndClearMarker,
+  formatUpgradeNotification,
+  getFailedVersion,
+  clearFailedVersion,
+  recordFailedVersion,
+} = mod;
 
 function writeMarker(data) {
   fs.writeFileSync(MARKER_PATH, JSON.stringify(data, null, 2));
 }
 
-// Mirror of production readAndClearMarker with the race-condition fix
-function readAndClearMarker() {
-  try {
-    const raw = fs.readFileSync(MARKER_PATH, 'utf-8');
-    const data = JSON.parse(raw);
-    if (data.status === 'running') return null;
-    fs.unlinkSync(MARKER_PATH);
-    return data;
-  } catch {
-    return null;
-  }
-}
+afterEach(() => {
+  try { fs.unlinkSync(MARKER_PATH); } catch {}
+  try { fs.unlinkSync(FAILED_VERSION_PATH); } catch {}
+});
 
 describe('readAndClearMarker race-condition fix', () => {
   it('skips running markers (leaves file intact for executor)', () => {
@@ -65,13 +62,34 @@ describe('readAndClearMarker race-condition fix', () => {
   });
 });
 
-describe('formatUpgradeNotification', () => {
-  let formatUpgradeNotification;
-  beforeEach(async () => {
-    const mod = await import('./auto-upgrade.js');
-    formatUpgradeNotification = mod.formatUpgradeNotification;
+describe('failed version cooldown', () => {
+  it('getFailedVersion returns null when no record exists', () => {
+    assert.equal(getFailedVersion(), null);
   });
 
+  it('recordFailedVersion writes and getFailedVersion reads it back', () => {
+    recordFailedVersion('2.5.0');
+    assert.equal(getFailedVersion(), '2.5.0');
+  });
+
+  it('clearFailedVersion removes the record', () => {
+    recordFailedVersion('2.5.0');
+    clearFailedVersion();
+    assert.equal(getFailedVersion(), null);
+  });
+
+  it('clearFailedVersion is safe when no record exists', () => {
+    assert.doesNotThrow(() => clearFailedVersion());
+  });
+
+  it('recordFailedVersion overwrites a previous record', () => {
+    recordFailedVersion('2.5.0');
+    recordFailedVersion('2.6.0');
+    assert.equal(getFailedVersion(), '2.6.0');
+  });
+});
+
+describe('formatUpgradeNotification', () => {
   it('formats success notification', () => {
     const text = formatUpgradeNotification({ completed: true, from: '2.4.3', to: '2.5.0', url: 'https://example.com' });
     assert.ok(text.includes('upgraded'));

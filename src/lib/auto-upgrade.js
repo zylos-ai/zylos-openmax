@@ -27,6 +27,7 @@ const RUNTIME_DIR = path.join(HOME, 'zylos/components/openmax/runtime');
 const MARKER_PATH = path.join(RUNTIME_DIR, 'upgrade-marker.json');
 const SEND_SCRIPT = path.resolve(new URL('../../scripts/send.js', import.meta.url).pathname);
 const EXECUTOR_SCRIPT = path.resolve(new URL('../../scripts/upgrade-executor.cjs', import.meta.url).pathname);
+const FAILED_VERSION_PATH = path.join(RUNTIME_DIR, 'upgrade-failed-version');
 const GITHUB_REPO = 'zylos-ai/zylos-openmax';
 export const INITIAL_DELAY_MS = 60 * 1000;
 
@@ -75,6 +76,23 @@ async function fetchLatestRelease() {
 function writeMarker(data) {
   fs.mkdirSync(path.dirname(MARKER_PATH), { recursive: true });
   fs.writeFileSync(MARKER_PATH, JSON.stringify(data, null, 2));
+}
+
+export function recordFailedVersion(version) {
+  fs.mkdirSync(path.dirname(FAILED_VERSION_PATH), { recursive: true });
+  fs.writeFileSync(FAILED_VERSION_PATH, version);
+}
+
+export function getFailedVersion() {
+  try {
+    return fs.readFileSync(FAILED_VERSION_PATH, 'utf-8').trim();
+  } catch {
+    return null;
+  }
+}
+
+export function clearFailedVersion() {
+  try { fs.unlinkSync(FAILED_VERSION_PATH); } catch {}
 }
 
 export function readAndClearMarker() {
@@ -188,6 +206,12 @@ export async function notifyUpgradeComplete(enabledOrgConfigs, postForOrgFn, api
       warn(`[${slug}] notification failed: ${e.message}`);
     }
   }
+
+  if (marker.completed) {
+    clearFailedVersion();
+  } else {
+    recordFailedVersion(marker.to);
+  }
 }
 
 async function notifyOwners(text, enabledOrgConfigs, postForOrgFn, apiPathFn) {
@@ -250,6 +274,14 @@ export async function checkForUpdates(enabledOrgConfigs, postForOrgFn, apiPathFn
       log(`up to date (latest: v${latest.tag})`);
       return;
     }
+
+    const failedVersion = getFailedVersion();
+    if (failedVersion && failedVersion === latest.tag) {
+      log(`v${latest.tag} was already attempted and failed — skipping until a newer release`);
+      return;
+    }
+    clearFailedVersion();
+
     log(`new version available: v${current} → v${latest.tag}, starting upgrade...`);
 
     const notifyText = formatUpgradeNotification({
