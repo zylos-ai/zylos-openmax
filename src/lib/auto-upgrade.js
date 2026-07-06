@@ -58,10 +58,10 @@ function compareSemver(a, b) {
 
 async function fetchLatestRelease() {
   const url = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-  const res = await fetch(url, {
-    headers: { Accept: 'application/vnd.github.v3+json' },
-    signal: AbortSignal.timeout(15000),
-  });
+  const headers = { Accept: 'application/vnd.github.v3+json' };
+  const ghToken = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  if (ghToken) headers.Authorization = `Bearer ${ghToken}`;
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
   if (!res.ok) throw new Error(`GitHub API ${res.status}: ${res.statusText}`);
   const data = await res.json();
   return {
