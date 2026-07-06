@@ -1,16 +1,17 @@
 /**
- * Auto-upgrade — periodically check GitHub for new releases and notify.
+ * Auto-upgrade — periodically check GitHub for new releases and upgrade
+ * via a detached child process.
  *
  * Flow:
  *   1. Timer fires (first check after INITIAL_DELAY, then every intervalMs).
  *   2. Fetch latest GitHub release tag via REST API.
  *   3. Compare against current package.json version (semver).
- *   4. If newer: notify owners via DM (detect-and-notify only).
- *
- * Self-execution (`zylos upgrade` from within the process) is disabled —
- * the upgrade command stops this PM2 service as its first step, killing
- * the parent process mid-execution and leaving the service stopped.
- * Upgrades should be triggered externally (manual or via ops-agent).
+ *   4. If newer: write a marker, notify owners, spawn a detached child that
+ *      runs `zylos upgrade openmax --yes --mode overwrite`.
+ *   5. The child process survives the parent being stopped by zylos upgrade.
+ *      On success: writes completed marker (new openmax reads it on startup).
+ *      On failure: writes failed marker + pm2 restarts the old version.
+ *   6. On next startup, notifyUpgradeComplete reads the marker and DMs owners.
  *
  * Config (all optional, in config.json top level):
  *   autoUpgrade.enabled        — boolean, default true
@@ -19,14 +20,17 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 
 const HOME = process.env.HOME || '/tmp';
 const RUNTIME_DIR = path.join(HOME, 'zylos/components/openmax/runtime');
 const MARKER_PATH = path.join(RUNTIME_DIR, 'upgrade-marker.json');
 const SEND_SCRIPT = path.resolve(new URL('../../scripts/send.js', import.meta.url).pathname);
+const EXECUTOR_SCRIPT = path.resolve(new URL('../../scripts/upgrade-executor.cjs', import.meta.url).pathname);
 const GITHUB_REPO = 'zylos-ai/zylos-openmax';
 export const INITIAL_DELAY_MS = 60 * 1000;
+
+const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000;
 
 const log  = (...a) => console.log('[auto-upgrade]', ...a);
 const warn = (...a) => console.warn('[auto-upgrade]', ...a);
@@ -68,6 +72,11 @@ async function fetchLatestRelease() {
   };
 }
 
+function writeMarker(data) {
+  fs.mkdirSync(path.dirname(MARKER_PATH), { recursive: true });
+  fs.writeFileSync(MARKER_PATH, JSON.stringify(data, null, 2));
+}
+
 export function readAndClearMarker() {
   try {
     const raw = fs.readFileSync(MARKER_PATH, 'utf-8');
@@ -78,10 +87,28 @@ export function readAndClearMarker() {
   }
 }
 
-/**
- * Send a message to a conversation via scripts/send.js.
- * send.js handles auth, org resolution, and message formatting.
- */
+function isUpgradeRunning() {
+  try {
+    const raw = fs.readFileSync(MARKER_PATH, 'utf-8');
+    const marker = JSON.parse(raw);
+    if (marker.status === 'running') {
+      const age = Date.now() - (marker.ts || 0);
+      if (age < STALE_RUNNING_THRESHOLD_MS) return true;
+      log('stale running marker detected, treating as failed');
+      writeMarker({
+        ...marker,
+        status: 'failed',
+        completed: false,
+        error: 'Upgrade process timed out or was interrupted',
+        ts: Date.now(),
+      });
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function sendMessage(conversationId, text) {
   return new Promise((resolve, reject) => {
     execFile(process.execPath, [SEND_SCRIPT, conversationId, text], { timeout: 30000 },
@@ -92,15 +119,25 @@ function sendMessage(conversationId, text) {
   });
 }
 
-/**
- * Build the upgrade notification text from the marker.
- */
 export function formatUpgradeNotification(marker) {
-  const lines = marker.completed
-    ? [`OpenMax upgraded: v${marker.from} → v${marker.to}`]
-    : [`OpenMax update available: v${marker.from} → v${marker.to}`,
-       '', 'Run `zylos upgrade openmax --yes --mode overwrite` to upgrade.'];
-  if (marker.notes) {
+  const lines = [];
+
+  if (marker.completed) {
+    lines.push(`OpenMax upgraded: v${marker.from} → v${marker.to}`);
+  } else if (marker.error) {
+    lines.push(`OpenMax upgrade failed: v${marker.from} → v${marker.to}`);
+    lines.push('Rolled back to previous version and restarted.');
+    const errSummary = marker.error.split('\n').filter(l => l.trim()).slice(0, 5).join('\n');
+    if (errSummary) lines.push('', `Error: ${errSummary}`);
+  } else if (marker.status === 'running') {
+    lines.push(`OpenMax upgrading: v${marker.from} → v${marker.to}`);
+    lines.push('Running zylos upgrade in background...');
+  } else {
+    lines.push(`OpenMax update available: v${marker.from} → v${marker.to}`);
+    lines.push('', 'Run `zylos upgrade openmax --yes --mode overwrite` to upgrade.');
+  }
+
+  if (marker.notes && !marker.error) {
     const summary = marker.notes.split('\n').filter(l => l.trim()).slice(0, 8).join('\n');
     if (summary) lines.push('', summary);
   }
@@ -109,15 +146,21 @@ export function formatUpgradeNotification(marker) {
 }
 
 /**
- * On startup, check for a completed-upgrade marker left by an external
- * `zylos upgrade` run and notify owners. The marker is written by
- * checkAndUpgrade() but the actual upgrade is done externally.
+ * On startup, read the marker left by the detached upgrade executor
+ * and notify owners of the outcome.
  */
 export async function notifyUpgradeComplete(enabledOrgConfigs, postForOrgFn, apiPathFn) {
   const marker = readAndClearMarker();
   if (!marker) return;
-  log(`upgrade completed: v${marker.from} → v${marker.to}, notifying owners...`);
-  const text = formatUpgradeNotification({ ...marker, completed: true });
+
+  if (marker.status === 'running') {
+    marker.completed = false;
+    marker.error = 'Upgrade process was interrupted (marker still in running state on restart)';
+  }
+
+  const label = marker.completed ? 'completed' : 'failed';
+  log(`upgrade ${label}: v${marker.from} → v${marker.to}, notifying owners...`);
+  const text = formatUpgradeNotification(marker);
 
   for (const [slug, orgConfig] of enabledOrgConfigs) {
     const ownerMemberId = orgConfig.owner?.member_id;
@@ -141,11 +184,7 @@ export async function notifyUpgradeComplete(enabledOrgConfigs, postForOrgFn, api
   }
 }
 
-/**
- * Notify owners about an available update (no self-upgrade).
- */
-async function notifyUpdateAvailable(current, latest, enabledOrgConfigs, postForOrgFn, apiPathFn) {
-  const text = formatUpgradeNotification({ from: current, to: latest.tag, notes: latest.body, url: latest.url });
+async function notifyOwners(text, enabledOrgConfigs, postForOrgFn, apiPathFn) {
   for (const [slug, orgConfig] of enabledOrgConfigs) {
     const ownerMemberId = orgConfig.owner?.member_id;
     if (!ownerMemberId) continue;
@@ -155,14 +194,40 @@ async function notifyUpdateAvailable(current, latest, enabledOrgConfigs, postFor
       const convId = res?.conversation?.id;
       if (!convId) continue;
       await sendMessage(convId, text);
-      log(`[${slug}] owner notified of v${latest.tag}`);
+      log(`[${slug}] owner notified of upgrade`);
     } catch (e) {
       warn(`[${slug}] notification failed: ${e.message}`);
     }
   }
 }
 
+function spawnUpgradeExecutor(fromVersion, toVersion, notes, releaseUrl) {
+  const markerData = {
+    from: fromVersion,
+    to: toVersion,
+    notes: notes || '',
+    url: releaseUrl || '',
+    status: 'running',
+    completed: false,
+    ts: Date.now(),
+  };
+  writeMarker(markerData);
+
+  const child = spawn(process.execPath, [EXECUTOR_SCRIPT, MARKER_PATH], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env },
+  });
+  child.unref();
+  log(`spawned detached upgrade executor (pid=${child.pid})`);
+}
+
 export async function checkForUpdates(enabledOrgConfigs, postForOrgFn, apiPathFn) {
+  if (isUpgradeRunning()) {
+    log('upgrade in progress, skipping check');
+    return;
+  }
+
   const current = readPkgVersion();
   log(`checking for updates (current: v${current})...`);
   try {
@@ -175,8 +240,14 @@ export async function checkForUpdates(enabledOrgConfigs, postForOrgFn, apiPathFn
       log(`up to date (latest: v${latest.tag})`);
       return;
     }
-    log(`new version available: v${current} → v${latest.tag}, notifying owners...`);
-    await notifyUpdateAvailable(current, latest, enabledOrgConfigs, postForOrgFn, apiPathFn);
+    log(`new version available: v${current} → v${latest.tag}, starting upgrade...`);
+
+    const notifyText = formatUpgradeNotification({
+      from: current, to: latest.tag, notes: latest.body, url: latest.url, status: 'running',
+    });
+    await notifyOwners(notifyText, enabledOrgConfigs, postForOrgFn, apiPathFn);
+
+    spawnUpgradeExecutor(current, latest.tag, latest.body, latest.url);
   } catch (e) {
     warn(`check failed: ${e.message}`);
   }

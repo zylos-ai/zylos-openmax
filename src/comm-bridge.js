@@ -1918,7 +1918,7 @@ if (orgs.length === 0) {
       const checkFn = () => checkForUpdates(activeOrgConfigs, postForOrg, apiPath);
       tasks.register('auto-upgrade', checkFn, intervalMs, { delay, runOnStart: true });
       tasks.start('auto-upgrade');
-      log(`auto-upgrade scheduled (notify-only): first check in ${Math.round(delay / 1000)}s, then every ${Math.round(intervalMs / 3600_000)}h`);
+      log(`auto-upgrade scheduled (detached executor): first check in ${Math.round(delay / 1000)}s, then every ${Math.round(intervalMs / 3600_000)}h`);
     } else {
       log('auto-upgrade disabled in config');
     }
