@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.2] — 2026-07-06
+
+### Fixed
+
+- **fix(skill): frontend URL basePath /cws → /workspace**. cws-fe migrated `DEFAULT_BASE_PATH` to `/workspace` (`apps/web/src/lib/base-path.ts`). Updated all frontend URL templates in SKILL.md and removed hardcoded test environment domain.
+
 ## [2.4.1] — 2026-07-03
 
 ### Fixed
