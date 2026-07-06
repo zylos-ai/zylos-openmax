@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **feat(auto-upgrade): detached child process execution**. Re-enables self-upgrade with a safe execution model. When a new version is detected, openmax spawns a detached child process (`scripts/upgrade-executor.cjs`) that runs `zylos upgrade openmax --yes --mode overwrite`. The child is `detached: true` + `unref()`, so it survives the parent PM2 process being stopped by zylos upgrade. Post-upgrade verification checks the installed version and PM2 status match before reporting success. On failure: writes error details to the marker, then `pm2 restart zylos-openmax` as a safety net to ensure the old version comes back up. Owner DM notifications at three points: pre-upgrade ("upgrading now"), post-upgrade success, and post-upgrade failure with rollback details. Guard against concurrent upgrades via marker status check. Stale running markers (>10 min) are auto-resolved as failed.
 - **GitHub API auth**: auto-upgrade now passes `GITHUB_TOKEN`/`GH_TOKEN` when available, raising the rate limit from 60/hr (unauthenticated) to 5000/hr.
 
+### Fixed
+
+- **fix(auto-upgrade): marker race between executor and restarted service**. `zylos upgrade` restarts the PM2 service mid-upgrade, so the restarted service's `notifyUpgradeComplete` was consuming the still-running marker before the executor could write the terminal result — reporting a successful upgrade as failed. `readAndClearMarker` now skips `running` markers (returns null, leaves file intact); the detached executor retains ownership of the marker lifecycle and writes `completed` or `failed` once it finishes.
+- **fix(auto-upgrade): prevent failed upgrade retry loop**. When an upgrade failed, the service restarted, consumed the failed marker, and immediately retried the same version — creating an infinite restart→fail→retry loop. Added version-specific cooldown: failed target version is recorded in `upgrade-failed-version`; `checkForUpdates` skips that version until a newer release is available. Successful upgrades clear the record.
+
 ## [2.4.3] — 2026-07-06
 
 ### Fixed
