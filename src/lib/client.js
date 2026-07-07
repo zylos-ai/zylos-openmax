@@ -280,7 +280,7 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
  * bff_url. Example:
  *
  *   frontendUrl('/knowledge?kb=xxx&node=yyy')
- *   → 'https://cws-int.coco.xyz/workspace/knowledge?kb=xxx&node=yyy'
+ *   → '{bff_url}/workspace/knowledge?kb=xxx&node=yyy'
  */
 export function frontendUrl(path) {
   const base = resolveBaseUrl().replace(/\/$/, '');
