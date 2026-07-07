@@ -195,6 +195,12 @@ for (const [slug, org] of Object.entries(config.orgs)) {
   }
 }
 
+// ── server.frontend_base_path: /cws → /workspace ───────────────────────────
+if (config.server?.frontend_base_path === '/cws') {
+  config.server.frontend_base_path = '/workspace';
+  legacyKeysSeen.push('server.frontend_base_path: "/cws" → "/workspace"');
+}
+
 // ── drop workspace_id entirely ──────────────────────────────────────────────
 if (config.workspace_id !== undefined) {
   legacyKeysSeen.push('workspace_id (dropped — no replacement)');
