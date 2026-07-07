@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1] — 2026-07-07
+
+### Fixed
+
+- **fix: frontend_base_path default `/cws` → `/workspace`**. The code default in `config.js` and the fallback in `client.js` `frontendUrl()` still used the legacy `/cws` path. New installs without a config.json override would generate wrong browser links. Updated both to `/workspace` to match the current cws-fe basePath.
+- **fix: post-upgrade migration for existing `/cws` configs**. Added a migration step in `post-upgrade.js` that auto-corrects `frontend_base_path: "/cws"` to `"/workspace"` during `zylos upgrade openmax`. Existing installs are fixed automatically on upgrade.
+- **fix: hardcoded domain in `frontendUrl()` comment**. Replaced `cws-int.coco.xyz` with `{bff_url}` placeholder — the domain is resolved from config, not hardcoded.
+
 ## [2.5.0] — 2026-07-06
 
 ### Changed
