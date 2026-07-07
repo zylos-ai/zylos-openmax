@@ -62,7 +62,7 @@ export const DEFAULT_CONFIG = {
     // Frontend base path — the SPA mount point on the same origin as bff_url.
     // Used by frontendUrl() to construct browser-navigable links. Override
     // when the deployment mounts cws-fe at a different path.
-    frontend_base_path: '/cws',
+    frontend_base_path: '/workspace',
   },
 
   // Cloudflare Access service-token headers, attached to every outbound REST

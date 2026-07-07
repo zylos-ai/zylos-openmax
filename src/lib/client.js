@@ -276,15 +276,15 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
 
 /**
  * Build a browser-navigable frontend URL. The frontend SPA is mounted at
- * `server.frontend_base_path` (default `/cws`) on the same origin as
+ * `server.frontend_base_path` (default `/workspace`) on the same origin as
  * bff_url. Example:
  *
  *   frontendUrl('/knowledge?kb=xxx&node=yyy')
- *   → 'https://cws-int.coco.xyz/cws/knowledge?kb=xxx&node=yyy'
+ *   → 'https://cws-int.coco.xyz/workspace/knowledge?kb=xxx&node=yyy'
  */
 export function frontendUrl(path) {
   const base = resolveBaseUrl().replace(/\/$/, '');
-  const prefix = (loadConfig().server?.frontend_base_path || '/cws').replace(/\/$/, '');
+  const prefix = (loadConfig().server?.frontend_base_path || '/workspace').replace(/\/$/, '');
   const p = (path && !path.startsWith('/')) ? `/${path}` : (path || '');
   return `${base}${prefix}${p}`;
 }
