@@ -1688,6 +1688,31 @@ function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) 
 }
 
 // =============================================================================
+// Agent online self-report — onboarding trigger signal (cws-core C1)
+// =============================================================================
+// Once per process per org, tell cws-core this agent instance is up:
+// POST /api/v1/agents/{member_id}/online-report. cws-core uses the report as
+// its onboarding trigger signal, gated entirely server-side (platform switch,
+// org's-first-active-agent check, session state) — so repeated reports across
+// restarts are expected input, not errors. A failed report never affects
+// messaging: we simply retry on the next WS (re)connect until one succeeds.
+
+const _onlineReportDone = new Set();   // org slugs reported this process
+
+async function reportAgentOnline(orgConfig) {
+  if (_onlineReportDone.has(orgConfig.slug)) return;
+  const memberId = orgConfig.self?.member_id;
+  if (!memberId) {
+    // member_id is written back by the first token exchange; if it is not
+    // there yet, the next reconnect retries.
+    return;
+  }
+  const res = await postForOrg(orgConfig.org_id, apiPath(`/agents/${memberId}/online-report`));
+  _onlineReportDone.add(orgConfig.slug);
+  log(`[${orgConfig.slug}] online-report: triggered=${res?.triggered === true} reason=${res?.reason || '?'}`);
+}
+
+// =============================================================================
 // Config sync to cws-comm — push local policy config on every WS (re)connect
 // =============================================================================
 // The reverse direction of agent.config.* WS events. When the agent connects,
@@ -1826,6 +1851,8 @@ function startOrgWs(orgConfig, wsBaseUrl) {
 
     onOpen: async () => {
       log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
+      reportAgentOnline(orgConfig).catch(e =>
+        warn(`[${orgConfig.slug}] online-report failed: ${e.message} — will retry on next reconnect`));
       if (!sessionRef.sync_seq) {
         // First-ever connect: initialize sync_seq from current inbox position.
         await initSyncSeq(orgConfig, sessionRef);
