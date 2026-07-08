@@ -22,6 +22,7 @@ const executor = (await import('../../scripts/upgrade-executor.cjs')).default;
 process.env.HOME = originalHome;
 
 const {
+  shouldRunMain,
   evaluateStartGuard,
   buildFatalMarkerUpdate,
   resolveInterruptedAction,
@@ -236,5 +237,29 @@ describe('replaceDirWithSnapshot (restore replaces, never merges)', () => {
     assert.equal(fs.readFileSync(path.join(target, 'package.json'), 'utf-8'), '{"version":"2.0.0"}');
     assert.ok(fs.existsSync(path.join(target, 'added.js')), 'target untouched on staging failure');
     assert.ok(!fs.existsSync(`${target}.restore-tmp`), 'no stage dir left behind');
+  });
+});
+
+describe('shouldRunMain (pm2 fork-mode entry gate)', () => {
+  const SELF = '/skills/openmax/scripts/upgrade-executor.cjs';
+
+  it('direct CLI execution (require.main === module) runs', () => {
+    assert.equal(shouldRunMain(true, {}, SELF), true);
+  });
+
+  it('plain import (tests) does NOT run', () => {
+    assert.equal(shouldRunMain(false, {}, SELF), false);
+  });
+
+  it('pm2 fork mode (wrapper requires the script) RUNS: pm_id set + pm_exec_path is this file', () => {
+    assert.equal(shouldRunMain(false, { pm_id: '7', pm_exec_path: SELF }, SELF), true);
+  });
+
+  it('pm2-managed process that merely imports this module does NOT run (pm_exec_path is another file)', () => {
+    assert.equal(shouldRunMain(false, { pm_id: '3', pm_exec_path: '/other/service.js' }, SELF), false);
+  });
+
+  it('pm_exec_path matching but no pm_id (not pm2) does NOT run', () => {
+    assert.equal(shouldRunMain(false, { pm_exec_path: SELF }, SELF), false);
   });
 });

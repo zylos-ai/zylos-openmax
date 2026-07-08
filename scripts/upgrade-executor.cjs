@@ -790,7 +790,20 @@ async function main() {
   selfDeleteAndExit(0);
 }
 
+// PM2 fork mode starts apps through its own ProcessContainer wrapper, which
+// `require()`s the target script — so under pm2, `require.main === module` is
+// FALSE here and main() would never run: the upgrader sits "online" doing
+// nothing forever (observed on the mechanism's first live run, v2.6.0→v2.7.0).
+// Detect the pm2-managed case via the env pm2 injects: `pm_id` is always set,
+// and `pm_exec_path` must point at THIS file so a pm2-managed process that
+// merely requires this module still gets a side-effect-free import.
+function shouldRunMain(requireMainIsModule, env, selfPath) {
+  if (requireMainIsModule) return true;
+  return env.pm_id !== undefined && env.pm_exec_path === selfPath;
+}
+
 module.exports = {
+  shouldRunMain,
   evaluateStartGuard,
   buildFatalMarkerUpdate,
   resolveInterruptedAction,
@@ -800,7 +813,7 @@ module.exports = {
   VERIFY_RETRIES,
 };
 
-if (require.main === module) {
+if (shouldRunMain(require.main === module, process.env, __filename)) {
   // Top-level catch: without it an unexpected throw becomes an unhandled
   // rejection — the process would die with no failed marker, no owner
   // notification, and possibly openmax left stopped.

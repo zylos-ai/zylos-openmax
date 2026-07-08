@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.1] — 2026-07-08
+
+### Fixed
+
+- **fix(upgrade-executor): run main() under PM2 fork-mode wrapper**. PM2 fork mode starts apps through its ProcessContainer wrapper, which `require()`s the target script — so `require.main === module` was false under pm2 and the upgrader's `main()` never ran: the `zylos-openmax-upgrader` app sat online doing nothing forever. Observed on the mechanism's first live run (v2.6.0 → v2.7.0). The entry gate is now `shouldRunMain()`: direct CLI execution, or pm2-managed with `pm_exec_path` pointing at the executor itself; plain imports (unit tests, other modules) remain side-effect free. Verified end-to-end with a live v2.6.0 → v2.7.0 auto-upgrade (detect → snapshot → upgrade → restart → verify → self-clean, ~19s).
+
+
 ## [2.7.0] — 2026-07-08
 
 ### Added
