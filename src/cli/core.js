@@ -120,6 +120,25 @@ const COMMANDS = {
   }),
   'core.platform_agent_delete': () => del(apiPath(`/platform-agents/${params.memberId}`)),
 
+  // ✅ Onboarding session — the org's onboarding lifecycle record. A Lead
+  // agent woken by the welcome DM reads this to locate the onboarding
+  // structure: `core_issue_id` is the guided-conversation Issue to drive
+  // (read it + its blueprint via tm.js), `project_id` the onboarding project.
+  // 404 = this org never started onboarding.
+  'core.onboarding_session': () => get(apiPath('/onboarding/session')),
+
+  // ✅ Onboarding funnel event report. Caller must be the in-flight session's
+  // lead agent. Self-reportable types: d1_activation (user replied ≥1 round
+  // in the core-issue icebreaker), d3_im_connected (third-party IM linked).
+  // Duplicates are absorbed server-side (idempotent 200, recorded=false) —
+  // safe to fire without checking first. d7_first_delivery is server-observed
+  // on issue accept and cannot be self-reported.
+  'core.onboarding_event': () => post(apiPath('/onboarding/events'), {
+    event_type:  params.eventType || params.event_type,
+    occurred_at: params.occurredAt || params.occurred_at,
+    meta:        params.meta,
+  }),
+
   // ✅ Projects list. Defaults to active projects: resolving a project by name
   // (e.g. picking where to register an Issue) must not match ARCHIVED ones — a
   // human refers to a live project, and archived duplicates would make the match
@@ -226,6 +245,10 @@ Platform agents (lifecycle)
 
 Projects (directory view — workflow ops live in tm.js)
   core.project_list        {status?, page?, pageSize?, orderBy?}    # default status=active (pass status:"archived" for archived); pageSize legacy alias: limit
+
+Onboarding (Lead agent — see SKILL.md "Onboarding Lead" section)
+  core.onboarding_session  {}                                  # org 的 onboarding 会话；core_issue_id=核心对话 Issue，404=从未开始
+  core.onboarding_event    {eventType, occurredAt?, meta?}     # 漏斗埋点上报（d1_activation|d3_im_connected）；重复上报幂等，放心发
 
 Organizations
   core.org_list            {orderBy?}

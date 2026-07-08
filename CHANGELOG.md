@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] — 2026-07-08
+
+### Added
+
+- **feat(onboarding): boot-time online report for onboarding trigger**. On WebSocket open, the comm bridge now reports each org's agent member to cws-core via `POST /agents/{member_id}/online-report`, allowing cws-core to seed or resume the org-first-agent onboarding flow. The report is idempotent, isolated from messaging, and retries from reconnects and periodic sync until it succeeds.
+- **feat(core-cli): onboarding session and funnel event commands**. Added `core.onboarding_session` for discovering an org's onboarding lifecycle record and `core.onboarding_event` for reporting self-reportable funnel milestones such as `d1_activation` and `d3_im_connected`.
+- **docs(skill): Onboarding Lead flow**. Documented how an agent leading a new org's onboarding should recognize welcome DMs, resume from existing session structure, guide the first three onboarding steps, and avoid peripheral-task upsells.
+
+### Fixed
+
+- **fix(onboarding): fresh-install member_id re-resolution**. The online reporter now re-reads `self.member_id` from live config when the boot-captured org config is stale, so the first token exchange write-back can trigger online-report without requiring a service restart.
+- **fix(onboarding): bounded retries and older-core compatibility**. The reporter skips with a warn-once path when cws-core lacks the online-report endpoint, retries transient failures from periodic sync, and deduplicates concurrent reporting attempts.
+
 ## [2.6.0] — 2026-07-08
 
 ### Added

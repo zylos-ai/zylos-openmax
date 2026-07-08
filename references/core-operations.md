@@ -126,6 +126,15 @@ CLI 位置:`src/cli/core.js`
 
 平台 agent = org-scope 的机器人成员行,跟 human member 一样占 `member_id`,可以被 `task.create` 派单 / 入会话 / 写 KB。
 
+### Onboarding(Lead agent 引导新组织,行为面见 SKILL.md「Onboarding Lead」)
+
+| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| --- | --- | --- | --- | --- |
+| ✅ | `core.onboarding_session` | org 的 onboarding 生命周期记录;`core_issue_id`=核心对话 Issue,`project_id`=onboarding 项目;404=从未开始 | `{}` | `GET /api/v1/onboarding/session` |
+| ✅ | `core.onboarding_event` | 漏斗埋点上报;仅在途 session 的 lead agent 可调;重复上报被服务端唯一索引吸收(幂等 200,`recorded=false`) | `{eventType, occurredAt?, meta?}` | `POST /api/v1/onboarding/events` |
+
+`eventType` 只放行 `d1_activation`(核心 Issue 破冰阶段用户回复≥1轮) / `d3_im_connected`(第三方 IM 绑定成功);`d7_first_delivery` 由服务端在核心 Issue accept 时自动落,自报会被 422 拒绝。开机自报(`online-report`)由 comm-bridge 启动时自动发,不需要手动调。
+
 ## 典型流程:Lead 决策派发
 
 ```bash

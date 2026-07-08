@@ -32,6 +32,7 @@ import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath } from './lib/client.js';
+import { createOnlineReporter } from './lib/online-report.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
@@ -1688,6 +1689,16 @@ function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) 
 }
 
 // =============================================================================
+// Agent online self-report — onboarding trigger signal (cws-core C1)
+// =============================================================================
+// Logic and rationale live in lib/online-report.js (extracted for unit
+// testing). Called from WS onOpen and from periodicSync — Set-guarded and
+// idempotent, so both call sites are safe; a failed report never affects
+// messaging.
+
+const reportAgentOnline = createOnlineReporter({ loadConfig, postForOrg, apiPath, log, warn });
+
+// =============================================================================
 // Config sync to cws-comm — push local policy config on every WS (re)connect
 // =============================================================================
 // The reverse direction of agent.config.* WS events. When the agent connects,
@@ -1744,6 +1755,11 @@ function periodicSync() {
       warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
     syncConfigToComm(orgConfig).catch(e =>
       warn(`[${slug}] periodic config-sync failed: ${e.message}`));
+    // Onboarding online-report: heals transient failures on a stable WS
+    // connection (otherwise the next attempt waits for a reconnect).
+    // Set-guarded and idempotent — no-op once one report has succeeded.
+    reportAgentOnline(orgConfig).catch(e =>
+      warn(`[${slug}] periodic online-report failed: ${e.message}`));
   }
 }
 
@@ -1826,6 +1842,8 @@ function startOrgWs(orgConfig, wsBaseUrl) {
 
     onOpen: async () => {
       log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
+      reportAgentOnline(orgConfig).catch(e =>
+        warn(`[${orgConfig.slug}] online-report failed: ${e.message} — will retry on next reconnect`));
       if (!sessionRef.sync_seq) {
         // First-ever connect: initialize sync_seq from current inbox position.
         await initSyncSeq(orgConfig, sessionRef);

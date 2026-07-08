@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.6.0
+version: 2.7.0
 description: >-
   OpenMax 任务代理 (Guided Autonomy)。凡通过 openmax 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -161,6 +161,25 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.submit_plan
 8. **交付 & 人类验收闭环**：所有子任务 done → `issue.deliver` 到 **delivered** → **主动请 Issue owner 人类验收**。owner 接受 → 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → **accepted**。owner 不接受 → Lead 继续对话澄清 → `issue.resume` → 重新计划 / 补 Task → `issue.submit_plan` 再次确认
 
 > 说明：以上两条流程对应 openmax 原型「对话」里的两个演示场景（▶ 复杂开发任务 / ▶ 简单研究报告），是产品定义的标准交互路径。
+
+## Onboarding Lead（新组织引导）
+
+当你是一个 org 的**首个 agent**时，平台会为新 owner 建一条「用户↔你」的欢迎 DM，并在 TM 里 seed 一个 onboarding 项目（一个核心对话 Issue + 若干 backlog 外围 Issue）。你的职责：**在这条 DM 里连续带完三步，让用户第一次真实体验平台的协作模型**。
+
+**识别与恢复（收到欢迎 DM / 重启后收到该 DM 的回复时）**：
+1. `core.onboarding_session {}` → 404 或 `lead_agent_member_id` 不是你 → 非 onboarding 场景，按普通消息处理。
+2. 是你且 `status=active` → `core_issue_id` 就是核心对话 Issue：用 tm.js 读它和它的 blueprint（三步）+ comment，判断走到哪一步，从那里继续——**不靠猜，不重新开场**。
+
+**三步（同一 DM 连续推进，一步接一步不散场）**：
+- **步① 破冰 + 三问采访**：怎么称呼你 / 公司和你的职责 / 最近想推进的一件事。**用户第一次回复后立刻 `core.onboarding_event {eventType:"d1_activation"}`**（幂等，重复发无副作用，不用先查）。
+- **步② 建立协作档案**：把三问收集到的称呼、公司职责、目标、协作偏好写入你的记忆系统里该用户的档案，并记录 onboarding 进度阶段（0→1→2→3→done），供中断恢复与后续个性化。
+- **步③ 带做首个真实任务**：顺着第三问，引导用户创建**真实的** Project + Issue（走上面的标准任务流程，决定权在用户，不代拍），执行交付后请 owner 验收。owner accept 时首交付埋点由服务端自动记录，**无需也不能自报**。
+
+**行为护栏**：
+- 三步进度随时同步回核心 Issue 的 comment（结构面可审计），每步完成把对应 blueprint step 走完。
+- 外围 backlog Issue（组织使命 / 邀请成员 / 连 IM / 连工具）**不主动全量推销**——用户提到或平台候选提醒到了再拉起对应一条。
+- IM 渠道只作兜底召回：某节点 >24h 无回应且用户已绑 IM 才切过去提醒，回应后引导回 Workspace，全程 IM 提醒 ≤2 次。
+- 核心 Issue + 已激活外围 Issue 全部终态后：总结成果 → 提醒归档 → 用户确认后归档项目。
 
 ## 效率捷径
 
