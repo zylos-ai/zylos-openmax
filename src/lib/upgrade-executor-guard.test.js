@@ -24,6 +24,8 @@ process.env.HOME = originalHome;
 const {
   evaluateStartGuard,
   buildFatalMarkerUpdate,
+  resolveInterruptedAction,
+  replaceDirWithSnapshot,
   verifyUpgrade,
   STALE_RUNNING_THRESHOLD_MS,
 } = executor;
@@ -145,5 +147,94 @@ describe('verifyUpgrade poll boundaries (injected deps, no real sleeps/pm2)', ()
   it('never healthy → failure after the scheduled polls', async () => {
     const ok = await verifyUpgrade('2.0.0', 2, scripted([down, down]));
     assert.equal(ok, false);
+  });
+});
+
+describe('resolveInterruptedAction (version-aware interrupted recovery)', () => {
+  const marker = { from: '1.0.0', to: '2.0.0', status: 'running' };
+
+  it('installed == target → resume-verify, regardless of service/snapshot state', () => {
+    for (const serviceOnline of [true, false]) {
+      for (const snapshotAvailable of [true, false]) {
+        const res = resolveInterruptedAction({ installedVersion: '2.0.0', marker, serviceOnline, snapshotAvailable });
+        assert.equal(res.action, 'resume-verify', `online=${serviceOnline}, snapshot=${snapshotAvailable}`);
+      }
+    }
+  });
+
+  it('installed == previous + service down + snapshot → restore (consistency guarantee)', () => {
+    const res = resolveInterruptedAction({ installedVersion: '1.0.0', marker, serviceOnline: false, snapshotAvailable: true });
+    assert.equal(res.action, 'restore');
+  });
+
+  it('installed == previous + service running → fail-keep-old (no disruptive restore)', () => {
+    const res = resolveInterruptedAction({ installedVersion: '1.0.0', marker, serviceOnline: true, snapshotAvailable: true });
+    assert.equal(res.action, 'fail-keep-old');
+  });
+
+  it('installed == previous + no snapshot → fail-keep-old', () => {
+    const res = resolveInterruptedAction({ installedVersion: '1.0.0', marker, serviceOnline: false, snapshotAvailable: false });
+    assert.equal(res.action, 'fail-keep-old');
+  });
+
+  it('unknown installed version → fail-preserve-snapshot (never destroy the rollback path)', () => {
+    const res = resolveInterruptedAction({ installedVersion: '9.9.9', marker, serviceOnline: true, snapshotAvailable: true });
+    assert.equal(res.action, 'fail-preserve-snapshot');
+  });
+
+  it('unreadable installed version → fail-preserve-snapshot', () => {
+    const res = resolveInterruptedAction({ installedVersion: null, marker, serviceOnline: false, snapshotAvailable: true });
+    assert.equal(res.action, 'fail-preserve-snapshot');
+  });
+});
+
+describe('replaceDirWithSnapshot (restore replaces, never merges)', () => {
+  function makeDirs(name) {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), `restore-test-${name}-`));
+    const snapshot = path.join(base, 'snapshot');
+    const target = path.join(base, 'target');
+    fs.mkdirSync(snapshot, { recursive: true });
+    fs.mkdirSync(target, { recursive: true });
+    return { base, snapshot, target };
+  }
+  const noopLog = () => {};
+
+  it('removes files added by the failed new version and restores old contents', () => {
+    const { snapshot, target } = makeDirs('replace');
+    // Snapshot = old version.
+    fs.writeFileSync(path.join(snapshot, 'package.json'), '{"version":"1.0.0"}');
+    fs.mkdirSync(path.join(snapshot, 'src'));
+    fs.writeFileSync(path.join(snapshot, 'src/old.js'), 'old');
+    // Target = broken new version: modified file + files ADDED by the upgrade.
+    fs.writeFileSync(path.join(target, 'package.json'), '{"version":"2.0.0"}');
+    fs.mkdirSync(path.join(target, 'src'));
+    fs.writeFileSync(path.join(target, 'src/old.js'), 'new-modified');
+    fs.writeFileSync(path.join(target, 'src/added-by-new.js'), 'leftover');
+    fs.writeFileSync(path.join(target, '.new-dotfile'), 'leftover');
+    // Preserved entries must survive.
+    fs.mkdirSync(path.join(target, '.backup/2026'), { recursive: true });
+    fs.writeFileSync(path.join(target, '.backup/2026/keep.txt'), 'keep');
+
+    const ok = replaceDirWithSnapshot(snapshot, target, new Set(['.backup', '.git', '.zylos']), noopLog);
+    assert.equal(ok, true);
+    assert.equal(fs.readFileSync(path.join(target, 'package.json'), 'utf-8'), '{"version":"1.0.0"}');
+    assert.equal(fs.readFileSync(path.join(target, 'src/old.js'), 'utf-8'), 'old');
+    assert.ok(!fs.existsSync(path.join(target, 'src/added-by-new.js')), 'added file must be gone (no merge)');
+    assert.ok(!fs.existsSync(path.join(target, '.new-dotfile')), 'added dotfile must be gone');
+    assert.equal(fs.readFileSync(path.join(target, '.backup/2026/keep.txt'), 'utf-8'), 'keep', '.backup must be preserved');
+    assert.ok(!fs.existsSync(`${target}.restore-tmp`), 'stage dir must be cleaned up');
+  });
+
+  it('staging failure leaves the target completely untouched', () => {
+    const { base, target } = makeDirs('stage-fail');
+    fs.writeFileSync(path.join(target, 'package.json'), '{"version":"2.0.0"}');
+    fs.writeFileSync(path.join(target, 'added.js'), 'still-here');
+
+    const missingSnapshot = path.join(base, 'no-such-snapshot');
+    const ok = replaceDirWithSnapshot(missingSnapshot, target, new Set(), noopLog);
+    assert.equal(ok, false);
+    assert.equal(fs.readFileSync(path.join(target, 'package.json'), 'utf-8'), '{"version":"2.0.0"}');
+    assert.ok(fs.existsSync(path.join(target, 'added.js')), 'target untouched on staging failure');
+    assert.ok(!fs.existsSync(`${target}.restore-tmp`), 'no stage dir left behind');
   });
 });

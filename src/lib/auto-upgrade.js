@@ -179,6 +179,8 @@ export function formatUpgradeNotification(marker) {
 
   if (marker.completed) {
     lines.push(`OpenMax upgraded: v${marker.from} → v${marker.to}`);
+    // e.g. "verification was resumed after an executor interruption"
+    if (marker.detail) lines.push(marker.detail);
   } else if (marker.error) {
     lines.push(`OpenMax upgrade failed: v${marker.from} → v${marker.to}`);
     // Only state what actually happened. The executor records the true outcome

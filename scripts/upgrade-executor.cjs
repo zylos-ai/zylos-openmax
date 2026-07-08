@@ -303,10 +303,12 @@ function takeSnapshot() {
   }
 }
 
-// Snapshot lifecycle policy: removed on every terminal path where it is no
-// longer useful (verified success, successful rollback, zylos-side rollback);
-// kept for forensics/manual recovery whenever a restore attempt failed or the
-// rolled-back service did not come up healthy. Every decision is logged.
+// Snapshot lifecycle policy: removed only once the install state is RESOLVED —
+// verified success (incl. verification resumed after an interruption) or a
+// snapshot consumed by a successful rollback. Kept for forensics/manual
+// recovery in every unresolved case: failed restore, unhealthy rollback, or an
+// interruption that left the version state ambiguous. Every decision is
+// logged; the next upgrade's takeSnapshot() replaces any leftover snapshot.
 function clearSnapshot(reason) {
   try {
     fs.rmSync(SNAPSHOT_DIR, { recursive: true, force: true });
@@ -317,9 +319,64 @@ function clearSnapshot(reason) {
 }
 
 /**
- * Roll back to the pre-upgrade snapshot: stop service, restore files, restart.
+ * Replace targetDir's contents with the snapshot — a true restore, not a
+ * merge. A plain overwrite-copy would leave files ADDED by the failed new
+ * version in place, producing a broken mix of old package.json + new-version
+ * leftovers. Entries in `preserved` (zylos-core's .backup, component .zylos
+ * state, .git in dev installs) survive; everything else is replaced. All
+ * runtime data/config/logs live under ~/zylos/components/openmax (verified
+ * across the repo), so nothing else in the skill dir needs to survive.
  *
- * @returns {boolean} whether the snapshot files were restored (the service is
+ * Failure ordering — no data copying may happen after anything is deleted:
+ *   1. STAGE: copy the snapshot to a sibling temp dir (same filesystem).
+ *      Fails → abort with targetDir completely untouched.
+ *   2. CLEAR: delete targetDir entries (incl. dotfiles, except preserved).
+ *      Only the CONTENTS are removed — targetDir keeps its inode, so pm2 cwd
+ *      references and this process's own cwd stay valid.
+ *   3. SWAP:  rename staged entries into place — pure same-filesystem
+ *      renames, no data copying left to fail. If a rename still fails, log
+ *      loudly and KEEP the staged copy on disk for manual recovery.
+ *
+ * Exported for tests (paths injectable).
+ *
+ * @returns {boolean} whether the restore fully completed.
+ */
+function replaceDirWithSnapshot(snapshotDir, targetDir, preserved = SNAPSHOT_EXCLUDES, log = appendLog) {
+  const stageDir = `${targetDir}.restore-tmp`;
+
+  // 1. STAGE
+  try {
+    fs.rmSync(stageDir, { recursive: true, force: true });
+    fs.cpSync(snapshotDir, stageDir, { recursive: true });
+  } catch (e) {
+    log(`restore staging FAILED (target dir untouched): ${e.message}`);
+    try { fs.rmSync(stageDir, { recursive: true, force: true }); } catch {}
+    return false;
+  }
+
+  try {
+    // 2. CLEAR
+    for (const entry of fs.readdirSync(targetDir)) {
+      if (preserved.has(entry)) continue;
+      fs.rmSync(path.join(targetDir, entry), { recursive: true, force: true });
+    }
+    // 3. SWAP
+    for (const entry of fs.readdirSync(stageDir)) {
+      fs.renameSync(path.join(stageDir, entry), path.join(targetDir, entry));
+    }
+  } catch (e) {
+    log(`FATAL: restore swap failed midway: ${e.message} — target dir may be incomplete; staged copy KEPT at ${stageDir} for manual recovery`);
+    return false;
+  }
+
+  try { fs.rmSync(stageDir, { recursive: true, force: true }); } catch {}
+  return true;
+}
+
+/**
+ * Roll back to the pre-upgrade snapshot: stop service, replace files, restart.
+ *
+ * @returns {boolean} whether the snapshot was fully restored (the service is
  *   restarted in either case, with whatever ended up on disk).
  */
 function rollbackToSnapshot() {
@@ -327,22 +384,20 @@ function rollbackToSnapshot() {
     appendLog('no snapshot available — cannot roll back');
     return false;
   }
-  appendLog('rolling back to pre-upgrade snapshot...');
+  appendLog('rolling back to pre-upgrade snapshot (replace, not merge)...');
   try {
     pm2(['stop', PM2_SERVICE]);
   } catch (e) {
     appendLog(`pm2 stop before rollback failed (continuing): ${e.message}`);
   }
-  try {
-    fs.cpSync(SNAPSHOT_DIR, SKILL_DIR, { recursive: true, force: true });
-    appendLog('snapshot files restored');
-  } catch (e) {
-    appendLog(`rollback file restore FAILED: ${e.message}`);
-    ensurePm2Running({ forceRestart: true }); // bring back whatever is on disk
-    return false;
+  const restored = replaceDirWithSnapshot(SNAPSHOT_DIR, SKILL_DIR);
+  if (restored) {
+    appendLog('snapshot restored (skill dir fully replaced)');
   }
+  // Restart in either case — with the restored version, or with whatever is
+  // on disk if the restore could not complete.
   ensurePm2Running({ forceRestart: true });
-  return true;
+  return restored;
 }
 
 // ---------------------------------------------------------------------------
@@ -482,7 +537,7 @@ async function handleVerificationFailure() {
       completed: false,
       status: 'failed',
       error: `Upgrade verification failed (installed=${version}, pm2=${status}) and the snapshot restore also failed.`,
-      detail: `The new version failed verification AND the rollback could not be applied — the service may still be on the broken version. Manual attention needed. Snapshot kept at ${SNAPSHOT_DIR}.`,
+      detail: `The new version failed verification AND the rollback could not be fully applied — the install may be broken or incomplete. Manual attention needed; see upgrade-executor.log. Snapshot kept at ${SNAPSHOT_DIR}.`,
     });
     return; // rollbackToSnapshot already attempted a restart
   }
@@ -506,45 +561,138 @@ async function handleVerificationFailure() {
   }
 }
 
+const INTERRUPTED_ERROR = 'Upgrade executor died mid-run and was relaunched (PM2 watchdog or a pm2-wide restart).';
+
+/**
+ * Pure (exported for tests): decide how an interrupted run should recover,
+ * based on what version is ACTUALLY installed. The previous executor may have
+ * died at any point, so the install state — not the service state — is the
+ * source of truth:
+ *
+ *   'resume-verify' — installed == marker.to: `zylos upgrade` completed before
+ *       the interruption. The new version may be perfectly healthy; blindly
+ *       failing it (and deleting the snapshot, the only rollback path!) would
+ *       both mislabel a good upgrade as failedVersion and destroy recovery.
+ *       Resume verification instead.
+ *   'restore'       — installed == marker.from, service down, snapshot
+ *       available: the upgrade never took effect but may have died mid-copy;
+ *       a full snapshot restore guarantees a consistent install.
+ *   'fail-keep-old' — installed == marker.from, but the service is running or
+ *       no snapshot exists: the old version is in place; just ensure it runs.
+ *   'fail-preserve-snapshot' — version unreadable or matches neither side:
+ *       unknown state. Keep the snapshot, ensure the service runs, tell the
+ *       owner manual attention may be needed.
+ *
+ * The snapshot is never cleared before the version state is resolved.
+ */
+function resolveInterruptedAction({ installedVersion, marker, serviceOnline, snapshotAvailable }) {
+  if (installedVersion && marker && installedVersion === marker.to) {
+    return { action: 'resume-verify' };
+  }
+  if (installedVersion && marker && installedVersion === marker.from) {
+    if (!serviceOnline && snapshotAvailable) return { action: 'restore' };
+    return { action: 'fail-keep-old' };
+  }
+  return { action: 'fail-preserve-snapshot' };
+}
+
 /**
  * A relaunched instance found a running marker claimed by a dead predecessor.
- * The previous run may have died at any point — possibly with openmax stopped
- * and/or the skill dir half-written. Recover; NEVER re-run the upgrade.
+ * The previous run may have died at any point — before, during, or after the
+ * upgrade command. Resolve the actual install state first; NEVER re-run the
+ * upgrade command itself.
  */
-function handleInterrupted(reason) {
+async function handleInterrupted(reason) {
   appendLog(`INTERRUPTED RUN DETECTED: ${reason}`);
   // The previous instance may have crashed with a stack trace on stderr —
   // preserve it in our persistent log before terminal cleanup wipes the
   // pm2-captured files.
   logUpgraderErrTail();
+
+  const installedVersion = readInstalledVersion();
   const proc = getPm2Proc();
   const serviceOnline = proc?.pm2_env?.status === 'online';
-  let detail;
+  const { action } = resolveInterruptedAction({
+    installedVersion,
+    marker,
+    serviceOnline,
+    snapshotAvailable: hasSnapshot(),
+  });
+  appendLog(`interrupted recovery: installed=${installedVersion}, from=v${marker.from}, to=v${marker.to}, serviceOnline=${serviceOnline}, action=${action}`);
 
-  if (serviceOnline) {
-    // Likely died during verification, after openmax was already restarted.
-    // Files under a running process are left alone; conservative fail.
-    detail = 'The upgrade was interrupted (executor relaunched by PM2); the service is still running and was left untouched. The upgrade was NOT re-run.';
-    clearSnapshot('interrupted run, service online — snapshot no longer authoritative');
-  } else if (hasSnapshot()) {
-    const restored = rollbackToSnapshot();
-    if (restored) {
-      clearSnapshot('consumed by interrupted-run rollback');
-      detail = `The upgrade was interrupted mid-run; the previous version v${marker.from} was restored from snapshot and the service restarted. The upgrade was NOT re-run.`;
-    } else {
-      detail = `The upgrade was interrupted mid-run and the snapshot restore failed; the service was restarted with whatever is on disk. Manual check advised. Snapshot kept at ${SNAPSHOT_DIR}.`;
+  switch (action) {
+    case 'resume-verify': {
+      // Files are on the target version — the upgrade command completed
+      // before the interruption. Resume verification where the previous run
+      // left off instead of failing a possibly-healthy upgrade.
+      ensurePm2Running(); // it may have died before the post-upgrade restart
+      const ok = await verifyUpgrade(marker.to);
+      if (ok) {
+        appendLog('resumed verification PASSED — recording success');
+        clearSnapshot('upgrade verified successfully (verification resumed after interruption)');
+        writeMarker({
+          completed: true,
+          status: 'completed',
+          detail: 'The upgrade completed; verification was interrupted and resumed by a relaunched executor, then passed.',
+        });
+      } else {
+        // Same recovery as a normal verification failure — the snapshot is
+        // still intact because nothing was cleared before this resolution.
+        await handleVerificationFailure();
+      }
+      break;
     }
-  } else {
-    ensurePm2Running();
-    detail = 'The upgrade was interrupted mid-run and no snapshot was available; the service was restarted with whatever is on disk. The upgrade was NOT re-run.';
+
+    case 'restore': {
+      const restored = rollbackToSnapshot();
+      if (restored) {
+        clearSnapshot('consumed by interrupted-run rollback');
+        writeMarker({
+          completed: false,
+          status: 'failed',
+          error: INTERRUPTED_ERROR,
+          detail: `The upgrade was interrupted before taking effect; the previous version v${marker.from} was restored from snapshot and the service restarted. The upgrade was NOT re-run.`,
+        });
+      } else {
+        writeMarker({
+          completed: false,
+          status: 'failed',
+          error: INTERRUPTED_ERROR,
+          detail: `The upgrade was interrupted and the snapshot restore could not be fully applied; the service was restarted with what is on disk. Manual check advised; see upgrade-executor.log. Snapshot kept at ${SNAPSHOT_DIR}.`,
+        });
+      }
+      break;
+    }
+
+    case 'fail-keep-old': {
+      ensurePm2Running();
+      writeMarker({
+        completed: false,
+        status: 'failed',
+        error: INTERRUPTED_ERROR,
+        detail: `The upgrade was interrupted before it took effect; the service is still on v${marker.from}. The upgrade was NOT re-run.`,
+      });
+      // The old version is confirmed in place, but keep the snapshot anyway —
+      // the interruption's exact progress is unknown (package.json is the
+      // last-copied signal, not proof of full consistency). The next
+      // upgrade's takeSnapshot() replaces it.
+      appendLog(`snapshot kept at ${SNAPSHOT_DIR} (old version in place; next upgrade replaces it)`);
+      break;
+    }
+
+    case 'fail-preserve-snapshot':
+    default: {
+      ensurePm2Running();
+      writeMarker({
+        completed: false,
+        status: 'failed',
+        error: INTERRUPTED_ERROR,
+        detail: `The upgrade was interrupted and left the install in an unexpected state (installed=${installedVersion ?? 'unreadable'}, expected v${marker.from} or v${marker.to}); the service was restarted with what is on disk. Manual attention may be needed. Snapshot kept at ${SNAPSHOT_DIR}.`,
+      });
+      break;
+    }
   }
 
-  writeMarker({
-    completed: false,
-    status: 'failed',
-    error: 'Upgrade executor died mid-run and was relaunched (PM2 watchdog or a pm2-wide restart).',
-    detail,
-  });
   selfDeleteAndExit(0);
 }
 
@@ -590,7 +738,7 @@ async function main() {
     return;
   }
   if (guard.action === 'interrupted') {
-    handleInterrupted(guard.reason);
+    await handleInterrupted(guard.reason);
     return;
   }
 
@@ -645,6 +793,8 @@ async function main() {
 module.exports = {
   evaluateStartGuard,
   buildFatalMarkerUpdate,
+  resolveInterruptedAction,
+  replaceDirWithSnapshot,
   verifyUpgrade,
   STALE_RUNNING_THRESHOLD_MS,
   VERIFY_RETRIES,
