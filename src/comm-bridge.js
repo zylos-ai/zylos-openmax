@@ -1701,11 +1701,16 @@ const _onlineReportDone = new Set();   // org slugs reported this process
 
 async function reportAgentOnline(orgConfig) {
   if (_onlineReportDone.has(orgConfig.slug)) return;
-  const memberId = orgConfig.self?.member_id;
+  let memberId = orgConfig.self?.member_id;
   if (!memberId) {
-    // member_id is written back by the first token exchange; if it is not
-    // there yet, the next reconnect retries.
-    return;
+    // Fresh install: the first token exchange writes member_id back to
+    // config.json only — the in-memory orgConfig captured at boot never sees
+    // it (watchConfig treats `self` as structural and skips it on reload).
+    // Re-read from disk so retry-on-reconnect actually works, and fill the
+    // live object in place.
+    memberId = loadConfig().orgs?.[orgConfig.slug]?.self?.member_id || '';
+    if (!memberId) return; // token exchange hasn't landed yet — next reconnect retries
+    orgConfig.self = { ...(orgConfig.self || {}), member_id: memberId };
   }
   const res = await postForOrg(orgConfig.org_id, apiPath(`/agents/${memberId}/online-report`));
   _onlineReportDone.add(orgConfig.slug);
