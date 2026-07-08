@@ -129,12 +129,16 @@ export const DEFAULT_CONFIG = {
   // `enabled` / `intervalSeconds` are NOT in DEFAULT_CONFIG — their defaults
   // are hardcoded in src/comm-bridge.js; config may override either.
   //
-  // `dashboardApiKey` — zylos-dashboard API key (`zylos_ak_...`). Required
-  // when the dashboard has password auth enabled: unauthenticated `/api/state`
+  // `dashboardApiKey` — zylos-dashboard API key (`zylos_ak_...`). Used when
+  // the dashboard has password auth enabled: unauthenticated `/api/state`
   // then returns 401 and metrics would never be reported. The reporter
   // exchanges the key at `POST /api/auth/token` for a short-lived session
-  // token and attaches it to `/api/state`. Empty = no auth (dashboard auth
-  // disabled).
+  // token and attaches it to `/api/state`.
+  //
+  // Normally left empty: when the dashboard demands auth and no (working)
+  // key is configured, the reporter auto-provisions one via the dashboard's
+  // local api-key CLI and writes it back here (see src/lib/metrics-reporter.js).
+  // A manually configured key is always tried first.
   metricsReport: {
     dashboardApiKey: '',
   },
