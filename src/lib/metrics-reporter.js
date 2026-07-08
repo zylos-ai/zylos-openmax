@@ -49,7 +49,7 @@ const TOKEN_EXPIRY_MARGIN_MS = 30_000;
 // `apiKeyCliPath` for tests / nonstandard layouts.
 const DEFAULT_API_KEY_CLI = path.join(HOME, 'zylos/.claude/skills/dashboard/scripts/api-key.js');
 const PROVISION_KEY_NAME = 'openmax-metrics';
-const KEY_LINE_RE = /^Key: (zylos_ak_\S+)$/m;
+const KEY_LINE_RE = /^(?:Key|New key): (zylos_ak_\S+)$/m;
 const CLI_TIMEOUT_MS = 15_000;
 
 const promisifiedExecFile = promisify(execFileCb);
@@ -119,6 +119,7 @@ export function createMetricsReporter(activeOrgConfigs, {
   let warnedStateUnavailable = false; // dashboard state fetch failing — re-armed on success
   let apiKey = dashboardApiKey;       // may be replaced by an auto-provisioned key
   let provisionAttempted = false;     // auto-provision runs at most once per process
+  let provisionPromise = null;        // serialize overlapping ticks onto one attempt
   let authQuiet = false;              // unrecoverable auth state — warned once, quiet until restart
   let cachedToken = null;             // { token, expiresAtMs }
 
@@ -181,6 +182,7 @@ export function createMetricsReporter(activeOrgConfigs, {
   // silences the reporter until restart. Returns true when a fresh key was
   // provisioned and persisted.
   async function ensureProvisionedKey() {
+    if (provisionPromise) return provisionPromise;
     if (provisionAttempted) {
       authQuiet = true;
       warn('dashboard api key rejected (401) after auto-provision — '
@@ -188,18 +190,23 @@ export function createMetricsReporter(activeOrgConfigs, {
       return false;
     }
     provisionAttempted = true;
-    try {
+    provisionPromise = (async () => {
       const key = await provisionKey();
       apiKey = key;
       persistKey(key);
       log?.(`dashboard api key auto-provisioned ("${PROVISION_KEY_NAME}") and saved to config`);
       return true;
+    })();
+    try {
+      return await provisionPromise;
     } catch (err) {
       authQuiet = true;
       warn(`dashboard api key auto-provision failed (${err?.message || err}) — `
         + 'metrics reporting needs the dashboard component, or set '
         + 'metricsReport.dashboardApiKey manually; runtime-metrics not reported until restart');
       return false;
+    } finally {
+      provisionPromise = null;
     }
   }
 

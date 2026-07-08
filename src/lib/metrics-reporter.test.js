@@ -13,6 +13,14 @@ const DASHBOARD_STATE = { state: 'IDLE', system_metrics: { cpu_pct: 1 }, runtime
 
 const CLI_PATH = '/fake/skills/dashboard/scripts/api-key.js';
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 // exchange / state are per-call responders: (call) => response.
 // call = { headers, method } as passed to fetch.
 // cli is a per-invocation responder: (argv) => { stdout } (throw to simulate
@@ -228,7 +236,7 @@ test('无 key + generate 报 already exists：回退 rotate → 成功', async (
         err.stderr = 'Error: API key "openmax-metrics" already exists — use rotate to replace it\n';
         throw err;
       }
-      return { stdout: 'API key rotated\nName: openmax-metrics\nKey: zylos_ak_auto1\nScope: read\n' };
+      return { stdout: 'API key rotated\nName: openmax-metrics\nNew key: zylos_ak_auto1\nPrevious key and its sessions have been invalidated.\n' };
     },
   });
   await reporter();
@@ -239,6 +247,37 @@ test('无 key + generate 报 already exists：回退 rotate → 成功', async (
   assert.deepEqual(persisted, ['zylos_ak_auto1']);
   assert.equal(exchangeCalls[0].headers.Authorization, 'Bearer zylos_ak_auto1');
   assert.equal(puts.length, 1);
+  assert.equal(warns.length, 0);
+});
+
+test('并发 tick 共享同一次自动供给：不会因第二个 tick 提前静默成功进程', async () => {
+  const cliGate = deferred();
+  let cliStarted = 0;
+  const { reporter, exchangeCalls, stateCalls, puts, warns, cliCalls, persisted } = makeHarness({
+    state: authedState,
+    cli: async () => {
+      cliStarted += 1;
+      await cliGate.promise;
+      return { stdout: 'API key generated\nName: openmax-metrics\nKey: zylos_ak_auto1\nScope: read\n' };
+    },
+  });
+
+  const first = reporter();
+  const second = reporter();
+  while (cliStarted === 0) await new Promise((resolve) => setImmediate(resolve));
+  cliGate.resolve();
+  await Promise.all([first, second]);
+
+  assert.deepEqual(cliCalls, [['generate', 'openmax-metrics', 'read']]);
+  assert.deepEqual(persisted, ['zylos_ak_auto1']);
+  assert.equal(exchangeCalls.length, 2);
+  assert.equal(stateCalls.length, 4); // two unauthenticated probes + two authenticated retries
+  assert.equal(puts.length, 2);
+  assert.equal(warns.length, 0);
+
+  await reporter();
+  assert.equal(cliCalls.length, 1);
+  assert.equal(puts.length, 3);
   assert.equal(warns.length, 0);
 });
 
