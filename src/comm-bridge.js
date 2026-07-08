@@ -32,6 +32,7 @@ import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath } from './lib/client.js';
+import { createOnlineReporter } from './lib/online-report.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
@@ -1690,32 +1691,12 @@ function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) 
 // =============================================================================
 // Agent online self-report — onboarding trigger signal (cws-core C1)
 // =============================================================================
-// Once per process per org, tell cws-core this agent instance is up:
-// POST /api/v1/agents/{member_id}/online-report. cws-core uses the report as
-// its onboarding trigger signal, gated entirely server-side (platform switch,
-// org's-first-active-agent check, session state) — so repeated reports across
-// restarts are expected input, not errors. A failed report never affects
-// messaging: we simply retry on the next WS (re)connect until one succeeds.
+// Logic and rationale live in lib/online-report.js (extracted for unit
+// testing). Called from WS onOpen and from periodicSync — Set-guarded and
+// idempotent, so both call sites are safe; a failed report never affects
+// messaging.
 
-const _onlineReportDone = new Set();   // org slugs reported this process
-
-async function reportAgentOnline(orgConfig) {
-  if (_onlineReportDone.has(orgConfig.slug)) return;
-  let memberId = orgConfig.self?.member_id;
-  if (!memberId) {
-    // Fresh install: the first token exchange writes member_id back to
-    // config.json only — the in-memory orgConfig captured at boot never sees
-    // it (watchConfig treats `self` as structural and skips it on reload).
-    // Re-read from disk so retry-on-reconnect actually works, and fill the
-    // live object in place.
-    memberId = loadConfig().orgs?.[orgConfig.slug]?.self?.member_id || '';
-    if (!memberId) return; // token exchange hasn't landed yet — next reconnect retries
-    orgConfig.self = { ...(orgConfig.self || {}), member_id: memberId };
-  }
-  const res = await postForOrg(orgConfig.org_id, apiPath(`/agents/${memberId}/online-report`));
-  _onlineReportDone.add(orgConfig.slug);
-  log(`[${orgConfig.slug}] online-report: triggered=${res?.triggered === true} reason=${res?.reason || '?'}`);
-}
+const reportAgentOnline = createOnlineReporter({ loadConfig, postForOrg, apiPath, log, warn });
 
 // =============================================================================
 // Config sync to cws-comm — push local policy config on every WS (re)connect
@@ -1774,6 +1755,11 @@ function periodicSync() {
       warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
     syncConfigToComm(orgConfig).catch(e =>
       warn(`[${slug}] periodic config-sync failed: ${e.message}`));
+    // Onboarding online-report: heals transient failures on a stable WS
+    // connection (otherwise the next attempt waits for a reconnect).
+    // Set-guarded and idempotent — no-op once one report has succeeded.
+    reportAgentOnline(orgConfig).catch(e =>
+      warn(`[${slug}] periodic online-report failed: ${e.message}`));
   }
 }
 
