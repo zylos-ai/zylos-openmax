@@ -6,17 +6,27 @@
  *   1. Timer fires (first check after INITIAL_DELAY, then every intervalMs).
  *   2. Fetch latest GitHub release tag via REST API.
  *   3. Compare against current package.json version (semver).
- *   4. If newer: write a 'running' marker, notify owners, then start the
- *      executor as its OWN PM2 app (`zylos-openmax-upgrader`) via `pm2 start`.
+ *   4. If newer: write a 'running' marker, start the executor as its OWN PM2
+ *      app (`zylos-openmax-upgrader`) via `pm2 start`, and only notify owners
+ *      once the start succeeded (a failed start writes a failed marker and
+ *      notifies of the failure instead).
  *   5. Because a pm2-started process is parented to the PM2 daemon (a sibling of
  *      zylos-openmax, not a descendant), the `pm2 stop zylos-openmax` inside
  *      `zylos upgrade openmax` can never kill it — no "suicide" mid-upgrade.
- *      The executor verifies the new version, writes a terminal marker, ensures
- *      the service is running on failure, and removes its own PM2 entry.
+ *      The executor snapshots the current version, verifies the new version,
+ *      rolls back to the snapshot on failure, writes a terminal marker, ensures
+ *      the service is running, and removes its own PM2 entry. PM2 acts as its
+ *      watchdog: the upgrader runs with autorestart capped at max_restarts, so
+ *      an executor that dies unexpectedly (OOM, kill) is relaunched within
+ *      seconds; the relaunch detects the foreign pid claim in the marker and
+ *      recovers (restore + restart openmax) instead of re-running the upgrade.
+ *      This matters because the detection timer below lives INSIDE openmax —
+ *      if openmax is left stopped, no future check cycle can ever rescue it.
  *   6. On the next startup / check, notifyUpgradeComplete reads the terminal
- *      marker and DMs owners. A leftover upgrader found on a later check is
- *      treated as a zombie: cleaned up and (if its marker was still 'running')
- *      recorded as a failed version so it is never retried into a loop.
+ *      marker and DMs owners. A leftover upgrader entry found on a later check
+ *      is treated as a zombie: cleaned up and (if its marker was still
+ *      'running') recorded as a failed version so it is never retried into a
+ *      loop. An upgrader that is still ONLINE is never killed from here.
  *
  * Config (all optional, in config.json top level):
  *   autoUpgrade.enabled        — boolean, default true
@@ -25,7 +35,10 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFile, execFileSync } from 'child_process';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const HOME = process.env.HOME || '/tmp';
 const RUNTIME_DIR = path.join(HOME, 'zylos/components/openmax/runtime');
@@ -41,7 +54,12 @@ export const INITIAL_DELAY_MS = 60 * 1000;
 // `pm2 stop zylos-openmax` inside `zylos upgrade openmax` can never kill it.
 const PM2_UPGRADER = 'zylos-openmax-upgrader';
 
-const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000;
+export const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000;
+
+// Grace period after a 'running' marker is written during which the upgrader
+// pm2 entry may legitimately not be visible yet (pm2 start still in flight on
+// a slow box). Only after this do we treat marker-without-entry as interrupted.
+export const GRACE_START_MS = 2 * 60 * 1000;
 
 const log  = (...a) => console.log('[auto-upgrade]', ...a);
 const warn = (...a) => console.warn('[auto-upgrade]', ...a);
@@ -83,9 +101,18 @@ async function fetchLatestRelease() {
   };
 }
 
+// Atomic write (tmp + rename) so no reader — this service after a restart, or
+// the executor — can ever observe a half-written JSON marker.
 function writeMarker(data) {
   fs.mkdirSync(path.dirname(MARKER_PATH), { recursive: true });
-  fs.writeFileSync(MARKER_PATH, JSON.stringify(data, null, 2));
+  const tmp = `${MARKER_PATH}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+    fs.renameSync(tmp, MARKER_PATH);
+  } catch (e) {
+    warn(`failed to write marker: ${e.message}`);
+    try { fs.unlinkSync(tmp); } catch {}
+  }
 }
 
 export function recordFailedVersion(version) {
@@ -146,7 +173,13 @@ export function formatUpgradeNotification(marker) {
     lines.push(`OpenMax upgraded: v${marker.from} → v${marker.to}`);
   } else if (marker.error) {
     lines.push(`OpenMax upgrade failed: v${marker.from} → v${marker.to}`);
-    lines.push('Rolled back to previous version and restarted.');
+    // Only state what actually happened. The executor records the true outcome
+    // in marker.detail (rolled back / left on new version / never started).
+    if (marker.detail) {
+      lines.push(marker.detail);
+    } else {
+      lines.push('Automatic recovery was attempted — check upgrade-executor.log for details.');
+    }
     const errSummary = marker.error.split('\n').filter(l => l.trim()).slice(0, 5).join('\n');
     if (errSummary) lines.push('', `Error: ${errSummary}`);
   } else if (marker.status === 'running') {
@@ -229,13 +262,22 @@ async function notifyOwners(text, enabledOrgConfigs, postForOrgFn, apiPathFn) {
 }
 
 /**
- * Return the PM2 process record for the upgrader app, or null if it is not
- * currently registered.
+ * Async pm2 invocation (promisified execFile). Everything in this module runs
+ * on the comm-bridge event loop, so pm2 calls must never block it — a hung pm2
+ * daemon would otherwise freeze websocket heartbeats for the timeout duration.
  */
-function getUpgraderProc() {
+function pm2Exec(args, timeoutMs) {
+  return execFileAsync('pm2', args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 });
+}
+
+/**
+ * Return the PM2 process record for the upgrader app, or null if it is not
+ * currently registered (or pm2 is unreachable).
+ */
+async function getUpgraderProc(runPm2 = pm2Exec) {
   try {
-    const out = execFileSync('pm2', ['jlist'], { timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const procs = JSON.parse(out.toString());
+    const { stdout } = await runPm2(['jlist'], 10000);
+    const procs = JSON.parse(stdout.toString());
     return procs.find(p => p.name === PM2_UPGRADER) || null;
   } catch {
     return null;
@@ -244,13 +286,13 @@ function getUpgraderProc() {
 
 /**
  * Remove a leftover upgrader PM2 entry. The upgrader deletes itself when it
- * finishes, but if it ever crashes before doing so a stopped/errored entry can
- * linger. Clearing it here keeps `pm2 list` clean and frees the name for the
- * next real upgrade.
+ * finishes, but if it dies before doing so a stopped/errored entry can linger
+ * (with capped autorestart it ends 'errored' after max_restarts). Clearing it
+ * keeps `pm2 list` clean and frees the name for the next real upgrade.
  */
-function deleteUpgraderEntry() {
+async function deleteUpgraderEntry(runPm2 = pm2Exec) {
   try {
-    execFileSync('pm2', ['delete', PM2_UPGRADER], { timeout: 15000, stdio: 'ignore' });
+    await runPm2(['delete', PM2_UPGRADER], 15000);
     log(`removed leftover upgrader pm2 entry (${PM2_UPGRADER})`);
   } catch {
     // Not registered / already gone — nothing to do.
@@ -258,62 +300,158 @@ function deleteUpgraderEntry() {
 }
 
 /**
+ * Pure decision function for the pre-flight guard (exported for tests).
+ *
+ * @param {string|null} procStatus - pm2 status of the upgrader entry, or null
+ *   if the entry does not exist.
+ * @param {object|null} marker - current marker contents, or null.
+ * @param {number} now - clock, injectable for tests.
+ * @returns {{action: string, reason: string}} one of:
+ *   'proceed'                       — no upgrade in flight, safe to check
+ *   'wait'                          — treat as in flight, skip this cycle
+ *   'mark-interrupted'              — no entry but a stale running marker:
+ *                                     convert to failed (notifies + cooldown)
+ *   'cleanup'                       — dead entry, terminal/absent marker:
+ *                                     delete the entry
+ *   'cleanup-and-mark-interrupted'  — dead entry + running marker: both
+ */
+export function classifyUpgraderState(procStatus, marker, now = Date.now()) {
+  const markerRunning = marker != null && marker.status === 'running';
+  const age = markerRunning ? now - (marker.ts || 0) : Infinity;
+
+  if (!procStatus) {
+    if (!markerRunning) return { action: 'proceed', reason: 'no upgrader entry, no running marker' };
+    if (age < GRACE_START_MS) return { action: 'wait', reason: 'running marker is fresh; upgrader may still be starting' };
+    // The upgrader vanished without writing a terminal result (pm2 daemon
+    // restart / pm2 kill / manual delete). Without this branch the stuck
+    // 'running' marker would linger forever and the version would be silently
+    // retried with no owner notification.
+    return { action: 'mark-interrupted', reason: `running marker is ${age}ms old but the upgrader entry is gone` };
+  }
+
+  if (procStatus === 'online') {
+    // NEVER kill an online upgrader from here — a pm2 delete would treekill a
+    // live `zylos upgrade` mid-flight and could leave the skill dir half
+    // written. Its own timeouts bound how long it can stay online.
+    if (markerRunning && age < STALE_RUNNING_THRESHOLD_MS) {
+      return { action: 'wait', reason: 'upgrade in flight' };
+    }
+    if (markerRunning) return { action: 'wait', reason: 'upgrader online with stale running marker (unusually long run)' };
+    return { action: 'wait', reason: 'upgrader online in its completion window' };
+  }
+
+  // stopped / errored / stopping — a dead entry.
+  return markerRunning
+    ? { action: 'cleanup-and-mark-interrupted', reason: `dead upgrader entry (${procStatus}) with a running marker` }
+    : { action: 'cleanup', reason: `dead upgrader entry (${procStatus})` };
+}
+
+/** Convert a stuck 'running' marker into a terminal failed one (with ts). */
+function markInterrupted(marker, error, detail) {
+  writeMarker({
+    ...marker,
+    status: 'failed',
+    completed: false,
+    error,
+    detail,
+    ts: Date.now(),
+  });
+}
+
+/**
  * Pre-flight guard against concurrent / stuck upgrades.
  *
- * @returns {boolean} true if an upgrade is genuinely in progress (caller should
- *   skip), false if it is safe to proceed. Side effect: clears zombie upgrader
- *   entries so a crashed previous run never blocks future upgrades forever.
+ * @returns {Promise<boolean>} true if an upgrade should be treated as in
+ *   progress (caller skips this cycle), false if it is safe to proceed. Side
+ *   effects: clears dead upgrader entries, converts orphaned 'running' markers
+ *   to failed (the subsequent notifyUpgradeComplete then DMs the owner and
+ *   records the failed version), and warns—once—about an unusually long run.
  */
-function upgradeInProgress() {
-  const proc = getUpgraderProc();
-  if (!proc) return false;
+async function upgradeInProgress(enabledOrgConfigs, postForOrgFn, apiPathFn) {
+  try {
+    const proc = await getUpgraderProc();
+    const marker = readMarker();
+    const { action, reason } = classifyUpgraderState(proc?.pm2_env?.status ?? null, marker);
 
-  const status = proc.pm2_env?.status;
-  const marker = readMarker();
-  const markerRunning = marker && marker.status === 'running';
-  const fresh = markerRunning && Date.now() - (marker.ts || 0) < STALE_RUNNING_THRESHOLD_MS;
+    switch (action) {
+      case 'proceed':
+        return false;
 
-  if (status === 'online' && fresh) {
-    // Rare legitimate overlap: verification is running unusually long and its
-    // window bumps into a detection check. Skip to avoid a concurrent upgrade.
-    // In the normal path the executor self-deletes (~40s) well before the next
-    // check, so we should almost never get here.
-    log('upgrader still online with a fresh marker — treating as an in-flight upgrade, skipping this cycle');
-    return true;
+      case 'wait':
+        log(`upgrader busy (${reason}) — skipping this cycle`);
+        if (reason.includes('stale running marker') && marker && !marker.anomalyNotified) {
+          // Online but past the stale threshold: don't kill it (see classify),
+          // but tell the owner once so a genuinely hung upgrade is not silent.
+          writeMarker({ ...marker, anomalyNotified: true });
+          await notifyOwners(
+            `OpenMax upgrade to v${marker.to} is taking unusually long. The upgrader is still running and will not be interrupted — check upgrade-executor.log if this persists.`,
+            enabledOrgConfigs, postForOrgFn, apiPathFn,
+          );
+        }
+        return true;
+
+      case 'mark-interrupted':
+        warn(`${reason} — marking the upgrade as failed`);
+        markInterrupted(
+          marker,
+          'Upgrade was interrupted: the upgrader process disappeared without reporting a result (possibly a PM2 daemon restart).',
+          'The upgrader vanished mid-run; openmax kept running. The target version was recorded as failed so it will not be retried.',
+        );
+        return false;
+
+      case 'cleanup-and-mark-interrupted':
+        warn(`${reason} — marking the upgrade as failed and removing the entry`);
+        markInterrupted(
+          marker,
+          'Upgrade was interrupted: the upgrader died without reporting a result.',
+          'The upgrader died mid-run; openmax kept running. The target version was recorded as failed so it will not be retried.',
+        );
+        await deleteUpgraderEntry();
+        return false;
+
+      case 'cleanup':
+        warn(`${reason} — removing the entry`);
+        await deleteUpgraderEntry();
+        return false;
+
+      default:
+        return false;
+    }
+  } catch (e) {
+    warn(`upgrade pre-flight check failed: ${e.message}`);
+    // Fail open (proceed) — a broken pm2 will surface again at start time.
+    return false;
   }
-
-  // Anything else means a leaked/zombie upgrader. Given the long check interval
-  // and that a healthy executor removes itself within ~40s, finding one here is
-  // an anomaly (likely a bug) — surface it loudly, clean it up, and don't let it
-  // block future upgrades.
-  warn(`found a leftover upgrader (pm2=${status}, markerRunning=${markerRunning}, fresh=${fresh}) — likely a stuck/leaked upgrade, cleaning up`);
-  // If the marker was still 'running', the previous upgrade got stuck/killed
-  // before writing a terminal result — mark it failed so the owner is notified
-  // and the version is recorded as failed (preventing an endless retry loop).
-  if (markerRunning) {
-    writeMarker({
-      ...marker,
-      status: 'failed',
-      completed: false,
-      error: 'Upgrade process was interrupted or leaked (found still registered on a later check)',
-    });
-  }
-  deleteUpgraderEntry();
-  return false;
 }
 
 /**
  * Start the upgrade executor as its own PM2 app.
  *
- * `--no-autorestart` makes it a one-shot (it must never be relaunched into a
- * loop). We deliberately do NOT run `pm2 save` afterwards, so the upgrader is
- * never persisted into the PM2 dump and a daemon resurrection can't bring back
- * a stale upgrader. The executor removes its own entry when it finishes.
+ * The upgrader runs with autorestart capped at --max-restarts 3: PM2 acts as
+ * its watchdog, so an executor that dies unexpectedly (OOM, manual kill) —
+ * possibly with openmax stopped — is relaunched within seconds and recovers
+ * via its interrupted-run path. This must not rely on our own check timer,
+ * which lives inside openmax and stops ticking the moment openmax is stopped.
+ * Relaunches after a terminal marker are cheap no-ops that exit immediately,
+ * so max_restarts turns the entry 'errored' at worst; it is never persisted
+ * (`pm2 save` is never run) and the executor deletes its own entry when done.
  *
- * @returns {boolean} whether the executor was started.
+ * @returns {Promise<boolean>} whether the executor was started.
  */
-function startUpgraderApp(fromVersion, toVersion, notes, releaseUrl) {
-  const markerData = {
+export async function startUpgraderApp(fromVersion, toVersion, notes, releaseUrl, deps = {}) {
+  const runPm2 = deps.pm2Exec || pm2Exec;
+
+  // Never touch an online upgrader (upgradeInProgress already screens for
+  // this; re-check to close the race with a run that started in between).
+  const existing = await getUpgraderProc(runPm2);
+  if (existing?.pm2_env?.status === 'online') {
+    warn('an upgrader is unexpectedly online at start time — skipping this cycle');
+    return false;
+  }
+  if (existing) await deleteUpgraderEntry(runPm2);
+
+  // The marker must exist before pm2 start: the executor reads it on boot.
+  writeMarker({
     from: fromVersion,
     to: toVersion,
     notes: notes || '',
@@ -321,35 +459,36 @@ function startUpgraderApp(fromVersion, toVersion, notes, releaseUrl) {
     status: 'running',
     completed: false,
     ts: Date.now(),
-  };
-  writeMarker(markerData);
-
-  // Ensure the name is free (defensive — upgradeInProgress already cleared
-  // zombies, but a race with a just-finished run could leave a stopped entry).
-  deleteUpgraderEntry();
+  });
 
   try {
-    execFileSync('pm2', [
+    await runPm2([
       'start', EXECUTOR_SCRIPT,
       '--name', PM2_UPGRADER,
-      '--no-autorestart',
+      '--max-restarts', '3',
+      '--restart-delay', '2000',
       '--interpreter', 'node',
       '--', MARKER_PATH,
-    ], {
-      timeout: 30000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      // Pass our full environment so the upgrader inherits PATH (to find the
-      // `zylos` binary), GITHUB_TOKEN, ZYLOS_BIN, etc.
-      env: { ...process.env },
-    });
+    ], 30000);
     log(`started upgrade executor as pm2 app ${PM2_UPGRADER}`);
     return true;
   } catch (e) {
     warn(`failed to start upgrader pm2 app: ${e.stderr?.toString() || e.message}`);
-    // Roll back the running marker so the next check retries instead of seeing
-    // a phantom in-progress upgrade.
-    try { fs.unlinkSync(MARKER_PATH); } catch {}
-    deleteUpgraderEntry();
+    // Record the failure instead of just unlinking the marker: the caller
+    // flushes this through notifyUpgradeComplete, which DMs the owner and
+    // records the failed version — no silent "upgrading..." spam every cycle.
+    writeMarker({
+      from: fromVersion,
+      to: toVersion,
+      notes: notes || '',
+      url: releaseUrl || '',
+      status: 'failed',
+      completed: false,
+      error: `Could not start the upgrader pm2 app: ${e.message}`,
+      detail: 'The upgrade never started — the running service was not touched.',
+      ts: Date.now(),
+    });
+    await deleteUpgraderEntry(runPm2);
     return false;
   }
 }
@@ -357,7 +496,7 @@ function startUpgraderApp(fromVersion, toVersion, notes, releaseUrl) {
 export async function checkForUpdates(enabledOrgConfigs, postForOrgFn, apiPathFn) {
   // Guard against concurrent upgrades and clear any zombie upgrader left behind
   // by a crashed previous run (which also converts a stuck marker to failed).
-  if (upgradeInProgress()) {
+  if (await upgradeInProgress(enabledOrgConfigs, postForOrgFn, apiPathFn)) {
     log('upgrade in progress, skipping check');
     return;
   }
@@ -388,12 +527,18 @@ export async function checkForUpdates(enabledOrgConfigs, postForOrgFn, apiPathFn
 
     log(`new version available: v${current} → v${latest.tag}, starting upgrade...`);
 
-    const notifyText = formatUpgradeNotification({
-      from: current, to: latest.tag, notes: latest.body, url: latest.url, status: 'running',
-    });
-    await notifyOwners(notifyText, enabledOrgConfigs, postForOrgFn, apiPathFn);
-
-    startUpgraderApp(current, latest.tag, latest.body, latest.url);
+    const started = await startUpgraderApp(current, latest.tag, latest.body, latest.url);
+    if (started) {
+      // Only announce "upgrading..." once the upgrader is actually running.
+      const notifyText = formatUpgradeNotification({
+        from: current, to: latest.tag, notes: latest.body, url: latest.url, status: 'running',
+      });
+      await notifyOwners(notifyText, enabledOrgConfigs, postForOrgFn, apiPathFn);
+    } else {
+      // startUpgraderApp left a terminal failed marker — flush it now so the
+      // owner hears about the failure and the version enters cooldown.
+      await notifyUpgradeComplete(enabledOrgConfigs, postForOrgFn, apiPathFn);
+    }
   } catch (e) {
     warn(`check failed: ${e.message}`);
   }
