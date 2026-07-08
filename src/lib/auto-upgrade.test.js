@@ -204,6 +204,31 @@ describe('startUpgraderApp', () => {
     assert.ok(m.ts >= before, 'failed marker must carry a fresh ts (F9)');
   });
 
+  it('points pm2 stdio logs at the runtime dir and clears stale ones (no ~/.pm2/logs accumulation)', async () => {
+    const staleOut = path.join(runtimeDir, 'upgrader-out.log');
+    const staleErr = path.join(runtimeDir, 'upgrader-err.log');
+    fs.writeFileSync(staleOut, 'old output from a previous run\n');
+    fs.writeFileSync(staleErr, 'old errors from a previous run\n');
+
+    let startArgs = null;
+    const capturing = async (args) => {
+      if (args[0] === 'jlist') return { stdout: '[]' };
+      if (args[0] === 'start') startArgs = args;
+      return { stdout: '' };
+    };
+    const ok = await startUpgraderApp('2.5.1', '2.6.0', '', '', { pm2Exec: capturing });
+    assert.equal(ok, true);
+
+    const outIdx = startArgs.indexOf('--output');
+    const errIdx = startArgs.indexOf('--error');
+    assert.ok(outIdx !== -1 && errIdx !== -1, 'must pass --output/--error to pm2 start');
+    assert.equal(startArgs[outIdx + 1], staleOut);
+    assert.equal(startArgs[errIdx + 1], staleErr);
+
+    assert.ok(!fs.existsSync(staleOut), 'stale out log must be removed before a fresh run');
+    assert.ok(!fs.existsSync(staleErr), 'stale err log must be removed before a fresh run');
+  });
+
   it('refuses to start while an upgrader is online (never touches it)', async () => {
     const calls = [];
     const onlineUpgrader = async (args) => {

@@ -54,6 +54,14 @@ export const INITIAL_DELAY_MS = 60 * 1000;
 // `pm2 stop zylos-openmax` inside `zylos upgrade openmax` can never kill it.
 const PM2_UPGRADER = 'zylos-openmax-upgrader';
 
+// PM2-captured stdout/stderr of the upgrader app. Pointed into the runtime dir
+// via --output/--error (the ~/.pm2/logs defaults would accumulate forever) and
+// removed on every cleanup path here; the executor also removes them when it
+// finishes. A watchdog relaunch keeps them until terminal cleanup so crash
+// forensics survive.
+const UPGRADER_OUT_LOG = path.join(RUNTIME_DIR, 'upgrader-out.log');
+const UPGRADER_ERR_LOG = path.join(RUNTIME_DIR, 'upgrader-err.log');
+
 export const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000;
 
 // Grace period after a 'running' marker is written during which the upgrader
@@ -297,6 +305,32 @@ async function deleteUpgraderEntry(runPm2 = pm2Exec) {
   } catch {
     // Not registered / already gone — nothing to do.
   }
+  removeUpgraderLogs();
+}
+
+/** Remove the upgrader's pm2-captured log files so they never accumulate. */
+function removeUpgraderLogs() {
+  for (const f of [UPGRADER_OUT_LOG, UPGRADER_ERR_LOG]) {
+    try { fs.rmSync(f, { force: true }); } catch {}
+  }
+}
+
+/**
+ * Surface the tail of the dead upgrader's stderr in our own log before the
+ * cleanup below deletes it — for the watchdog-exhausted case where no
+ * executor instance survived to capture it.
+ */
+function logLeftoverUpgraderErrTail(maxBytes = 2048) {
+  try {
+    const st = fs.statSync(UPGRADER_ERR_LOG);
+    if (!st.size) return;
+    const len = Math.min(st.size, maxBytes);
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(UPGRADER_ERR_LOG, 'r');
+    fs.readSync(fd, buf, 0, len, st.size - len);
+    fs.closeSync(fd);
+    warn(`tail of dead upgrader's stderr:\n${buf.toString('utf-8')}`);
+  } catch {}
 }
 
 /**
@@ -401,6 +435,7 @@ async function upgradeInProgress(enabledOrgConfigs, postForOrgFn, apiPathFn) {
 
       case 'cleanup-and-mark-interrupted':
         warn(`${reason} — marking the upgrade as failed and removing the entry`);
+        logLeftoverUpgraderErrTail();
         markInterrupted(
           marker,
           'Upgrade was interrupted: the upgrader died without reporting a result.',
@@ -450,6 +485,10 @@ export async function startUpgraderApp(fromVersion, toVersion, notes, releaseUrl
   }
   if (existing) await deleteUpgraderEntry(runPm2);
 
+  // Fresh pm2 log files for this run (previous runs' files were removed on
+  // cleanup, but be defensive — never let them accumulate across runs).
+  removeUpgraderLogs();
+
   // The marker must exist before pm2 start: the executor reads it on boot.
   writeMarker({
     from: fromVersion,
@@ -468,6 +507,11 @@ export async function startUpgraderApp(fromVersion, toVersion, notes, releaseUrl
       '--max-restarts', '3',
       '--restart-delay', '2000',
       '--interpreter', 'node',
+      // Keep pm2-captured stdio out of ~/.pm2/logs (which is never rotated
+      // for on-demand apps) — point it at the runtime dir where our cleanup
+      // paths remove it.
+      '--output', UPGRADER_OUT_LOG,
+      '--error', UPGRADER_ERR_LOG,
       '--', MARKER_PATH,
     ], 30000);
     log(`started upgrade executor as pm2 app ${PM2_UPGRADER}`);

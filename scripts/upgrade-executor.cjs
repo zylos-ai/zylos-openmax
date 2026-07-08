@@ -6,7 +6,9 @@
  *
  * Started on demand by auto-upgrade.js via:
  *   pm2 start scripts/upgrade-executor.cjs --name zylos-openmax-upgrader \
- *     --max-restarts 3 --restart-delay 2000 -- <marker-path>
+ *     --max-restarts 3 --restart-delay 2000 \
+ *     --output <runtime>/upgrader-out.log --error <runtime>/upgrader-err.log \
+ *     -- <marker-path>
  *
  * Why a separate PM2 app instead of a detached child of the openmax service?
  *   `zylos upgrade openmax` internally runs `pm2 stop zylos-openmax`, and PM2's
@@ -81,6 +83,14 @@ const DEFAULT_MARKER_PATH = path.join(
 const markerPath = process.argv[2] || DEFAULT_MARKER_PATH;
 const runtimeDir = path.dirname(markerPath);
 const logFile = path.join(runtimeDir, 'upgrade-executor.log');
+const MAX_EXECUTOR_LOG_BYTES = 1024 * 1024;
+
+// PM2-captured stdout/stderr of this app. auto-upgrade.js starts us with
+// --output/--error pointing here (instead of the default ~/.pm2/logs, which
+// would accumulate forever). Removed on terminal cleanup paths; a watchdog
+// relaunch leaves them in place so crash forensics survive until then.
+const UPGRADER_OUT_LOG = path.join(runtimeDir, 'upgrader-out.log');
+const UPGRADER_ERR_LOG = path.join(runtimeDir, 'upgrader-err.log');
 
 // Self-contained pre-upgrade snapshot (lives in the openmax data dir, outside
 // the skill dir that `zylos upgrade` overwrites). node_modules is tiny for
@@ -91,6 +101,42 @@ const SNAPSHOT_EXCLUDES = new Set(['.backup', '.git', '.zylos']);
 function appendLog(line) {
   try {
     fs.appendFileSync(logFile, `${new Date().toISOString()} [upgrader:${process.pid}] ${line}\n`);
+  } catch {}
+}
+
+/** Keep the executor's own log size-bounded: truncate if it exceeds 1MB. */
+function boundExecutorLog() {
+  try {
+    const st = fs.statSync(logFile);
+    if (st.size > MAX_EXECUTOR_LOG_BYTES) {
+      fs.truncateSync(logFile, 0);
+      appendLog(`log truncated (previous size ${st.size} bytes exceeded ${MAX_EXECUTOR_LOG_BYTES})`);
+    }
+  } catch {}
+}
+
+/** Remove the PM2-captured stdout/stderr files (terminal cleanup only). */
+function removeUpgraderPm2Logs() {
+  for (const f of [UPGRADER_OUT_LOG, UPGRADER_ERR_LOG]) {
+    try { fs.rmSync(f, { force: true }); } catch {}
+  }
+}
+
+/**
+ * Preserve crash forensics: copy the tail of the pm2-captured stderr of the
+ * previous (crashed) run into our persistent executor log before terminal
+ * cleanup deletes the pm2 log files.
+ */
+function logUpgraderErrTail(maxBytes = 4096) {
+  try {
+    const st = fs.statSync(UPGRADER_ERR_LOG);
+    if (!st.size) return;
+    const len = Math.min(st.size, maxBytes);
+    const buf = Buffer.alloc(len);
+    const fd = fs.openSync(UPGRADER_ERR_LOG, 'r');
+    fs.readSync(fd, buf, 0, len, st.size - len);
+    fs.closeSync(fd);
+    appendLog(`tail of previous run's pm2 error log:\n${buf.toString('utf-8')}`);
   } catch {}
 }
 
@@ -213,6 +259,10 @@ function ensurePm2Running({ forceRestart = false } = {}) {
  */
 function selfDeleteAndExit(code) {
   appendLog(`self-cleanup: pm2 delete ${PM2_UPGRADER}, exiting(${code})`);
+  // Terminal path: drop the pm2-captured stdout/stderr files so they never
+  // accumulate across runs. (A relaunch racing the delete may recreate small
+  // files; auto-upgrade.js removes them again on its cleanup paths.)
+  removeUpgraderPm2Logs();
   try {
     const child = spawn('pm2', ['delete', PM2_UPGRADER], {
       detached: true,
@@ -335,19 +385,34 @@ function readInstalledVersion() {
  * and the service is online with a NON-increasing restart counter. If the
  * restart counter climbs between polls the version is crash-looping — treated
  * as failure rather than declaring success on a process about to die again.
+ *
+ * Last-poll boundary: success needs two consecutive healthy polls, so a
+ * service whose FIRST healthy sighting lands on the final scheduled poll can
+ * never confirm within the loop. Exactly one extra confirmation poll is
+ * granted in that case — otherwise a service that came up healthy right at
+ * the deadline would be declared failed and needlessly rolled back.
+ *
+ * deps ({sleep, readInstalledVersion, getPm2Proc}) are injectable for tests.
  */
-async function verifyUpgrade(targetVersion, retries = VERIFY_RETRIES) {
+async function verifyUpgrade(targetVersion, retries = VERIFY_RETRIES, deps = {}) {
+  const doSleep = deps.sleep || sleep;
+  const readVersion = deps.readInstalledVersion || readInstalledVersion;
+  const getProc = deps.getPm2Proc || getPm2Proc;
+
   appendLog(`verifying v${targetVersion} (version match + stability, up to ${retries} polls)...`);
   let baselineRestarts = null;
   let stableOnce = false;
+  let extraPollGranted = false;
+  let polls = 0;
 
   for (let i = 0; i < retries; i++) {
-    await sleep(VERIFY_DELAY_MS);
-    const version = readInstalledVersion();
-    const proc = getPm2Proc();
+    await doSleep(VERIFY_DELAY_MS);
+    polls = i + 1;
+    const version = readVersion();
+    const proc = getProc();
     const status = proc ? proc.pm2_env.status : null;
     const restarts = proc ? (proc.pm2_env.restart_time ?? 0) : null;
-    appendLog(`  attempt ${i + 1}: version=${version}, pm2=${status}, restarts=${restarts}`);
+    appendLog(`  poll ${polls}: version=${version}, pm2=${status}, restarts=${restarts}`);
 
     if (version !== targetVersion || status !== 'online') {
       // Reset stability tracking — not there yet.
@@ -360,6 +425,11 @@ async function verifyUpgrade(targetVersion, retries = VERIFY_RETRIES) {
       // First healthy sighting — record restart baseline, need one more clean poll.
       baselineRestarts = restarts;
       stableOnce = true;
+      if (i === retries - 1 && !extraPollGranted) {
+        extraPollGranted = true;
+        retries += 1;
+        appendLog('  first healthy poll landed on the final slot — granting one extra confirmation poll');
+      }
       continue;
     }
 
@@ -373,6 +443,7 @@ async function verifyUpgrade(targetVersion, retries = VERIFY_RETRIES) {
       return true;
     }
   }
+  appendLog(`verification FAILED for v${targetVersion}: no two consecutive healthy polls in ${polls} polls`);
   return false;
 }
 
@@ -442,6 +513,10 @@ async function handleVerificationFailure() {
  */
 function handleInterrupted(reason) {
   appendLog(`INTERRUPTED RUN DETECTED: ${reason}`);
+  // The previous instance may have crashed with a stack trace on stderr —
+  // preserve it in our persistent log before terminal cleanup wipes the
+  // pm2-captured files.
+  logUpgraderErrTail();
   const proc = getPm2Proc();
   const serviceOnline = proc?.pm2_env?.status === 'online';
   let detail;
@@ -477,7 +552,25 @@ function handleInterrupted(reason) {
 // Main
 // ---------------------------------------------------------------------------
 
+/**
+ * Pure (exported for tests): build the marker update for an unexpected
+ * top-level crash of main(), or null when nothing should be written — either
+ * there is no marker to update, or it already holds a terminal result that
+ * must not be overwritten (re-entrancy with the normal terminal paths).
+ */
+function buildFatalMarkerUpdate(err, currentMarker) {
+  if (!currentMarker) return null;
+  if (currentMarker.status && currentMarker.status !== 'running') return null;
+  return {
+    completed: false,
+    status: 'failed',
+    error: `Unexpected executor error: ${(err && err.message) || String(err)}`,
+    detail: 'The upgrade executor crashed unexpectedly; the service was restarted as a safety net. See upgrade-executor.log.',
+  };
+}
+
 async function main() {
+  boundExecutorLog();
   try {
     marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
   } catch (e) {
@@ -551,9 +644,29 @@ async function main() {
 
 module.exports = {
   evaluateStartGuard,
+  buildFatalMarkerUpdate,
+  verifyUpgrade,
   STALE_RUNNING_THRESHOLD_MS,
+  VERIFY_RETRIES,
 };
 
 if (require.main === module) {
-  main();
+  // Top-level catch: without it an unexpected throw becomes an unhandled
+  // rejection — the process would die with no failed marker, no owner
+  // notification, and possibly openmax left stopped.
+  main().catch(err => {
+    appendLog(`FATAL: unhandled executor error: ${(err && err.stack) || err}`);
+    try {
+      const update = buildFatalMarkerUpdate(err, marker);
+      if (update) writeMarker(update); // atomic, stamps ts
+    } catch (e) {
+      appendLog(`WARN: fatal-path marker write failed: ${e.message}`);
+    }
+    try {
+      ensurePm2Running();
+    } catch (e) {
+      appendLog(`WARN: fatal-path ensurePm2Running failed: ${e.message}`);
+    }
+    selfDeleteAndExit(1);
+  });
 }
