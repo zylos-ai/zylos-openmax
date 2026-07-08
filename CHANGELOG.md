@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] — 2026-07-08
+
+### Added
+
+- **feat(auto-upgrade): dedicated on-demand PM2 upgrader app**. Auto-upgrade now launches a sibling PM2 app, `zylos-openmax-upgrader`, instead of a detached child of the `zylos-openmax` service. The upgrader is parented to the PM2 daemon, survives `pm2 stop zylos-openmax` during `zylos upgrade openmax`, is not saved into the PM2 dump, and self-deletes after terminal completion.
+- **feat(auto-upgrade): PM2 watchdog recovery for interrupted upgrades**. The upgrader runs with bounded PM2 autorestart. If it is killed mid-flight, the restarted instance detects a foreign running marker, marks the upgrade failed, ensures openmax is running, notifies the owner, and exits without re-running the upgrade.
+- **feat(auto-upgrade): rollback snapshot and verification guardrails**. Before upgrading, the executor snapshots the installed skill directory to `runtime/rollback-snapshot`; failed post-upgrade verification restores that snapshot, restarts openmax, re-verifies, and reports whether rollback succeeded.
+
+### Fixed
+
+- **fix(auto-upgrade): prevent suicide upgrades and retry loops**. Service-side upgrade checks now start the PM2 upgrader asynchronously, preserve failed-version cooldown, require a real version change, and avoid blocking the comm-bridge event loop on PM2 calls.
+- **fix(auto-upgrade): stale marker and zombie handling**. Running markers without a live upgrader are converted to failed after a start grace period; stopped/errored upgrader leftovers are cleaned; online-but-stale upgraders produce a one-time owner warning instead of being deleted.
+- **fix(upgrade-executor): restore accuracy and bounded logs**. The executor uses array-argument process execution, atomic marker writes, version-aware interrupted-run handling, bounded log capture, and true replace-restore behavior during rollback.
+
 ## [2.5.2] — 2026-07-08
 
 ### Fixed
