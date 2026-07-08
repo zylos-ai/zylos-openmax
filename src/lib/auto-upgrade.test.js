@@ -21,6 +21,10 @@ const {
   getFailedVersion,
   clearFailedVersion,
   recordFailedVersion,
+  classifyUpgraderState,
+  startUpgraderApp,
+  GRACE_START_MS,
+  STALE_RUNNING_THRESHOLD_MS,
 } = mod;
 
 function writeMarker(data) {
@@ -101,5 +105,143 @@ describe('formatUpgradeNotification', () => {
     const text = formatUpgradeNotification({ completed: false, error: 'timeout', from: '2.4.3', to: '2.5.0' });
     assert.ok(text.includes('failed'));
     assert.ok(text.includes('timeout'));
+  });
+
+  it('does not claim a rollback that did not happen', () => {
+    const text = formatUpgradeNotification({ completed: false, error: 'boom', from: '2.4.3', to: '2.5.0' });
+    assert.ok(!text.includes('Rolled back'), 'must not hardcode a rollback claim');
+  });
+
+  it('uses the executor-provided detail line when present', () => {
+    const text = formatUpgradeNotification({
+      completed: false, error: 'crash-loop', from: '2.4.3', to: '2.5.0',
+      detail: 'rolled back to v2.4.3 and the service is running again.',
+    });
+    assert.ok(text.includes('rolled back to v2.4.3'));
+  });
+});
+
+describe('classifyUpgraderState (pre-flight decision logic)', () => {
+  const NOW = 100 * 60 * 1000; // arbitrary fixed clock
+
+  it('no entry + no marker → proceed', () => {
+    assert.equal(classifyUpgraderState(null, null, NOW).action, 'proceed');
+  });
+
+  it('no entry + terminal marker → proceed', () => {
+    assert.equal(classifyUpgraderState(null, { status: 'completed' }, NOW).action, 'proceed');
+    assert.equal(classifyUpgraderState(null, { status: 'failed' }, NOW).action, 'proceed');
+  });
+
+  it('no entry + fresh running marker (within grace) → wait (upgrader may be starting)', () => {
+    const marker = { status: 'running', ts: NOW - (GRACE_START_MS - 1000) };
+    assert.equal(classifyUpgraderState(null, marker, NOW).action, 'wait');
+  });
+
+  it('no entry + running marker past grace → mark-interrupted (F1: stuck marker must not linger)', () => {
+    const marker = { status: 'running', ts: NOW - (GRACE_START_MS + 1000) };
+    assert.equal(classifyUpgraderState(null, marker, NOW).action, 'mark-interrupted');
+  });
+
+  it('online entry + fresh running marker → wait (in flight)', () => {
+    const marker = { status: 'running', ts: NOW - 60 * 1000 };
+    assert.equal(classifyUpgraderState('online', marker, NOW).action, 'wait');
+  });
+
+  it('online entry + stale running marker → wait, never a delete (F5: no killing live upgraders)', () => {
+    const marker = { status: 'running', ts: NOW - (STALE_RUNNING_THRESHOLD_MS + 1000) };
+    const res = classifyUpgraderState('online', marker, NOW);
+    assert.equal(res.action, 'wait');
+    assert.ok(res.reason.includes('stale running marker'));
+  });
+
+  it('online entry + terminal marker → wait (completion window, executor self-deletes)', () => {
+    assert.equal(classifyUpgraderState('online', { status: 'completed' }, NOW).action, 'wait');
+  });
+
+  it('dead entry + running marker → cleanup-and-mark-interrupted', () => {
+    const marker = { status: 'running', ts: NOW - 60 * 1000 };
+    assert.equal(classifyUpgraderState('stopped', marker, NOW).action, 'cleanup-and-mark-interrupted');
+    assert.equal(classifyUpgraderState('errored', marker, NOW).action, 'cleanup-and-mark-interrupted');
+  });
+
+  it('dead entry + terminal/absent marker → cleanup', () => {
+    assert.equal(classifyUpgraderState('errored', null, NOW).action, 'cleanup');
+    assert.equal(classifyUpgraderState('stopped', { status: 'failed' }, NOW).action, 'cleanup');
+  });
+});
+
+describe('startUpgraderApp', () => {
+  const noUpgrader = async (args) => {
+    if (args[0] === 'jlist') return { stdout: '[]' };
+    return { stdout: '' };
+  };
+
+  it('success: leaves a running marker and returns true', async () => {
+    const ok = await startUpgraderApp('2.5.1', '2.6.0', 'notes', 'https://x', { pm2Exec: noUpgrader });
+    assert.equal(ok, true);
+    const m = JSON.parse(fs.readFileSync(MARKER_PATH, 'utf-8'));
+    assert.equal(m.status, 'running');
+    assert.equal(m.from, '2.5.1');
+    assert.equal(m.to, '2.6.0');
+    assert.equal(typeof m.ts, 'number');
+  });
+
+  it('start failure: records a failed marker with ts + error instead of unlinking (F7)', async () => {
+    const failingStart = async (args) => {
+      if (args[0] === 'jlist') return { stdout: '[]' };
+      if (args[0] === 'start') throw new Error('pm2 daemon unreachable');
+      return { stdout: '' };
+    };
+    const before = Date.now();
+    const ok = await startUpgraderApp('2.5.1', '2.6.0', '', '', { pm2Exec: failingStart });
+    assert.equal(ok, false);
+    const m = JSON.parse(fs.readFileSync(MARKER_PATH, 'utf-8'));
+    assert.equal(m.status, 'failed');
+    assert.equal(m.completed, false);
+    assert.ok(m.error.includes('pm2 daemon unreachable'));
+    assert.ok(m.detail.includes('never started'));
+    assert.ok(m.ts >= before, 'failed marker must carry a fresh ts (F9)');
+  });
+
+  it('points pm2 stdio logs at the runtime dir and clears stale ones (no ~/.pm2/logs accumulation)', async () => {
+    const staleOut = path.join(runtimeDir, 'upgrader-out.log');
+    const staleErr = path.join(runtimeDir, 'upgrader-err.log');
+    fs.writeFileSync(staleOut, 'old output from a previous run\n');
+    fs.writeFileSync(staleErr, 'old errors from a previous run\n');
+
+    let startArgs = null;
+    const capturing = async (args) => {
+      if (args[0] === 'jlist') return { stdout: '[]' };
+      if (args[0] === 'start') startArgs = args;
+      return { stdout: '' };
+    };
+    const ok = await startUpgraderApp('2.5.1', '2.6.0', '', '', { pm2Exec: capturing });
+    assert.equal(ok, true);
+
+    const outIdx = startArgs.indexOf('--output');
+    const errIdx = startArgs.indexOf('--error');
+    assert.ok(outIdx !== -1 && errIdx !== -1, 'must pass --output/--error to pm2 start');
+    assert.equal(startArgs[outIdx + 1], staleOut);
+    assert.equal(startArgs[errIdx + 1], staleErr);
+
+    assert.ok(!fs.existsSync(staleOut), 'stale out log must be removed before a fresh run');
+    assert.ok(!fs.existsSync(staleErr), 'stale err log must be removed before a fresh run');
+  });
+
+  it('refuses to start while an upgrader is online (never touches it)', async () => {
+    const calls = [];
+    const onlineUpgrader = async (args) => {
+      calls.push(args[0]);
+      if (args[0] === 'jlist') {
+        return { stdout: JSON.stringify([{ name: 'zylos-openmax-upgrader', pm2_env: { status: 'online' } }]) };
+      }
+      return { stdout: '' };
+    };
+    const ok = await startUpgraderApp('2.5.1', '2.6.0', '', '', { pm2Exec: onlineUpgrader });
+    assert.equal(ok, false);
+    assert.ok(!calls.includes('delete'), 'must not delete an online upgrader');
+    assert.ok(!calls.includes('start'), 'must not start a second upgrader');
+    assert.ok(!fs.existsSync(MARKER_PATH), 'must not overwrite the marker');
   });
 });

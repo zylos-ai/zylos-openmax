@@ -1936,7 +1936,7 @@ if (orgs.length === 0) {
       const checkFn = () => checkForUpdates(activeOrgConfigs, postForOrg, apiPath);
       tasks.register('auto-upgrade', checkFn, intervalMs, { delay, runOnStart: true });
       tasks.start('auto-upgrade');
-      log(`auto-upgrade scheduled (detached executor): first check in ${Math.round(delay / 1000)}s, then every ${Math.round(intervalMs / 3600_000)}h`);
+      log(`auto-upgrade scheduled (on-demand pm2 upgrader): first check in ${Math.round(delay / 1000)}s, then every ${Math.round(intervalMs / 3600_000)}h`);
     } else {
       log('auto-upgrade disabled in config');
     }
@@ -2002,7 +2002,10 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
 tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
 if (config.metricsReport?.enabled !== false) {
-  const reportMetrics = createMetricsReporter(activeOrgConfigs, { log, warn });
+  const reportMetrics = createMetricsReporter(activeOrgConfigs, {
+    log, warn,
+    dashboardApiKey: config.metricsReport?.dashboardApiKey || '',
+  });
   tasks.register('metrics-report', reportMetrics, METRICS_REPORT_INTERVAL_MS, {
     delay: METRICS_REPORT_INITIAL_DELAY_MS,
   });
