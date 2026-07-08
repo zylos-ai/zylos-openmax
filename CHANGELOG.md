@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.2] — 2026-07-08
+
 ### Changed
 
 - Onboarding Lead 步① interaction guidelines (#23): the agent opener must not
