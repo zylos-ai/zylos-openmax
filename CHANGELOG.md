@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.2] — 2026-07-08
+
+### Fixed
+
+- **fix(metrics-reporter): authenticated dashboard state with automatic API key provisioning**. When zylos-dashboard requires auth and `metricsReport.dashboardApiKey` is missing or stale, the reporter now provisions a local `openmax-metrics` read API key through the dashboard CLI, persists it to config, exchanges it for a short-lived session token, and reports metrics in the same tick.
+- **fix(metrics-reporter): dashboard API key rotate output parsing**. The dashboard CLI prints `Key:` for `generate` and `New key:` for `rotate`; the reporter now accepts both real output formats, so existing-key fleets recover through rotate instead of failing to parse the new key.
+- **fix(metrics-reporter): prevent provisioning and auth retry loops**. Auto-provisioning is serialized across overlapping metrics ticks, runs at most once per process, and keeps the existing finite retry/warn-once behavior for expired tokens, invalid keys, missing dashboard CLI, and persistent 401 responses.
+
 ## [2.5.1] — 2026-07-07
 
 ### Fixed
