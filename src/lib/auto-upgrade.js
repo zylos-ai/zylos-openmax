@@ -1,17 +1,22 @@
 /**
- * Auto-upgrade — periodically check GitHub for new releases and upgrade
- * via a detached child process.
+ * Auto-upgrade — periodically check GitHub for new releases and upgrade openmax
+ * via a dedicated, on-demand PM2 app (the "upgrader").
  *
  * Flow:
  *   1. Timer fires (first check after INITIAL_DELAY, then every intervalMs).
  *   2. Fetch latest GitHub release tag via REST API.
  *   3. Compare against current package.json version (semver).
- *   4. If newer: write a marker, notify owners, spawn a detached child that
- *      runs `zylos upgrade openmax --yes --mode overwrite`.
- *   5. The child process survives the parent being stopped by zylos upgrade.
- *      On success: writes completed marker (new openmax reads it on startup).
- *      On failure: writes failed marker + pm2 restarts the old version.
- *   6. On next startup, notifyUpgradeComplete reads the marker and DMs owners.
+ *   4. If newer: write a 'running' marker, notify owners, then start the
+ *      executor as its OWN PM2 app (`zylos-openmax-upgrader`) via `pm2 start`.
+ *   5. Because a pm2-started process is parented to the PM2 daemon (a sibling of
+ *      zylos-openmax, not a descendant), the `pm2 stop zylos-openmax` inside
+ *      `zylos upgrade openmax` can never kill it — no "suicide" mid-upgrade.
+ *      The executor verifies the new version, writes a terminal marker, ensures
+ *      the service is running on failure, and removes its own PM2 entry.
+ *   6. On the next startup / check, notifyUpgradeComplete reads the terminal
+ *      marker and DMs owners. A leftover upgrader found on a later check is
+ *      treated as a zombie: cleaned up and (if its marker was still 'running')
+ *      recorded as a failed version so it is never retried into a loop.
  *
  * Config (all optional, in config.json top level):
  *   autoUpgrade.enabled        — boolean, default true
@@ -20,7 +25,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFile, spawn } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 
 const HOME = process.env.HOME || '/tmp';
 const RUNTIME_DIR = path.join(HOME, 'zylos/components/openmax/runtime');
@@ -30,6 +35,11 @@ const EXECUTOR_SCRIPT = path.resolve(new URL('../../scripts/upgrade-executor.cjs
 const FAILED_VERSION_PATH = path.join(RUNTIME_DIR, 'upgrade-failed-version');
 const GITHUB_REPO = 'zylos-ai/zylos-openmax';
 export const INITIAL_DELAY_MS = 60 * 1000;
+
+// PM2 app name for the on-demand upgrade executor. It is started as its own PM2
+// app (a sibling of zylos-openmax under the PM2 daemon) so that the
+// `pm2 stop zylos-openmax` inside `zylos upgrade openmax` can never kill it.
+const PM2_UPGRADER = 'zylos-openmax-upgrader';
 
 const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000;
 
@@ -99,9 +109,9 @@ export function readAndClearMarker() {
   try {
     const raw = fs.readFileSync(MARKER_PATH, 'utf-8');
     const data = JSON.parse(raw);
-    // Don't consume 'running' markers — the detached executor owns them
-    // and will write the terminal result. zylos upgrade restarts this
-    // service mid-upgrade, so startup must not treat 'running' as terminal.
+    // Don't consume 'running' markers — the executor owns them and will write
+    // the terminal result. zylos upgrade restarts this service mid-upgrade, so
+    // startup must not treat 'running' as terminal.
     if (data.status === 'running') return null;
     fs.unlinkSync(MARKER_PATH);
     return data;
@@ -110,25 +120,12 @@ export function readAndClearMarker() {
   }
 }
 
-function isUpgradeRunning() {
+/** Read the marker without consuming it. Returns null if absent/unreadable. */
+function readMarker() {
   try {
-    const raw = fs.readFileSync(MARKER_PATH, 'utf-8');
-    const marker = JSON.parse(raw);
-    if (marker.status === 'running') {
-      const age = Date.now() - (marker.ts || 0);
-      if (age < STALE_RUNNING_THRESHOLD_MS) return true;
-      log('stale running marker detected, treating as failed');
-      writeMarker({
-        ...marker,
-        status: 'failed',
-        completed: false,
-        error: 'Upgrade process timed out or was interrupted',
-        ts: Date.now(),
-      });
-    }
-    return false;
+    return JSON.parse(fs.readFileSync(MARKER_PATH, 'utf-8'));
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -231,7 +228,91 @@ async function notifyOwners(text, enabledOrgConfigs, postForOrgFn, apiPathFn) {
   }
 }
 
-function spawnUpgradeExecutor(fromVersion, toVersion, notes, releaseUrl) {
+/**
+ * Return the PM2 process record for the upgrader app, or null if it is not
+ * currently registered.
+ */
+function getUpgraderProc() {
+  try {
+    const out = execFileSync('pm2', ['jlist'], { timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const procs = JSON.parse(out.toString());
+    return procs.find(p => p.name === PM2_UPGRADER) || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove a leftover upgrader PM2 entry. The upgrader deletes itself when it
+ * finishes, but if it ever crashes before doing so a stopped/errored entry can
+ * linger. Clearing it here keeps `pm2 list` clean and frees the name for the
+ * next real upgrade.
+ */
+function deleteUpgraderEntry() {
+  try {
+    execFileSync('pm2', ['delete', PM2_UPGRADER], { timeout: 15000, stdio: 'ignore' });
+    log(`removed leftover upgrader pm2 entry (${PM2_UPGRADER})`);
+  } catch {
+    // Not registered / already gone — nothing to do.
+  }
+}
+
+/**
+ * Pre-flight guard against concurrent / stuck upgrades.
+ *
+ * @returns {boolean} true if an upgrade is genuinely in progress (caller should
+ *   skip), false if it is safe to proceed. Side effect: clears zombie upgrader
+ *   entries so a crashed previous run never blocks future upgrades forever.
+ */
+function upgradeInProgress() {
+  const proc = getUpgraderProc();
+  if (!proc) return false;
+
+  const status = proc.pm2_env?.status;
+  const marker = readMarker();
+  const markerRunning = marker && marker.status === 'running';
+  const fresh = markerRunning && Date.now() - (marker.ts || 0) < STALE_RUNNING_THRESHOLD_MS;
+
+  if (status === 'online' && fresh) {
+    // Rare legitimate overlap: verification is running unusually long and its
+    // window bumps into a detection check. Skip to avoid a concurrent upgrade.
+    // In the normal path the executor self-deletes (~40s) well before the next
+    // check, so we should almost never get here.
+    log('upgrader still online with a fresh marker — treating as an in-flight upgrade, skipping this cycle');
+    return true;
+  }
+
+  // Anything else means a leaked/zombie upgrader. Given the long check interval
+  // and that a healthy executor removes itself within ~40s, finding one here is
+  // an anomaly (likely a bug) — surface it loudly, clean it up, and don't let it
+  // block future upgrades.
+  warn(`found a leftover upgrader (pm2=${status}, markerRunning=${markerRunning}, fresh=${fresh}) — likely a stuck/leaked upgrade, cleaning up`);
+  // If the marker was still 'running', the previous upgrade got stuck/killed
+  // before writing a terminal result — mark it failed so the owner is notified
+  // and the version is recorded as failed (preventing an endless retry loop).
+  if (markerRunning) {
+    writeMarker({
+      ...marker,
+      status: 'failed',
+      completed: false,
+      error: 'Upgrade process was interrupted or leaked (found still registered on a later check)',
+    });
+  }
+  deleteUpgraderEntry();
+  return false;
+}
+
+/**
+ * Start the upgrade executor as its own PM2 app.
+ *
+ * `--no-autorestart` makes it a one-shot (it must never be relaunched into a
+ * loop). We deliberately do NOT run `pm2 save` afterwards, so the upgrader is
+ * never persisted into the PM2 dump and a daemon resurrection can't bring back
+ * a stale upgrader. The executor removes its own entry when it finishes.
+ *
+ * @returns {boolean} whether the executor was started.
+ */
+function startUpgraderApp(fromVersion, toVersion, notes, releaseUrl) {
   const markerData = {
     from: fromVersion,
     to: toVersion,
@@ -243,17 +324,40 @@ function spawnUpgradeExecutor(fromVersion, toVersion, notes, releaseUrl) {
   };
   writeMarker(markerData);
 
-  const child = spawn(process.execPath, [EXECUTOR_SCRIPT, MARKER_PATH], {
-    detached: true,
-    stdio: 'ignore',
-    env: { ...process.env },
-  });
-  child.unref();
-  log(`spawned detached upgrade executor (pid=${child.pid})`);
+  // Ensure the name is free (defensive — upgradeInProgress already cleared
+  // zombies, but a race with a just-finished run could leave a stopped entry).
+  deleteUpgraderEntry();
+
+  try {
+    execFileSync('pm2', [
+      'start', EXECUTOR_SCRIPT,
+      '--name', PM2_UPGRADER,
+      '--no-autorestart',
+      '--interpreter', 'node',
+      '--', MARKER_PATH,
+    ], {
+      timeout: 30000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Pass our full environment so the upgrader inherits PATH (to find the
+      // `zylos` binary), GITHUB_TOKEN, ZYLOS_BIN, etc.
+      env: { ...process.env },
+    });
+    log(`started upgrade executor as pm2 app ${PM2_UPGRADER}`);
+    return true;
+  } catch (e) {
+    warn(`failed to start upgrader pm2 app: ${e.stderr?.toString() || e.message}`);
+    // Roll back the running marker so the next check retries instead of seeing
+    // a phantom in-progress upgrade.
+    try { fs.unlinkSync(MARKER_PATH); } catch {}
+    deleteUpgraderEntry();
+    return false;
+  }
 }
 
 export async function checkForUpdates(enabledOrgConfigs, postForOrgFn, apiPathFn) {
-  if (isUpgradeRunning()) {
+  // Guard against concurrent upgrades and clear any zombie upgrader left behind
+  // by a crashed previous run (which also converts a stuck marker to failed).
+  if (upgradeInProgress()) {
     log('upgrade in progress, skipping check');
     return;
   }
@@ -289,7 +393,7 @@ export async function checkForUpdates(enabledOrgConfigs, postForOrgFn, apiPathFn
     });
     await notifyOwners(notifyText, enabledOrgConfigs, postForOrgFn, apiPathFn);
 
-    spawnUpgradeExecutor(current, latest.tag, latest.body, latest.url);
+    startUpgraderApp(current, latest.tag, latest.body, latest.url);
   } catch (e) {
     warn(`check failed: ${e.message}`);
   }
