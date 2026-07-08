@@ -1984,7 +1984,10 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
 tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
 if (config.metricsReport?.enabled !== false) {
-  const reportMetrics = createMetricsReporter(activeOrgConfigs, { log, warn });
+  const reportMetrics = createMetricsReporter(activeOrgConfigs, {
+    log, warn,
+    dashboardApiKey: config.metricsReport?.dashboardApiKey || '',
+  });
   tasks.register('metrics-report', reportMetrics, METRICS_REPORT_INTERVAL_MS, {
     delay: METRICS_REPORT_INITIAL_DELAY_MS,
   });
