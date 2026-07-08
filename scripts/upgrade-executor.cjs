@@ -6,7 +6,7 @@
  *
  * Started on demand by auto-upgrade.js via:
  *   pm2 start scripts/upgrade-executor.cjs --name zylos-openmax-upgrader \
- *     --no-autorestart -- <marker-path>
+ *     --max-restarts 3 --restart-delay 2000 -- <marker-path>
  *
  * Why a separate PM2 app instead of a detached child of the openmax service?
  *   `zylos upgrade openmax` internally runs `pm2 stop zylos-openmax`, and PM2's
@@ -14,31 +14,47 @@
  *   openmax service (even detached) risks being caught. A process started via
  *   `pm2 start` is parented to the PM2 God daemon — it is a SIBLING of
  *   zylos-openmax, not a descendant — so stopping zylos-openmax can never reach
- *   it. This is the same decoupling zylos-core's self-upgrade relies on
- *   (the upgrader is not one of the services it restarts).
+ *   it.
+ *
+ * Why autorestart (capped) instead of --no-autorestart?
+ *   If this executor dies unexpectedly (OOM, manual kill, pm2-wide restart)
+ *   AFTER it has already stopped openmax, nothing else can rescue the system:
+ *   the auto-upgrade check timer lives INSIDE openmax, so a stopped openmax
+ *   means no future detection cycle. PM2 therefore acts as the watchdog — it
+ *   relaunches a dead executor within seconds. The relaunched instance never
+ *   re-runs the upgrade: the first instance claims the marker with its pid, so
+ *   a relaunch sees a foreign `executorPid` on a 'running' marker and takes the
+ *   interrupted-run path (restore snapshot, restart openmax, mark failed,
+ *   self-delete). Relaunches after a terminal marker are cheap no-ops that exit
+ *   immediately; --max-restarts caps the loop (fast exits count as unstable
+ *   restarts), leaving at worst an 'errored' entry that auto-upgrade.js clears
+ *   on its next cycle. The entry is never `pm2 save`d, so a daemon resurrection
+ *   cannot bring back a stale upgrader.
  *
  * Responsibilities:
- *   1. Read the pre-written marker (from, to, notes, url).
- *   2. Run `zylos upgrade openmax --yes --mode overwrite`.
- *   3. Verify the new version is installed AND stable (not crash-looping).
- *   4. Write the terminal result back to the marker (atomically).
- *   5. On ANY failure, ensure the openmax service is running again (fallback).
- *   6. Always remove its own PM2 entry (`pm2 delete`) before exiting, so it is
- *      invisible in `pm2 list` outside of an active upgrade.
+ *   1. Read the pre-written marker (from, to, notes, url) and claim it (pid).
+ *   2. Snapshot the currently installed skill dir (self-contained rollback —
+ *      does not depend on zylos-core's internal backup layout).
+ *   3. Run `zylos upgrade openmax --yes --mode overwrite`.
+ *   4. Verify the new version is installed AND stable (not crash-looping).
+ *   5. On verification failure: stop openmax, restore the snapshot, restart,
+ *      verify the rollback, and record a truthful outcome in the marker.
+ *   6. Write the terminal result back to the marker (atomically), THEN remove
+ *      our own PM2 entry — state must be final before the self-delete.
+ *   7. On ANY failure, ensure the openmax service is running again (with an
+ *      ecosystem-file fallback in case its pm2 entry was deleted).
  *
  * Anti-infinite-loop guarantees live here + in auto-upgrade.js:
- *   - autorestart:false (set at `pm2 start`) — this one-shot never relaunches.
- *   - verification requires the version to ACTUALLY change to the target, so a
- *     no-op / broken upgrade is recorded as failed (auto-upgrade.js then records
- *     the failed version and won't retry it until a newer release appears).
- *   - crash-loop detection (restart_time must not climb across polls) so a
- *     version that starts then immediately dies is treated as failed, not
- *     "online".
+ *   - a relaunched instance never re-runs a claimed upgrade (pid guard);
+ *   - verification requires the version to ACTUALLY change to the target and
+ *     the restart counter to hold steady, so a broken upgrade is recorded as
+ *     failed and auto-upgrade.js won't retry that version (cooldown);
+ *   - stray/terminal/stale-marker launches exit without acting.
  *
  * CJS (.cjs) so Node treats it as CommonJS regardless of package.json "type".
  */
 
-const { execSync, spawn } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -46,10 +62,13 @@ const os = require('os');
 const PM2_SERVICE = 'zylos-openmax';
 const PM2_UPGRADER = 'zylos-openmax-upgrader';
 const UPGRADE_TIMEOUT_MS = 5 * 60 * 1000;
-const PM2_RESTART_TIMEOUT_MS = 30 * 1000;
+const PM2_CMD_TIMEOUT_MS = 30 * 1000;
 const VERIFY_DELAY_MS = 5 * 1000;
 const VERIFY_RETRIES = 6;
+const ROLLBACK_VERIFY_RETRIES = 4;
+const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000;
 const SKILL_DIR = path.resolve(__dirname, '..');
+const ECOSYSTEM_PATH = path.join(SKILL_DIR, 'ecosystem.config.cjs');
 
 const zylosBin = process.env.ZYLOS_BIN || 'zylos';
 
@@ -60,51 +79,141 @@ const DEFAULT_MARKER_PATH = path.join(
   'zylos/components/openmax/runtime/upgrade-marker.json',
 );
 const markerPath = process.argv[2] || DEFAULT_MARKER_PATH;
+const runtimeDir = path.dirname(markerPath);
+const logFile = path.join(runtimeDir, 'upgrade-executor.log');
 
-const logFile = path.join(path.dirname(markerPath), 'upgrade-executor.log');
+// Self-contained pre-upgrade snapshot (lives in the openmax data dir, outside
+// the skill dir that `zylos upgrade` overwrites). node_modules is tiny for
+// this component, so the snapshot includes it — restoring needs no npm.
+const SNAPSHOT_DIR = path.join(runtimeDir, 'rollback-snapshot');
+const SNAPSHOT_EXCLUDES = new Set(['.backup', '.git', '.zylos']);
+
 function appendLog(line) {
   try {
-    fs.appendFileSync(logFile, `${new Date().toISOString()} [upgrader] ${line}\n`);
+    fs.appendFileSync(logFile, `${new Date().toISOString()} [upgrader:${process.pid}] ${line}\n`);
   } catch {}
 }
 
+// ---------------------------------------------------------------------------
+// Pure decision helper (exported for tests)
+// ---------------------------------------------------------------------------
+
 /**
- * Fallback: make sure the openmax service is running. Called on every failure
- * path so a broken upgrade never leaves the bot dead. `zylos upgrade` already
- * rolls back files + restarts on its own failure; this is a second safety net
- * for the cases it can't cover (e.g. verification failure after a "successful"
- * command, or the upgrade command itself throwing).
+ * Decide what a freshly started executor instance should do, based solely on
+ * the marker contents. One code path covers every relaunch flavour: PM2
+ * watchdog restart after a crash, `pm2 restart` from a pm2-wide operation
+ * (e.g. `zylos upgrade --self` restarting skill services), or a stray launch.
+ *
+ * @returns {{action: 'proceed'|'exit-stale'|'interrupted', reason: string}}
+ *   'proceed'     — fresh unclaimed running marker: this is the real run.
+ *   'exit-stale'  — terminal/missing/too-old marker: no-op, self-delete, exit.
+ *   'interrupted' — running marker claimed by another pid: the previous run
+ *                   died mid-upgrade. Recover openmax; NEVER re-run the upgrade.
  */
-function ensurePm2Running() {
-  appendLog('ensuring PM2 service is running (safety net)...');
-  try {
-    execSync(`pm2 restart ${PM2_SERVICE}`, { timeout: PM2_RESTART_TIMEOUT_MS, stdio: 'ignore' });
-    appendLog('PM2 restart succeeded');
-    return;
-  } catch (e2) {
-    appendLog(`PM2 restart failed: ${e2.message}`);
+function evaluateStartGuard(marker, now = Date.now(), pid = process.pid) {
+  if (!marker || marker.status !== 'running') {
+    return {
+      action: 'exit-stale',
+      reason: `marker status is '${marker ? marker.status : 'missing'}' — nothing pending`,
+    };
   }
+  const age = now - (marker.ts || 0);
+  if (age >= STALE_RUNNING_THRESHOLD_MS) {
+    return { action: 'exit-stale', reason: `running marker too old (${age}ms) — refusing to act on it` };
+  }
+  if (marker.executorPid && marker.executorPid !== pid) {
+    // Note: pid reuse could theoretically alias a relaunch to 'proceed', but a
+    // recycled pid landing on the exact claimed value within the fresh-marker
+    // window is negligible in practice.
+    return {
+      action: 'interrupted',
+      reason: `marker claimed by pid ${marker.executorPid}, we are ${pid} — previous run died mid-upgrade`,
+    };
+  }
+  return { action: 'proceed', reason: 'fresh unclaimed running marker' };
+}
+
+// ---------------------------------------------------------------------------
+// pm2 helpers (array args — no shell interpolation anywhere in this file)
+// ---------------------------------------------------------------------------
+
+function pm2(args, timeout = PM2_CMD_TIMEOUT_MS) {
+  execFileSync('pm2', args, { timeout, stdio: 'ignore' });
+}
+
+function getPm2Proc(name = PM2_SERVICE) {
   try {
-    execSync(`pm2 start ${PM2_SERVICE}`, { timeout: PM2_RESTART_TIMEOUT_MS, stdio: 'ignore' });
-    appendLog('PM2 start succeeded (fallback)');
-  } catch (e3) {
-    appendLog(`PM2 start also failed: ${e3.message}`);
+    const out = execFileSync('pm2', ['jlist'], { timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
+    const procs = JSON.parse(out.toString());
+    return procs.find(p => p.name === name) || null;
+  } catch {
+    return null;
+  }
+}
+
+function startServiceFromEcosystem() {
+  try {
+    pm2(['start', ECOSYSTEM_PATH, '--only', PM2_SERVICE, '--update-env']);
+    appendLog('PM2 start from ecosystem file succeeded');
+    return true;
+  } catch (e) {
+    appendLog(`PM2 start from ecosystem file FAILED: ${e.message}`);
+    return false;
   }
 }
 
 /**
- * Remove our own PM2 entry and exit. Because deleting ourselves would kill this
- * process mid-call, the `pm2 delete` runs as a detached, reparented child that
- * outlives us. auto-upgrade.js also cleans up any leftover upgrader entry on its
- * next detection cycle, so this is belt-and-suspenders.
+ * Safety net: make sure the openmax service is running.
+ *
+ * - If its pm2 entry is gone entirely (e.g. a failed re-registration inside
+ *   `zylos upgrade` deleted it), `pm2 restart/start <name>` cannot work — go
+ *   straight to the component ecosystem file.
+ * - If it is already online and forceRestart is false, leave it untouched
+ *   (no gratuitous restart of a healthy service).
+ * - forceRestart is used after restoring files, so the process reloads them.
+ *
+ * @returns {boolean} whether the service is believed to be running afterwards.
+ */
+function ensurePm2Running({ forceRestart = false } = {}) {
+  appendLog(`ensuring ${PM2_SERVICE} is running (forceRestart=${forceRestart})...`);
+  const proc = getPm2Proc();
+  if (!proc) {
+    appendLog(`${PM2_SERVICE} has no pm2 entry — starting from ecosystem file`);
+    return startServiceFromEcosystem();
+  }
+  if (!forceRestart && proc.pm2_env?.status === 'online') {
+    appendLog(`${PM2_SERVICE} already online — leaving it untouched`);
+    return true;
+  }
+  try {
+    pm2(['restart', PM2_SERVICE]);
+    appendLog('PM2 restart succeeded');
+    return true;
+  } catch (e) {
+    appendLog(`PM2 restart failed: ${e.message}`);
+  }
+  try {
+    pm2(['start', PM2_SERVICE]);
+    appendLog('PM2 start succeeded');
+    return true;
+  } catch (e) {
+    appendLog(`PM2 start failed: ${e.message}`);
+  }
+  return startServiceFromEcosystem();
+}
+
+/**
+ * Remove our own PM2 entry and exit. Deleting ourselves would kill this
+ * process mid-call, so the `pm2 delete` runs as a detached child that outlives
+ * us. IMPORTANT: the marker (and thus the owner notification content) must be
+ * finalized BEFORE calling this — after process.exit nothing else runs. If the
+ * delete loses the race against PM2's autorestart, the relaunch is a cheap
+ * no-op ('exit-stale' guard) that spawns its own delete; --max-restarts bounds
+ * the cycle and auto-upgrade.js clears any leftover errored entry.
  */
 function selfDeleteAndExit(code) {
   appendLog(`self-cleanup: pm2 delete ${PM2_UPGRADER}, exiting(${code})`);
   try {
-    // detached + unref + own process group (setsid): the child is fully forked
-    // by the time spawn() returns and survives us exiting immediately, so no
-    // delay is needed. process.exit() below halts synchronously, which is what
-    // lets the guard/catch call sites terminate without falling through.
     const child = spawn('pm2', ['delete', PM2_UPGRADER], {
       detached: true,
       stdio: 'ignore',
@@ -116,35 +225,84 @@ function selfDeleteAndExit(code) {
   process.exit(code);
 }
 
-const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000;
+// ---------------------------------------------------------------------------
+// Snapshot / rollback (self-contained — no dependence on zylos-core internals)
+// ---------------------------------------------------------------------------
 
-let marker;
-try {
-  marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
-} catch (e) {
-  appendLog(`FATAL: cannot read marker ${markerPath}: ${e.message}`);
-  // Nothing to upgrade toward and no marker to update — just make sure the
-  // service is alive and clean ourselves up.
-  ensurePm2Running();
-  selfDeleteAndExit(1);
+function snapshotFilter(src) {
+  return !SNAPSHOT_EXCLUDES.has(path.basename(src));
 }
 
-// Guard against a stray/resurrected launch. auto-upgrade.js writes a fresh
-// 'running' marker immediately before starting us, so a legitimate run always
-// sees status==='running' and a recent ts. Anything else (a terminal marker, or
-// a stale running marker left over from long ago) means we were launched
-// spuriously — do nothing and remove ourselves so we can never trigger a rogue
-// upgrade on resurrection.
-{
-  const age = Date.now() - (marker.ts || 0);
-  if (marker.status !== 'running' || age >= STALE_RUNNING_THRESHOLD_MS) {
-    appendLog(`no fresh pending upgrade (status=${marker.status}, age=${age}ms) — exiting without acting`);
-    selfDeleteAndExit(0);
+function hasSnapshot() {
+  try {
+    return fs.existsSync(path.join(SNAPSHOT_DIR, 'package.json'));
+  } catch {
+    return false;
   }
 }
 
-// Atomic write: write to a temp file then rename, so a reader (the restarted
-// openmax service) never observes a half-written JSON marker.
+function takeSnapshot() {
+  try {
+    fs.rmSync(SNAPSHOT_DIR, { recursive: true, force: true });
+    fs.cpSync(SKILL_DIR, SNAPSHOT_DIR, { recursive: true, filter: snapshotFilter });
+    appendLog(`snapshot of current version saved to ${SNAPSHOT_DIR}`);
+    return true;
+  } catch (e) {
+    appendLog(`WARN: snapshot failed: ${e.message} — no self-contained rollback available`);
+    return false;
+  }
+}
+
+// Snapshot lifecycle policy: removed on every terminal path where it is no
+// longer useful (verified success, successful rollback, zylos-side rollback);
+// kept for forensics/manual recovery whenever a restore attempt failed or the
+// rolled-back service did not come up healthy. Every decision is logged.
+function clearSnapshot(reason) {
+  try {
+    fs.rmSync(SNAPSHOT_DIR, { recursive: true, force: true });
+    appendLog(`snapshot removed (${reason})`);
+  } catch (e) {
+    appendLog(`WARN: failed to remove snapshot: ${e.message}`);
+  }
+}
+
+/**
+ * Roll back to the pre-upgrade snapshot: stop service, restore files, restart.
+ *
+ * @returns {boolean} whether the snapshot files were restored (the service is
+ *   restarted in either case, with whatever ended up on disk).
+ */
+function rollbackToSnapshot() {
+  if (!hasSnapshot()) {
+    appendLog('no snapshot available — cannot roll back');
+    return false;
+  }
+  appendLog('rolling back to pre-upgrade snapshot...');
+  try {
+    pm2(['stop', PM2_SERVICE]);
+  } catch (e) {
+    appendLog(`pm2 stop before rollback failed (continuing): ${e.message}`);
+  }
+  try {
+    fs.cpSync(SNAPSHOT_DIR, SKILL_DIR, { recursive: true, force: true });
+    appendLog('snapshot files restored');
+  } catch (e) {
+    appendLog(`rollback file restore FAILED: ${e.message}`);
+    ensurePm2Running({ forceRestart: true }); // bring back whatever is on disk
+    return false;
+  }
+  ensurePm2Running({ forceRestart: true });
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Marker + verification
+// ---------------------------------------------------------------------------
+
+let marker = null;
+
+// Atomic write: tmp file + rename, so a reader (the restarted openmax service)
+// never observes a half-written JSON marker.
 function writeMarker(updates) {
   Object.assign(marker, updates, { ts: Date.now() });
   const tmp = `${markerPath}.tmp.${process.pid}`;
@@ -170,38 +328,26 @@ function readInstalledVersion() {
   }
 }
 
-function getPm2Proc() {
-  try {
-    const out = execSync('pm2 jlist', { timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] });
-    const procs = JSON.parse(out.toString());
-    return procs.find(p => p.name === PM2_SERVICE) || null;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Verify the upgrade landed AND is stable.
+ * Verify a target version landed AND is stable.
  *
  * Requires two consecutive polls where the installed version equals the target
  * and the service is online with a NON-increasing restart counter. If the
- * restart counter climbs between polls the new version is crash-looping — we
- * treat that as a failed upgrade rather than declaring success on a process
- * that is about to die again.
+ * restart counter climbs between polls the version is crash-looping — treated
+ * as failure rather than declaring success on a process about to die again.
  */
-async function verifyUpgrade(targetVersion) {
-  appendLog(`verifying upgrade to v${targetVersion} (version match + stability)...`);
+async function verifyUpgrade(targetVersion, retries = VERIFY_RETRIES) {
+  appendLog(`verifying v${targetVersion} (version match + stability, up to ${retries} polls)...`);
   let baselineRestarts = null;
   let stableOnce = false;
 
-  for (let i = 0; i < VERIFY_RETRIES; i++) {
+  for (let i = 0; i < retries; i++) {
     await sleep(VERIFY_DELAY_MS);
     const version = readInstalledVersion();
     const proc = getPm2Proc();
     const status = proc ? proc.pm2_env.status : null;
     const restarts = proc ? (proc.pm2_env.restart_time ?? 0) : null;
-    const uptime = proc && proc.pm2_env.pm_uptime ? proc.pm2_env.pm_uptime : null;
-    appendLog(`  attempt ${i + 1}: version=${version}, pm2=${status}, restarts=${restarts}, uptime=${uptime}`);
+    appendLog(`  attempt ${i + 1}: version=${version}, pm2=${status}, restarts=${restarts}`);
 
     if (version !== targetVersion || status !== 'online') {
       // Reset stability tracking — not there yet.
@@ -218,7 +364,7 @@ async function verifyUpgrade(targetVersion) {
     }
 
     if (restarts != null && baselineRestarts != null && restarts > baselineRestarts) {
-      appendLog(`  restart counter climbed ${baselineRestarts} -> ${restarts}: new version is crash-looping`);
+      appendLog(`  restart counter climbed ${baselineRestarts} -> ${restarts}: version is crash-looping`);
       return false;
     }
 
@@ -230,47 +376,184 @@ async function verifyUpgrade(targetVersion) {
   return false;
 }
 
-async function run() {
+// ---------------------------------------------------------------------------
+// Failure handlers
+// ---------------------------------------------------------------------------
+
+/**
+ * The upgrade command succeeded but the result failed verification (wrong
+ * version, offline, or crash-looping). `zylos upgrade` exited 0 so IT rolled
+ * nothing back — the broken new version is on disk. Restore our snapshot,
+ * verify the rollback, and record a truthful outcome. The marker stays
+ * 'running' until the final write, so a restarted openmax cannot consume a
+ * half-baked result mid-recovery.
+ */
+async function handleVerificationFailure() {
+  const version = readInstalledVersion();
+  const proc = getPm2Proc();
+  const status = proc ? proc.pm2_env?.status : null;
+  appendLog(`post-upgrade verification FAILED: version=${version}, pm2=${status}`);
+
+  if (!hasSnapshot()) {
+    writeMarker({
+      completed: false,
+      status: 'failed',
+      error: `Upgrade verification failed (installed=${version}, pm2=${status}).`,
+      detail: `The new version failed verification and no snapshot was available to roll back — the service was left on v${version} and may be unstable.`,
+    });
+    ensurePm2Running();
+    return;
+  }
+
+  const restored = rollbackToSnapshot();
+  if (!restored) {
+    writeMarker({
+      completed: false,
+      status: 'failed',
+      error: `Upgrade verification failed (installed=${version}, pm2=${status}) and the snapshot restore also failed.`,
+      detail: `The new version failed verification AND the rollback could not be applied — the service may still be on the broken version. Manual attention needed. Snapshot kept at ${SNAPSHOT_DIR}.`,
+    });
+    return; // rollbackToSnapshot already attempted a restart
+  }
+
+  const rollbackOk = await verifyUpgrade(marker.from, ROLLBACK_VERIFY_RETRIES);
+  if (rollbackOk) {
+    clearSnapshot('consumed by successful rollback');
+    writeMarker({
+      completed: false,
+      status: 'failed',
+      error: `New version v${marker.to} failed verification (crash-loop or version mismatch).`,
+      detail: `The new version did not run stably; rolled back to v${marker.from} and the service is running again.`,
+    });
+  } else {
+    writeMarker({
+      completed: false,
+      status: 'failed',
+      error: `New version v${marker.to} failed verification; rollback to v${marker.from} was applied but the service did not come up healthy.`,
+      detail: `Rolled back to v${marker.from}, but the service is still not healthy — manual attention needed. Snapshot kept at ${SNAPSHOT_DIR}.`,
+    });
+  }
+}
+
+/**
+ * A relaunched instance found a running marker claimed by a dead predecessor.
+ * The previous run may have died at any point — possibly with openmax stopped
+ * and/or the skill dir half-written. Recover; NEVER re-run the upgrade.
+ */
+function handleInterrupted(reason) {
+  appendLog(`INTERRUPTED RUN DETECTED: ${reason}`);
+  const proc = getPm2Proc();
+  const serviceOnline = proc?.pm2_env?.status === 'online';
+  let detail;
+
+  if (serviceOnline) {
+    // Likely died during verification, after openmax was already restarted.
+    // Files under a running process are left alone; conservative fail.
+    detail = 'The upgrade was interrupted (executor relaunched by PM2); the service is still running and was left untouched. The upgrade was NOT re-run.';
+    clearSnapshot('interrupted run, service online — snapshot no longer authoritative');
+  } else if (hasSnapshot()) {
+    const restored = rollbackToSnapshot();
+    if (restored) {
+      clearSnapshot('consumed by interrupted-run rollback');
+      detail = `The upgrade was interrupted mid-run; the previous version v${marker.from} was restored from snapshot and the service restarted. The upgrade was NOT re-run.`;
+    } else {
+      detail = `The upgrade was interrupted mid-run and the snapshot restore failed; the service was restarted with whatever is on disk. Manual check advised. Snapshot kept at ${SNAPSHOT_DIR}.`;
+    }
+  } else {
+    ensurePm2Running();
+    detail = 'The upgrade was interrupted mid-run and no snapshot was available; the service was restarted with whatever is on disk. The upgrade was NOT re-run.';
+  }
+
+  writeMarker({
+    completed: false,
+    status: 'failed',
+    error: 'Upgrade executor died mid-run and was relaunched (PM2 watchdog or a pm2-wide restart).',
+    detail,
+  });
+  selfDeleteAndExit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function main() {
+  try {
+    marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
+  } catch (e) {
+    appendLog(`FATAL: cannot read marker ${markerPath}: ${e.message}`);
+    // Nothing to upgrade toward and no marker to update — just make sure the
+    // service is alive (no forced restart if it already is) and clean up.
+    ensurePm2Running();
+    selfDeleteAndExit(1);
+    return;
+  }
+
+  const guard = evaluateStartGuard(marker, Date.now(), process.pid);
+  appendLog(`start guard: ${guard.action} (${guard.reason})`);
+
+  if (guard.action === 'exit-stale') {
+    selfDeleteAndExit(0);
+    return;
+  }
+  if (guard.action === 'interrupted') {
+    handleInterrupted(guard.reason);
+    return;
+  }
+
+  // Claim the run: any relaunch of this pm2 app will now hit the
+  // 'interrupted' path instead of re-running the upgrade.
+  writeMarker({ executorPid: process.pid });
+
   appendLog(`starting upgrade: v${marker.from} -> v${marker.to}`);
   appendLog(`zylos bin: ${zylosBin}; skill dir: ${SKILL_DIR}; marker: ${markerPath}`);
 
+  takeSnapshot();
+
   try {
-    const result = execSync(`${zylosBin} upgrade openmax --yes --mode overwrite`, {
+    const result = execFileSync(zylosBin, ['upgrade', 'openmax', '--yes', '--mode', 'overwrite'], {
       timeout: UPGRADE_TIMEOUT_MS,
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
     });
-    const stdout = result.toString().slice(-2000);
-    appendLog(`zylos upgrade exited successfully:\n${stdout}`);
+    appendLog(`zylos upgrade exited successfully:\n${result.toString().slice(-2000)}`);
 
     const ok = await verifyUpgrade(marker.to);
     if (ok) {
       appendLog('post-upgrade verification passed');
+      clearSnapshot('upgrade verified successfully');
       writeMarker({ completed: true, status: 'completed' });
     } else {
-      const version = readInstalledVersion();
-      const proc = getPm2Proc();
-      const status = proc ? proc.pm2_env.status : null;
-      appendLog(`post-upgrade verification FAILED: version=${version}, pm2=${status}`);
-      writeMarker({
-        completed: false,
-        status: 'failed',
-        error: `Upgrade command succeeded but verification failed: installed=${version}, pm2=${status}`,
-      });
-      ensurePm2Running();
+      await handleVerificationFailure();
     }
   } catch (err) {
     const stderr = err.stderr ? err.stderr.toString().slice(0, 1000) : '';
     const stdout = err.stdout ? err.stdout.toString().slice(-500) : '';
     const errMsg = stderr || err.message || 'unknown error';
-    appendLog(`upgrade failed: ${errMsg}`);
+    appendLog(`upgrade command failed: ${errMsg}`);
     if (stdout) appendLog(`stdout: ${stdout}`);
-    writeMarker({ completed: false, status: 'failed', error: errMsg });
+    // zylos upgrade rolls back its own files and restarts the service when it
+    // fails; write the marker first (so the failure DM cannot be swallowed by
+    // a later crash), then double-check the service as a second net.
+    writeMarker({
+      completed: false,
+      status: 'failed',
+      error: errMsg,
+      detail: 'The upgrade command failed; zylos upgrade rolled back to the previous version automatically. The service was restarted.',
+    });
     ensurePm2Running();
+    clearSnapshot('upgrade command failed; zylos upgrade performed its own rollback');
   }
 
   appendLog('executor done');
   selfDeleteAndExit(0);
 }
 
-run();
+module.exports = {
+  evaluateStartGuard,
+  STALE_RUNNING_THRESHOLD_MS,
+};
+
+if (require.main === module) {
+  main();
+}
