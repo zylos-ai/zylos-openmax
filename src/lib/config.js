@@ -124,6 +124,21 @@ export const DEFAULT_CONFIG = {
     // },
   },
 
+  // Runtime-metrics reporting (periodic tick in src/comm-bridge.js — reads
+  // the local zylos-dashboard `/api/state`, PUTs to cws-core runtime-metrics).
+  // `enabled` / `intervalSeconds` are NOT in DEFAULT_CONFIG — their defaults
+  // are hardcoded in src/comm-bridge.js; config may override either.
+  //
+  // `dashboardApiKey` — zylos-dashboard API key (`zylos_ak_...`). Required
+  // when the dashboard has password auth enabled: unauthenticated `/api/state`
+  // then returns 401 and metrics would never be reported. The reporter
+  // exchanges the key at `POST /api/auth/token` for a short-lived session
+  // token and attaches it to `/api/state`. Empty = no auth (dashboard auth
+  // disabled).
+  metricsReport: {
+    dashboardApiKey: '',
+  },
+
   // `message.context_messages` / `message.dedup_ttl` / `message.dedup_max_entries`
   // are NOT in DEFAULT_CONFIG. Defaults are hardcoded in src/comm-bridge.js
   // (DEFAULT_CONTEXT_MESSAGES, DEFAULT_DEDUP_TTL_MS, DEFAULT_DEDUP_MAX_ENTRIES) —
