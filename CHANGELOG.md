@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Onboarding Lead 步① interaction guidelines (#23): the agent opener must not
+  repeat the built-in welcome greeting (go straight into the interview);
+  the three interview questions are asked one at a time (wait for each answer)
+  and without numbering ("第 N 个问题"). Decided by the product owner after a
+  live end-to-end onboarding test on cws-int (2026-07-08).
+
 ## [2.7.1] — 2026-07-08
 
 ### Fixed
