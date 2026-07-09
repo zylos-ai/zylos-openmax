@@ -196,9 +196,10 @@ export function createChannelInstaller({
   const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
   const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
   const doVerify = verifyConnected || ((spec) => defaultVerify(spec, { execFile, timeoutMs: verifyTimeoutMs }));
-  // Default connect-result callback: log-only placeholder. The real per-binding
-  // report to cws-connect is wired once cws-connect exposes the endpoint
-  // (coco-workspace/cws-connect#4). Must never throw.
+  // Default connect-result callback: log-only fallback used by tests / when no
+  // reporter is injected. In production comm-bridge.js injects the real
+  // reportResult that POSTs to cws-core's
+  // /connect/channel-bindings/{binding_id}/result passthrough. Must never throw.
   const doReport = reportResult || (async (r) => {
     log(`[connect-result] binding=${r.bindingId} channel=${r.channelType} status=${r.status}`
       + (r.detail ? ` detail=${r.detail}` : ''));

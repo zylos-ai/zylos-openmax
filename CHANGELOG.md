@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] — 2026-07-10
+
+### Added
+
+- **Channel connect/disconnect lifecycle connector (feishu).** cws-connect dispatches a `channel.connect` / `channel.disconnect` command over cws-comm to this openmax runtime — the single channel path for all agents (platform + external). `connect` is idempotent: pull bind credentials from the cws-core BFF with a one-shot token → probe the component → `zylos add` if missing / `zylos upgrade` if present → write creds + config → restart → verify → report the result. `disconnect` soft-disables (pm2 stop + `enabled:false`), keeping the component and credentials installed so reconnect is the same idempotent connect.
+- **Connect-result callback wired to cws-core.** The connector now reports each terminal connect/disconnect outcome to `POST /connect/channel-bindings/{binding_id}/result` (via the cws-core BFF), echoing `request_id` so cws-connect can match it against the in-flight command (its authorization + idempotency check). This drives the binding `pending → connected/error` (and soft-delete on disconnect), replacing installed_channels polling. Best-effort: a report failure warns and never throws out of the WS dispatcher.
+
+### Changed
+
+- **Runtime-metrics reporter no longer sends `installed_channels`.** Channel state is now driven by the connect-result callback above, not by polling the runtime's installed channels.
+
+### Notes
+
+- Connect verification is currently a bounded pm2-`online` poll (process health only); a real IM-readiness signal (feishu websocket handshake marker) is tracked in zylos-openmax#34.
+
 ## [2.7.5] — 2026-07-09
 
 ### Changed
