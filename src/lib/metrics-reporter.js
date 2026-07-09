@@ -73,6 +73,73 @@ function getDashboardPort() {
   }
 }
 
+// IM channel components we report to cws-core. Deliberately excludes non-IM
+// components (browser / openmax / dashboard / http / voice-asr / ...).
+const IM_CHANNEL_COMPONENTS = new Set([
+  'telegram', 'lark', 'feishu', 'dingtalk', 'wecom', 'slack', 'discord',
+  'line', 'zalo', 'ms_teams', 'msteams', 'whatsapp', 'whatsapp_business',
+]);
+
+// Component name → channel_type reported upstream (identity for most).
+function componentToChannelType(name) {
+  if (name === 'msteams') return 'ms_teams';
+  return name;
+}
+
+// Parse `zylos list` plain text (the CLI ignores --json). Lines look like:
+//   "✓ lark (v0.3.5)" — pull the component name preceding " (vX.Y.Z)".
+export function parseInstalledComponents(listStdout) {
+  const names = [];
+  for (const line of String(listStdout || '').split('\n')) {
+    const m = /([a-z0-9_-]+)\s+\(v[0-9]/i.exec(line);
+    if (m) names.push(m[1]);
+  }
+  return names;
+}
+
+// Parse `pm2 jlist` → Map<serviceName, statusString>.
+export function parsePm2Statuses(jlistStdout) {
+  const map = new Map();
+  try {
+    const procs = JSON.parse(String(jlistStdout));
+    if (Array.isArray(procs)) {
+      for (const p of procs) map.set(p.name, p?.pm2_env?.status || 'stopped');
+    }
+  } catch { /* best-effort — no status */ }
+  return map;
+}
+
+// Best-effort list of installed IM channels with their running status. Returns
+// null when `zylos list` fails (caller then omits the field entirely so metrics
+// reporting is never broken by this). pm2 status is a soft signal: if pm2 jlist
+// is unavailable we still report the channel, defaulting to 'running' (it IS
+// installed) rather than dropping it.
+export async function deriveInstalledChannels({ execFile }) {
+  let names;
+  try {
+    const { stdout } = await execFile('zylos', ['list']);
+    names = parseInstalledComponents(stdout);
+  } catch {
+    return null;
+  }
+  const channels = names.filter((n) => IM_CHANNEL_COMPONENTS.has(n));
+  if (channels.length === 0) return [];
+
+  let statuses = new Map();
+  try {
+    const { stdout } = await execFile('pm2', ['jlist']);
+    statuses = parsePm2Statuses(stdout);
+  } catch { /* status best-effort */ }
+
+  return channels.map((name) => {
+    const st = statuses.get(`zylos-${name}`);
+    // online → running; a known-but-not-online entry → stopped; unknown
+    // (pm2 unavailable) → running fallback (the component is installed).
+    const status = st === 'online' ? 'running' : (st ? 'stopped' : 'running');
+    return { channel_type: componentToChannelType(name), status };
+  });
+}
+
 function buildPayload(dashboard) {
   if (!dashboard) return null;
   const sys = dashboard.system_metrics || {};
@@ -283,6 +350,15 @@ export function createMetricsReporter(activeOrgConfigs, {
     const dashboard = await fetchDashboardState();
     const payload = buildPayload(dashboard);
     if (!payload) return;
+
+    // Best-effort: attach installed IM channels so cws-connect can reconcile
+    // channel-binding status. Never let this break the metrics PUT.
+    try {
+      const channels = await deriveInstalledChannels({ execFile });
+      if (channels) payload.installed_channels = channels;
+    } catch (err) {
+      warn(`installed_channels derivation failed: ${err?.message || err}`);
+    }
 
     for (const [slug, orgConfig] of activeOrgConfigs) {
       const selfMemberId = orgConfig.self?.member_id;
