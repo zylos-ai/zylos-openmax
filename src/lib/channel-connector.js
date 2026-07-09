@@ -67,6 +67,10 @@ export const CHANNEL_COMPONENT = {
       const appSecret = c.app_secret ?? c.appSecret ?? c.APP_SECRET ?? c.feishu_app_secret ?? '';
       return {
         env: {
+          // The feishu/lark component shares one codebase; FEISHU_IS_LARK
+          // selects the Feishu (China) endpoints over Lark (intl). coco-dashboard's
+          // provisioning path sets this for feishu, so we match it here.
+          FEISHU_IS_LARK: 'N',
           FEISHU_APP_ID: appId,
           FEISHU_APP_SECRET: appSecret,
         },

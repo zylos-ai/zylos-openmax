@@ -27,7 +27,7 @@ test('CHANNEL_COMPONENT.feishu.buildConfig: maps app_id/app_secret → .env, web
   assert.equal(spec.pm2Service, 'zylos-feishu');
 
   const built = spec.buildConfig({ app_id: 'cli_abc', app_secret: 's3cr3t', extra: 'ignored' });
-  assert.deepEqual(built.env, { FEISHU_APP_ID: 'cli_abc', FEISHU_APP_SECRET: 's3cr3t' });
+  assert.deepEqual(built.env, { FEISHU_IS_LARK: 'N', FEISHU_APP_ID: 'cli_abc', FEISHU_APP_SECRET: 's3cr3t' });
   assert.deepEqual(built.configJson, { enabled: true, connection_mode: 'websocket' });
 
   // Accept alternate key spellings from cws-core.
@@ -108,7 +108,7 @@ test('install feishu (not yet installed): pulls with bind token, installs, write
   assert.deepEqual(h.execCalls[2], ['pm2', 'restart', 'zylos-feishu', '--update-env']);
 
   // Secrets → .env, connection mode → config.json
-  assert.deepEqual(h.envWrites, [{ FEISHU_APP_ID: 'aid', FEISHU_APP_SECRET: 'asec' }]);
+  assert.deepEqual(h.envWrites, [{ FEISHU_IS_LARK: 'N', FEISHU_APP_ID: 'aid', FEISHU_APP_SECRET: 'asec' }]);
   assert.deepEqual(h.configWrites, [{ component: 'feishu', patch: { enabled: true, connection_mode: 'websocket' } }]);
   assert.equal(h.warns.length, 0);
 
