@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Auto-upgrade checks are opt-in and no longer run on service restart.** Scheduled auto-upgrade now registers only when `autoUpgrade.enabled` is explicitly `true`; missing config defaults to disabled. When enabled, the first check waits for the full configured interval instead of firing shortly after process start/restart.
+
 ## [2.7.3] — 2026-07-09
 
 ### Added

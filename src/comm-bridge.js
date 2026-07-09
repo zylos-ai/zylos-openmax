@@ -39,7 +39,7 @@ import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
-import { checkForUpdates, INITIAL_DELAY_MS as UPGRADE_DELAY_MS, notifyUpgradeComplete } from './lib/auto-upgrade.js';
+import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter } from './lib/metrics-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
 
@@ -1955,14 +1955,15 @@ if (orgs.length === 0) {
     }
     notifyUpgradeComplete(activeOrgConfigs, postForOrg, apiPath).catch(e =>
       warn(`upgrade notification error: ${e.message}`));
-    const upgradeSettings = config?.autoUpgrade || {};
-    if (upgradeSettings.enabled !== false) {
-      const intervalMs = (upgradeSettings.intervalHours || 24) * 3600_000;
-      const delay = Math.max(UPGRADE_DELAY_MS, upgradeSettings.initialDelayMs || UPGRADE_DELAY_MS);
+    const upgradeSchedule = resolveAutoUpgradeSchedule(config?.autoUpgrade);
+    if (upgradeSchedule.enabled) {
       const checkFn = () => checkForUpdates(activeOrgConfigs, postForOrg, apiPath);
-      tasks.register('auto-upgrade', checkFn, intervalMs, { delay, runOnStart: true });
+      tasks.register('auto-upgrade', checkFn, upgradeSchedule.intervalMs, {
+        delay: upgradeSchedule.delay,
+        runOnStart: upgradeSchedule.runOnStart,
+      });
       tasks.start('auto-upgrade');
-      log(`auto-upgrade scheduled (on-demand pm2 upgrader): first check in ${Math.round(delay / 1000)}s, then every ${Math.round(intervalMs / 3600_000)}h`);
+      log(`auto-upgrade scheduled (on-demand pm2 upgrader): first check in ${Math.round(upgradeSchedule.intervalMs / 3600_000)}h, then every ${Math.round(upgradeSchedule.intervalMs / 3600_000)}h`);
     } else {
       log('auto-upgrade disabled in config');
     }
