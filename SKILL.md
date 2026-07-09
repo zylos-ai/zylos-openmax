@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.7.3
+version: 2.7.4
 description: >-
   OpenMax 任务代理 (Guided Autonomy)。凡通过 openmax 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
