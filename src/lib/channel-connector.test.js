@@ -27,7 +27,7 @@ test('CHANNEL_COMPONENT.feishu.buildConfig: maps app_id/app_secret → .env, web
   assert.equal(spec.pm2Service, 'zylos-feishu');
 
   const built = spec.buildConfig({ app_id: 'cli_abc', app_secret: 's3cr3t', extra: 'ignored' });
-  assert.deepEqual(built.env, { FEISHU_IS_LARK: 'N', FEISHU_APP_ID: 'cli_abc', FEISHU_APP_SECRET: 's3cr3t' });
+  assert.deepEqual(built.env, { FEISHU_APP_ID: 'cli_abc', FEISHU_APP_SECRET: 's3cr3t' });
   assert.deepEqual(built.configJson, { enabled: true, connection_mode: 'websocket' });
 
   // Accept alternate key spellings from cws-core.
@@ -36,11 +36,69 @@ test('CHANNEL_COMPONENT.feishu.buildConfig: maps app_id/app_secret → .env, web
   assert.equal(built2.env.FEISHU_APP_SECRET, 'y');
 });
 
-test('Phase 1: only feishu is wired up', () => {
-  assert.ok(CHANNEL_COMPONENT.feishu);
-  for (const other of ['slack', 'discord', 'whatsapp', 'line', 'telegram', 'lark']) {
-    assert.equal(CHANNEL_COMPONENT[other], undefined, `${other} must not be wired up in Phase 1`);
+test('wired set = the 7 coco-dashboard-supported channels; others absent', () => {
+  // channel_type keys as sent by cws-connect (hyphenated multi-word types).
+  for (const wired of ['feishu', 'lark', 'telegram', 'wecom', 'dingtalk', 'slack', 'ms-teams']) {
+    assert.ok(CHANNEL_COMPONENT[wired], `${wired} must be wired up`);
   }
+  // Not wired: components exist but coco-dashboard never mapped them, or they
+  // are credential-less QR-scan channels needing a separate flow. `ms_teams`
+  // (underscore) is the pre-canonicalization spelling and must NOT be present.
+  for (const other of ['discord', 'zalo', 'wechat', 'whatsapp', 'whatsapp_business', 'whatsapp-business', 'line', 'ms_teams']) {
+    assert.equal(CHANNEL_COMPONENT[other], undefined, `${other} must not be wired up`);
+  }
+});
+
+test('CHANNEL_COMPONENT.lark: app_id/app_secret → LARK_* env + transport websocket', () => {
+  const spec = CHANNEL_COMPONENT.lark;
+  assert.equal(spec.component, 'lark');
+  assert.equal(spec.pm2Service, 'zylos-lark');
+  const built = spec.buildConfig({ app_id: 'cli_l', app_secret: 'ls' });
+  assert.deepEqual(built.env, { LARK_APP_ID: 'cli_l', LARK_APP_SECRET: 'ls' });
+  assert.deepEqual(built.configJson, { enabled: true, transport: 'websocket' });
+});
+
+test('CHANNEL_COMPONENT.telegram: bot_token → TELEGRAM_BOT_TOKEN', () => {
+  const spec = CHANNEL_COMPONENT.telegram;
+  assert.equal(spec.pm2Service, 'zylos-telegram');
+  assert.deepEqual(spec.buildConfig({ bot_token: '123:abc' }).env, { TELEGRAM_BOT_TOKEN: '123:abc' });
+});
+
+test('CHANNEL_COMPONENT.wecom: bot_id/bot_secret → WECOM_*', () => {
+  const built = CHANNEL_COMPONENT.wecom.buildConfig({ bot_id: 'b', bot_secret: 's' });
+  assert.deepEqual(built.env, { WECOM_BOT_ID: 'b', WECOM_BOT_SECRET: 's' });
+});
+
+test('CHANNEL_COMPONENT.dingtalk: app_key/app_secret/robot_code → DINGTALK_*', () => {
+  const built = CHANNEL_COMPONENT.dingtalk.buildConfig({ app_key: 'k', app_secret: 's', robot_code: 'r' });
+  assert.deepEqual(built.env, {
+    DINGTALK_APP_KEY: 'k', DINGTALK_APP_SECRET: 's', DINGTALK_ROBOT_CODE: 'r',
+  });
+});
+
+test('CHANNEL_COMPONENT.slack: bot_token/app_token → SLACK_* + connection_mode socket', () => {
+  const spec = CHANNEL_COMPONENT.slack;
+  const built = spec.buildConfig({ bot_token: 'xoxb-1', app_token: 'xapp-1' });
+  assert.deepEqual(built.env, { SLACK_BOT_TOKEN: 'xoxb-1', SLACK_APP_TOKEN: 'xapp-1' });
+  assert.deepEqual(built.configJson, { enabled: true, connection_mode: 'socket' });
+});
+
+test('CHANNEL_COMPONENT["ms-teams"]: key == component == hyphenated; MSTEAMS_* env', () => {
+  const spec = CHANNEL_COMPONENT['ms-teams'];
+  assert.equal(spec.component, 'ms-teams');
+  assert.equal(spec.pm2Service, 'zylos-ms-teams');
+  const built = spec.buildConfig({ app_id: 'a', app_password: 'p', tenant_id: 't' });
+  assert.deepEqual(built.env, {
+    MSTEAMS_APP_ID: 'a', MSTEAMS_APP_PASSWORD: 'p', MSTEAMS_TENANT_ID: 't',
+  });
+  // optional app_catalog_id only emitted when present
+  assert.equal(built.env.MSTEAMS_APP_CATALOG_ID, undefined);
+  assert.equal(spec.buildConfig({ app_catalog_id: 'c' }).env.MSTEAMS_APP_CATALOG_ID, 'c');
+});
+
+test('buildConfig omits empty credentials (only non-empty env written)', () => {
+  const built = CHANNEL_COMPONENT.dingtalk.buildConfig({ app_key: 'k' });
+  assert.deepEqual(built.env, { DINGTALK_APP_KEY: 'k' });
 });
 
 const ORG = { slug: 'acme', org_id: 'org-1', self: { member_id: 'm-self' } };
@@ -108,7 +166,7 @@ test('install feishu (not yet installed): pulls with bind token, installs, write
   assert.deepEqual(h.execCalls[2], ['pm2', 'restart', 'zylos-feishu', '--update-env']);
 
   // Secrets → .env, connection mode → config.json
-  assert.deepEqual(h.envWrites, [{ FEISHU_IS_LARK: 'N', FEISHU_APP_ID: 'aid', FEISHU_APP_SECRET: 'asec' }]);
+  assert.deepEqual(h.envWrites, [{ FEISHU_APP_ID: 'aid', FEISHU_APP_SECRET: 'asec' }]);
   assert.deepEqual(h.configWrites, [{ component: 'feishu', patch: { enabled: true, connection_mode: 'websocket' } }]);
   assert.equal(h.warns.length, 0);
 
@@ -131,7 +189,7 @@ test('update-credentials (already installed): skips `zylos add`, re-writes creds
 test('unsupported channel_type: no pull, no shell-out, warns', async () => {
   const h = makeInstaller();
   await h.handle(ORG, frame({
-    channel_type: 'slack', action: 'install', binding_id: 'bind-3', request_id: 'req-3',
+    channel_type: 'discord', action: 'install', binding_id: 'bind-3', request_id: 'req-3',
     credential_pull_token: 'tok-3',
   }));
   assert.equal(h.pulls.length, 0);

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.6] — 2026-07-09
+
+### Added
+
+- **Channel connector now supports the 7 coco-dashboard-provisioned IM channels** (previously feishu-only). Extended `CHANNEL_COMPONENT` in `channel-connector.js` with `telegram`, `lark`, `wecom`, `dingtalk`, `slack`, and `ms-teams`, each a declarative catalog-field → env-var mapping matching what the corresponding `zylos-<component>` reads at startup (`TELEGRAM_BOT_TOKEN`; `LARK_APP_ID`/`LARK_APP_SECRET`; `WECOM_BOT_ID`/`WECOM_BOT_SECRET`; `DINGTALK_APP_KEY`/`_APP_SECRET`/`_ROBOT_CODE`; `SLACK_BOT_TOKEN`/`SLACK_APP_TOKEN`; `MSTEAMS_APP_ID`/`_APP_PASSWORD`/`_TENANT_ID`). Every channel_type key is 1:1 with the component / `zylos-<component>` pm2 service (depends on cws-connect!25, which canonicalizes multi-word channel types to the hyphenated spelling — no underscore/hyphen special-casing here). Mode is pinned to the no-ingress transport where applicable (lark `transport: websocket`, slack `connection_mode: socket`). `ms-teams` is webhook-style and only receives inbound behind a public HTTPS ingress.
+
+### Changed
+
+- **Refactored `CHANNEL_COMPONENT` to a declarative `imChannelSpec` factory** (credential→env map + optional config.json merge-patch), replacing the per-channel hand-written `buildConfig`. Only non-empty credentials are written.
+
+### Removed
+
+- **Dropped the dead `FEISHU_IS_LARK` env write** from the feishu spec — no zylos component reads it (verified by grep across all IM component repos); feishu and lark are independent components with distinct env prefixes.
+
 ## [2.7.5] — 2026-07-09
 
 ### Changed

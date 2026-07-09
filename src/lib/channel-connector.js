@@ -43,44 +43,109 @@ const realExecFile = (file, args, opts) =>
 /**
  * channel_type → the zylos IM component that services it, plus the mapping from
  * the pulled credential config (a { key: value } map from cws-core) to what the
- * component actually consumes. Adding a channel later is a one-liner here.
+ * component actually consumes.
  *
- * Phase 1: ONLY feishu is wired up. Any other channel_type is intentionally
- * absent so handleChannelCommand skips it with a warning.
+ * Scope: the channels coco-dashboard's provisioning path (channel-config.js /
+ * zylos-channel-runtime.js) explicitly supports with a credential→env mapping —
+ * feishu, telegram, lark, wecom, dingtalk, slack, ms-teams. Each is a clean 1:1
+ * catalog-field → env-var map; the env var names match what each zylos-<comp>
+ * component reads from ~/zylos/.env at startup (verified against their config
+ * loaders). configJson is a flat merge-patch for the component's config.json.
+ *
+ * NOTE: cws-connect's catalog field keys are snake_case (bot_token, app_id, …);
+ * pick() also tolerates camelCase / UPPER spellings since cws-core owns the
+ * exact payload shape. Only non-empty credentials are written (required fields
+ * are already enforced by cws-connect's bind-form validation).
+ *
+ * Not wired here (deliberately): discord / zalo (components exist but coco-
+ * dashboard never mapped them) and the credential-less QR-scan channels
+ * wechat / whatsapp (no env secrets — they need a separate QR-relay flow).
+ * NOTE: `FEISHU_IS_LARK` was dropped — no zylos component reads it (dead var).
  */
-export const CHANNEL_COMPONENT = {
-  feishu: {
-    component: 'feishu',
-    pm2Service: 'zylos-feishu',
-    // The feishu component (zylos-feishu) reads its bot credentials from
-    // ~/zylos/.env (FEISHU_APP_ID / FEISHU_APP_SECRET) at process start, and its
-    // non-secret runtime config from components/feishu/config.json
-    // (connection_mode, enabled, ...). So buildConfig returns BOTH:
-    //   - env:        the secrets, written to ~/zylos/.env
-    //   - configJson: a merge patch for the component's config.json
-    // NOTE: the exact key names in the pulled config are owned by cws-core;
-    // we accept a few likely spellings for the app id / secret. Double-check
-    // against the real cws-core channel-binding credential payload.
+
+// Read a credential field from the pulled config, tolerating the snake_case
+// catalog spelling plus camelCase / UPPER fallbacks.
+function pickCredential(config, field) {
+  const c = config || {};
+  const camel = field.replace(/_([a-z])/g, (_, ch) => ch.toUpperCase());
+  return c[field] ?? c[camel] ?? c[field.toUpperCase()] ?? '';
+}
+
+// Build a spec from a declarative credential→env map. The channel_type key,
+// the component name, and the pm2 service (`zylos-<component>`) are all 1:1
+// (cws-connect canonicalizes multi-word types to the hyphenated component
+// spelling). Only non-empty credentials are emitted.
+function imChannelSpec({ component, credMap, configJson }) {
+  return {
+    component,
+    pm2Service: `zylos-${component}`,
     buildConfig(config) {
-      const c = config || {};
-      const appId = c.app_id ?? c.appId ?? c.APP_ID ?? c.feishu_app_id ?? '';
-      const appSecret = c.app_secret ?? c.appSecret ?? c.APP_SECRET ?? c.feishu_app_secret ?? '';
-      return {
-        env: {
-          // The feishu/lark component shares one codebase; FEISHU_IS_LARK
-          // selects the Feishu (China) endpoints over Lark (intl). coco-dashboard's
-          // provisioning path sets this for feishu, so we match it here.
-          FEISHU_IS_LARK: 'N',
-          FEISHU_APP_ID: appId,
-          FEISHU_APP_SECRET: appSecret,
-        },
-        configJson: {
-          enabled: true,
-          connection_mode: 'websocket',
-        },
-      };
+      const env = {};
+      for (const [field, envVar] of Object.entries(credMap)) {
+        const value = pickCredential(config, field);
+        if (value) env[envVar] = value;
+      }
+      return { env, configJson };
     },
-  },
+  };
+}
+
+export const CHANNEL_COMPONENT = {
+  // WebSocket (China, feishu.cn). Outbound connection — no public ingress.
+  feishu: imChannelSpec({
+    component: 'feishu',
+    credMap: { app_id: 'FEISHU_APP_ID', app_secret: 'FEISHU_APP_SECRET' },
+    configJson: { enabled: true, connection_mode: 'websocket' },
+  }),
+  // WebSocket (international, larksuite.com). Separate component/env from feishu.
+  lark: imChannelSpec({
+    component: 'lark',
+    credMap: { app_id: 'LARK_APP_ID', app_secret: 'LARK_APP_SECRET' },
+    configJson: { enabled: true, transport: 'websocket' },
+  }),
+  // Long-polling — no ingress.
+  telegram: imChannelSpec({
+    component: 'telegram',
+    credMap: { bot_token: 'TELEGRAM_BOT_TOKEN' },
+    configJson: { enabled: true },
+  }),
+  // WeCom smart-robot WebSocket long connection — no ingress.
+  wecom: imChannelSpec({
+    component: 'wecom',
+    credMap: { bot_id: 'WECOM_BOT_ID', bot_secret: 'WECOM_BOT_SECRET' },
+    configJson: { enabled: true },
+  }),
+  // DingTalk Stream mode (WebSocket) — no ingress.
+  dingtalk: imChannelSpec({
+    component: 'dingtalk',
+    credMap: {
+      app_key: 'DINGTALK_APP_KEY',
+      app_secret: 'DINGTALK_APP_SECRET',
+      robot_code: 'DINGTALK_ROBOT_CODE',
+    },
+    configJson: { enabled: true },
+  }),
+  // Slack Socket Mode — no ingress.
+  slack: imChannelSpec({
+    component: 'slack',
+    credMap: { bot_token: 'SLACK_BOT_TOKEN', app_token: 'SLACK_APP_TOKEN' },
+    configJson: { enabled: true, connection_mode: 'socket' },
+  }),
+  // Microsoft Teams — Bot Framework HTTP endpoint. channel_type `ms-teams`
+  // matches the component / pm2 service (cws-connect canonicalized the catalog
+  // to hyphenated multi-word types; see cws-connect!25).
+  // NOTE: webhook-style — only receives inbound when a public HTTPS ingress
+  // routes to the component port; credentials are still written the same way.
+  'ms-teams': imChannelSpec({
+    component: 'ms-teams',
+    credMap: {
+      app_id: 'MSTEAMS_APP_ID',
+      app_password: 'MSTEAMS_APP_PASSWORD',
+      tenant_id: 'MSTEAMS_TENANT_ID',
+      app_catalog_id: 'MSTEAMS_APP_CATALOG_ID',
+    },
+    configJson: { enabled: true },
+  }),
 };
 
 /**
