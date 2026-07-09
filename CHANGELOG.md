@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Onboarding Lead 步③ — materialize artifacts + advance platform state (doc/behavior).** The Lead now proactively `project.create` + `issue.create` the user's first real Project/Issue once the user has stated a goal and agreed to a direction, instead of waiting for the user to explicitly say "create project" (surfaced in a live int onboarding test: the project was only created after the user manually asked). Added an explicit exception to the "never implicitly create a Project" guardrail for the onboarding first-task, and clarified that the *direction* (not the act of materializing it) is what stays the user's call. Also made explicit that when the 3-step blueprint completes the Lead must `issue.deliver` the **core onboarding Issue** itself (not just say "delivered" in the DM) and then request owner acceptance — otherwise the core Issue stays `in_progress` and the first-delivery datapoint never fires. Acceptance stays a genuine owner action (no self-accept). Docs only (SKILL.md); no runtime code change.
+
 ## [2.7.2] — 2026-07-08
 
 ### Changed
