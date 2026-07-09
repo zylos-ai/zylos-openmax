@@ -31,7 +31,8 @@ import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
-import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath } from './lib/client.js';
+import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
+import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
 import { createOnlineReporter } from './lib/online-report.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
@@ -1249,6 +1250,7 @@ function classifySystemEvent(eventName) {
   if (e === 'message.updated') return 'edit';
   if (e.startsWith('agent.config.')) return 'config_update';
   if (e.startsWith('connection.')) return 'connection';
+  if (isChannelEvent(e)) return 'channel';
   // Defensive fallback for naming drift — does not match reaction/read/etc.
   if (e.includes('recall') || e.includes('delete')) return 'recall';
   if (e.includes('edit') || e.includes('updat')) return 'edit';
@@ -1271,6 +1273,14 @@ async function handleSystemEvent(orgConfig, frame) {
   if (kind === 'connection') {
     handleConnectionEvent(orgConfig, frame).catch(e =>
       warn(`[${orgConfig.slug}] handleConnectionEvent: ${e.message}`));
+    return;
+  }
+
+  if (kind === 'channel') {
+    // Fire-and-forget, best-effort install/uninstall of an IM channel component
+    // (cws-connect → cws-comm → openmax). handleChannelCommand never throws.
+    handleChannelCommand(orgConfig, frame).catch(e =>
+      warn(`[${orgConfig.slug}] handleChannelCommand: ${e.message}`));
     return;
   }
 
@@ -1454,6 +1464,22 @@ async function handleConnectionEvent(orgConfig, frame) {
       warn(`[${slug}] unknown connection event: ${event}`);
   }
 }
+
+// =============================================================================
+// Channel connector — cws-connect IM channel install/uninstall (Phase 1: feishu)
+// =============================================================================
+//
+// Same command shape as connection events: cws-connect dispatches a `channel.*`
+// system frame over cws-comm; we pull the bind credentials from cws-core and
+// install/start the mapped zylos IM component. Best-effort; never throws.
+// (Full flow, deps, and DEFERRED follow-ups documented in channel-connector.js.)
+const handleChannelCommand = createChannelInstaller({
+  getForOrgWithHeaders,
+  apiPath,
+  dedupe,
+  log,
+  warn,
+});
 
 function makeOrgFrameDispatcher(orgConfig, onMessage) {
   return function onFrame(frame) {

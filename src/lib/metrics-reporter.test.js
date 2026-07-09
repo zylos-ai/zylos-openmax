@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMetricsReporter } from './metrics-reporter.js';
+import {
+  createMetricsReporter,
+  parseInstalledComponents,
+  parsePm2Statuses,
+  deriveInstalledChannels,
+} from './metrics-reporter.js';
 
 const noop = () => {};
 const apiPath = (p) => `/api/v1${p}`;
@@ -26,12 +31,36 @@ function deferred() {
 // cli is a per-invocation responder: (argv) => { stdout } (throw to simulate
 // a non-zero exit; attach .stdout/.stderr like child_process does). Default:
 // `generate` succeeds and prints `Key: zylos_ak_auto1`.
-function makeHarness({ dashboardApiKey = '', state, exchange, cli, fileExists, nowRef = { t: 0 } } = {}) {
+// Default `zylos list` output: two IM channels (lark, telegram) plus non-IM
+// components that must be filtered out (browser, dashboard, openmax).
+const ZYLOS_LIST_DEFAULT = [
+  'Installed Components',
+  '====================',
+  '',
+  '✓ browser (v0.1.3)',
+  '✓ lark (v0.3.5)',
+  '✓ telegram (v0.4.0)',
+  '✓ dashboard (v0.5.1)',
+  '✓ openmax (v2.7.2)',
+  '',
+].join('\n');
+
+// Default `pm2 jlist`: lark online, telegram stopped.
+const PM2_JLIST_DEFAULT = JSON.stringify([
+  { name: 'zylos-lark', pm2_env: { status: 'online' } },
+  { name: 'zylos-telegram', pm2_env: { status: 'stopped' } },
+]);
+
+function makeHarness({
+  dashboardApiKey = '', state, exchange, cli, fileExists, nowRef = { t: 0 },
+  zylosList = ZYLOS_LIST_DEFAULT, pm2Jlist = PM2_JLIST_DEFAULT,
+} = {}) {
   const exchangeCalls = [];
   const stateCalls = [];
   const puts = [];
   const warns = [];
   const cliCalls = [];
+  const channelCalls = [];
   const persisted = [];
   const fakeFetch = async (url, opts = {}) => {
     const { pathname } = new URL(url);
@@ -49,6 +78,18 @@ function makeHarness({ dashboardApiKey = '', state, exchange, cli, fileExists, n
     throw new Error(`unexpected fetch: ${url}`);
   };
   const fakeExecFile = async (file, args) => {
+    // installed_channels derivation shells out to `zylos list` / `pm2 jlist`.
+    if (file === 'zylos') {
+      channelCalls.push(['zylos', ...args]);
+      if (zylosList instanceof Error) throw zylosList;
+      return { stdout: zylosList };
+    }
+    if (file === 'pm2') {
+      channelCalls.push(['pm2', ...args]);
+      if (pm2Jlist instanceof Error) throw pm2Jlist;
+      return { stdout: pm2Jlist };
+    }
+    // dashboard api-key CLI (auto-provision path)
     assert.equal(args[0], CLI_PATH);
     const argv = args.slice(1); // e.g. ['generate', 'openmax-metrics', 'read']
     cliCalls.push(argv);
@@ -71,7 +112,7 @@ function makeHarness({ dashboardApiKey = '', state, exchange, cli, fileExists, n
       apiKeyCliPath: CLI_PATH,
     },
   );
-  return { reporter, exchangeCalls, stateCalls, puts, warns, cliCalls, persisted };
+  return { reporter, exchangeCalls, stateCalls, puts, warns, cliCalls, channelCalls, persisted };
 }
 
 test('无 key + state 200：直接拉取（不带 Authorization、不换 token）并发出 PUT', async () => {
@@ -360,4 +401,63 @@ test('供给成功后同进程再遇 401：不再二次供给，warn 一次后�
   assert.equal(stateCalls.length, statesSoFar);
   assert.equal(warns.length, 1);
   assert.equal(puts.length, 1);
+});
+
+// ============================================================================
+// installed_channels — derived from `zylos list` + `pm2 jlist`
+// ============================================================================
+
+test('installed_channels：从 zylos list 派生 IM 渠道并附到 PUT payload（含 pm2 状态）', async () => {
+  const { reporter, puts, channelCalls, warns } = makeHarness();
+  await reporter();
+  assert.equal(puts.length, 1);
+  assert.deepEqual(puts[0].payload.installed_channels, [
+    { channel_type: 'lark', status: 'running' },      // pm2 online
+    { channel_type: 'telegram', status: 'stopped' },   // pm2 stopped
+  ]);
+  // browser / dashboard / openmax are filtered out (not IM channels).
+  assert.ok(channelCalls.some((c) => c[0] === 'zylos' && c[1] === 'list'));
+  assert.ok(channelCalls.some((c) => c[0] === 'pm2' && c[1] === 'jlist'));
+  assert.equal(warns.length, 0);
+});
+
+test('installed_channels：zylos list 失败 → 省略字段，不影响 metrics PUT', async () => {
+  const { reporter, puts, warns } = makeHarness({ zylosList: new Error('zylos not found') });
+  await reporter();
+  assert.equal(puts.length, 1);
+  assert.equal('installed_channels' in puts[0].payload, false);
+  assert.equal(warns.length, 0); // derivation returns null quietly; metrics still sent
+});
+
+test('installed_channels：pm2 jlist 失败 → 仍上报渠道，状态回退 running', async () => {
+  const { reporter, puts } = makeHarness({ pm2Jlist: new Error('pm2 down') });
+  await reporter();
+  assert.deepEqual(puts[0].payload.installed_channels, [
+    { channel_type: 'lark', status: 'running' },
+    { channel_type: 'telegram', status: 'running' },
+  ]);
+});
+
+test('parseInstalledComponents：解析 zylos list 纯文本', () => {
+  const names = parseInstalledComponents(ZYLOS_LIST_DEFAULT);
+  assert.deepEqual(names, ['browser', 'lark', 'telegram', 'dashboard', 'openmax']);
+});
+
+test('parsePm2Statuses：解析 pm2 jlist；坏输入返回空 Map', () => {
+  const m = parsePm2Statuses(PM2_JLIST_DEFAULT);
+  assert.equal(m.get('zylos-lark'), 'online');
+  assert.equal(m.get('zylos-telegram'), 'stopped');
+  assert.equal(parsePm2Statuses('not json').size, 0);
+});
+
+test('deriveInstalledChannels：msteams → ms_teams 别名映射', async () => {
+  const execFile = async (file, args) => {
+    if (file === 'zylos') return { stdout: '✓ msteams (v0.1.0)\n✓ slack (v0.2.0)\n' };
+    return { stdout: '[]' };
+  };
+  const channels = await deriveInstalledChannels({ execFile });
+  assert.deepEqual(channels, [
+    { channel_type: 'ms_teams', status: 'running' }, // pm2 empty → running fallback
+    { channel_type: 'slack', status: 'running' },
+  ]);
 });

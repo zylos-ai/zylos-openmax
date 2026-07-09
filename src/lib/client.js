@@ -323,6 +323,13 @@ export const del   = (path)        => request('DELETE', path);
 // agent never accidentally calls cws-core with the wrong org's token.
 export const getForOrg   = (orgId, path, query) => request('GET',    path, { query, orgId });
 export const postForOrg  = (orgId, path, body)  => request('POST',   path, { body,  orgId });
+
+// Org-scoped GET that also attaches caller-supplied request headers — used when
+// a route needs a one-shot bearer that is NOT the org JWT (e.g. cws-connect's
+// X-Channel-Bind-Token, a short-lived credential-pull token). Same org-scoped
+// JWT resolution + D8 envelope unwrapping as getForOrg.
+export const getForOrgWithHeaders = (orgId, path, extraHeaders, query) =>
+  request('GET', path, { query, orgId, extraHeaders });
 export const patchForOrg = (orgId, path, body)  => request('PATCH',  path, { body,  orgId });
 export const putForOrg   = (orgId, path, body)  => request('PUT',    path, { body,  orgId });
 export const delForOrg   = (orgId, path)        => request('DELETE', path, { orgId });
