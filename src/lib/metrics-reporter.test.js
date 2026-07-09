@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   createMetricsReporter,
   parseInstalledComponents,
@@ -125,6 +126,68 @@ test('无 key + state 200：直接拉取（不带 Authorization、不换 token�
   assert.equal(puts[0].path, '/api/v1/agents/m-1/runtime-metrics');
   assert.equal(puts[0].payload.resources.cpu_pct, 1);
   assert.equal(warns.length, 0);
+});
+
+test('payload 携带顶层 version 字段（openmax package version）', async () => {
+  const { reporter, puts } = makeHarness();
+  await reporter();
+  assert.equal(puts.length, 1);
+  const pkgVersion = JSON.parse(
+    fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'),
+  ).version;
+  assert.equal(puts[0].payload.version, pkgVersion);
+});
+
+test('多 org：只上报给主（第一个启用的）org，单次 PUT', async () => {
+  const puts = [];
+  const warns = [];
+  const reporter = createMetricsReporter(
+    new Map([
+      ['coco', { org_id: 'org-primary', self: { member_id: 'm-primary' } }],
+      ['other', { org_id: 'org-secondary', self: { member_id: 'm-secondary' } }],
+    ]),
+    {
+      log: noop,
+      warn: (m) => warns.push(m),
+      fetch: async (url) => {
+        const { pathname } = new URL(url);
+        if (pathname === '/api/state') return jsonRes(200, DASHBOARD_STATE);
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+      now: () => 0,
+      putForOrg: async (orgId, path, payload) => { puts.push({ orgId, path, payload }); },
+      apiPath,
+      execFile: async () => { throw new Error('skip channels'); },
+      fileExists: () => true,
+    },
+  );
+  await reporter();
+  assert.equal(puts.length, 1); // 单次 PUT，不循环所有 org
+  assert.equal(puts[0].orgId, 'org-primary');
+  assert.equal(puts[0].path, '/api/v1/agents/m-primary/runtime-metrics');
+});
+
+test('空 org Map：不 PUT，优雅 warn 一次', async () => {
+  const puts = [];
+  const warns = [];
+  const reporter = createMetricsReporter(new Map(), {
+    log: noop,
+    warn: (m) => warns.push(m),
+    fetch: async (url) => {
+      const { pathname } = new URL(url);
+      if (pathname === '/api/state') return jsonRes(200, DASHBOARD_STATE);
+      throw new Error(`unexpected fetch: ${url}`);
+    },
+    now: () => 0,
+    putForOrg: async (orgId, path, payload) => { puts.push({ orgId, path, payload }); },
+    apiPath,
+    execFile: async () => { throw new Error('skip channels'); },
+    fileExists: () => true,
+  });
+  await reporter();
+  assert.equal(puts.length, 0);
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /no active org/);
 });
 
 test('无 key + state 持续 401：自动供给 key 后 state 仍 401 → 只 warn 一次（带 http 状态码），不发 PUT，不重复供给', async () => {
