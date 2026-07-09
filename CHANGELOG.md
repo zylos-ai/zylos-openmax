@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.3] — 2026-07-09
+
+### Added
+
+- **Install IM channel components from cws-connect commands (external-agent channel dispatch, Phase 1: feishu).** openmax now handles `channel.*` commands relayed over cws-comm: it pulls the bind credentials from cws-core (BFF `GET /api/v1/connect/channel-bindings/{binding_id}/credential`) with a one-time `X-Channel-Bind-Token`, then installs / configures / starts the mapped zylos IM component (`zylos add` → write `.env` secrets + `config.json` → pm2 restart). Fire-and-forget off the WS dispatcher (never throws), bounded timeouts so a hung `zylos`/`pm2` can't stall heartbeats, and secret values are never logged (keys only). Phase 1 wires **feishu** only; other `channel_type`s are skipped with a warning. `metrics-reporter` additionally reports `installed_channels` (from `zylos list` + `pm2 jlist`) so cws-connect can reconcile channel-binding status. New `getForOrgWithHeaders` client helper attaches the one-shot bind token alongside the org JWT. (#27)
+
 ### Changed
 
 - **Onboarding Lead 步③ — materialize artifacts + advance platform state (doc/behavior).** The Lead now proactively `project.create` + `issue.create` the user's first real Project/Issue once the user has stated a goal and agreed to a direction, instead of waiting for the user to explicitly say "create project" (surfaced in a live int onboarding test: the project was only created after the user manually asked). Added an explicit exception to the "never implicitly create a Project" guardrail for the onboarding first-task, and clarified that the *direction* (not the act of materializing it) is what stays the user's call. Also made explicit that when the 3-step blueprint completes the Lead must `issue.deliver` the **core onboarding Issue** itself (not just say "delivered" in the DM) and then request owner acceptance — otherwise the core Issue stays `in_progress` and the first-delivery datapoint never fires. Acceptance stays a genuine owner action (no self-accept). Docs only (SKILL.md); no runtime code change.
