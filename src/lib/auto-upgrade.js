@@ -3,7 +3,7 @@
  * via a dedicated, on-demand PM2 app (the "upgrader").
  *
  * Flow:
- *   1. Timer fires (first check after INITIAL_DELAY, then every intervalMs).
+ *   1. Timer fires (first check after intervalMs, then every intervalMs).
  *   2. Fetch latest GitHub release tag via REST API.
  *   3. Compare against current package.json version (semver).
  *   4. If newer: write a 'running' marker, start the executor as its OWN PM2
@@ -29,7 +29,7 @@
  *      loop. An upgrader that is still ONLINE is never killed from here.
  *
  * Config (all optional, in config.json top level):
- *   autoUpgrade.enabled        — boolean, default true
+ *   autoUpgrade.enabled        — boolean, default false
  *   autoUpgrade.intervalHours  — number,  default 24
  */
 
@@ -48,6 +48,22 @@ const EXECUTOR_SCRIPT = path.resolve(new URL('../../scripts/upgrade-executor.cjs
 const FAILED_VERSION_PATH = path.join(RUNTIME_DIR, 'upgrade-failed-version');
 const GITHUB_REPO = 'zylos-ai/zylos-openmax';
 export const INITIAL_DELAY_MS = 60 * 1000;
+export const DEFAULT_INTERVAL_HOURS = 24;
+
+export function resolveAutoUpgradeSchedule(settings = {}) {
+  if (settings?.enabled !== true) {
+    return { enabled: false };
+  }
+
+  const intervalHours = Number(settings.intervalHours) || DEFAULT_INTERVAL_HOURS;
+  return {
+    enabled: true,
+    intervalHours,
+    intervalMs: intervalHours * 3600_000,
+    delay: 0,
+    runOnStart: false,
+  };
+}
 
 // PM2 app name for the on-demand upgrade executor. It is started as its own PM2
 // app (a sibling of zylos-openmax under the PM2 daemon) so that the

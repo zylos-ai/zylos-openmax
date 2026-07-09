@@ -17,6 +17,7 @@ process.env.HOME = originalHome;
 
 const {
   readAndClearMarker,
+  resolveAutoUpgradeSchedule,
   formatUpgradeNotification,
   getFailedVersion,
   clearFailedVersion,
@@ -34,6 +35,38 @@ function writeMarker(data) {
 afterEach(() => {
   try { fs.unlinkSync(MARKER_PATH); } catch {}
   try { fs.unlinkSync(FAILED_VERSION_PATH); } catch {}
+});
+
+describe('resolveAutoUpgradeSchedule', () => {
+  it('defaults scheduled auto-upgrade to disabled', () => {
+    assert.deepEqual(resolveAutoUpgradeSchedule(undefined), { enabled: false });
+    assert.deepEqual(resolveAutoUpgradeSchedule({}), { enabled: false });
+  });
+
+  it('requires explicit enabled=true', () => {
+    assert.deepEqual(resolveAutoUpgradeSchedule({ enabled: false }), { enabled: false });
+    assert.deepEqual(resolveAutoUpgradeSchedule({ enabled: 'true' }), { enabled: false });
+  });
+
+  it('does not run a check on process start when enabled', () => {
+    assert.deepEqual(resolveAutoUpgradeSchedule({ enabled: true }), {
+      enabled: true,
+      intervalHours: 24,
+      intervalMs: 24 * 3600_000,
+      delay: 0,
+      runOnStart: false,
+    });
+  });
+
+  it('keeps intervalHours configurable for explicit opt-in', () => {
+    assert.deepEqual(resolveAutoUpgradeSchedule({ enabled: true, intervalHours: 6 }), {
+      enabled: true,
+      intervalHours: 6,
+      intervalMs: 6 * 3600_000,
+      delay: 0,
+      runOnStart: false,
+    });
+  });
 });
 
 describe('readAndClearMarker race-condition fix', () => {
