@@ -1,26 +1,29 @@
 /**
- * Channel connector — external-agent IM channel install/uninstall.
+ * Channel connector — IM channel connect / disconnect for the openmax path.
  *
- * Phase 1 (feishu-websocket). cws-connect dispatches a `channel.*` command over
- * cws-comm to this openmax runtime. We pull the bind credentials from cws-core
- * (BFF) with a one-shot X-Channel-Bind-Token, then install / configure / start
- * the corresponding zylos IM component. This mirrors the credential-lifecycle
- * precedent (comm-bridge's handleConnectionEvent): fire-and-forget from the WS
- * dispatcher, best-effort, and it MUST NEVER throw out into the dispatcher.
+ * cws-connect dispatches a `channel.connect` / `channel.disconnect` command over
+ * cws-comm to this openmax runtime. This is the single channel path for ALL
+ * agents (platform + external): openmax runs in every agent's pod, so the
+ * backend no longer distinguishes agent type or calls cws-agent-manager for
+ * channels.
  *
- * Platform agents use a different path (cws-agent-manager) — not our concern.
+ * connect (idempotent): pull bind credentials from cws-core (BFF) with a
+ * one-shot X-Channel-Bind-Token → probe the component → `zylos add` if missing /
+ * `zylos upgrade` if present (`zylos add` refuses an already-installed
+ * component, so the probe-then-branch is required) → write creds + config →
+ * restart → verify the component actually connected → report the result back to
+ * cws-connect.
+ *
+ * disconnect (soft-disable, mirrors coco-dashboard): stop the service + set the
+ * component's `enabled: false`; keep the component installed and its
+ * credentials. Reconnect is the same idempotent connect (upgrade branch).
+ *
+ * Fire-and-forget from the WS dispatcher (comm-bridge awaits nothing; it only
+ * `.catch`es), so a bounded verify does not block heartbeats. This function MUST
+ * NEVER throw out into the dispatcher.
  *
  * Deps are injected so the flow is unit-testable without a live cws-core, the
  * `zylos`/`pm2` binaries, or the real filesystem (see channel-connector.test.js).
- *
- * DEFERRED (follow-ups — intentionally NOT implemented here):
- *   - Reconnect-reconcile: on WS reconnect, query cws-connect for bindings whose
- *     install command we may have missed while disconnected, and re-drive them.
- *     No endpoint exists yet — add when cws-connect exposes one.
- *   - Immediate status callback to cws-connect after install. For now the
- *     install result is reconciled asynchronously via the `installed_channels`
- *     field of the runtime-metrics report (see metrics-reporter.js). A direct
- *     per-command status callback is a future improvement.
  */
 
 import fs from 'fs';
@@ -32,64 +35,61 @@ const HOME = process.env.HOME;
 
 const promisifiedExecFile = promisify(execFileCb);
 
-// Bounded timeouts: everything here runs on the comm-bridge WS event loop, so a
-// hung `zylos`/`pm2` must never freeze heartbeats indefinitely.
-const INSTALL_TIMEOUT_MS = 180_000; // `zylos add` may run npm install
-const QUERY_TIMEOUT_MS = 20_000;    // info / pm2 / restart
+// Bounded timeouts: everything here runs off the comm-bridge WS event loop.
+const INSTALL_TIMEOUT_MS = 180_000; // `zylos add`/`upgrade` may run npm install
+const QUERY_TIMEOUT_MS = 20_000;    // info / pm2 / restart / stop
+const VERIFY_TIMEOUT_MS = 60_000;   // bounded wait for the component to connect
+const VERIFY_POLL_MS = 2_000;
 
 const realExecFile = (file, args, opts) =>
   promisifiedExecFile(file, args, { timeout: QUERY_TIMEOUT_MS, ...(opts || {}) });
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * channel_type → the zylos IM component that services it, plus the mapping from
  * the pulled credential config (a { key: value } map from cws-core) to what the
- * component actually consumes. Adding a channel later is a one-liner here.
- *
- * Phase 1: ONLY feishu is wired up. Any other channel_type is intentionally
- * absent so handleChannelCommand skips it with a warning.
+ * component consumes. Scope: feishu (the one channel openmax implements today);
+ * add more entries here as they are supported.
  */
 export const CHANNEL_COMPONENT = {
   feishu: {
     component: 'feishu',
     pm2Service: 'zylos-feishu',
-    // The feishu component (zylos-feishu) reads its bot credentials from
-    // ~/zylos/.env (FEISHU_APP_ID / FEISHU_APP_SECRET) at process start, and its
-    // non-secret runtime config from components/feishu/config.json
-    // (connection_mode, enabled, ...). So buildConfig returns BOTH:
-    //   - env:        the secrets, written to ~/zylos/.env
-    //   - configJson: a merge patch for the component's config.json
-    // NOTE: the exact key names in the pulled config are owned by cws-core;
-    // we accept a few likely spellings for the app id / secret. Double-check
-    // against the real cws-core channel-binding credential payload.
+    // zylos-feishu reads FEISHU_APP_ID / FEISHU_APP_SECRET from ~/zylos/.env at
+    // process start, and connection_mode / enabled from
+    // components/feishu/config.json. buildConfig returns both.
+    // NOTE: cws-core owns the exact pulled key names; accept a few spellings.
     buildConfig(config) {
       const c = config || {};
       const appId = c.app_id ?? c.appId ?? c.APP_ID ?? c.feishu_app_id ?? '';
       const appSecret = c.app_secret ?? c.appSecret ?? c.APP_SECRET ?? c.feishu_app_secret ?? '';
       return {
-        env: {
-          // The feishu/lark component shares one codebase; FEISHU_IS_LARK
-          // selects the Feishu (China) endpoints over Lark (intl). coco-dashboard's
-          // provisioning path sets this for feishu, so we match it here.
-          FEISHU_IS_LARK: 'N',
-          FEISHU_APP_ID: appId,
-          FEISHU_APP_SECRET: appSecret,
-        },
-        configJson: {
-          enabled: true,
-          connection_mode: 'websocket',
-        },
+        env: { FEISHU_APP_ID: appId, FEISHU_APP_SECRET: appSecret },
+        configJson: { enabled: true, connection_mode: 'websocket' },
       };
     },
   },
 };
 
 /**
- * True for cws-connect channel-connector commands (`channel.install`,
- * `channel.update-credentials`, `channel.uninstall`, ...). classifySystemEvent
- * in comm-bridge delegates here so the predicate has a single, testable home.
+ * True for cws-connect channel-connector commands (`channel.connect`,
+ * `channel.disconnect`, ...). classifySystemEvent in comm-bridge delegates here.
  */
 export function isChannelEvent(eventName) {
   return String(eventName || '').toLowerCase().startsWith('channel.');
+}
+
+/**
+ * Normalize the command action to `connect` / `disconnect`. Tolerant of the
+ * legacy install / update-credentials / uninstall names during the transition
+ * so the connector works regardless of which cws-connect version dispatches.
+ */
+export function normalizeAction(action) {
+  const a = String(action || '').toLowerCase();
+  if (a === 'connect' || a === 'install' || a === 'update-credentials') return 'connect';
+  if (a === 'disconnect' || a === 'uninstall') return 'disconnect';
+  return a;
 }
 
 // Whether a fan-out event addressed to a set of agents (or a single one) is for
@@ -111,7 +111,6 @@ function defaultWriteEnv(vars, { home = HOME, fsDep = fs } = {}) {
     const safeVal = String(value ?? '');
     const keyRe = new RegExp(`^${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}=.*$`, 'm');
     if (keyRe.test(content)) {
-      // Function replacement so `$&`/`$1` in the secret are not interpreted.
       content = content.replace(keyRe, () => `${key}=${safeVal}`);
     } else {
       if (content.length && !content.endsWith('\n')) content += '\n';
@@ -137,6 +136,32 @@ function defaultWriteConfig(component, patch, { home = HOME, fsDep = fs } = {}) 
 }
 
 /**
+ * Default connect verification: bounded poll that the pm2 service reaches
+ * `online`. NOTE: this is a PROCESS-HEALTH check only — it does NOT confirm the
+ * IM side (e.g. the Feishu websocket handshake / bot login) actually succeeded,
+ * so wrong credentials can still surface as "connected". A real readiness
+ * signal from the component (ws-connected marker) should replace this; tracked
+ * in zylos-openmax#34. Returns true if online within the timeout, else false.
+ */
+async function defaultVerify(spec, { execFile, timeoutMs = VERIFY_TIMEOUT_MS, pollMs = VERIFY_POLL_MS } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let online = false;
+    try {
+      const { stdout } = await execFile('pm2', ['jlist']);
+      const procs = JSON.parse(String(stdout));
+      if (Array.isArray(procs)) {
+        const p = procs.find((x) => x?.name === spec.pm2Service);
+        online = p?.pm2_env?.status === 'online';
+      }
+    } catch { /* pm2 unavailable — retry until deadline */ }
+    if (online) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(pollMs);
+  }
+}
+
+/**
  * Build the channel-command handler.
  *
  * @param {object} deps
@@ -146,6 +171,8 @@ function defaultWriteConfig(component, patch, { home = HOME, fsDep = fs } = {}) 
  * @param {function} [deps.execFile]  promisified (file, args, opts) => {stdout}
  * @param {function} [deps.writeEnv]  (vars) => void
  * @param {function} [deps.writeConfig] (component, patch) => void
+ * @param {(spec) => Promise<boolean>} [deps.verifyConnected]  connect verification
+ * @param {(result) => Promise<void>} [deps.reportResult]  connect-result callback
  * @param {function} [deps.log] @param {function} [deps.warn]
  * @param {string}   [deps.home]
  * @returns {(orgConfig, frame) => Promise<void>} never throws
@@ -157,14 +184,30 @@ export function createChannelInstaller({
   execFile = realExecFile,
   writeEnv,
   writeConfig,
+  verifyConnected,
+  reportResult,
   log = () => {},
   warn = () => {},
   home = HOME,
   installTimeoutMs = INSTALL_TIMEOUT_MS,
   queryTimeoutMs = QUERY_TIMEOUT_MS,
+  verifyTimeoutMs = VERIFY_TIMEOUT_MS,
 } = {}) {
   const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
   const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
+  const doVerify = verifyConnected || ((spec) => defaultVerify(spec, { execFile, timeoutMs: verifyTimeoutMs }));
+  // Default connect-result callback: log-only placeholder. The real per-binding
+  // report to cws-connect is wired once cws-connect exposes the endpoint
+  // (coco-workspace/cws-connect#4). Must never throw.
+  const doReport = reportResult || (async (r) => {
+    log(`[connect-result] binding=${r.bindingId} channel=${r.channelType} status=${r.status}`
+      + (r.detail ? ` detail=${r.detail}` : ''));
+  });
+
+  const report = async (meta, status, detail = '') => {
+    try { await doReport({ ...meta, status, detail }); }
+    catch (e) { warn(`[${meta.slug}] connect-result report failed binding=${meta.bindingId}: ${e.message}`); }
+  };
 
   async function isComponentInstalled(component) {
     try {
@@ -177,10 +220,22 @@ export function createChannelInstaller({
     }
   }
 
+  // Idempotent: install if missing, upgrade if present. `zylos add` refuses an
+  // already-installed component (won't upgrade even a lower version), so we must
+  // branch on the probe rather than always `add`.
+  async function ensureInstalledOrUpgraded(slug, spec) {
+    if (await isComponentInstalled(spec.component)) {
+      log(`[${slug}] '${spec.component}' already installed → zylos upgrade`);
+      await execFile('zylos', ['upgrade', spec.component, '--yes'], { timeout: installTimeoutMs });
+    } else {
+      log(`[${slug}] '${spec.component}' not installed → zylos add`);
+      await execFile('zylos', ['add', spec.component, '--yes'], { timeout: installTimeoutMs });
+    }
+  }
+
   async function startOrRestartService(spec) {
     // Prefer restart --update-env so a running service re-reads the freshly
-    // written ~/zylos/.env. If it is not yet registered (fresh install),
-    // fall back to starting from its ecosystem file.
+    // written ~/zylos/.env. If it is not yet registered, start from ecosystem.
     try {
       await execFile('pm2', ['restart', spec.pm2Service, '--update-env'], { timeout: queryTimeoutMs });
       return;
@@ -191,18 +246,15 @@ export function createChannelInstaller({
     await execFile('pm2', ['start', ecosystem, '--update-env'], { timeout: queryTimeoutMs });
   }
 
-  async function installChannelComponent(slug, spec, config) {
+  async function connectChannel(slug, spec, config, meta) {
     const built = spec.buildConfig(config);
 
-    // 1. ensure the component is installed
+    // 1. install or upgrade (idempotent)
     try {
-      if (!(await isComponentInstalled(spec.component))) {
-        log(`[${slug}] installing channel component '${spec.component}'...`);
-        await execFile('zylos', ['add', spec.component, '--yes'], { timeout: installTimeoutMs });
-        log(`[${slug}] channel component '${spec.component}' installed`);
-      }
+      await ensureInstalledOrUpgraded(slug, spec);
     } catch (e) {
-      warn(`[${slug}] channel component install failed (${spec.component}): ${e.message}`);
+      warn(`[${slug}] install/upgrade failed (${spec.component}): ${e.message}`);
+      await report(meta, 'error', 'install/upgrade failed');
       return;
     }
 
@@ -214,6 +266,7 @@ export function createChannelInstaller({
       }
     } catch (e) {
       warn(`[${slug}] writing .env failed (${spec.component}): ${e.message}`);
+      await report(meta, 'error', 'writing credentials failed');
       return;
     }
 
@@ -225,25 +278,51 @@ export function createChannelInstaller({
       }
     } catch (e) {
       warn(`[${slug}] writing config.json failed (${spec.component}): ${e.message}`);
+      await report(meta, 'error', 'writing config failed');
       return;
     }
 
-    // 4. start / restart the pm2 service so it picks up the new credentials
+    // 4. start / restart so the component picks up the new credentials
     try {
       await startOrRestartService(spec);
-      log(`[${slug}] channel component '${spec.component}' started (${spec.pm2Service})`);
+      log(`[${slug}] '${spec.component}' started (${spec.pm2Service})`);
     } catch (e) {
       warn(`[${slug}] starting service failed (${spec.pm2Service}): ${e.message}`);
+      await report(meta, 'error', 'starting service failed');
+      return;
     }
+
+    // 5. verify the component actually connected (bounded)
+    let ok = false;
+    try {
+      ok = await doVerify(spec);
+    } catch (e) {
+      warn(`[${slug}] connect verification errored (${spec.component}): ${e.message}`);
+      ok = false;
+    }
+
+    // 6. report the result back to cws-connect
+    await report(meta, ok ? 'connected' : 'error', ok ? '' : 'connect verification failed/timed out');
+    log(`[${slug}] connect ${spec.component} binding=${meta.bindingId} → ${ok ? 'connected' : 'error'}`);
   }
 
-  async function uninstallChannelComponent(slug, spec) {
+  // Soft-disable (mirrors coco-dashboard): stop the service + set enabled:false.
+  // Keep the component installed and its credentials, so reconnect is the same
+  // idempotent connect (upgrade branch). NOT an uninstall.
+  async function disconnectChannel(slug, spec, meta) {
     try {
-      await execFile('zylos', ['uninstall', spec.component, '--force'], { timeout: installTimeoutMs });
-      log(`[${slug}] channel component '${spec.component}' uninstalled`);
+      await execFile('pm2', ['stop', spec.pm2Service], { timeout: queryTimeoutMs });
+      log(`[${slug}] stopped ${spec.pm2Service}`);
     } catch (e) {
-      warn(`[${slug}] channel component uninstall failed (${spec.component}): ${e.message}`);
+      warn(`[${slug}] pm2 stop failed (${spec.pm2Service}): ${e.message}`);
     }
+    try {
+      doWriteConfig(spec.component, { enabled: false });
+    } catch (e) {
+      warn(`[${slug}] disabling ${spec.component} config failed: ${e.message}`);
+    }
+    await report(meta, 'disconnected', '');
+    log(`[${slug}] disconnect ${spec.component} binding=${meta.bindingId} → soft-disabled (kept installed + creds)`);
   }
 
   return async function handleChannelCommand(orgConfig, frame) {
@@ -270,21 +349,24 @@ export function createChannelInstaller({
         return;
       }
 
+      const act = normalizeAction(action);
+
       // Replay/reconnect-safe: cws-comm may redeliver the same command on a
       // catch-up sweep. Keyed by action+binding+request so a genuine retry with
       // a new request_id is NOT deduped.
-      const dedupKey = `channel:${action}:${binding_id}:${request_id}`;
+      const dedupKey = `channel:${act}:${binding_id}:${request_id}`;
       if (dedupe(dedupKey)) {
-        log(`[${slug}] channel ${action} dedup binding=${binding_id}`);
+        log(`[${slug}] channel ${act} dedup binding=${binding_id}`);
         return;
       }
 
       const orgId = orgConfig.org_id;
       const spec = CHANNEL_COMPONENT[channel_type];
+      const meta = { slug, orgId, bindingId: binding_id, channelType: channel_type, requestId: request_id };
 
-      if (action === 'install' || action === 'update-credentials') {
+      if (act === 'connect') {
         if (!spec) {
-          warn(`[${slug}] channel_type '${channel_type}' not yet supported on external agents `
+          warn(`[${slug}] channel_type '${channel_type}' not supported by openmax `
             + `(binding=${binding_id}) — skipping`);
           return;
         }
@@ -298,31 +380,31 @@ export function createChannelInstaller({
             apiPath(`/connect/channel-bindings/${binding_id}/credential`),
             { 'X-Channel-Bind-Token': credential_pull_token || '' },
           );
-          // request() already unwraps the D8 envelope's outer `.data`; accept
-          // both `{ config }` and a still-nested `{ data: { config } }`.
           config = resp?.config ?? resp?.data?.config ?? null;
         } catch (e) {
           warn(`[${slug}] channel credential pull failed binding=${binding_id}: ${e.message}`);
+          await report(meta, 'error', 'credential pull failed');
           return;
         }
         if (!config || typeof config !== 'object' || Object.keys(config).length === 0) {
           warn(`[${slug}] channel credential empty/absent binding=${binding_id} — skipping`);
+          await report(meta, 'error', 'credential empty/absent');
           return;
         }
 
         // Log KEYS only — the config values are secrets.
-        log(`[${slug}] channel ${action} ${channel_type} binding=${binding_id} `
+        log(`[${slug}] channel connect ${channel_type} binding=${binding_id} `
           + `config keys=[${Object.keys(config).join(',')}]`);
-        await installChannelComponent(slug, spec, config);
+        await connectChannel(slug, spec, config, meta);
         return;
       }
 
-      if (action === 'uninstall') {
+      if (act === 'disconnect') {
         if (!spec) {
-          log(`[${slug}] channel uninstall for unsupported channel_type '${channel_type}' — nothing to do`);
+          log(`[${slug}] channel disconnect for unsupported channel_type '${channel_type}' — nothing to do`);
           return;
         }
-        await uninstallChannelComponent(slug, spec);
+        await disconnectChannel(slug, spec, meta);
         return;
       }
 
