@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.5] — 2026-07-09
+
+### Changed
+
+- **Runtime-metrics reporter now sends a single report to the primary (first-enabled) org instead of one per org.** The 60s reporter previously PUT the same payload once per active org; it now takes the first entry of the insertion-ordered active-org map (the primary org) and issues a single `PUT /agents/{member_id}/runtime-metrics`. If no org is configured, or the primary org has no `self.member_id`, it warns and skips gracefully without crashing the tick.
+
+### Added
+
+- **Added top-level `version` field to the runtime-metrics payload** carrying openmax's own package version (read once at module load, same pattern as auto-upgrade). A downstream service reads `body.version`.
+
 ## [2.7.4] — 2026-07-09
 
 ### Changed

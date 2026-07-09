@@ -42,6 +42,19 @@ import { updateConfig } from './config.js';
 const HOME = process.env.HOME;
 const DASHBOARD_CONFIG_PATH = path.join(HOME, 'zylos/components/dashboard/config.json');
 const FETCH_TIMEOUT_MS = 5000;
+
+// openmax's own package version, read once at module load (not per tick). Same
+// pattern as auto-upgrade.js readPkgVersion(). Reported as a top-level `version`
+// field in the runtime-metrics payload (a downstream service reads body.version).
+const PKG_VERSION = (() => {
+  try {
+    return JSON.parse(
+      fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf-8'),
+    ).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 const TOKEN_EXPIRY_MARGIN_MS = 30_000;
 
 // Dashboard-local API-key CLI (same machine/user — reads/writes the dashboard
@@ -145,6 +158,7 @@ function buildPayload(dashboard) {
   const sys = dashboard.system_metrics || {};
   const rt = dashboard.runtime_info || {};
   return {
+    version: PKG_VERSION,
     resources: {
       cpu_pct:   sys.cpu_pct ?? null,
       mem_pct:   sys.mem_pct ?? null,
@@ -360,20 +374,29 @@ export function createMetricsReporter(activeOrgConfigs, {
       warn(`installed_channels derivation failed: ${err?.message || err}`);
     }
 
-    for (const [slug, orgConfig] of activeOrgConfigs) {
-      const selfMemberId = orgConfig.self?.member_id;
-      if (!selfMemberId) continue;
-      try {
-        await putForOrg(orgConfig.org_id, apiPath(`/agents/${selfMemberId}/runtime-metrics`), payload);
-      } catch (err) {
-        if (err.status === 404) {
-          if (!warnedEndpoint404) {
-            warn(`[${slug}] runtime-metrics endpoint not available (404), skipping`);
-            warnedEndpoint404 = true;
-          }
-        } else {
-          warn(`[${slug}] metrics report failed: ${err.message}`);
+    // Report to the PRIMARY org only (the first enabled org, i.e. the first
+    // entry of the insertion-ordered Map) — a single PUT, not one per org.
+    const [primary] = activeOrgConfigs;
+    if (!primary) {
+      warn('no active org configured — runtime-metrics not reported');
+      return;
+    }
+    const [slug, orgConfig] = primary;
+    const selfMemberId = orgConfig.self?.member_id;
+    if (!selfMemberId) {
+      warn(`[${slug}] primary org has no self.member_id — runtime-metrics not reported`);
+      return;
+    }
+    try {
+      await putForOrg(orgConfig.org_id, apiPath(`/agents/${selfMemberId}/runtime-metrics`), payload);
+    } catch (err) {
+      if (err.status === 404) {
+        if (!warnedEndpoint404) {
+          warn(`[${slug}] runtime-metrics endpoint not available (404), skipping`);
+          warnedEndpoint404 = true;
         }
+      } else {
+        warn(`[${slug}] metrics report failed: ${err.message}`);
       }
     }
   };
