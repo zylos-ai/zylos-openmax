@@ -1477,6 +1477,18 @@ const handleChannelCommand = createChannelInstaller({
   getForOrgWithHeaders,
   apiPath,
   dedupe,
+  // Report the terminal connect/disconnect outcome back to cws-connect through
+  // the cws-core BFF passthrough. request_id is echoed so cws-connect can match
+  // it against the in-flight command (its authorization + idempotency check);
+  // binding_id addresses the row. Best-effort — the connector wraps this and
+  // only warns on failure, never throws.
+  reportResult: async (r) => {
+    await postForOrg(
+      r.orgId,
+      apiPath(`/connect/channel-bindings/${r.bindingId}/result`),
+      { status: r.status, detail: r.detail || '', request_id: r.requestId || '' },
+    );
+  },
   log,
   warn,
 });
