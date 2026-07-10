@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.7] — 2026-07-10
+
+### Removed
+
+- **Reverted the component-reported connection-state consumption (#34 / v2.8.5)** per the 2026-07-10 architecture decision: existing channel components must not be modified for platform features, so no component will write `runtime/connection-state.json`. Connect verification returns to the bounded pm2 process-health poll. Definitive credential validation now happens server-side in cws-connect (MR !30) before any command reaches the agent.
+
 ## [2.8.6] — 2026-07-10
 
 ### Fixed
