@@ -46,11 +46,74 @@ const realExecFile = (file, args, opts) =>
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const PROBE_TIMEOUT_MS = 8_000; // one-shot credential probe against the IM API
+
+// Fetch helper for credential probes: bounded, returns { status, json } and
+// never logs the URL or body (they can carry secrets). A thrown error means
+// the IM API was unreachable — the caller treats that as INCONCLUSIVE (the
+// component may reach the API via its own proxy), not as a credential failure.
+async function probeFetch(fetchDep, url, opts, timeoutMs = PROBE_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const resp = await fetchDep(url, { ...opts, signal: ctrl.signal });
+    const text = await resp.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* non-JSON body */ }
+    return { status: resp.status, json };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Inconclusive marker: probe couldn't decide (unreachable / 5xx / odd body).
+// Distinct from { ok:false } which is a DEFINITIVE credential rejection.
+const inconclusive = (detail) => {
+  const e = new Error(detail);
+  e.probeInconclusive = true;
+  return e;
+};
+
+// Feishu/Lark share the tenant_access_token/internal shape, different domains.
+function larkStyleProbe(base) {
+  return async (c, { fetchDep, timeoutMs }) => {
+    const { status, json } = await probeFetch(fetchDep, `${base}/open-apis/auth/v3/tenant_access_token/internal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: c.app_id, app_secret: c.app_secret }),
+    }, timeoutMs);
+    if (json && json.code === 0) return { ok: true };
+    if (json && typeof json.code === 'number') {
+      return { ok: false, detail: `app auth rejected (code ${json.code})` };
+    }
+    throw inconclusive(`unexpected response (http ${status})`);
+  };
+}
+
 /**
  * channel_type → the zylos IM component that services it, plus the mapping from
- * the pulled credential config (a { key: value } map from cws-core) to what the
- * component consumes. Scope: feishu (the one channel openmax implements today);
- * add more entries here as they are supported.
+ * the pulled credential config (a { key: value } map from cws-core, keyed by
+ * the cws-connect catalog form-field keys) to what the component consumes.
+ *
+ * Entry shape:
+ *   component   — `zylos add|upgrade` package name. Keys are cws-connect
+ *                 channel_type strings, which use underscores for ms_teams /
+ *                 whatsapp_business — the entry translates to the hyphenated
+ *                 component name (naming decision D-1: alias here, no backend
+ *                 rename).
+ *   pm2Service  — pm2 process name to restart/stop/health-check.
+ *   buildConfig — { env, configJson }: secrets → ~/zylos/.env, non-secret
+ *                 runtime flags → components/<c>/config.json. Env var names
+ *                 verified against each component's config loader.
+ *   probe       — optional one-shot credential check against the IM API
+ *                 (deep-verify decision D-5). Returns { ok:true } /
+ *                 { ok:false, detail } on a definitive answer; throws
+ *                 (probeInconclusive) when the API is unreachable, in which
+ *                 case connect proceeds and falls back to process-health
+ *                 verification. detail must NEVER contain secrets.
+ *
+ * wechat / whatsapp (QR-login, no credential form) are deliberately absent —
+ * they need the QR-relay flow (batch 2), not this pull-creds→write-env path.
  */
 export const CHANNEL_COMPONENT = {
   feishu: {
@@ -68,6 +131,251 @@ export const CHANNEL_COMPONENT = {
         env: { FEISHU_APP_ID: appId, FEISHU_APP_SECRET: appSecret },
         configJson: { enabled: true, connection_mode: 'websocket' },
       };
+    },
+    probe: larkStyleProbe('https://open.feishu.cn'),
+  },
+
+  lark: {
+    component: 'lark',
+    pm2Service: 'zylos-lark',
+    // Independent fork of the feishu component: LARK_* env vars, and the
+    // connection mode key is `transport` (not connection_mode).
+    buildConfig(config) {
+      const c = config || {};
+      return {
+        env: { LARK_APP_ID: c.app_id ?? '', LARK_APP_SECRET: c.app_secret ?? '' },
+        configJson: { enabled: true, transport: 'websocket' },
+      };
+    },
+    probe: larkStyleProbe('https://open.larksuite.com'),
+  },
+
+  telegram: {
+    component: 'telegram',
+    pm2Service: 'zylos-telegram',
+    buildConfig(config) {
+      const c = config || {};
+      return {
+        env: { TELEGRAM_BOT_TOKEN: c.bot_token ?? '' },
+        configJson: { enabled: true },
+      };
+    },
+    async probe(c, { fetchDep, timeoutMs }) {
+      const { status, json } = await probeFetch(
+        fetchDep, `https://api.telegram.org/bot${c.bot_token}/getMe`, {}, timeoutMs,
+      );
+      if (json?.ok === true) return { ok: true };
+      if (json && json.ok === false) {
+        return { ok: false, detail: `bot token rejected (${json.error_code ?? status})` };
+      }
+      throw inconclusive(`unexpected response (http ${status})`);
+    },
+  },
+
+  dingtalk: {
+    component: 'dingtalk',
+    pm2Service: 'zylos-dingtalk',
+    buildConfig(config) {
+      const c = config || {};
+      return {
+        env: {
+          DINGTALK_APP_KEY: c.app_key ?? '',
+          DINGTALK_APP_SECRET: c.app_secret ?? '',
+          DINGTALK_ROBOT_CODE: c.robot_code ?? '',
+        },
+        configJson: { enabled: true },
+      };
+    },
+    // v1.0 token endpoint takes the secret in the JSON body (not the URL).
+    async probe(c, { fetchDep, timeoutMs }) {
+      const { status, json } = await probeFetch(fetchDep, 'https://api.dingtalk.com/v1.0/oauth2/accessToken', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appKey: c.app_key, appSecret: c.app_secret }),
+      }, timeoutMs);
+      if (json?.accessToken) return { ok: true };
+      if (status === 400 || status === 401 || status === 403) {
+        return { ok: false, detail: `app key/secret rejected (${json?.code ?? status})` };
+      }
+      throw inconclusive(`unexpected response (http ${status})`);
+    },
+  },
+
+  wecom: {
+    component: 'wecom',
+    pm2Service: 'zylos-wecom',
+    buildConfig(config) {
+      const c = config || {};
+      return {
+        env: { WECOM_BOT_ID: c.bot_id ?? '', WECOM_BOT_SECRET: c.bot_secret ?? '' },
+        configJson: { enabled: true },
+      };
+    },
+    // No public credential-check endpoint for the智能机器人 long-connection
+    // mode — verification falls back to process health (+ #34 later).
+  },
+
+  slack: {
+    component: 'slack',
+    pm2Service: 'zylos-slack',
+    buildConfig(config) {
+      const c = config || {};
+      return {
+        env: { SLACK_BOT_TOKEN: c.bot_token ?? '', SLACK_APP_TOKEN: c.app_token ?? '' },
+        configJson: { enabled: true, connection_mode: 'socket' },
+      };
+    },
+    // Two tokens, two checks: bot token via auth.test, app-level token via
+    // apps.connections.open (the Socket Mode capability the component needs).
+    async probe(c, { fetchDep, timeoutMs }) {
+      const bot = await probeFetch(fetchDep, 'https://slack.com/api/auth.test', {
+        method: 'POST', headers: { Authorization: `Bearer ${c.bot_token}` },
+      }, timeoutMs);
+      if (bot.json && bot.json.ok === false) {
+        return { ok: false, detail: `bot token rejected (${bot.json.error})` };
+      }
+      if (bot.json?.ok !== true) throw inconclusive(`unexpected auth.test response (http ${bot.status})`);
+      const app = await probeFetch(fetchDep, 'https://slack.com/api/apps.connections.open', {
+        method: 'POST', headers: { Authorization: `Bearer ${c.app_token}` },
+      }, timeoutMs);
+      if (app.json && app.json.ok === false) {
+        return { ok: false, detail: `app-level token rejected (${app.json.error})` };
+      }
+      if (app.json?.ok !== true) throw inconclusive(`unexpected connections.open response (http ${app.status})`);
+      return { ok: true };
+    },
+  },
+
+  discord: {
+    component: 'discord',
+    pm2Service: 'zylos-discord',
+    buildConfig(config) {
+      const c = config || {};
+      return {
+        env: { DISCORD_BOT_TOKEN: c.bot_token ?? '' },
+        configJson: { enabled: true },
+      };
+    },
+    async probe(c, { fetchDep, timeoutMs }) {
+      const { status } = await probeFetch(fetchDep, 'https://discord.com/api/v10/users/@me', {
+        headers: { Authorization: `Bot ${c.bot_token}` },
+      }, timeoutMs);
+      if (status === 200) return { ok: true };
+      if (status === 401 || status === 403) return { ok: false, detail: `bot token rejected (http ${status})` };
+      throw inconclusive(`unexpected response (http ${status})`);
+    },
+  },
+
+  zalo: {
+    // Bot Platform only (decision D-4); zalo-personal is out of scope.
+    component: 'zalo',
+    pm2Service: 'zylos-zalo',
+    buildConfig(config) {
+      const c = config || {};
+      return {
+        env: { ZALO_BOT_TOKEN: c.bot_token ?? '' },
+        configJson: { enabled: true },
+      };
+    },
+    // Same /bot{token}/{method} shape as telegram (zylos-zalo src/lib/api.js).
+    async probe(c, { fetchDep, timeoutMs }) {
+      const { status, json } = await probeFetch(
+        fetchDep, `https://bot-api.zaloplatforms.com/bot${c.bot_token}/getMe`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+        timeoutMs,
+      );
+      if (json?.ok === true) return { ok: true };
+      if (json && json.ok === false) return { ok: false, detail: `bot token rejected (${json.error_code ?? status})` };
+      throw inconclusive(`unexpected response (http ${status})`);
+    },
+  },
+
+  line: {
+    // Webhook-inbound channel: the user pastes the webhook URL into the LINE
+    // console and manages public ingress themselves (decision D-2). Credential
+    // write + outbound send need no ingress.
+    component: 'line',
+    pm2Service: 'zylos-line',
+    buildConfig(config) {
+      const c = config || {};
+      return {
+        env: {
+          LINE_CHANNEL_ACCESS_TOKEN: c.channel_access_token ?? '',
+          LINE_CHANNEL_SECRET: c.channel_secret ?? '',
+        },
+        configJson: { enabled: true },
+      };
+    },
+    async probe(c, { fetchDep, timeoutMs }) {
+      const { status } = await probeFetch(fetchDep, 'https://api.line.me/v2/bot/info', {
+        headers: { Authorization: `Bearer ${c.channel_access_token}` },
+      }, timeoutMs);
+      if (status === 200) return { ok: true };
+      if (status === 401 || status === 403) return { ok: false, detail: `channel access token rejected (http ${status})` };
+      throw inconclusive(`unexpected response (http ${status})`);
+    },
+  },
+
+  // cws-connect channel_type uses underscores; the component name is hyphenated.
+  whatsapp_business: {
+    component: 'whatsapp-business',
+    pm2Service: 'zylos-whatsapp-business',
+    buildConfig(config) {
+      const c = config || {};
+      const env = {
+        WAB_PHONE_NUMBER_ID: c.phone_number_id ?? '',
+        WAB_ACCESS_TOKEN: c.access_token ?? '',
+        WAB_APP_SECRET: c.app_secret ?? '',
+        WAB_VERIFY_TOKEN: c.verify_token ?? '',
+      };
+      if (c.waba_id) env.WAB_WABA_ID = c.waba_id; // optional field
+      return { env, configJson: { enabled: true } };
+    },
+    // v21.0 mirrors the component's default WAB_GRAPH_VERSION.
+    async probe(c, { fetchDep, timeoutMs }) {
+      const { status, json } = await probeFetch(
+        fetchDep, `https://graph.facebook.com/v21.0/${encodeURIComponent(c.phone_number_id)}?fields=id`,
+        { headers: { Authorization: `Bearer ${c.access_token}` } },
+        timeoutMs,
+      );
+      if (status === 200) return { ok: true };
+      if (json?.error) return { ok: false, detail: `graph API rejected (code ${json.error.code ?? status})` };
+      throw inconclusive(`unexpected response (http ${status})`);
+    },
+  },
+
+  ms_teams: {
+    component: 'ms-teams',
+    pm2Service: 'zylos-ms-teams',
+    buildConfig(config) {
+      const c = config || {};
+      const env = {
+        MSTEAMS_APP_ID: c.app_id ?? '',
+        MSTEAMS_APP_PASSWORD: c.app_password ?? '',
+        MSTEAMS_TENANT_ID: c.tenant_id ?? '',
+      };
+      if (c.app_catalog_id) env.MSTEAMS_APP_CATALOG_ID = c.app_catalog_id; // optional field
+      return { env, configJson: { enabled: true } };
+    },
+    // AAD client-credentials grant for the Bot Framework scope — validates
+    // app_id/app_password/tenant_id in one shot.
+    async probe(c, { fetchDep, timeoutMs }) {
+      const body = new URLSearchParams({
+        grant_type: 'client_credentials',
+        client_id: c.app_id ?? '',
+        client_secret: c.app_password ?? '',
+        scope: 'https://api.botframework.com/.default',
+      });
+      const { status, json } = await probeFetch(
+        fetchDep, `https://login.microsoftonline.com/${encodeURIComponent(c.tenant_id ?? '')}/oauth2/v2.0/token`,
+        { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() },
+        timeoutMs,
+      );
+      if (json?.access_token) return { ok: true };
+      if (status === 400 || status === 401) {
+        return { ok: false, detail: `AAD rejected app credentials (${json?.error ?? status})` };
+      }
+      throw inconclusive(`unexpected response (http ${status})`);
     },
   },
 };
@@ -173,6 +481,7 @@ async function defaultVerify(spec, { execFile, timeoutMs = VERIFY_TIMEOUT_MS, po
  * @param {function} [deps.writeConfig] (component, patch) => void
  * @param {(spec) => Promise<boolean>} [deps.verifyConnected]  connect verification
  * @param {(result) => Promise<void>} [deps.reportResult]  connect-result callback
+ * @param {function} [deps.fetchDep]  fetch used by credential probes
  * @param {function} [deps.log] @param {function} [deps.warn]
  * @param {string}   [deps.home]
  * @returns {(orgConfig, frame) => Promise<void>} never throws
@@ -186,12 +495,14 @@ export function createChannelInstaller({
   writeConfig,
   verifyConnected,
   reportResult,
+  fetchDep = fetch,
   log = () => {},
   warn = () => {},
   home = HOME,
   installTimeoutMs = INSTALL_TIMEOUT_MS,
   queryTimeoutMs = QUERY_TIMEOUT_MS,
   verifyTimeoutMs = VERIFY_TIMEOUT_MS,
+  probeTimeoutMs = PROBE_TIMEOUT_MS,
 } = {}) {
   const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
   const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
@@ -249,6 +560,26 @@ export function createChannelInstaller({
 
   async function connectChannel(slug, spec, config, meta) {
     const built = spec.buildConfig(config);
+
+    // 0. one-shot credential probe against the IM API (fail fast, before any
+    //    install/restart side effects). Only a DEFINITIVE rejection fails the
+    //    connect; an unreachable API (throw) is inconclusive — the component
+    //    may reach it via its own proxy — so we log and proceed, falling back
+    //    to the process-health verification below.
+    if (spec.probe) {
+      let probed = null;
+      try {
+        probed = await spec.probe(config, { fetchDep, timeoutMs: probeTimeoutMs });
+      } catch (e) {
+        log(`[${slug}] credential probe inconclusive (${spec.component}): ${e.message} — proceeding`);
+      }
+      if (probed && probed.ok === false) {
+        warn(`[${slug}] credential probe rejected (${spec.component}): ${probed.detail}`);
+        await report(meta, 'error', `credential check failed: ${probed.detail}`);
+        return;
+      }
+      if (probed?.ok) log(`[${slug}] credential probe passed (${spec.component})`);
+    }
 
     // 1. install or upgrade (idempotent)
     try {
