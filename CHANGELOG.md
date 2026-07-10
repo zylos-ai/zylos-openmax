@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.4] — 2026-07-10
+
+### Fixed
+
+- **Channel connect no longer reports a false failure when the service start races `zylos add`'s own startup** (int E2E 2026-07-10: telegram binding went `error` while the component came up fine). A thrown pm2 start/restart now defers to the connect verification (process-health poll / QR flow) instead of failing the connect immediately; the receipt only reports `starting service failed: …` when the service truly never comes online.
+- **wechat QR login waits for the just-started component to become ready** (bounded 45s window) instead of crashing with `fetch failed` when the admin token file / HTTP listener hasn't appeared yet — this made the frontend show no QR at all on first connect.
+
+### Changed
+
+- **Failure receipts now carry a bounded, sanitized slice of the underlying error** (`install/upgrade failed: …`, `writing credentials failed: …`, `QR login flow failed: …`, `starting service failed: …`) — whitespace-collapsed, capped at 300 chars, with any credential values the flow handled masked out — so operators can diagnose from the binding row without shell access to the agent host.
+
 ## [2.8.3] — 2026-07-10
 
 ### Removed
