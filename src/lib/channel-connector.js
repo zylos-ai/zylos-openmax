@@ -74,6 +74,21 @@ const inconclusive = (detail) => {
   return e;
 };
 
+const DETAIL_MAX_CHARS = 300;
+
+// Failure receipts carry a bounded slice of the underlying error so operators
+// can diagnose from the binding row without shell access to the agent host.
+// Any secret VALUES this connect flow handled are masked defensively (shell
+// errors normally never echo env values, but the receipt leaves the host).
+function sanitizeDetail(message, secretValues = []) {
+  let s = String(message || '').replace(/\s+/g, ' ').trim();
+  for (const v of secretValues) {
+    const secret = String(v ?? '');
+    if (secret.length >= 6) s = s.split(secret).join('***');
+  }
+  return s.length > DETAIL_MAX_CHARS ? `${s.slice(0, DETAIL_MAX_CHARS - 3)}...` : s;
+}
+
 // Feishu/Lark share the tenant_access_token/internal shape, different domains.
 function larkStyleProbe(base) {
   return async (c, { fetchDep, timeoutMs }) => {
@@ -100,6 +115,13 @@ function larkStyleProbe(base) {
 
 const QR_LOGIN_TIMEOUT_MS = 270_000; // < the FE's 5-min connecting cap
 const QR_POLL_MS = 3_000;
+// A QR component is often pm2-started moments before the login flow runs: its
+// admin token file / HTTP listener / status file appear asynchronously. The
+// flow treats "not listening yet" as not-ready and retries within this window
+// instead of failing the connect (int E2E 2026-07-10: wechat QR never showed
+// because the first /login/start fired the same second the service started).
+const QR_READY_TIMEOUT_MS = 45_000;
+const QR_READY_POLL_MS = 2_000;
 
 // zylos-wechat: local admin HTTP (default 127.0.0.1:17605, Bearer token file at
 // <dataDir>/.admin-token). POST /v1/login/start → session (409 = an account is
@@ -109,16 +131,12 @@ const QR_POLL_MS = 3_000;
 export async function wechatQrLogin({
   fetchDep, fsDep = fs, home = HOME, onQr, log,
   timeoutMs = QR_LOGIN_TIMEOUT_MS, pollMs = QR_POLL_MS, sleepDep = sleep,
+  readyTimeoutMs = QR_READY_TIMEOUT_MS, readyPollMs = QR_READY_POLL_MS,
 }) {
   const base = 'http://127.0.0.1:17605';
   let token = '';
-  try {
-    token = String(fsDep.readFileSync(path.join(home, 'zylos/components/wechat/.admin-token'), 'utf8')).trim();
-  } catch {
-    return { status: 'error', detail: 'wechat admin token unavailable (component not ready)' };
-  }
-  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
   const call = async (method, p, body) => {
+    const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
     const resp = await fetchDep(`${base}${p}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
     const text = await resp.text();
     let json = null;
@@ -126,14 +144,29 @@ export async function wechatQrLogin({
     return { status: resp.status, json };
   };
 
-  const started = await call('POST', '/v1/login/start');
+  // Component-ready wait: a missing token file or an unreachable/not-yet-OK
+  // admin API right after pm2 start is "booting", not failure — retry within
+  // the bounded window. Only a response the component meaningfully produced
+  // (200 / 409) exits the loop.
+  const readyDeadline = Date.now() + readyTimeoutMs;
+  let started = null;
+  for (;;) {
+    try {
+      token = String(fsDep.readFileSync(path.join(home, 'zylos/components/wechat/.admin-token'), 'utf8')).trim();
+      if (token) started = await call('POST', '/v1/login/start');
+    } catch { started = null; }
+    if (started && (started.status === 409 || (started.status === 200 && started.json?.ok))) break;
+    if (Date.now() >= readyDeadline) {
+      if (started) return { status: 'error', detail: `wechat login start failed (http ${started.status})` };
+      return { status: 'error', detail: 'wechat admin token unavailable / login API unreachable (component not ready)' };
+    }
+    log('[wechat-qr] component not ready yet — retrying');
+    await sleepDep(readyPollMs);
+  }
   if (started.status === 409) {
     // An account already exists on this host — already logged in.
     log('[wechat-qr] account already present → connected');
     return { status: 'connected', detail: '' };
-  }
-  if (started.status !== 200 || !started.json?.ok) {
-    return { status: 'error', detail: `wechat login start failed (http ${started.status})` };
   }
   const sessionId = started.json.session?.sessionId;
 
@@ -667,6 +700,7 @@ export function createChannelInstaller({
   verifyTimeoutMs = VERIFY_TIMEOUT_MS,
   probeTimeoutMs = PROBE_TIMEOUT_MS,
   qrTimeoutMs = QR_LOGIN_TIMEOUT_MS,
+  qrReadyTimeoutMs = QR_READY_TIMEOUT_MS,
 } = {}) {
   const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
   const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
@@ -736,6 +770,9 @@ export function createChannelInstaller({
 
   async function connectChannel(slug, spec, config, meta) {
     const built = spec.buildConfig(config);
+    // Secret values this flow handles — masked out of any receipt detail.
+    const secretValues = Object.values(built.env || {});
+    const failDetail = (msg) => sanitizeDetail(msg, secretValues);
 
     // 0. one-shot credential probe against the IM API (fail fast, before any
     //    install/restart side effects). Only a DEFINITIVE rejection fails the
@@ -762,7 +799,7 @@ export function createChannelInstaller({
       await ensureInstalledOrUpgraded(slug, spec);
     } catch (e) {
       warn(`[${slug}] install/upgrade failed (${spec.component}): ${e.message}`);
-      await report(meta, 'error', 'install/upgrade failed');
+      await report(meta, 'error', failDetail(`install/upgrade failed: ${e.message}`));
       return;
     }
 
@@ -774,7 +811,7 @@ export function createChannelInstaller({
       }
     } catch (e) {
       warn(`[${slug}] writing .env failed (${spec.component}): ${e.message}`);
-      await report(meta, 'error', 'writing credentials failed');
+      await report(meta, 'error', failDetail(`writing credentials failed: ${e.message}`));
       return;
     }
 
@@ -786,18 +823,23 @@ export function createChannelInstaller({
       }
     } catch (e) {
       warn(`[${slug}] writing config.json failed (${spec.component}): ${e.message}`);
-      await report(meta, 'error', 'writing config failed');
+      await report(meta, 'error', failDetail(`writing config failed: ${e.message}`));
       return;
     }
 
-    // 4. start / restart so the component picks up the new credentials
+    // 4. start / restart so the component picks up the new credentials. A
+    //    thrown pm2 invocation is NOT terminal: `zylos add` may itself have
+    //    just registered/started the service, and the two racing pm2 calls
+    //    can crash the pm2 CLI transiently while the process still comes up
+    //    fine (int E2E 2026-07-10: telegram reported a false failure this
+    //    way). Record the error and let verification below decide.
+    let startError = null;
     try {
       await startOrRestartService(spec);
       log(`[${slug}] '${spec.component}' started (${spec.pm2Service})`);
     } catch (e) {
-      warn(`[${slug}] starting service failed (${spec.pm2Service}): ${e.message}`);
-      await report(meta, 'error', 'starting service failed');
-      return;
+      startError = e;
+      warn(`[${slug}] starting service failed (${spec.pm2Service}): ${e.message} — deferring to connect verification`);
     }
 
     // 5a. QR-login channels: run the interactive login flow — it relays each
@@ -813,10 +855,14 @@ export function createChannelInstaller({
           onQr: (qr) => relayQr(meta, qr),
           log: (m) => log(`[${slug}] ${m}`),
           timeoutMs: qrTimeoutMs,
+          readyTimeoutMs: qrReadyTimeoutMs,
         });
       } catch (e) {
         warn(`[${slug}] QR login flow crashed (${spec.component}): ${e.message}`);
-        res = { status: 'error', detail: 'QR login flow failed' };
+        res = { status: 'error', detail: failDetail(`QR login flow failed: ${e.message}`) };
+      }
+      if (res.status !== 'connected' && startError) {
+        res.detail = failDetail(`${res.detail || 'QR login failed'}; service start had failed: ${startError.message}`);
       }
       await report(meta, res.status === 'connected' ? 'connected' : 'error', res.detail || '');
       log(`[${slug}] connect ${spec.component} binding=${meta.bindingId} → ${res.status}`);
@@ -832,8 +878,12 @@ export function createChannelInstaller({
       ok = false;
     }
 
-    // 6. report the result back to cws-connect
-    await report(meta, ok ? 'connected' : 'error', ok ? '' : 'connect verification failed/timed out');
+    // 6. report the result back to cws-connect. If the service never came
+    //    online AND the start step had errored, the start error is the story.
+    const verifyFail = startError
+      ? failDetail(`starting service failed: ${startError.message}`)
+      : 'connect verification failed/timed out';
+    await report(meta, ok ? 'connected' : 'error', ok ? '' : verifyFail);
     log(`[${slug}] connect ${spec.component} binding=${meta.bindingId} → ${ok ? 'connected' : 'error'}`);
   }
 

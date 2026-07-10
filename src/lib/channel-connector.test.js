@@ -61,6 +61,8 @@ function makeConnector({
   dedupeSeen = false,
   verify = true,          // injected verifyConnected result
   fetchDep = fakeFetch(), // probe passes by default
+  pm2Fails = false,       // every pm2 invocation throws (restart AND start)
+  installFails = false,   // zylos add/upgrade throws
 } = {}) {
   const pulls = [];
   const execCalls = [];
@@ -81,6 +83,10 @@ function makeConnector({
     if (file === 'zylos' && args[0] === 'info') {
       if (installed) return { stdout: JSON.stringify({ name: args[1] }) };
       throw new Error('component not installed');
+    }
+    if (pm2Fails && file === 'pm2') throw new Error('[PM2][ERROR] Process 9 not found');
+    if (installFails && file === 'zylos' && (args[0] === 'add' || args[0] === 'upgrade')) {
+      throw new Error('npm install exited 1 (env echoed sekrit-value-42 by mistake)');
     }
     return { stdout: '' };
   };
@@ -168,6 +174,45 @@ test('connect: verification fails → reports error (not a false connected)', as
   assert.ok(h.execCalls.some((c) => c[1] === 'add'));
   assert.equal(h.reports.length, 1);
   assert.equal(h.reports[0].status, 'error');
+});
+
+test('connect: pm2 start throws but service comes online → connected (no false failure)', async () => {
+  // int E2E 2026-07-10: `zylos add` had already started the service; the
+  // connector's own pm2 start raced it and crashed, while the process was
+  // fine. The start error must defer to verification, not fail the connect.
+  const h = makeConnector({ installed: false, pm2Fails: true, verify: true });
+  await h.handle(ORG, frame({
+    channel_type: 'feishu', action: 'connect', binding_id: 'bind-race', request_id: 'req-race', credential_pull_token: 'tok-r',
+  }));
+  assert.equal(h.reports.length, 1);
+  assert.equal(h.reports[0].status, 'connected');
+  assert.ok(h.warns.some((w) => /starting service failed/.test(w) && /deferring to connect verification/.test(w)));
+});
+
+test('connect: pm2 start throws AND verification fails → error receipt carries the underlying start error', async () => {
+  const h = makeConnector({ installed: false, pm2Fails: true, verify: false });
+  await h.handle(ORG, frame({
+    channel_type: 'feishu', action: 'connect', binding_id: 'bind-race2', request_id: 'req-race2', credential_pull_token: 'tok-r2',
+  }));
+  assert.equal(h.reports.length, 1);
+  assert.equal(h.reports[0].status, 'error');
+  assert.match(h.reports[0].detail, /starting service failed: .*Process 9 not found/);
+});
+
+test('connect: install failure receipt carries the underlying error with secret values masked', async () => {
+  const h = makeConnector({
+    installed: true, installFails: true,
+    pullResp: { config: { app_id: 'aid', app_secret: 'sekrit-value-42' } },
+  });
+  await h.handle(ORG, frame({
+    channel_type: 'feishu', action: 'connect', binding_id: 'bind-inst', request_id: 'req-inst', credential_pull_token: 'tok-i',
+  }));
+  assert.equal(h.reports.length, 1);
+  assert.equal(h.reports[0].status, 'error');
+  assert.match(h.reports[0].detail, /install\/upgrade failed: npm install exited 1/);
+  // the pulled app_secret value must be masked out of the receipt
+  assert.ok(!h.reports[0].detail.includes('sekrit-value-42'), `secret leaked: ${h.reports[0].detail}`);
+  assert.ok(h.reports[0].detail.includes('***'));
 });
 
 test('disconnect: soft-disable (pm2 stop + enabled:false), keeps creds, NO uninstall', async () => {
@@ -537,9 +582,59 @@ test('wechatQrLogin: expired session → error; missing admin token → error', 
   const res2 = await wechatQrLogin({
     fetchDep, fsDep: { readFileSync: () => { throw new Error('ENOENT'); } }, home: '/h',
     onQr: () => {}, log: () => {}, timeoutMs: 1000, pollMs: 0, sleepDep: noSleep,
+    readyTimeoutMs: 0,
   });
   assert.equal(res2.status, 'error');
   assert.match(res2.detail, /admin token/);
+});
+
+test('wechatQrLogin: component booting (token missing, then API refused) → retries within ready window, then proceeds', async () => {
+  // Simulates connect right after pm2 start: .admin-token appears on the 2nd
+  // read, the admin HTTP starts answering on the 2nd /login/start attempt.
+  let tokenReads = 0;
+  let startCalls = 0;
+  let polls = 0;
+  const sessions = [
+    { state: 'qr_ready', sessionId: 's1', qrPngBase64: 'QRX' },
+    { state: 'confirmed', sessionId: 's1' },
+  ];
+  const fsDep = {
+    readFileSync: () => {
+      tokenReads += 1;
+      if (tokenReads < 2) throw new Error('ENOENT');
+      return 'tok-late\n';
+    },
+  };
+  const fetchDep = async (url) => {
+    if (url.endsWith('/v1/login/start')) {
+      startCalls += 1;
+      if (startCalls < 2) throw new Error('fetch failed'); // ECONNREFUSED while booting
+      return { status: 200, text: async () => JSON.stringify({ ok: true, session: { sessionId: 's1' } }) };
+    }
+    if (url.endsWith('/v1/login/session')) {
+      return { status: 200, text: async () => JSON.stringify({ ok: true, session: sessions[Math.min(polls++, 1)] }) };
+    }
+    if (url.endsWith('/v1/login/finalize')) return { status: 200, text: async () => JSON.stringify({ ok: true }) };
+    return { status: 404, text: async () => '{}' };
+  };
+  const qrs = [];
+  const res = await wechatQrLogin({
+    fetchDep, fsDep, home: '/h', onQr: (q) => qrs.push(q), log: () => {},
+    timeoutMs: 10_000, pollMs: 0, sleepDep: noSleep, readyTimeoutMs: 10_000, readyPollMs: 0,
+  });
+  assert.deepEqual(res, { status: 'connected', detail: '' });
+  assert.deepEqual(qrs, ['QRX']);
+  assert.ok(tokenReads >= 2 && startCalls >= 2);
+});
+
+test('wechatQrLogin: component never comes up within ready window → clean not-ready error (no crash)', async () => {
+  const fetchDep = async () => { throw new Error('fetch failed'); };
+  const res = await wechatQrLogin({
+    fetchDep, fsDep: { readFileSync: () => 'tok\n' }, home: '/h', onQr: () => {}, log: () => {},
+    timeoutMs: 1000, pollMs: 0, sleepDep: noSleep, readyTimeoutMs: 0,
+  });
+  assert.equal(res.status, 'error');
+  assert.match(res.detail, /not ready/);
 });
 
 test('whatsappQrLogin: qr_waiting relays qr.png as base64 (rotation re-relays) → open → connected', async () => {
@@ -609,6 +704,7 @@ test('connect wechat (QR): skips credential pull, installs + starts, QR relayed 
     reportQR: async (r) => qrReports.push(r),
     fetchDep,
     home: '/nonexistent-home',
+    qrReadyTimeoutMs: 0, // token file never appears — fail fast in tests
     log: () => {}, warn: () => {},
   });
   await handle(ORG, frame({
