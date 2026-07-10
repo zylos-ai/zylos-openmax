@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.1] — 2026-07-10
+
+### Added
+
+- **Channel connector: 10 more credential channels.** `CHANNEL_COMPONENT` now covers all non-QR channels — lark, telegram, dingtalk, wecom, slack, discord, zalo (Tier A outbound) and line, whatsapp_business, ms_teams (webhook-inbound; public ingress is user-managed). Each entry maps the cws-connect catalog form fields to the component's env contract (verified against every component's config loader) plus its `enabled`/mode config.json flags. Underscore channel_types (`ms_teams`, `whatsapp_business`) translate to the hyphenated component names here — no backend rename.
+- **One-shot credential probes (deep-verify).** Before any install/restart side effects, `connect` validates the submitted credentials directly against the IM platform (telegram/zalo `getMe`, feishu/lark `tenant_access_token`, dingtalk v1.0 `accessToken`, slack `auth.test` + `apps.connections.open`, discord `/users/@me`, line `/v2/bot/info`, WhatsApp Business Graph lookup, ms_teams AAD client-credentials grant). A definitive rejection reports `error` (`credential check failed: …`, secret-free detail) without touching the installed component; an unreachable API is treated as inconclusive (components may use their own proxy) and connect proceeds with the process-health fallback. wecom has no public check endpoint and skips the probe.
+
+### Notes
+
+- wechat / whatsapp (QR-login channels) remain unsupported by this path — they need the QR-relay flow (batch 2).
+- Probe timeout is 8s; probes never log URLs, bodies, or credential values.
+
 ## [2.8.0] — 2026-07-10
 
 ### Added
