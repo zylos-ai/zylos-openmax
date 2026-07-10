@@ -5,6 +5,7 @@ import {
   normalizeAction,
   CHANNEL_COMPONENT,
   createChannelInstaller,
+  defaultVerify,
 } from './channel-connector.js';
 
 const apiPath = (p) => `/api/v1${p}`;
@@ -59,10 +60,14 @@ function makeConnector({
   pullResp = { config: { app_id: 'aid', app_secret: 'asec' } },
   installed = false,      // whether `zylos info` reports the component installed
   dedupeSeen = false,
-  verify = true,          // injected verifyConnected result
+  verify = true,          // injected verifyConnected result; 'default' → use the real defaultVerify
   fetchDep = fakeFetch(), // probe passes by default
   pm2Fails = false,       // every pm2 invocation throws (restart AND start)
   installFails = false,   // zylos add/upgrade throws
+  stateFs,                // fs used by defaultVerify to read connection-state.json
+  pm2Online = false,      // pm2 jlist reports the service online (defaultVerify fallback)
+  pm2OnlineName = 'zylos-feishu',
+  verifyTimeoutMs = 60_000,
 } = {}) {
   const pulls = [];
   const execCalls = [];
@@ -85,6 +90,9 @@ function makeConnector({
       throw new Error('component not installed');
     }
     if (pm2Fails && file === 'pm2') throw new Error('[PM2][ERROR] Process 9 not found');
+    if (file === 'pm2' && args[0] === 'jlist') {
+      return { stdout: JSON.stringify(pm2Online ? [{ name: pm2OnlineName, pm2_env: { status: 'online' } }] : []) };
+    }
     if (installFails && file === 'zylos' && (args[0] === 'add' || args[0] === 'upgrade')) {
       throw new Error('npm install exited 1 (env echoed sekrit-value-42 by mistake)');
     }
@@ -98,9 +106,13 @@ function makeConnector({
     execFile,
     writeEnv: (vars) => envWrites.push(vars),
     writeConfig: (component, patch) => configWrites.push({ component, patch }),
-    verifyConnected: async () => verify,
+    verifyConnected: verify === 'default' ? undefined : (async () => verify),
     reportResult: async (r) => reports.push(r),
     fetchDep: async (url, opts) => { fetches.push({ url, opts }); return fetchDep(url, opts); },
+    fsDep: stateFs,
+    home: '/h',
+    verifyTimeoutMs,
+    verifyPollMs: 0,
     log: (m) => logs.push(m),
     warn: (m) => warns.push(m),
   });
@@ -197,6 +209,125 @@ test('connect: pm2 start throws AND verification fails → error receipt carries
   assert.equal(h.reports.length, 1);
   assert.equal(h.reports[0].status, 'error');
   assert.match(h.reports[0].detail, /starting service failed: .*Process 9 not found/);
+});
+
+// ── #34: component-reported connection state (defaultVerify) ────────────────
+
+// fs stub whose connection-state.json for <component> returns `body`
+// (a string is returned raw so unparseable files can be simulated).
+function stateFsFor(component, body) {
+  return {
+    readFileSync: (p) => {
+      if (String(p).endsWith(`components/${component}/runtime/connection-state.json`)) {
+        return typeof body === 'string' ? body : JSON.stringify(body);
+      }
+      throw new Error('ENOENT');
+    },
+  };
+}
+
+test('connect (default verify): fresh connection-state "connected" → connected receipt, no pm2 fallback needed', async () => {
+  const h = makeConnector({
+    verify: 'default',
+    stateFs: stateFsFor('feishu', { state: 'connected', updatedAt: new Date().toISOString() }),
+  });
+  await h.handle(ORG, frame({
+    channel_type: 'feishu', action: 'connect', binding_id: 'bind-cs1', request_id: 'r', credential_pull_token: 't',
+  }));
+  assert.equal(h.reports.length, 1);
+  assert.equal(h.reports[0].status, 'connected');
+  assert.ok(!h.execCalls.some((c) => c[0] === 'pm2' && c[1] === 'jlist')); // state file was authoritative
+});
+
+test('connect (default verify): fresh "auth_failed" → error receipt with component detail, resolves immediately (no timeout wait)', async () => {
+  const h = makeConnector({
+    verify: 'default',
+    pullResp: { config: { bot_id: 'b', bot_secret: 's' } },
+    stateFs: stateFsFor('wecom', {
+      state: 'auth_failed', detail: 'code 301002: invalid bot secret', updatedAt: new Date().toISOString(),
+    }),
+    verifyTimeoutMs: 60_000, // a poll-to-deadline would hang far past the assertion below
+  });
+  const t0 = Date.now();
+  await h.handle(ORG, frame({
+    channel_type: 'wecom', action: 'connect', binding_id: 'bind-cs2', request_id: 'r', credential_pull_token: 't',
+  }));
+  assert.ok(Date.now() - t0 < 5_000, 'auth_failed must resolve without waiting out the verify timeout');
+  assert.equal(h.reports.length, 1);
+  assert.equal(h.reports[0].status, 'error');
+  assert.match(h.reports[0].detail, /component reports auth failed: code 301002: invalid bot secret/);
+});
+
+test('connect (default verify): STALE connection-state file → pm2-online fallback → connected (pre-#34 behavior)', async () => {
+  const h = makeConnector({
+    verify: 'default',
+    stateFs: stateFsFor('feishu', {
+      state: 'auth_failed', detail: 'old news',
+      updatedAt: new Date(Date.now() - 3_600_000).toISOString(), // 1h old > 10min freshness window
+    }),
+    pm2Online: true,
+  });
+  await h.handle(ORG, frame({
+    channel_type: 'feishu', action: 'connect', binding_id: 'bind-cs3', request_id: 'r', credential_pull_token: 't',
+  }));
+  assert.equal(h.reports[0].status, 'connected');
+  assert.ok(h.execCalls.some((c) => c[0] === 'pm2' && c[1] === 'jlist'));
+});
+
+test('connect (default verify): NO connection-state file → pm2-online fallback → connected; pm2 offline → generic timeout error', async () => {
+  const h = makeConnector({ verify: 'default', pm2Online: true }); // real fs + home=/h → no state file
+  await h.handle(ORG, frame({
+    channel_type: 'feishu', action: 'connect', binding_id: 'bind-cs4', request_id: 'r', credential_pull_token: 't',
+  }));
+  assert.equal(h.reports[0].status, 'connected');
+
+  const h2 = makeConnector({ verify: 'default', pm2Online: false, verifyTimeoutMs: 20 });
+  await h2.handle(ORG, frame({
+    channel_type: 'feishu', action: 'connect', binding_id: 'bind-cs5', request_id: 'r', credential_pull_token: 't',
+  }));
+  assert.equal(h2.reports[0].status, 'error');
+  assert.equal(h2.reports[0].detail, 'connect verification failed/timed out');
+});
+
+test('connect: injected verify returning an OBJECT ({ok:false, detail}) feeds the receipt detail', async () => {
+  const h = makeConnector({ verify: { ok: false, detail: 'custom verify detail' } });
+  await h.handle(ORG, frame({
+    channel_type: 'feishu', action: 'connect', binding_id: 'bind-cs6', request_id: 'r', credential_pull_token: 't',
+  }));
+  assert.equal(h.reports[0].status, 'error');
+  assert.equal(h.reports[0].detail, 'custom verify detail');
+});
+
+test('defaultVerify: "connecting" that never progresses → deadline error naming the never-connected state (+ last detail)', async () => {
+  const res = await defaultVerify(
+    { component: 'wecom', pm2Service: 'zylos-wecom' },
+    {
+      execFile: async () => ({ stdout: '[]' }),
+      fsDep: stateFsFor('wecom', { state: 'connecting', detail: 'ws dialing', updatedAt: new Date().toISOString() }),
+      home: '/h', timeoutMs: 20, pollMs: 0, sleepDep: async () => {},
+    },
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.detail, /component never reached connected state \(ws dialing\)/);
+});
+
+test('defaultVerify: unparseable / missing-updatedAt state file → pm2 fallback for that tick', async () => {
+  for (const body of ['{not json', { state: 'auth_failed', detail: 'no timestamp' }]) {
+    const jlists = [];
+    const res = await defaultVerify(
+      { component: 'wecom', pm2Service: 'zylos-wecom' },
+      {
+        execFile: async (file, args) => {
+          jlists.push([file, ...args]);
+          return { stdout: JSON.stringify([{ name: 'zylos-wecom', pm2_env: { status: 'online' } }]) };
+        },
+        fsDep: stateFsFor('wecom', body),
+        home: '/h', timeoutMs: 1_000, pollMs: 0, sleepDep: async () => {},
+      },
+    );
+    assert.deepEqual(res, { ok: true, detail: '' });
+    assert.deepEqual(jlists[0], ['pm2', 'jlist']);
+  }
 });
 
 test('connect: install failure receipt carries the underlying error with secret values masked', async () => {

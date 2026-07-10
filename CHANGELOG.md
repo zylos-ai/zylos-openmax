@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.5] — 2026-07-10
+
+### Changed
+
+- **Channel-connect verification now consumes the component's REAL login state (#34).** A channel component may report its connection state by atomically writing `~/zylos/components/<component>/runtime/connection-state.json` with `{ "state": "connected" | "auth_failed" | "connecting" | "disconnected", "detail": "<short human reason, optional>", "updatedAt": "<ISO8601>" }` on every connection-state transition. The connect verification poll treats a **fresh** file (`updatedAt` ≤ 10 minutes old) as authoritative: `connected` resolves the binding as connected, `auth_failed` fails it **immediately** with the component-reported detail in the receipt (no more waiting out the verify timeout on bad credentials), and `connecting`/`disconnected` keep polling until the deadline (`component never reached connected state`). A stale, absent, or unparseable file falls back to the previous pm2-online process-health check for that tick, so components that don't write the file behave exactly as before. Fixes the incident where garbage wecom credentials still produced a `connected` binding because only pm2 process health was checked.
+- `defaultVerify` now returns `{ ok, detail }` and the component-reported detail feeds the failure receipt (composing with a start error when both exist); injected `verifyConnected` deps that return a plain boolean are still accepted and normalized.
+
 ## [2.8.4] — 2026-07-10
 
 ### Fixed
