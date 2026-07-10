@@ -150,12 +150,6 @@ export const DEFAULT_CONFIG = {
   // block to override any of these fields; if absent, the hardcoded defaults
   // apply. Keeping these out of DEFAULT_CONFIG means operator-edited config.json
   // files don't need to mention them at all.
-  //
-  // `message.enforceSkillFlow` (boolean, default TRUE) — when on, every inbound
-  // envelope leads with a <openmax> directive telling the agent to load
-  // the openmax skill and run its task flow before handling (enforcement
-  // L1, see SKILL_FLOW_DIRECTIVE in src/lib/message.js). Set to false to suppress
-  // the injected directive (e.g. a bot that never runs the openmax skill).
 };
 
 let currentConfig = null;
