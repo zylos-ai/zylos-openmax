@@ -802,6 +802,28 @@ test('whatsappQrLogin: never reaches open before deadline → timeout error', as
   assert.match(res.detail, /timed out/);
 });
 
+test('whatsappQrLogin: reads the component\'s REAL `state` key (int E2E regression: `.status`-only reads relayed zero QRs)', async () => {
+  const qrs = [];
+  let poll = 0;
+  // zylos-whatsapp actually writes { state: ... } — this is the shape from the
+  // live incident (binding 80b45491): qr_waiting with rotating qr.png.
+  const states = ['connecting', 'qr_waiting', 'open'];
+  const fsDep = {
+    readFileSync: (p) => {
+      if (String(p).endsWith('status.json')) {
+        return JSON.stringify({ state: states[Math.min(poll++, states.length - 1)], updatedAt: 'x' });
+      }
+      return Buffer.from('PNG-REAL');
+    },
+  };
+  const res = await whatsappQrLogin({
+    fsDep, home: '/h', onQr: (q) => qrs.push(q), log: () => {},
+    timeoutMs: 10_000, pollMs: 0, sleepDep: noSleep,
+  });
+  assert.deepEqual(res, { status: 'connected', detail: '' });
+  assert.deepEqual(qrs, [Buffer.from('PNG-REAL').toString('base64')]); // QR actually relayed
+});
+
 test('connect wechat (QR): skips credential pull, installs + starts, QR relayed via reportQR, terminal receipt from flow', async () => {
   const h = makeConnector();
   const qrReports = [];
