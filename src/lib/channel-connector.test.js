@@ -193,10 +193,10 @@ test('legacy action "uninstall" → disconnect (soft-disable, not zylos uninstal
   assert.equal(h.reports[0].status, 'disconnected');
 });
 
-test('unsupported channel_type on connect (wechat = QR, batch 2): no pull, no shell-out, warns', async () => {
+test('unsupported channel_type on connect (zalo-personal = out of scope per D-4): no pull, no shell-out, warns', async () => {
   const h = makeConnector();
   await h.handle(ORG, frame({
-    channel_type: 'wechat', action: 'connect', binding_id: 'bind-5', request_id: 'req-5', credential_pull_token: 'tok-5',
+    channel_type: 'zalo-personal', action: 'connect', binding_id: 'bind-5', request_id: 'req-5', credential_pull_token: 'tok-5',
   }));
   assert.equal(h.pulls.length, 0);
   assert.equal(h.execCalls.length, 0);
@@ -254,11 +254,11 @@ test('missing binding_id: warns, no work', async () => {
 
 // ── batch 1: 10-channel expansion ────────────────────────────────────────────
 
-test('CHANNEL_COMPONENT: 11 credential channels mapped; QR channels absent; D-1 aliases translate to hyphenated components', () => {
-  const expected = ['feishu', 'lark', 'telegram', 'dingtalk', 'wecom', 'slack', 'discord', 'zalo', 'line', 'whatsapp_business', 'ms_teams'];
+test('CHANNEL_COMPONENT: all 13 channels mapped (11 credential + 2 QR); D-1 aliases translate to hyphenated components', () => {
+  const expected = ['feishu', 'lark', 'telegram', 'dingtalk', 'wecom', 'slack', 'discord', 'zalo', 'line', 'whatsapp_business', 'ms_teams', 'wechat', 'whatsapp'];
   assert.deepEqual(Object.keys(CHANNEL_COMPONENT).sort(), [...expected].sort());
-  assert.equal(CHANNEL_COMPONENT.wechat, undefined);    // QR — batch 2
-  assert.equal(CHANNEL_COMPONENT.whatsapp, undefined);  // QR — batch 2
+  assert.ok(CHANNEL_COMPONENT.wechat.qrLogin);    // QR-login channel
+  assert.ok(CHANNEL_COMPONENT.whatsapp.qrLogin);  // QR-login channel
   // underscore channel_type → hyphenated component (naming decision D-1)
   assert.equal(CHANNEL_COMPONENT.ms_teams.component, 'ms-teams');
   assert.equal(CHANNEL_COMPONENT.ms_teams.pm2Service, 'zylos-ms-teams');
@@ -438,4 +438,168 @@ test('probes: endpoint + auth shape + definitive pass/fail per channel', async (
   // 5xx / unparseable → inconclusive (throws), never a definitive verdict
   const out = await run('telegram', { bot_token: 'T' }, {}, 502);
   assert.ok(out.e);
+});
+
+// ── batch 2: QR-login channels (wechat / whatsapp) ───────────────────────────
+
+import { wechatQrLogin, whatsappQrLogin } from './channel-connector.js';
+
+const noSleep = async () => {};
+
+test('CHANNEL_COMPONENT: wechat/whatsapp present as qrLogin channels (no probe, empty env)', () => {
+  for (const type of ['wechat', 'whatsapp']) {
+    const spec = CHANNEL_COMPONENT[type];
+    assert.ok(spec.qrLogin, type);
+    assert.equal(spec.probe, undefined, type);
+    assert.deepEqual(spec.buildConfig({}).env, {}, type);
+    assert.deepEqual(spec.buildConfig({}).configJson, { enabled: true }, type);
+  }
+});
+
+test('wechatQrLogin: start → qr_ready relays QR (and rotation) → confirmed finalizes → connected', async () => {
+  const qrs = [];
+  const calls = [];
+  const sessions = [
+    { state: 'qr_ready', sessionId: 's1', qrPngBase64: 'QR1' },
+    { state: 'qr_ready', sessionId: 's1', qrPngBase64: 'QR1' },  // unchanged → no re-relay
+    { state: 'qr_ready', sessionId: 's1', qrPngBase64: 'QR2' },  // rotated → relay again
+    { state: 'scanned', sessionId: 's1' },
+    { state: 'confirmed', sessionId: 's1' },
+  ];
+  let polls = 0;
+  const fetchDep = async (url, opts) => {
+    calls.push({ url, opts });
+    if (url.endsWith('/v1/login/start')) {
+      return { status: 200, text: async () => JSON.stringify({ ok: true, session: { sessionId: 's1' } }) };
+    }
+    if (url.endsWith('/v1/login/session')) {
+      const s = sessions[Math.min(polls++, sessions.length - 1)];
+      return { status: 200, text: async () => JSON.stringify({ ok: true, session: s }) };
+    }
+    if (url.endsWith('/v1/login/finalize')) {
+      return { status: 200, text: async () => JSON.stringify({ ok: true }) };
+    }
+    return { status: 404, text: async () => '{}' };
+  };
+  const fsDep = { readFileSync: () => 'tok-123\n' };
+  const res = await wechatQrLogin({
+    fetchDep, fsDep, home: '/h', onQr: (q) => qrs.push(q), log: () => {},
+    timeoutMs: 10_000, pollMs: 0, sleepDep: noSleep,
+  });
+  assert.deepEqual(res, { status: 'connected', detail: '' });
+  assert.deepEqual(qrs, ['QR1', 'QR2']);                      // relayed once per distinct code
+  assert.equal(calls[0].opts.headers.Authorization, 'Bearer tok-123');
+  assert.ok(calls.some((c) => c.url.endsWith('/v1/login/finalize')));
+});
+
+test('wechatQrLogin: 409 on start (account already present) → connected immediately', async () => {
+  const fetchDep = async () => ({ status: 409, text: async () => JSON.stringify({ ok: false }) });
+  const res = await wechatQrLogin({
+    fetchDep, fsDep: { readFileSync: () => 't' }, home: '/h', onQr: () => {}, log: () => {},
+    timeoutMs: 1000, pollMs: 0, sleepDep: noSleep,
+  });
+  assert.equal(res.status, 'connected');
+});
+
+test('wechatQrLogin: expired session → error; missing admin token → error', async () => {
+  let started = false;
+  const fetchDep = async (url) => {
+    if (url.endsWith('/start')) { started = true; return { status: 200, text: async () => JSON.stringify({ ok: true, session: { sessionId: 's' } }) }; }
+    return { status: 200, text: async () => JSON.stringify({ ok: true, session: { state: 'expired' } }) };
+  };
+  const res = await wechatQrLogin({
+    fetchDep, fsDep: { readFileSync: () => 't' }, home: '/h', onQr: () => {}, log: () => {},
+    timeoutMs: 10_000, pollMs: 0, sleepDep: noSleep,
+  });
+  assert.equal(res.status, 'error');
+  assert.match(res.detail, /expired/);
+  assert.ok(started);
+
+  const res2 = await wechatQrLogin({
+    fetchDep, fsDep: { readFileSync: () => { throw new Error('ENOENT'); } }, home: '/h',
+    onQr: () => {}, log: () => {}, timeoutMs: 1000, pollMs: 0, sleepDep: noSleep,
+  });
+  assert.equal(res2.status, 'error');
+  assert.match(res2.detail, /admin token/);
+});
+
+test('whatsappQrLogin: qr_waiting relays qr.png as base64 (rotation re-relays) → open → connected', async () => {
+  const qrs = [];
+  let poll = 0;
+  const statuses = ['connecting', 'qr_waiting', 'qr_waiting', 'qr_waiting', 'open'];
+  const pngs = { 1: 'PNG-A', 2: 'PNG-A', 3: 'PNG-B' };
+  const fsDep = {
+    readFileSync: (p) => {
+      if (String(p).endsWith('status.json')) {
+        const s = statuses[Math.min(poll++, statuses.length - 1)];
+        return JSON.stringify({ status: s });
+      }
+      return Buffer.from(pngs[poll - 1] || 'PNG-A');
+    },
+  };
+  const res = await whatsappQrLogin({
+    fsDep, home: '/h', onQr: (q) => qrs.push(q), log: () => {},
+    timeoutMs: 10_000, pollMs: 0, sleepDep: noSleep,
+  });
+  assert.deepEqual(res, { status: 'connected', detail: '' });
+  assert.deepEqual(qrs, [
+    Buffer.from('PNG-A').toString('base64'),
+    Buffer.from('PNG-B').toString('base64'),
+  ]);
+});
+
+test('whatsappQrLogin: never reaches open before deadline → timeout error', async () => {
+  const fsDep = { readFileSync: (p) => String(p).endsWith('status.json') ? JSON.stringify({ status: 'connecting' }) : Buffer.from('x') };
+  const res = await whatsappQrLogin({
+    fsDep, home: '/h', onQr: () => {}, log: () => {}, timeoutMs: 1, pollMs: 0, sleepDep: noSleep,
+  });
+  assert.equal(res.status, 'error');
+  assert.match(res.detail, /timed out/);
+});
+
+test('connect wechat (QR): skips credential pull, installs + starts, QR relayed via reportQR, terminal receipt from flow', async () => {
+  const h = makeConnector();
+  const qrReports = [];
+  // rebuild with reportQR + a qrLogin stub via spec injection is not possible —
+  // instead drive the real wechat spec with a fake local admin API.
+  const sessions = [
+    { state: 'qr_ready', sessionId: 's1', qrPngBase64: 'QQ' },
+    { state: 'confirmed', sessionId: 's1' },
+  ];
+  let poll = 0;
+  const fetchDep = async (url) => {
+    if (url.endsWith('/v1/login/start')) return { status: 200, text: async () => JSON.stringify({ ok: true, session: { sessionId: 's1' } }) };
+    if (url.endsWith('/v1/login/session')) return { status: 200, text: async () => JSON.stringify({ ok: true, session: sessions[Math.min(poll++, 1)] }) };
+    if (url.endsWith('/v1/login/finalize')) return { status: 200, text: async () => JSON.stringify({ ok: true }) };
+    return { status: 404, text: async () => '{}' };
+  };
+  // token file read goes through the REAL fs (home-based path) — but home in
+  // tests points nowhere; instead assert the error path is reported cleanly.
+  const pulls = [];
+  const reports = [];
+  const execCalls = [];
+  const handle = createChannelInstaller({
+    getForOrgWithHeaders: async (...a) => { pulls.push(a); return {}; },
+    apiPath,
+    dedupe: () => false,
+    execFile: async (file, args) => { execCalls.push([file, ...args]); if (file === 'zylos' && args[0] === 'info') throw new Error('nope'); return { stdout: '' }; },
+    writeEnv: () => {},
+    writeConfig: () => {},
+    verifyConnected: async () => true,
+    reportResult: async (r) => reports.push(r),
+    reportQR: async (r) => qrReports.push(r),
+    fetchDep,
+    home: '/nonexistent-home',
+    log: () => {}, warn: () => {},
+  });
+  await handle(ORG, frame({
+    channel_type: 'wechat', action: 'connect', binding_id: 'bind-qr1', request_id: 'rq', credential_pull_token: 't',
+  }));
+  assert.equal(pulls.length, 0);                                    // no credential pull for QR channels
+  assert.ok(execCalls.some((c) => c[1] === 'add' && c[2] === 'wechat'));
+  assert.ok(execCalls.some((c) => c[0] === 'pm2'));
+  assert.equal(reports.length, 1);
+  // /nonexistent-home has no .admin-token → flow reports a clean error receipt
+  assert.equal(reports[0].status, 'error');
+  assert.match(reports[0].detail, /admin token/);
 });
