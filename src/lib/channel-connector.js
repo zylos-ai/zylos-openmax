@@ -357,8 +357,7 @@ export const CHANNEL_COMPONENT = {
       };
     },
     // No public credential-check endpoint for the智能机器人 long-connection
-    // mode — verification relies on the component-reported connection-state
-    // file (#34; zylos-wecom writes it), with process health as the fallback.
+    // mode — verification falls back to process health (+ #34 later).
   },
 
   slack: {
@@ -646,87 +645,29 @@ function defaultWriteConfig(component, patch, { home = HOME, fsDep = fs } = {}) 
   fsDep.renameSync(tmp, cfgPath);
 }
 
-// Component-reported connection state (zylos-openmax#34). A channel component
-// MAY write <home>/zylos/components/<component>/runtime/connection-state.json:
-//   { "state": "connected"|"auth_failed"|"connecting"|"disconnected",
-//     "detail": "<short human reason, optional>", "updatedAt": "<ISO8601>" }
-// on every connection-state transition (atomic tmp+rename write). The file is
-// authoritative only while fresh (updatedAt ≤ 10 min old); stale / absent /
-// unparseable → the caller falls back to the pm2 process-health check, so
-// channels that don't write the file keep today's behavior unchanged.
-const CONNECTION_STATE_MAX_AGE_MS = 600_000;
-
-function readConnectionState(component, { fsDep = fs, home = HOME, maxAgeMs = CONNECTION_STATE_MAX_AGE_MS } = {}) {
-  try {
-    const p = path.join(home, 'zylos/components', component, 'runtime/connection-state.json');
-    const parsed = JSON.parse(fsDep.readFileSync(p, 'utf8'));
-    const updatedAt = Date.parse(parsed?.updatedAt);
-    if (!Number.isFinite(updatedAt) || Date.now() - updatedAt > maxAgeMs) return null; // stale
-    const state = String(parsed?.state || '');
-    if (!state) return null;
-    return { state, detail: typeof parsed.detail === 'string' ? parsed.detail : '' };
-  } catch {
-    return null; // absent / unreadable / unparseable
-  }
-}
-
 /**
- * Default connect verification: bounded poll of the component's REAL login
- * state. Each tick, prefer the component-reported connection-state file
- * (authoritative while fresh — see readConnectionState):
- *   connected   → { ok: true }
- *   auth_failed → { ok: false, detail } IMMEDIATELY (waiting can't fix creds)
- *   connecting / disconnected → keep polling until the deadline
- * No fresh file → fall back to the pm2 `online` process-health check for that
- * tick (components that don't report state keep the pre-#34 behavior, where
- * wrong credentials could still surface as "connected").
- * Returns { ok, detail } — detail is only set for component-reported failures;
- * an empty detail lets the caller supply its generic timeout message.
+ * Default connect verification: bounded poll that the pm2 service reaches
+ * `online`. NOTE: this is a PROCESS-HEALTH check only — it does NOT confirm the
+ * IM side (e.g. the Feishu websocket handshake / bot login) actually succeeded,
+ * so wrong credentials can still surface as "connected". A real readiness
+ * signal from the component (ws-connected marker) should replace this; tracked
+ * in zylos-openmax#34. Returns true if online within the timeout, else false.
  */
-export async function defaultVerify(spec, {
-  execFile,
-  timeoutMs = VERIFY_TIMEOUT_MS,
-  pollMs = VERIFY_POLL_MS,
-  fsDep = fs,
-  home = HOME,
-  stateMaxAgeMs = CONNECTION_STATE_MAX_AGE_MS,
-  sleepDep = sleep,
-} = {}) {
+async function defaultVerify(spec, { execFile, timeoutMs = VERIFY_TIMEOUT_MS, pollMs = VERIFY_POLL_MS } = {}) {
   const deadline = Date.now() + timeoutMs;
-  let sawState = false;
-  let lastDetail = '';
   for (;;) {
-    const cs = readConnectionState(spec.component, { fsDep, home, maxAgeMs: stateMaxAgeMs });
-    if (cs) {
-      sawState = true;
-      if (cs.detail) lastDetail = cs.detail;
-      if (cs.state === 'connected') return { ok: true, detail: '' };
-      if (cs.state === 'auth_failed') {
-        return { ok: false, detail: `component reports auth failed${cs.detail ? `: ${cs.detail}` : ''}` };
+    let online = false;
+    try {
+      const { stdout } = await execFile('pm2', ['jlist']);
+      const procs = JSON.parse(String(stdout));
+      if (Array.isArray(procs)) {
+        const p = procs.find((x) => x?.name === spec.pm2Service);
+        online = p?.pm2_env?.status === 'online';
       }
-      // connecting / disconnected (or unknown state): keep polling until deadline
-    } else {
-      // No fresh component-reported state → pm2 process-health fallback.
-      let online = false;
-      try {
-        const { stdout } = await execFile('pm2', ['jlist']);
-        const procs = JSON.parse(String(stdout));
-        if (Array.isArray(procs)) {
-          const p = procs.find((x) => x?.name === spec.pm2Service);
-          online = p?.pm2_env?.status === 'online';
-        }
-      } catch { /* pm2 unavailable — retry until deadline */ }
-      if (online) return { ok: true, detail: '' };
-    }
-    if (Date.now() >= deadline) {
-      return {
-        ok: false,
-        detail: sawState
-          ? `component never reached connected state${lastDetail ? ` (${lastDetail})` : ''}`
-          : '', // pm2-fallback timeout → caller's generic message
-      };
-    }
-    await sleepDep(pollMs);
+    } catch { /* pm2 unavailable — retry until deadline */ }
+    if (online) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(pollMs);
   }
 }
 
@@ -740,7 +681,7 @@ export async function defaultVerify(spec, {
  * @param {function} [deps.execFile]  promisified (file, args, opts) => {stdout}
  * @param {function} [deps.writeEnv]  (vars) => void
  * @param {function} [deps.writeConfig] (component, patch) => void
- * @param {(spec) => Promise<boolean|{ok:boolean,detail?:string}>} [deps.verifyConnected]  connect verification (booleans are normalized to {ok})
+ * @param {(spec) => Promise<boolean>} [deps.verifyConnected]  connect verification
  * @param {(result) => Promise<void>} [deps.reportResult]  connect-result callback
  * @param {function} [deps.fetchDep]  fetch used by credential probes
  * @param {function} [deps.log] @param {function} [deps.warn]
@@ -758,22 +699,19 @@ export function createChannelInstaller({
   reportResult,
   reportQR,
   fetchDep = fetch,
-  fsDep = fs,
   log = () => {},
   warn = () => {},
   home = HOME,
   installTimeoutMs = INSTALL_TIMEOUT_MS,
   queryTimeoutMs = QUERY_TIMEOUT_MS,
   verifyTimeoutMs = VERIFY_TIMEOUT_MS,
-  verifyPollMs = VERIFY_POLL_MS,
   probeTimeoutMs = PROBE_TIMEOUT_MS,
   qrTimeoutMs = QR_LOGIN_TIMEOUT_MS,
   qrReadyTimeoutMs = QR_READY_TIMEOUT_MS,
 } = {}) {
   const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
   const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
-  const doVerify = verifyConnected
-    || ((spec) => defaultVerify(spec, { execFile, timeoutMs: verifyTimeoutMs, pollMs: verifyPollMs, fsDep, home }));
+  const doVerify = verifyConnected || ((spec) => defaultVerify(spec, { execFile, timeoutMs: verifyTimeoutMs }));
   // Default connect-result callback: log-only fallback used by tests / when no
   // reporter is injected. In production comm-bridge.js injects the real
   // reportResult that POSTs to cws-core's
@@ -938,29 +876,20 @@ export function createChannelInstaller({
       return;
     }
 
-    // 5. verify the component actually connected (bounded). An injected verify
-    //    may return a plain boolean (legacy contract) — normalize to {ok,detail}.
-    let verifyRes = { ok: false, detail: '' };
+    // 5. verify the component actually connected (bounded)
+    let ok = false;
     try {
-      const raw = await doVerify(spec);
-      verifyRes = typeof raw === 'boolean' ? { ok: raw, detail: '' } : (raw || { ok: false, detail: '' });
+      ok = await doVerify(spec);
     } catch (e) {
       warn(`[${slug}] connect verification errored (${spec.component}): ${e.message}`);
-      verifyRes = { ok: false, detail: '' };
+      ok = false;
     }
-    const ok = verifyRes.ok === true;
 
-    // 6. report the result back to cws-connect. A component-reported verify
-    //    detail (e.g. "component reports auth failed: ...") takes precedence
-    //    over the generic message and composes with the start error if both
-    //    exist; otherwise a failed start is the story.
-    const failParts = [];
-    if (!ok) {
-      if (verifyRes.detail) failParts.push(verifyRes.detail);
-      if (startError) failParts.push(`starting service failed: ${startError.message}`);
-      if (!failParts.length) failParts.push('connect verification failed/timed out');
-    }
-    const verifyFail = failDetail(failParts.join('; '));
+    // 6. report the result back to cws-connect. If the service never came
+    //    online AND the start step had errored, the start error is the story.
+    const verifyFail = startError
+      ? failDetail(`starting service failed: ${startError.message}`)
+      : 'connect verification failed/timed out';
     await report(meta, ok ? 'connected' : 'error', ok ? '' : verifyFail);
     log(`[${slug}] connect ${spec.component} binding=${meta.bindingId} → ${ok ? 'connected' : 'error'}`);
   }
