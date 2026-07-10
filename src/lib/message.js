@@ -33,17 +33,6 @@ import { randomUUID } from 'crypto';
 const TYPE_TAG = { dm: '[COCO DM]', group: '[COCO GROUP]', thread: '[COCO THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
 
-// Forced skill-flow directive, appended INSIDE the <current-message> block right
-// after the user's words when `enforceSkillFlow` is on
-// (config.message.enforceSkillFlow, default true). Placed post-user-content
-// (not as a leading namespace-style tag) on purpose: recency + co-location with
-// the actual ask maximize the chance the agent acts on it, whereas a leading
-// `<openmax>` envelope tends to be read as ignorable metadata and skipped.
-// The rule travels with the component: upgrade openmax → every inbound
-// human task is forced through the skill flow, with no per-bot instruction edits.
-const SKILL_FLOW_DIRECTIVE =
-`[SYSTEM · DO FIRST] If the above is a task from a human (do-it-for-me / review / analyze / develop / integrate / research — anything that produces a deliverable): you MUST follow the openmax skill — register Issue→Blueprint→Task and run the plan-confirmation flow before acting. Simple tasks use a one-step Blueprint; complex tasks use a multi-step / dependency Blueprint. Do NOT answer it as casual chat. Only pure Q&A / chit-chat may be answered directly. The skill is the source of truth.`;
-
 /**
  * Generate a client-side idempotency key for SendMessageRequest.client_msg_id.
  * The server de-dupes identical client_msg_id within 5 minutes (api-design.md §5.1).
@@ -177,7 +166,7 @@ function formatContextLine(m) {
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
   const rawType = (conv?.type || '').toLowerCase();
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
-  const { groupName, quotedContent, threadContext, threadRootId, smartHint, enforceSkillFlow, orgId, orgName } = opts;
+  const { groupName, quotedContent, threadContext, threadRootId, smartHint, orgId, orgName } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
   const safeName = escapeXml(name);
@@ -229,10 +218,7 @@ When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
     );
   }
 
-  // Append the skill-flow directive INSIDE current-message, right after the
-  // user's words (recency + can't be dismissed as envelope). enforceSkillFlow gates it.
-  const directiveSuffix = enforceSkillFlow ? `\n\n${SKILL_FLOW_DIRECTIVE}` : '';
-  parts.push(`<current-message>\n${safeName} said: ${safeContent}${directiveSuffix}\n</current-message>`);
+  parts.push(`<current-message>\n${safeName} said: ${safeContent}\n</current-message>`);
 
   let line = parts.join('');
   const kind = current.type === 'image' ? 'image' : 'file';

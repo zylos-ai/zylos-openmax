@@ -983,7 +983,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger) {
         mediaItems,
       },
       recent,
-      { groupName, smartHint, quotedContent, enforceSkillFlow: config.message?.enforceSkillFlow ?? true, orgId: orgConfig.org_id, orgName: orgConfig.org_name },
+      { groupName, smartHint, quotedContent, orgId: orgConfig.org_id, orgName: orgConfig.org_name },
     );
 
     try {
@@ -1355,7 +1355,7 @@ async function handleSystemEvent(orgConfig, frame) {
     { displayName: actorName },
     { content: notice, type: 'text' },
     [],
-    { enforceSkillFlow: false, orgId: orgConfig.org_id, orgName: orgConfig.org_name },
+    { orgId: orgConfig.org_id, orgName: orgConfig.org_name },
   );
   try {
     registerConvOrg(conversationId, orgConfig.org_id);
