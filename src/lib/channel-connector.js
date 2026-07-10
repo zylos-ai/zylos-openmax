@@ -90,6 +90,109 @@ function larkStyleProbe(base) {
   };
 }
 
+// ── QR-login flows (wechat / whatsapp) ───────────────────────────────────────
+//
+// QR channels have no credential form: the user scans a code the component
+// generates locally. The connect flow installs/starts the component, then runs
+// spec.qrLogin.run(...) which surfaces each fresh QR via onQr (relayed to the
+// frontend through cws-connect) and resolves { status:'connected'|'error',
+// detail } when the login reaches a terminal state or the deadline passes.
+
+const QR_LOGIN_TIMEOUT_MS = 270_000; // < the FE's 5-min connecting cap
+const QR_POLL_MS = 3_000;
+
+// zylos-wechat: local admin HTTP (default 127.0.0.1:17605, Bearer token file at
+// <dataDir>/.admin-token). POST /v1/login/start → session (409 = an account is
+// already logged in on this host). GET /v1/login/session → { state:
+// idle|qr_ready|scanned|confirmed|expired..., qrPngBase64 }. `confirmed` needs
+// POST /v1/login/finalize to persist the account.
+export async function wechatQrLogin({
+  fetchDep, fsDep = fs, home = HOME, onQr, log,
+  timeoutMs = QR_LOGIN_TIMEOUT_MS, pollMs = QR_POLL_MS, sleepDep = sleep,
+}) {
+  const base = 'http://127.0.0.1:17605';
+  let token = '';
+  try {
+    token = String(fsDep.readFileSync(path.join(home, 'zylos/components/wechat/.admin-token'), 'utf8')).trim();
+  } catch {
+    return { status: 'error', detail: 'wechat admin token unavailable (component not ready)' };
+  }
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const call = async (method, p, body) => {
+    const resp = await fetchDep(`${base}${p}`, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const text = await resp.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch { /* non-JSON */ }
+    return { status: resp.status, json };
+  };
+
+  const started = await call('POST', '/v1/login/start');
+  if (started.status === 409) {
+    // An account already exists on this host — already logged in.
+    log('[wechat-qr] account already present → connected');
+    return { status: 'connected', detail: '' };
+  }
+  if (started.status !== 200 || !started.json?.ok) {
+    return { status: 'error', detail: `wechat login start failed (http ${started.status})` };
+  }
+  const sessionId = started.json.session?.sessionId;
+
+  const deadline = Date.now() + timeoutMs;
+  let lastQr = '';
+  while (Date.now() < deadline) {
+    await sleepDep(pollMs);
+    let sess;
+    try { sess = (await call('GET', '/v1/login/session')).json?.session; } catch { continue; }
+    if (!sess) continue;
+    if (sess.state === 'qr_ready' && sess.qrPngBase64 && sess.qrPngBase64 !== lastQr) {
+      lastQr = sess.qrPngBase64;
+      await onQr(sess.qrPngBase64); // fresh (or rotated) code → relay
+    } else if (sess.state === 'confirmed') {
+      const fin = await call('POST', '/v1/login/finalize', { sessionId: sess.sessionId || sessionId });
+      if (fin.status === 200 && fin.json?.ok) return { status: 'connected', detail: '' };
+      return { status: 'error', detail: `wechat login finalize failed (${fin.json?.error?.code ?? fin.status})` };
+    } else if (sess.state === 'expired') {
+      return { status: 'error', detail: 'wechat login QR expired before scan' };
+    }
+    // idle / scanned / other intermediate states: keep polling
+  }
+  try { await call('POST', '/v1/login/cancel', { sessionId }); } catch { /* best-effort */ }
+  return { status: 'error', detail: 'wechat login timed out waiting for scan' };
+}
+
+// zylos-whatsapp (Baileys): writes <home>/zylos/components/whatsapp/status.json
+// ({ status: connecting|qr_waiting|open|disconnected }) and qr.png alongside.
+// `open` = logged in (a persisted session reconnects without a scan).
+export async function whatsappQrLogin({
+  fsDep = fs, home = HOME, onQr, log,
+  timeoutMs = QR_LOGIN_TIMEOUT_MS, pollMs = QR_POLL_MS, sleepDep = sleep,
+}) {
+  const dir = path.join(home, 'zylos/components/whatsapp');
+  const deadline = Date.now() + timeoutMs;
+  let lastQr = '';
+  while (Date.now() < deadline) {
+    await sleepDep(pollMs);
+    let status = '';
+    try { status = JSON.parse(fsDep.readFileSync(path.join(dir, 'status.json'), 'utf8'))?.status || ''; } catch { continue; }
+    if (status === 'open') {
+      log('[whatsapp-qr] session open → connected');
+      return { status: 'connected', detail: '' };
+    }
+    if (status === 'qr_waiting') {
+      try {
+        const png = fsDep.readFileSync(path.join(dir, 'qr.png'));
+        const b64 = Buffer.from(png).toString('base64');
+        if (b64 && b64 !== lastQr) {
+          lastQr = b64;
+          await onQr(b64); // fresh (or rotated) code → relay
+        }
+      } catch { /* qr.png being rewritten — next poll */ }
+    }
+    // connecting / disconnected: Baileys retries and regenerates — keep polling
+  }
+  return { status: 'error', detail: 'whatsapp login timed out waiting for scan' };
+}
+
 /**
  * channel_type → the zylos IM component that services it, plus the mapping from
  * the pulled credential config (a { key: value } map from cws-core, keyed by
@@ -112,8 +215,10 @@ function larkStyleProbe(base) {
  *                 case connect proceeds and falls back to process-health
  *                 verification. detail must NEVER contain secrets.
  *
- * wechat / whatsapp (QR-login, no credential form) are deliberately absent —
- * they need the QR-relay flow (batch 2), not this pull-creds→write-env path.
+ *   qrLogin     — QR-login channels (wechat / whatsapp) have no credential
+ *                 form: connect skips the credential pull, installs/starts the
+ *                 component, then runs qrLogin.run(...) which relays each QR
+ *                 via reportQR and resolves the terminal login state.
  */
 export const CHANNEL_COMPONENT = {
   feishu: {
@@ -378,6 +483,25 @@ export const CHANNEL_COMPONENT = {
       throw inconclusive(`unexpected response (http ${status})`);
     },
   },
+
+  // ── QR-login channels (no credential form; see qrLogin flows above) ────────
+  wechat: {
+    component: 'wechat',
+    pm2Service: 'zylos-wechat',
+    buildConfig() {
+      return { env: {}, configJson: { enabled: true } };
+    },
+    qrLogin: { run: wechatQrLogin },
+  },
+
+  whatsapp: {
+    component: 'whatsapp',
+    pm2Service: 'zylos-whatsapp',
+    buildConfig() {
+      return { env: {}, configJson: { enabled: true } };
+    },
+    qrLogin: { run: whatsappQrLogin },
+  },
 };
 
 /**
@@ -495,6 +619,7 @@ export function createChannelInstaller({
   writeConfig,
   verifyConnected,
   reportResult,
+  reportQR,
   fetchDep = fetch,
   log = () => {},
   warn = () => {},
@@ -503,6 +628,7 @@ export function createChannelInstaller({
   queryTimeoutMs = QUERY_TIMEOUT_MS,
   verifyTimeoutMs = VERIFY_TIMEOUT_MS,
   probeTimeoutMs = PROBE_TIMEOUT_MS,
+  qrTimeoutMs = QR_LOGIN_TIMEOUT_MS,
 } = {}) {
   const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
   const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
@@ -519,6 +645,18 @@ export function createChannelInstaller({
   const report = async (meta, status, detail = '') => {
     try { await doReport({ ...meta, status, detail }); }
     catch (e) { warn(`[${meta.slug}] connect-result report failed binding=${meta.bindingId}: ${e.message}`); }
+  };
+
+  // QR relay: production (comm-bridge.js) injects a reporter that POSTs to
+  // cws-core's /connect/channel-bindings/{binding_id}/qr passthrough. Default
+  // is log-only (never logs the QR payload itself). Best-effort — a failed QR
+  // relay must not kill the login flow (the code rotates; the next one retries).
+  const doReportQR = reportQR || (async (r) => {
+    log(`[connect-qr] binding=${r.bindingId} channel=${r.channelType} qr updated (${(r.qrPngBase64 || '').length}b64)`);
+  });
+  const relayQr = async (meta, qrPngBase64) => {
+    try { await doReportQR({ ...meta, qrPngBase64 }); }
+    catch (e) { warn(`[${meta.slug}] QR relay failed binding=${meta.bindingId}: ${e.message}`); }
   };
 
   async function isComponentInstalled(component) {
@@ -624,6 +762,29 @@ export function createChannelInstaller({
       return;
     }
 
+    // 5a. QR-login channels: run the interactive login flow — it relays each
+    //     fresh QR to the frontend and resolves the terminal login state
+    //     (already-logged-in resolves immediately). Replaces the plain
+    //     process-health verify.
+    if (spec.qrLogin) {
+      let res;
+      try {
+        res = await spec.qrLogin.run({
+          fetchDep,
+          home,
+          onQr: (qr) => relayQr(meta, qr),
+          log: (m) => log(`[${slug}] ${m}`),
+          timeoutMs: qrTimeoutMs,
+        });
+      } catch (e) {
+        warn(`[${slug}] QR login flow crashed (${spec.component}): ${e.message}`);
+        res = { status: 'error', detail: 'QR login flow failed' };
+      }
+      await report(meta, res.status === 'connected' ? 'connected' : 'error', res.detail || '');
+      log(`[${slug}] connect ${spec.component} binding=${meta.bindingId} → ${res.status}`);
+      return;
+    }
+
     // 5. verify the component actually connected (bounded)
     let ok = false;
     try {
@@ -700,6 +861,13 @@ export function createChannelInstaller({
         if (!spec) {
           warn(`[${slug}] channel_type '${channel_type}' not supported by openmax `
             + `(binding=${binding_id}) — skipping`);
+          return;
+        }
+
+        // QR-login channels have no credential form — skip the pull entirely.
+        if (spec.qrLogin) {
+          log(`[${slug}] channel connect ${channel_type} binding=${binding_id} (QR login)`);
+          await connectChannel(slug, spec, {}, meta);
           return;
         }
 

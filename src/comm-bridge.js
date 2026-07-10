@@ -1489,6 +1489,16 @@ const handleChannelCommand = createChannelInstaller({
       { status: r.status, detail: r.detail || '', request_id: r.requestId || '' },
     );
   },
+  // Relay a QR-login code (wechat/whatsapp) to the binding so the frontend can
+  // render it while the card is in the connecting state. Same auth model as
+  // /result (agent principal at cws-core + request_id one-shot at cws-connect).
+  reportQR: async (r) => {
+    await postForOrg(
+      r.orgId,
+      apiPath(`/connect/channel-bindings/${r.bindingId}/qr`),
+      { qr_png_base64: r.qrPngBase64, request_id: r.requestId || '' },
+    );
+  },
   log,
   warn,
 });

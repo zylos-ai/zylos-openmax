@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.2] — 2026-07-10
+
+### Added
+
+- **QR-login channels: wechat / whatsapp.** All 13 catalog channels are now connectable. QR channels skip the credential pull entirely: connect installs/starts the component, then drives the login — wechat via the local admin API (`/v1/login/start` → poll session → relay each `qr_ready` code → `finalize` on confirm; a 409 "account already exists" resolves as already-connected), whatsapp via the component's `status.json`/`qr.png` files (`qr_waiting` → relay, `open` → connected; a persisted session reconnects with no scan). Each fresh/rotated QR is relayed through the new `reportQR` callback → `POST /connect/channel-bindings/{binding_id}/qr` (cws-core passthrough) so the frontend renders it on the connecting card (D-3). Login window is 270s (inside the FE's 5-min cap); QR payloads are never logged.
+
 ## [2.8.1] — 2026-07-10
 
 ### Added
