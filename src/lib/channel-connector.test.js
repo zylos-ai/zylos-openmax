@@ -278,12 +278,15 @@ test('buildConfig: catalog form fields → component env contract, per channel',
       { WECOM_BOT_ID: 'b', WECOM_BOT_SECRET: 's' }, { enabled: true }],
     ['slack', { bot_token: 'xoxb-1', app_token: 'xapp-1' },
       { SLACK_BOT_TOKEN: 'xoxb-1', SLACK_APP_TOKEN: 'xapp-1' }, { enabled: true, connection_mode: 'socket' }],
+    // config-first loaders: fresh creds must land in config.json too, or a
+    // stale config value survives the upgrade and beats the new .env value.
     ['discord', { bot_token: 'd' },
-      { DISCORD_BOT_TOKEN: 'd' }, { enabled: true }],
+      { DISCORD_BOT_TOKEN: 'd' }, { enabled: true, botToken: 'd' }],
     ['zalo', { bot_token: 'z' },
-      { ZALO_BOT_TOKEN: 'z' }, { enabled: true }],
+      { ZALO_BOT_TOKEN: 'z' }, { enabled: true, botToken: 'z' }],
     ['line', { channel_access_token: 'cat', channel_secret: 'cs' },
-      { LINE_CHANNEL_ACCESS_TOKEN: 'cat', LINE_CHANNEL_SECRET: 'cs' }, { enabled: true }],
+      { LINE_CHANNEL_ACCESS_TOKEN: 'cat', LINE_CHANNEL_SECRET: 'cs' },
+      { enabled: true, channelAccessToken: 'cat', channelSecret: 'cs' }],
   ];
   for (const [type, config, env, configJson] of cases) {
     const built = CHANNEL_COMPONENT[type].buildConfig(config);
@@ -292,20 +295,36 @@ test('buildConfig: catalog form fields → component env contract, per channel',
   }
 });
 
-test('buildConfig optional fields: waba_id / app_catalog_id only written when present', () => {
+test('buildConfig optional fields: waba_id / app_catalog_id only written when present; config-first creds mirrored to config.json', () => {
   const wab = CHANNEL_COMPONENT.whatsapp_business;
   const base = { phone_number_id: 'p', access_token: 'a', app_secret: 's', verify_token: 'v' };
-  assert.deepEqual(wab.buildConfig(base).env, {
+  const wabBuilt = wab.buildConfig(base);
+  assert.deepEqual(wabBuilt.env, {
     WAB_PHONE_NUMBER_ID: 'p', WAB_ACCESS_TOKEN: 'a', WAB_APP_SECRET: 's', WAB_VERIFY_TOKEN: 'v',
   });
-  assert.equal(wab.buildConfig({ ...base, waba_id: 'w' }).env.WAB_WABA_ID, 'w');
+  // loader is config-first (cfg.credentials.*) → creds mirrored to config.json
+  assert.deepEqual(wabBuilt.configJson.credentials, {
+    phone_number_id: 'p', access_token: 'a', app_secret: 's', verify_token: 'v',
+  });
+  const wabOpt = wab.buildConfig({ ...base, waba_id: 'w' });
+  assert.equal(wabOpt.env.WAB_WABA_ID, 'w');
+  assert.equal(wabOpt.configJson.credentials.waba_id, 'w');
+  // omitted optional field must not linger in the replaced credentials object
+  assert.ok(!('waba_id' in wabBuilt.configJson.credentials));
 
   const teams = CHANNEL_COMPONENT.ms_teams;
   const tbase = { app_id: 'i', app_password: 'p', tenant_id: 't' };
-  assert.deepEqual(teams.buildConfig(tbase).env, {
+  const teamsBuilt = teams.buildConfig(tbase);
+  assert.deepEqual(teamsBuilt.env, {
     MSTEAMS_APP_ID: 'i', MSTEAMS_APP_PASSWORD: 'p', MSTEAMS_TENANT_ID: 't',
   });
-  assert.equal(teams.buildConfig({ ...tbase, app_catalog_id: 'c' }).env.MSTEAMS_APP_CATALOG_ID, 'c');
+  assert.deepEqual(teamsBuilt.configJson.credentials, {
+    appId: 'i', appPassword: 'p', tenantId: 't',
+  });
+  const teamsOpt = teams.buildConfig({ ...tbase, app_catalog_id: 'c' });
+  assert.equal(teamsOpt.env.MSTEAMS_APP_CATALOG_ID, 'c');
+  assert.equal(teamsOpt.configJson.teamsAppCatalogId, 'c'); // top-level key in that loader
+  assert.ok(!('teamsAppCatalogId' in teamsBuilt.configJson));
 });
 
 test('connect: probe definitively rejects creds → error receipt, NO install/restart side effects', async () => {

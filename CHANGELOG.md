@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.3] — 2026-07-10
+
+### Fixed
+
+- **Config-first loaders could keep stale credentials after connect.** Five components (discord, zalo, line, whatsapp-business, ms-teams) resolve credentials config-first (`config.json` value beats the env var), so writing fresh credentials only to `~/zylos/.env` left a previously-configured `config.json` credential in effect after the restart — the pre-restart credential probe (which validates the *submitted* values) plus pm2-online could then report a false `connected`. The connector now mirrors the submitted credentials into each component's canonical `config.json` keys (`botToken`; `channelAccessToken`/`channelSecret`; `credentials.*`; `teamsAppCatalogId`) alongside the env write, so the fresh submit always wins regardless of loader precedence. The env-first components (feishu, lark, telegram, dingtalk, wecom, slack) are unaffected.
+
 ## [2.8.2] — 2026-07-10
 
 ### Added

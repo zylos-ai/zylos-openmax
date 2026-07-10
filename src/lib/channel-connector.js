@@ -354,11 +354,14 @@ export const CHANNEL_COMPONENT = {
   discord: {
     component: 'discord',
     pm2Service: 'zylos-discord',
+    // zylos-discord's loader prefers config.json creds over env
+    // (cfg.botToken || DISCORD_BOT_TOKEN), so the fresh credential must be
+    // written to config.json too or a stale config value survives upgrades.
     buildConfig(config) {
       const c = config || {};
       return {
         env: { DISCORD_BOT_TOKEN: c.bot_token ?? '' },
-        configJson: { enabled: true },
+        configJson: { enabled: true, botToken: c.bot_token ?? '' },
       };
     },
     async probe(c, { fetchDep, timeoutMs }) {
@@ -375,11 +378,13 @@ export const CHANNEL_COMPONENT = {
     // Bot Platform only (decision D-4); zalo-personal is out of scope.
     component: 'zalo',
     pm2Service: 'zylos-zalo',
+    // config-first loader (config.botToken beats ZALO_BOT_TOKEN) — write the
+    // fresh credential to config.json too.
     buildConfig(config) {
       const c = config || {};
       return {
         env: { ZALO_BOT_TOKEN: c.bot_token ?? '' },
-        configJson: { enabled: true },
+        configJson: { enabled: true, botToken: c.bot_token ?? '' },
       };
     },
     // Same /bot{token}/{method} shape as telegram (zylos-zalo src/lib/api.js).
@@ -401,6 +406,8 @@ export const CHANNEL_COMPONENT = {
     // write + outbound send need no ingress.
     component: 'line',
     pm2Service: 'zylos-line',
+    // config-first loader (merged.channelAccessToken/channelSecret beat the
+    // env vars) — write the fresh credentials to config.json too.
     buildConfig(config) {
       const c = config || {};
       return {
@@ -408,7 +415,11 @@ export const CHANNEL_COMPONENT = {
           LINE_CHANNEL_ACCESS_TOKEN: c.channel_access_token ?? '',
           LINE_CHANNEL_SECRET: c.channel_secret ?? '',
         },
-        configJson: { enabled: true },
+        configJson: {
+          enabled: true,
+          channelAccessToken: c.channel_access_token ?? '',
+          channelSecret: c.channel_secret ?? '',
+        },
       };
     },
     async probe(c, { fetchDep, timeoutMs }) {
@@ -425,6 +436,10 @@ export const CHANNEL_COMPONENT = {
   whatsapp_business: {
     component: 'whatsapp-business',
     pm2Service: 'zylos-whatsapp-business',
+    // config-first loader (cfg.credentials.* beat the WAB_* env vars) — write
+    // the fresh credentials object to config.json too. The shallow merge
+    // replaces the whole credentials object, which is intended: every cred
+    // field comes from this submit (an omitted optional field is cleared).
     buildConfig(config) {
       const c = config || {};
       const env = {
@@ -433,8 +448,17 @@ export const CHANNEL_COMPONENT = {
         WAB_APP_SECRET: c.app_secret ?? '',
         WAB_VERIFY_TOKEN: c.verify_token ?? '',
       };
-      if (c.waba_id) env.WAB_WABA_ID = c.waba_id; // optional field
-      return { env, configJson: { enabled: true } };
+      const credentials = {
+        phone_number_id: c.phone_number_id ?? '',
+        access_token: c.access_token ?? '',
+        app_secret: c.app_secret ?? '',
+        verify_token: c.verify_token ?? '',
+      };
+      if (c.waba_id) { // optional field
+        env.WAB_WABA_ID = c.waba_id;
+        credentials.waba_id = c.waba_id;
+      }
+      return { env, configJson: { enabled: true, credentials } };
     },
     // v21.0 mirrors the component's default WAB_GRAPH_VERSION.
     async probe(c, { fetchDep, timeoutMs }) {
@@ -452,6 +476,9 @@ export const CHANNEL_COMPONENT = {
   ms_teams: {
     component: 'ms-teams',
     pm2Service: 'zylos-ms-teams',
+    // config-first loader (cfg.credentials.* beat the MSTEAMS_* env vars;
+    // teamsAppCatalogId is top-level) — write the fresh credentials to
+    // config.json too.
     buildConfig(config) {
       const c = config || {};
       const env = {
@@ -459,8 +486,19 @@ export const CHANNEL_COMPONENT = {
         MSTEAMS_APP_PASSWORD: c.app_password ?? '',
         MSTEAMS_TENANT_ID: c.tenant_id ?? '',
       };
-      if (c.app_catalog_id) env.MSTEAMS_APP_CATALOG_ID = c.app_catalog_id; // optional field
-      return { env, configJson: { enabled: true } };
+      const configJson = {
+        enabled: true,
+        credentials: {
+          appId: c.app_id ?? '',
+          appPassword: c.app_password ?? '',
+          tenantId: c.tenant_id ?? '',
+        },
+      };
+      if (c.app_catalog_id) { // optional field
+        env.MSTEAMS_APP_CATALOG_ID = c.app_catalog_id;
+        configJson.teamsAppCatalogId = c.app_catalog_id;
+      }
+      return { env, configJson };
     },
     // AAD client-credentials grant for the Bot Framework scope — validates
     // app_id/app_password/tenant_id in one shot.
