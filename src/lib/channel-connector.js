@@ -194,7 +194,11 @@ export async function wechatQrLogin({
 }
 
 // zylos-whatsapp (Baileys): writes <home>/zylos/components/whatsapp/status.json
-// ({ status: connecting|qr_waiting|open|disconnected }) and qr.png alongside.
+// and qr.png alongside. The component's file uses the key `state`
+// ({ state: connecting|qr_waiting|open|disconnected }); older docs said
+// `status`, so accept both — reading only `.status` made the flow blind to
+// `qr_waiting` and no QR was ever relayed (int E2E 2026-07-10, binding
+// 80b45491 timed out with zero QR relays while the component rotated codes).
 // `open` = logged in (a persisted session reconnects without a scan).
 export async function whatsappQrLogin({
   fsDep = fs, home = HOME, onQr, log,
@@ -206,7 +210,10 @@ export async function whatsappQrLogin({
   while (Date.now() < deadline) {
     await sleepDep(pollMs);
     let status = '';
-    try { status = JSON.parse(fsDep.readFileSync(path.join(dir, 'status.json'), 'utf8'))?.status || ''; } catch { continue; }
+    try {
+      const parsed = JSON.parse(fsDep.readFileSync(path.join(dir, 'status.json'), 'utf8'));
+      status = parsed?.state || parsed?.status || '';
+    } catch { continue; }
     if (status === 'open') {
       log('[whatsapp-qr] session open → connected');
       return { status: 'connected', detail: '' };

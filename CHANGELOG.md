@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.6] — 2026-07-10
+
+### Fixed
+
+- **whatsapp QR relay never fired**: `whatsappQrLogin` read `.status` from the component's `status.json`, but zylos-whatsapp writes `.state` — the flow was blind to `qr_waiting`, relayed zero QR codes, and every connect timed out ("whatsapp login timed out waiting for scan"). Now reads `state` with `status` fallback. Found live on int (binding 80b45491, 2026-07-10).
+
 ## [2.8.5] — 2026-07-10
 
 ### Changed
