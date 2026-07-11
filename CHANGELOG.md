@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.9] — 2026-07-11
+
+### Fixed
+
+- **`core.agent_domain` / `resolveAgentBaseUrl()` — malformed cws-core 200 responses now fail loudly instead of silently falling back to `AGENT_PUBLIC_BASE_URL`.** Two paths violated the documented "only a core 404 reaches the env tier" contract: (a) `resolveAgentIdentityId()` returned `''` when `GET /me` answered 200 without an `identity_id`, silently skipping the core domain tier entirely; (b) `resolveAgentBaseUrl()` treated a 200 from `GET /platform-agents/{identity_id}/domain` without `full_domain` as "no bound domain" and fell through to env. Both masked cws-core protocol corruption as a valid fallback — a stale env URL could keep receiving webhooks. Both cases now throw a descriptive protocol-violation `Error` (CLI: message on stderr, exit 1). **Breaking note:** callers that relied on the malformed-200 → env fallback now see an error; the env fallback remains ONLY for the 404 (no bound domain) case, and non-404 HTTP/network errors still propagate. Docs (`src/cli/core.js` usage/comments, `references/core-operations.md`) updated to the strict semantics; unit tests flipped from pinning the silent fallback to asserting the throw.
+
 ## [2.8.8] — 2026-07-11
 
 ### Added
