@@ -1,4 +1,10 @@
-const WORK_REFERENCE_RE = /\[([^\]]+)\]\(((proj|issue):\/\/([0-9a-fA-F-]{36}))\)|\b((proj|issue):\/\/([0-9a-fA-F-]{36}))\b/g;
+const UUID_PATTERN = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+const WORK_REFERENCE_RE = new RegExp(
+  `\\[([^\\]]+)\\]\\(((proj|issue):\\/\\/(${UUID_PATTERN}))\\)|\\b((proj|issue):\\/\\/(${UUID_PATTERN}))(?![\\w-])`,
+  'g',
+);
+
+export const MAX_WORK_REFERENCES = 10;
 
 function escapeXmlAttribute(value) {
   return String(value ?? '')
@@ -26,6 +32,7 @@ export function extractWorkReferences(text) {
         uri,
         label: match[1]?.replace(/^#/, '') || '',
       });
+      if (references.length === MAX_WORK_REFERENCES) break;
     }
     match = WORK_REFERENCE_RE.exec(text);
   }
@@ -34,7 +41,7 @@ export function extractWorkReferences(text) {
 
 export function formatWorkReferenceContext(references) {
   if (!Array.isArray(references) || references.length === 0) return '';
-  const items = references.map((reference) => {
+  const items = references.slice(0, MAX_WORK_REFERENCES).map((reference) => {
     const tag = reference.kind === 'project' ? 'project' : 'issue';
     const label = reference.label
       ? ` label="${escapeXmlAttribute(reference.label)}"`

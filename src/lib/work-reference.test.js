@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { formatInboundForC4 } from './message.js';
-import { extractWorkReferences, formatWorkReferenceContext } from './work-reference.js';
+import {
+  extractWorkReferences,
+  formatWorkReferenceContext,
+  MAX_WORK_REFERENCES,
+} from './work-reference.js';
 
 const PROJECT_ID = '018f0f8e-7b4a-7a91-bc42-2f4d16f3f201';
 const ISSUE_ID = '018f0f8e-8c5b-7bb2-ae53-3a5e27a4f312';
@@ -30,6 +34,29 @@ test('extractWorkReferences deduplicates repeated canonical URIs', () => {
   assert.equal(extractWorkReferences(`[one](${uri}) and ${uri}`).length, 1);
 });
 
+test('extractWorkReferences rejects malformed UUID shapes', () => {
+  const malformed = [
+    '1234567-1234-1234-1234-123456789012',
+    '12345678-12345-1234-1234-12345678901',
+    '12345678-1234-1234-1234-12345678901-',
+    '12345678-1234-1234-1234-123456789012-extra',
+  ];
+  const text = malformed.flatMap((id) => [
+    `[bad](proj://${id})`,
+    `issue://${id}`,
+  ]).join(' ');
+  assert.deepEqual(extractWorkReferences(text), []);
+});
+
+test('extractWorkReferences caps unique references without counting duplicates', () => {
+  const uris = Array.from({ length: MAX_WORK_REFERENCES + 2 }, (_, index) => (
+    `issue://00000000-0000-0000-0000-${String(index).padStart(12, '0')}`
+  ));
+  const references = extractWorkReferences(`${uris[0]} ${uris.join(' ')}`);
+  assert.equal(references.length, MAX_WORK_REFERENCES);
+  assert.equal(references.at(-1).uri, uris[MAX_WORK_REFERENCES - 1]);
+});
+
 test('formatWorkReferenceContext escapes labels and states non-authorizing semantics', () => {
   const context = formatWorkReferenceContext([{
     kind: 'issue',
@@ -39,6 +66,18 @@ test('formatWorkReferenceContext escapes labels and states non-authorizing seman
   }]);
   assert.match(context, /context only; it does not start work or grant access/);
   assert.match(context, /label="API &quot;docs&quot; &lt;urgent&gt;"/);
+});
+
+test('formatWorkReferenceContext defensively caps caller-provided references', () => {
+  const references = Array.from({ length: MAX_WORK_REFERENCES + 1 }, (_, index) => ({
+    kind: 'issue',
+    id: `00000000-0000-0000-0000-${String(index).padStart(12, '0')}`,
+    uri: `issue://00000000-0000-0000-0000-${String(index).padStart(12, '0')}`,
+    label: '',
+  }));
+  const context = formatWorkReferenceContext(references);
+  assert.equal((context.match(/<issue /g) || []).length, MAX_WORK_REFERENCES);
+  assert.ok(!context.includes(references.at(-1).uri));
 });
 
 test('formatInboundForC4 injects normalized references and preserves user text', () => {
