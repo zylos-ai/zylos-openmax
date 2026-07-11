@@ -29,6 +29,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import { extractWorkReferences, formatWorkReferenceContext } from './work-reference.js';
 
 const TYPE_TAG = { dm: '[COCO DM]', group: '[COCO GROUP]', thread: '[COCO THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
@@ -216,6 +217,13 @@ just casual chat, or doesn't need your input. Only reply when:
 When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
 </smart-mode>\n\n`,
     );
+  }
+
+  const workReferenceContext = formatWorkReferenceContext(
+    extractWorkReferences(current?.content ?? ''),
+  );
+  if (workReferenceContext) {
+    parts.push(`${workReferenceContext}\n\n`);
   }
 
   parts.push(`<current-message>\n${safeName} said: ${safeContent}\n</current-message>`);
