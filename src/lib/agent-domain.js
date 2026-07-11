@@ -8,10 +8,17 @@
  *   1. cws-core  — GET /api/v1/platform-agents/{identity_id}/domain returns the
  *      domain bound to this agent (`{full_domain, label, root_suffix}`).
  *      base_url = "https://" + full_domain.
- *   2. env       — if the agent has no bound domain (core 404), fall back to the
- *      AGENT_PUBLIC_BASE_URL environment variable.
+ *   2. env       — ONLY if the agent has no bound domain (core responds 404),
+ *      fall back to the AGENT_PUBLIC_BASE_URL environment variable.
  *
  * If neither yields a value → `{ ok:false, error }`.
+ *
+ * Strict semantics: the 404 is the ONE condition that reaches the env tier.
+ * Any other HTTP/network error propagates, and a malformed 200 (a /me response
+ * without identity_id, or a domain response without full_domain) throws a
+ * protocol-violation Error instead of silently falling back — a corrupt
+ * cws-core response must never be masked as "no bound domain", or a stale env
+ * URL could keep receiving webhooks.
  *
  * The reusable `resolveAgentBaseUrl()` takes injectable deps (get / apiPath /
  * env / config / identityId) so callers — the `core.agent_domain` CLI command,
@@ -42,7 +49,10 @@ export function normalizeBaseUrl(u) {
  * @param {object}   [deps.config]     pre-loaded config (else loadConfig())
  * @param {Function} [deps.getFn]      get(path) → response (else client.get)
  * @param {Function} [deps.apiPathFn]  apiPath(p) → prefixed path (else client.apiPath)
- * @returns {Promise<string>}          identity_id, or '' if unresolvable
+ * @returns {Promise<string>}          identity_id (never empty)
+ * @throws {Error} when /me succeeds (200) but carries no identity_id — a
+ *                 cws-core protocol violation that must fail loudly rather
+ *                 than silently skip the core domain tier.
  */
 export async function resolveAgentIdentityId(deps = {}) {
   const { config, getFn = get, apiPathFn = apiPath } = deps;
@@ -51,7 +61,13 @@ export async function resolveAgentIdentityId(deps = {}) {
   if (fromCfg) return String(fromCfg);
 
   const me = await getFn(apiPathFn('/me'));
-  return String(me?.identity_id || me?.identity?.id || '');
+  const id = me?.identity_id || me?.identity?.id;
+  if (!id) {
+    throw new Error(
+      'cws-core protocol violation: GET /me succeeded but returned no identity_id',
+    );
+  }
+  return String(id);
 }
 
 /**
@@ -68,6 +84,9 @@ export async function resolveAgentIdentityId(deps = {}) {
  *   { ok:true,  source:'env',  base_url:string } |
  *   { ok:false, error:string }
  * >}
+ * @throws {Error} on non-404 core errors and on malformed 200 responses
+ *                 (protocol violations) — see module doc; only a 404 reaches
+ *                 the env fallback.
  */
 export async function resolveAgentBaseUrl(deps = {}) {
   const {
@@ -85,20 +104,27 @@ export async function resolveAgentBaseUrl(deps = {}) {
     try {
       const domain = await getFn(apiPathFn(`/platform-agents/${identityId}/domain`));
       const fullDomain = domain?.full_domain;
-      if (fullDomain) {
-        return {
-          ok: true,
-          source: 'core',
-          full_domain: fullDomain,
-          label: domain.label,
-          root_suffix: domain.root_suffix,
-          base_url: normalizeBaseUrl(`https://${fullDomain}`),
-        };
+      if (!fullDomain) {
+        // A 200 MUST carry full_domain — "no bound domain" is signalled by a
+        // 404, never by an empty body. Fail loudly instead of silently
+        // falling back to a possibly-stale env URL.
+        throw new Error(
+          `cws-core protocol violation: GET /platform-agents/${identityId}/domain ` +
+          'succeeded but returned no full_domain',
+        );
       }
-      // A 200 without full_domain is treated like "no bound domain" → fall through.
+      return {
+        ok: true,
+        source: 'core',
+        full_domain: fullDomain,
+        label: domain.label,
+        root_suffix: domain.root_suffix,
+        base_url: normalizeBaseUrl(`https://${fullDomain}`),
+      };
     } catch (err) {
-      // Only a 404 (no bound domain) falls through to the env tier. Any other
-      // error (auth, 5xx, network) is a real failure and must propagate.
+      // ONLY a 404 (no bound domain) falls through to the env tier. Any other
+      // error (auth, 5xx, network, protocol violation) is a real failure and
+      // must propagate.
       if (err?.status !== 404) throw err;
     }
   }

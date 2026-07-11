@@ -88,15 +88,34 @@ test('non-404 core error propagates (not swallowed into env fallback)', async ()
   );
 });
 
-test('core 200 without full_domain falls through to env', async () => {
+test('core 200 without full_domain throws (protocol violation, no env fallback)', async () => {
   const getFn = async () => ({});
-  const out = await resolveAgentBaseUrl({
-    getFn,
-    apiPathFn,
-    identityId: ID,
-    env: { AGENT_PUBLIC_BASE_URL: 'https://fallback.example.com' },
-  });
-  assert.deepEqual(out, { ok: true, source: 'env', base_url: 'https://fallback.example.com' });
+  await assert.rejects(
+    () => resolveAgentBaseUrl({
+      getFn,
+      apiPathFn,
+      identityId: ID,
+      env: { AGENT_PUBLIC_BASE_URL: 'https://fallback.example.com' },
+    }),
+    /protocol violation.*no full_domain/,
+  );
+});
+
+test('GET /me 200 without identity_id throws (protocol violation, no env fallback)', async () => {
+  const getFn = async (path) => {
+    if (path === '/me') return { some: 'thing' }; // 200 but no identity_id
+    throw new Error('domain endpoint must not be reached');
+  };
+
+  await assert.rejects(
+    () => resolveAgentBaseUrl({
+      getFn,
+      apiPathFn,
+      config: { agent: {} },
+      env: { AGENT_PUBLIC_BASE_URL: 'https://fallback.example.com' },
+    }),
+    /protocol violation.*no identity_id/,
+  );
 });
 
 test('identity_id resolved from injected config when not passed directly', async () => {
