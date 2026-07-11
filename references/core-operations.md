@@ -9,6 +9,7 @@
 - 想拉同事进当前 org(`core.invitation_create` / `accept` / `revoke`)
 - 切到另一个 org 工作(`core.org_switch`)
 - 注册新平台 agent / 注销旧 agent(`core.platform_agent_create` / `delete`)
+- 需要本 agent 自己的公网域名(拼 webhook 回调,如 WAB/LINE/Teams)(`core.agent_domain`)
 - 查角色清单决定给新人配什么权限(`core.role_list`)
 
 **不在本文档范围**:
@@ -123,6 +124,7 @@ CLI 位置:`src/cli/core.js`
 | --- | --- | --- | --- | --- |
 | ✅ | `core.platform_agent_create` | 在当前 org 注册一个 agent member(机器人),返回 member_id | `{displayName, description?, metadata?}` | `POST /api/v1/platform-agents` |
 | ✅ | `core.platform_agent_delete` | 注销 agent member(同 DELETE /members,标 departed) | `{memberId}` | `DELETE /api/v1/platform-agents/{member_id}` |
+| ✅ | `core.agent_domain` | 解析**本 agent 自己**的公网 base URL(webhook 渠道如 WhatsApp Business / LINE / Teams 拼回调地址用)。两级:先查 cws-core 绑定域名,查不到回退环境变量 `AGENT_PUBLIC_BASE_URL` | `{}` | `GET /api/v1/platform-agents/{identity_id}/domain` |
 
 平台 agent = org-scope 的机器人成员行,跟 human member 一样占 `member_id`,可以被 `task.create` 派单 / 入会话 / 写 KB。
 

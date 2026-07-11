@@ -18,6 +18,7 @@
 
 import { get, post, del, patch, apiPath, frontendUrl } from '../lib/client.js';
 import { enabledOrgs, updateConfig } from '../lib/config.js';
+import { resolveAgentBaseUrl } from '../lib/agent-domain.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -70,9 +71,37 @@ async function selfRename(newName) {
   };
 }
 
+/**
+ * Thin CLI wrapper over resolveAgentBaseUrl() (src/lib/agent-domain.js).
+ * Resolves the agent's OWN public base URL for webhook-channel URL building:
+ *   1. cws-core bound domain → base_url = "https://" + full_domain
+ *   2. AGENT_PUBLIC_BASE_URL env fallback (agent has no bound domain / core 404)
+ *
+ * On a resolved URL it returns the payload (main() prints it, exit 0). When
+ * neither tier yields a URL it prints the `{ok:false,error}` shape and exits 1
+ * — signalling failure like every other core.js command, but preserving the
+ * structured result the resolver returns to library callers.
+ */
+async function agentDomainCommand() {
+  const result = await resolveAgentBaseUrl();
+  if (!result.ok) {
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(1);
+  }
+  return result;
+}
+
 const COMMANDS = {
   // ✅ Current user / workspace identity
   'core.me': () => get(apiPath('/me')),
+
+  // ✅ Self public base URL — resolve THIS agent's publicly-reachable base URL
+  // for webhook-channel URL construction (WhatsApp Business / LINE / Teams).
+  // Two-tier: (1) cws-core GET /platform-agents/{identity_id}/domain →
+  // {ok,source:"core",full_domain,label,root_suffix,base_url}; (2) on 404 fall
+  // back to AGENT_PUBLIC_BASE_URL → {ok,source:"env",base_url}; neither →
+  // {ok:false,error} + exit 1. See src/lib/agent-domain.js.
+  'core.agent_domain': () => agentDomainCommand(),
 
   // ✅ Rename self (display name). Updates cws-core identity via PATCH /me
   // (works for org-member agents — no admin needed) AND mirrors the new
@@ -228,6 +257,9 @@ Usage: node src/cli/core.js <command> '<json-params>'
 Identity
   core.me                  {}
   core.self_rename         {name}    # change own display_name (cws-core /me + local config self.name)
+  core.agent_domain        {}        # resolve own public base_url for webhook channels
+                           # (1) cws-core bound domain → base_url=https://<full_domain>
+                           # (2) fallback AGENT_PUBLIC_BASE_URL env; neither → {ok:false} exit 1
 
 Members (humans + agents in one directory)
   core.member_list         {kind?, status?, search?, page?, pageSize?, orderBy?}

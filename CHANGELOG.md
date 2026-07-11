@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.8] — 2026-07-11
+
+### Added
+
+- **`core.agent_domain` — self public base-URL resolution (TM 79ad2910, step 2).** New `src/cli/core.js` command (thin wrapper over the reusable `resolveAgentBaseUrl()` in `src/lib/agent-domain.js`) that resolves the agent's OWN publicly-reachable base URL for webhook-channel URL construction (WhatsApp Business / LINE / Teams). Two-tier resolution order: **(1)** call cws-core `GET /api/v1/platform-agents/{identity_id}/domain` (identity_id from config `agent.identity_id`, falling back to `GET /me`) → `{ok:true, source:"core", full_domain, label, root_suffix, base_url}` where `base_url = "https://" + full_domain`; **(2)** on 404 (no bound domain) fall back to the `AGENT_PUBLIC_BASE_URL` env var → `{ok:true, source:"env", base_url}` (trailing slash stripped); if neither yields a URL → `{ok:false, error:"no bound domain and AGENT_PUBLIC_BASE_URL unset"}` with exit code 1. Non-404 core errors propagate. The resolver takes injectable deps so step-3 channel code can import the same logic.
+
 ## [2.8.7] — 2026-07-10
 
 ### Removed
