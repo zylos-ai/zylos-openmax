@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.10] — 2026-07-12
+
 ### Added
 
-- Parse canonical `proj://<uuid>` and `issue://<uuid>` references from inbound messages into a normalized `<work-references>` prompt block. References establish context only: they do not grant access, start work, or imply creation of a new Issue. The OpenMax skill now resolves referenced objects with the agent's own Principal and reuses an existing Issue instead of duplicating it.
+- Parse canonical `proj://<uuid>` and `issue://<uuid>` references from inbound messages into a normalized `<work-references>` prompt block. References establish context only: they do not grant access, start work, or imply creation of a new Issue. The OpenMax skill now resolves referenced objects with the agent's own Principal and reuses an existing Issue instead of duplicating it. Canonical UUID shape is enforced and references are capped at 10 per message.
 
 ## [2.8.9] — 2026-07-11
 
