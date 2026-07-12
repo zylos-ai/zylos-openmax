@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.12] — 2026-07-12
+
+### Fixed
+
+- **Credit-arrears overdue gate now applies only to platform-managed agents — external / self-hosted agents are exempt.** The overdue gate was false-blocking EXTERNAL agents: credit-arrears enforcement is applied via billing → agent-manager → DisableApiKeys → gateway, which only affects platform-managed agents (they have an agent-manager runtime + gateway-managed LLM keys). External agents (self-hosted, bringing their own LLM key) have no agent-manager record, so the org-level `usage_snapshot.enforcement_suspended` flag can read true while their LLM still works — the gate would then drop their messages and send a spurious "out of credits" notice. `isOrgLLMSuspended` now resolves the agent's origin FIRST (via `GET /api/v1/members/{self.member_id}` → `agent_origin`, through the existing per-org authed cws-core client) and only proceeds to the plan-state / `enforcement_suspended` check when the origin is positively `platform_created`; `external_invited` or an unknown/unresolved origin returns "not suspended" immediately and skips the plan-state query entirely (fail-open — never false-blocks external or origin-unknown agents). Origin is immutable (set once at member creation) so it is cached PERMANENTLY per org_id; lookup errors / missing member_id / absent field are not cached and retry on the next message until a definitive value lands. The origin `/members` lookup is itself timeout-bounded (~800ms, raced, no retry, mirroring the plan-state deadline): a timeout is treated exactly like the unknown/error path — origin null, not cached, message allowed through and the plan-state query skipped (fail-open). The 800ms plan-state timeout and 30s plan-state cache for the `platform_created` path are unchanged.
+
 ## [2.8.11] — 2026-07-12
 
 ### Added
