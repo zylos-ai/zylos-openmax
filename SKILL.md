@@ -541,4 +541,4 @@ You can generate it in one step with the CLI: `node src/cli/core.js core.fronten
 | **Comm** | IM that the Agent **proactively initiates**: conversation/message/unread/WS sync/KB page search | proactively DM a colleague, create a group, search a page in a targeted way, WS reconnect to fill gaps | `references/comm-operations.md` |
 | **Core** | Identity + member/project/role/invitation directory queries + org switching + platform agent lifecycle | `core.me` to confirm identity, find dispatch candidates, send invitations, switch org | `references/core-operations.md` |
 
-The top of each Layer 3 doc has its own four-part summary of `Purpose` / `When to load this doc` / `Out of scope for this doc` / `Prerequisites`; after loading it into memory, first scan this section to confirm it is the one you want, then read on to the command list.
+The top of each Layer 3 doc has its own four-part summary of `Purpose` / `When to load this document` / `Out of scope for this document` / `Prerequisites`; after loading it into memory, first scan this section to confirm it is the one you want, then read on to the command list.
