@@ -25,6 +25,19 @@
  *
  * Result is cached per org_id for a short TTL so a chatty conversation doesn't
  * hammer plan-state on every inbound frame.
+ *
+ * ORIGIN GUARD (external agents are exempt): credit-arrears enforcement is
+ * applied via billing → agent-manager → DisableApiKeys → gateway, which only
+ * affects PLATFORM-MANAGED agents (they have an agent-manager runtime and
+ * gateway-managed LLM keys). EXTERNAL agents (self-hosted, bringing their own
+ * LLM key) have no agent-manager record, so the org-level
+ * `enforcement_suspended` flag can read true while their LLM still works — the
+ * gate would false-block them. So before consulting plan-state we resolve the
+ * agent's origin (`agent_origin` off `GET /api/v1/members/{self.member_id}`)
+ * and only proceed for `platform_created`. `external_invited` or an unknown /
+ * unresolved origin fails open (returns "not suspended"), never blocking. The
+ * origin is immutable (set once at member creation) so it is cached PERMANENTLY
+ * per org_id once a definitive value is obtained.
  */
 
 import { getForOrg, apiPath } from './client.js';
@@ -40,6 +53,14 @@ export const PLAN_STATE_TIMEOUT_MS = 800;
 
 // org_id → { value: boolean, ts: number(ms) }. Exported for tests.
 export const planStateCache = new Map();
+
+// org_id → agent_origin string ('platform_created' | 'external_invited').
+// PERMANENT cache (NO TTL): agent_origin is set once at member creation and is
+// immutable, so once a definitive value is resolved it is served forever. Only
+// definitive values are stored — a lookup error / missing member_id / absent
+// field is NOT cached, so it retries on the next message until resolved.
+// Exported for test reset, mirroring planStateCache.
+export const agentOriginCache = new Map();
 
 // User-facing notice sent when the org's LLM is suspended for arrears. Bilingual
 // (zh + en) on separate lines — sent verbatim every time, no per-user locale
@@ -105,15 +126,74 @@ export function shouldSendOverdueNotice(orgId, target, deps = {}) {
 }
 
 /**
+ * Resolve this agent's origin for the given org.
+ *
+ * Reads `agent_origin` off `GET /api/v1/members/{orgConfig.self.member_id}`
+ * through the per-org authed cws-core client (getForOrg unwraps the D8
+ * envelope; we also tolerate a non-unwrapped `body.data.agent_origin`).
+ *
+ * @param {{org_id?: string, self?: {member_id?: string}, slug?: string}} orgConfig
+ * @param {object} [deps]  test seam — { getForOrg, warn }.
+ * @returns {Promise<'platform_created'|'external_invited'|null>}  the origin
+ *        string, or null when it cannot be determined (missing member_id,
+ *        lookup error, or absent field). Only definitive values are cached
+ *        (permanently); null results are never cached so the next message
+ *        retries.
+ */
+export async function resolveAgentOrigin(orgConfig, deps = {}) {
+  const orgId = orgConfig?.org_id;
+  const warn = deps.warn || ((...a) => console.warn('[billing-status]', ...a));
+  const slug = orgConfig?.slug || orgId || '?';
+
+  // Serve the permanent cache first (immutable origin).
+  if (orgId && agentOriginCache.has(orgId)) return agentOriginCache.get(orgId);
+
+  const memberId = orgConfig?.self?.member_id;
+  if (!orgId || !memberId) {
+    // Cannot look up without an org-scoped client + a member id. Not cached —
+    // retry once these become available.
+    warn(`[${slug}] cannot resolve agent origin: missing org_id or self.member_id`);
+    return null;
+  }
+
+  const getFor = deps.getForOrg || getForOrg;
+  let body;
+  try {
+    body = await getFor(orgId, apiPath(`/members/${memberId}`));
+  } catch (err) {
+    // Do NOT cache: retry on the next message until a definitive value lands.
+    warn(`[${slug}] member lookup for agent origin failed, treating origin as unknown: ${err?.message || err}`);
+    return null;
+  }
+
+  // getForOrg unwraps the D8 envelope (agent_origin at top level); tolerate a
+  // stubbed / non-unwrapped envelope (body.data.agent_origin) defensively.
+  const origin = body?.agent_origin ?? body?.data?.agent_origin ?? null;
+  if (origin !== 'platform_created' && origin !== 'external_invited') {
+    // Absent / unknown value (e.g. non-agent member, or an enum we don't know).
+    // Not cached — retry next message.
+    warn(`[${slug}] agent_origin absent or unrecognized on member ${memberId}; treating origin as unknown`);
+    return null;
+  }
+
+  agentOriginCache.set(orgId, origin); // permanent — origin is immutable
+  return origin;
+}
+
+/**
  * Is this org's LLM currently suspended for credit arrears?
  *
- * @param {{org_id?: string, slug?: string}} orgConfig  per-org config (org_id
- *        selects the authed cws-core client; slug is used only for logging).
+ * @param {{org_id?: string, self?: {member_id?: string}, slug?: string}} orgConfig
+ *        per-org config (org_id selects the authed cws-core client;
+ *        self.member_id is used to resolve the agent's origin; slug is used
+ *        only for logging).
  * @param {object} [deps]  test seam — { getForOrg, now, ttlMs, warn }. Defaults
  *        wire the real cws-core client / clock / config TTL / console.warn, so
- *        production callers just pass orgConfig.
- * @returns {Promise<boolean>}  true only when plan-state affirmatively reports
- *        enforcement_suspended; false on unknown / missing / any error.
+ *        production callers just pass orgConfig. getForOrg is also threaded to
+ *        the origin lookup.
+ * @returns {Promise<boolean>}  true only when the agent is `platform_created`
+ *        AND plan-state affirmatively reports enforcement_suspended; false for
+ *        external / origin-unknown agents, and on unknown / missing / any error.
  */
 export async function isOrgLLMSuspended(orgConfig, deps = {}) {
   const orgId = orgConfig?.org_id;
@@ -125,6 +205,15 @@ export async function isOrgLLMSuspended(orgConfig, deps = {}) {
   const timeoutMs = Number.isInteger(deps.timeoutMs) ? deps.timeoutMs : PLAN_STATE_TIMEOUT_MS;
   const warn = deps.warn || ((...a) => console.warn('[billing-status]', ...a));
   const slug = orgConfig?.slug || orgId;
+
+  // Origin guard: credit-arrears enforcement only affects platform-managed
+  // agents (agent-manager + gateway-managed keys). External / self-hosted
+  // agents have no agent-manager record, so the org-level suspension flag must
+  // NOT gate them. Resolve origin FIRST and fail open (allow through) unless it
+  // is POSITIVELY platform_created — external_invited or unknown/null skips the
+  // plan-state query entirely. Threads the same getForOrg + warn seam.
+  const origin = await resolveAgentOrigin(orgConfig, { getForOrg: getFor, warn });
+  if (origin !== 'platform_created') return false;
 
   const cached = planStateCache.get(orgId);
   if (cached && (now - cached.ts) < ttl) return cached.value;

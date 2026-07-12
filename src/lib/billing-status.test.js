@@ -2,7 +2,9 @@ import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isOrgLLMSuspended,
+  resolveAgentOrigin,
   planStateCache,
+  agentOriginCache,
   PLAN_STATE_TTL_MS,
   PLAN_STATE_TIMEOUT_MS,
   OVERDUE_NOTICE,
@@ -11,22 +13,33 @@ import {
   OVERDUE_NOTICE_THROTTLE_MS,
 } from './billing-status.js';
 
-const org = (id = 'org-1') => ({ org_id: id, slug: id });
+const org = (id = 'org-1') => ({ org_id: id, slug: id, self: { member_id: 'm-1' } });
 
-// getForOrg stub factory: records calls, returns a plan-state body (the
-// D8-unwrapped `data` shape getForOrg hands back).
-function stubGet({ suspended, body, throws } = {}) {
-  const calls = [];
+const isMembersPath = (p) => /\/members\//.test(String(p));
+
+// getForOrg stub factory. Routes by path: the origin guard calls
+// `/members/{id}` first (default returns agent_origin='platform_created' so the
+// existing plan-state assertions still exercise the plan-state path), then
+// plan-state. `calls` records ONLY plan-state calls (existing tests assert on
+// its length); member lookups are recorded separately in `memberCalls`.
+function stubGet({ suspended, body, throws, origin = 'platform_created', originThrows } = {}) {
+  const calls = [];         // plan-state calls
+  const memberCalls = [];   // /members/ (origin) calls
   const getForOrg = async (orgId, path) => {
+    if (isMembersPath(path)) {
+      memberCalls.push({ orgId, path });
+      if (originThrows) throw (originThrows instanceof Error ? originThrows : new Error(String(originThrows)));
+      return origin === undefined ? {} : { agent_origin: origin };
+    }
     calls.push({ orgId, path });
     if (throws) throw (throws instanceof Error ? throws : new Error(String(throws)));
     if (body !== undefined) return body;
     return { usage_snapshot: { enforcement_suspended: suspended } };
   };
-  return { getForOrg, calls };
+  return { getForOrg, calls, memberCalls };
 }
 
-beforeEach(() => { planStateCache.clear(); overdueNoticeCache.clear(); });
+beforeEach(() => { planStateCache.clear(); agentOriginCache.clear(); overdueNoticeCache.clear(); });
 
 test('enforcement_suspended=true → returns true', async () => {
   const { getForOrg } = stubGet({ suspended: true });
@@ -92,8 +105,9 @@ test('fail-open: non-object body → false', async () => {
 });
 
 test('error result is NOT cached (next call re-queries)', async () => {
-  let calls = 0;
-  const getForOrg = async () => {
+  let calls = 0; // plan-state calls only
+  const getForOrg = async (_orgId, path) => {
+    if (isMembersPath(path)) return { agent_origin: 'platform_created' };
     calls += 1;
     if (calls === 1) throw new Error('boom');
     return { usage_snapshot: { enforcement_suspended: true } };
@@ -111,7 +125,8 @@ test('timeout → false (fail-open) and is NOT cached', async () => {
   // getForOrg resolves later than the injected 10ms timeout. The timer is
   // deliberately left ref'd so the event loop stays alive long enough for the
   // (unref'd, production-correct) deadline timer to fire during the await.
-  const getForOrg = () => {
+  const getForOrg = (_orgId, path) => {
+    if (isMembersPath(path)) return Promise.resolve({ agent_origin: 'platform_created' });
     calls += 1;
     return new Promise((resolve) => {
       setTimeout(() => resolve({ usage_snapshot: { enforcement_suspended: true } }), 60);
@@ -125,6 +140,75 @@ test('timeout → false (fail-open) and is NOT cached', async () => {
 
 test('PLAN_STATE_TIMEOUT_MS default is ~800ms', () => {
   assert.equal(PLAN_STATE_TIMEOUT_MS, 800);
+});
+
+// --- origin guard ----------------------------------------------------------
+
+test('origin=external_invited → false AND plan-state is never fetched', async () => {
+  const planStateThrows = () => { throw new Error('plan-state must not be called for external agents'); };
+  const getForOrg = async (_orgId, path) => {
+    if (isMembersPath(path)) return { agent_origin: 'external_invited' };
+    return planStateThrows();
+  };
+  assert.equal(await isOrgLLMSuspended(org(), { getForOrg, warn: () => {} }), false);
+});
+
+test('origin=platform_created + enforcement_suspended=true → true', async () => {
+  const { getForOrg, calls, memberCalls } = stubGet({ origin: 'platform_created', suspended: true });
+  assert.equal(await isOrgLLMSuspended(org(), { getForOrg }), true);
+  assert.equal(memberCalls.length, 1, 'resolved origin via /members');
+  assert.equal(calls.length, 1, 'proceeded to plan-state');
+});
+
+test('origin lookup error → false and NOT cached (retries next message)', async () => {
+  let originCalls = 0;
+  const getForOrg = async (_orgId, path) => {
+    if (isMembersPath(path)) {
+      originCalls += 1;
+      if (originCalls === 1) throw new Error('member lookup boom');
+      return { agent_origin: 'platform_created' };
+    }
+    return { usage_snapshot: { enforcement_suspended: true } };
+  };
+  // First call: origin lookup fails → fail-open false, origin not cached.
+  assert.equal(await isOrgLLMSuspended(org(), { getForOrg, warn: () => {} }), false);
+  assert.equal(agentOriginCache.size, 0, 'failed origin lookup not cached');
+  // Second call: origin now resolves to platform_created → proceeds, suspended.
+  assert.equal(await isOrgLLMSuspended(org(), { getForOrg, warn: () => {} }), true);
+  assert.equal(originCalls, 2, 'origin re-queried after the failure');
+});
+
+test('origin absent field → false and NOT cached', async () => {
+  let memberCalls = 0;
+  const getForOrg = async (_orgId, path) => {
+    if (isMembersPath(path)) { memberCalls += 1; return {}; } // no agent_origin (non-agent member)
+    return { usage_snapshot: { enforcement_suspended: true } };
+  };
+  assert.equal(await isOrgLLMSuspended(org(), { getForOrg, warn: () => {} }), false);
+  assert.equal(agentOriginCache.size, 0, 'unknown origin not cached');
+  assert.equal(memberCalls, 1);
+});
+
+test('origin is permanently cached: second call does not re-fetch the member', async () => {
+  const { getForOrg, memberCalls } = stubGet({ origin: 'platform_created', suspended: false });
+  const t = 6_000_000;
+  await isOrgLLMSuspended(org(), { getForOrg, now: () => t });
+  // Well past the plan-state TTL — plan-state may re-fetch, but origin must not.
+  await isOrgLLMSuspended(org(), { getForOrg, now: () => t + PLAN_STATE_TTL_MS + 1 });
+  assert.equal(memberCalls.length, 1, 'member/origin fetched once, then served from permanent cache');
+});
+
+test('resolveAgentOrigin: tolerates non-unwrapped envelope (body.data.agent_origin)', async () => {
+  const getForOrg = async () => ({ data: { agent_origin: 'external_invited' } });
+  assert.equal(await resolveAgentOrigin(org(), { getForOrg }), 'external_invited');
+});
+
+test('resolveAgentOrigin: missing self.member_id → null and not cached', async () => {
+  let called = 0;
+  const getForOrg = async () => { called += 1; return { agent_origin: 'platform_created' }; };
+  assert.equal(await resolveAgentOrigin({ org_id: 'org-1', slug: 'org-1' }, { getForOrg, warn: () => {} }), null);
+  assert.equal(called, 0, 'no lookup without a member_id');
+  assert.equal(agentOriginCache.size, 0);
 });
 
 // --- notice throttle -------------------------------------------------------
