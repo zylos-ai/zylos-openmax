@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.11] — 2026-07-12
+
 ### Added
 
 - **Credit-arrears gate — notify the user instead of waking a suspended LLM.** When an org's LLM is suspended for non-payment (欠费), a user message reaching the openmax bridge is no longer forwarded to the runtime. Credit arrears does not drop the WS (the agent stays online and keeps receiving frames; only the LLM call is blocked at the gateway), so the bridge now intercepts after `shouldHandleMessage` accepts a real user message and BEFORE `forwardToC4`: it consults the authoritative signal — cws-core BFF `GET /api/v1/billing/plan-state` `usage_snapshot.enforcement_suspended` (queried through the existing per-org authed cws-core client, cached 30s per org) — and when suspended sends the sender a short bilingual "out of credits" notice via the same reply path a policy drop uses, then skips the forward. The check is **fail-open**: any billing-query error (network, non-200, missing field) — or the query exceeding an ~800ms hard timeout (raced, no retry) — is treated as "not suspended" so it can never black-hole a user's messages; the gateway remains the hard enforcement boundary. Only successful lookups are cached (30s); timeouts and errors are never cached, so a transient stall self-heals on the next frame. The "out of credits" notice is throttled to at most once per 5 minutes per (org + reply target) — a suspended org always has its message dropped, but a chatty sender isn't spammed. Sync-replay frames and agent senders receive no notice (avoids stale spam / reject-notice ping-pong). User-facing copy is interim pending final FE wording.
+
+## [2.8.10] — 2026-07-12
 
 ### Added
 
