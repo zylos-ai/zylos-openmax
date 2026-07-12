@@ -42,7 +42,7 @@ import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-h
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter } from './lib/metrics-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
-import { isOrgLLMSuspended, OVERDUE_NOTICE } from './lib/billing-status.js';
+import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'openmax';
@@ -724,7 +724,10 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger) {
       const senderType = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
       const isSyncReplay = notification._via === 'sync';
       const isAgentSender = senderType === 'AGENT';
-      if (!isSyncReplay && !isAgentSender) {
+      // Always skip forwarding. Send the notice at most once per throttle
+      // window per (org + conversation); within the window silently skip the
+      // send but still drop the message (no forward, no reaction, no markRead).
+      if (!isSyncReplay && !isAgentSender && shouldSendOverdueNotice(orgConfig.org_id, msg.conversation_id)) {
         sendRejectNotice(orgConfig, msg, OVERDUE_NOTICE).catch(() => {});
       }
       return;
