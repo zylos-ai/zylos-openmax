@@ -1,97 +1,97 @@
-# AS 操作指南
+# AS Operations Guide
 
-**作用**:ArtifactStore 操作——文件 / 媒体的字节上传 + 下载 URL 解析。覆盖会话附件(IM 模式)和 KB 文件节点(KB 模式)两条上传路径,以及 artifact 的预签名 URL 解析与本地下载。
+**Purpose**: ArtifactStore operations — byte upload of files / media + download URL resolution. Covers the two upload paths, conversation attachments (IM mode) and KB file nodes (KB mode), as well as pre-signed URL resolution and local download of artifacts.
 
-**何时加载本文档**:
+**When to load this document**:
 
-- 要把本地文件作为会话附件发出去(图片 / PDF / 录音等),走 `as.upload` IM 模式(带 `conversationId`)
-- 要把文件归档到 KB 树,走 `as.upload` KB 模式(不带 `conversationId`,可选 `parentId`)或 `kb.upload`
-- 收到 `artifact://<id>` 形式的引用,要拿预签名 URL(`as.url` 单条 / `as.resolve` 批量)
-- 要把远端 artifact 的字节下载到本地做分析(`as.download`)
-- 排查为什么文件"上传成功了但发不出去"或"挂到 KB 但 search 找不到"(基本都是 IM vs KB 模式选错)
+- To send a local file as a conversation attachment (image / PDF / audio recording, etc.), use `as.upload` in IM mode (with `conversationId`)
+- To archive a file into the KB tree, use `as.upload` in KB mode (without `conversationId`, optional `parentId`) or `kb.upload`
+- Received a reference in the form `artifact://<id>` and need to get a pre-signed URL (`as.url` for a single one / `as.resolve` for a batch)
+- To download the bytes of a remote artifact locally for analysis (`as.download`)
+- To troubleshoot why a file "uploaded successfully but can't be sent" or "was attached to the KB but search can't find it" (almost always the wrong choice between IM vs KB mode)
 
-**不在本文档范围**:
+**Out of scope for this document**:
 
-- KB page / folder / tree node 操作 → `references/kb-operations.md`
-- 发消息引用附件 → `references/comm-operations.md`(`comm.send` 的 `content` 字段)
-- 任务 / Issue / Blueprint workflow → `references/tm-operations.md`
-- **artifact CRUD**(list / get / update / delete / abort)→ **v5 已下线**,cws-core BFF 不暴露;字节不可变,改内容就重传
+- KB page / folder / tree node operations → `references/kb-operations.md`
+- Referencing attachments when sending messages → `references/comm-operations.md` (the `content` field of `comm.send`)
+- Task / Issue / Blueprint workflow → `references/tm-operations.md`
+- **artifact CRUD** (list / get / update / delete / abort) → **retired in v5**, not exposed by the cws-core BFF; bytes are immutable, re-upload to change content
 
-**依赖前置**:
+**Prerequisites**:
 
-- IM 上传要先有 `conversationId`(从 `comm.create_dm` / `comm.list_conversations` 拿)
-- KB 上传的 `parentId`(folder node id)从 `kb.tree_roots` / `kb.node_children` 拿;不传则挂 KB 根
-- `as.url` / `as.download` 需要已经拿到 `artifactId` 或 `artifact://` URI(通常来自之前 `as.upload` 的响应,或别人发过来的引用)
-- 完整参数依赖树见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)
+- IM upload requires a `conversationId` first (obtained from `comm.create_dm` / `comm.list_conversations`)
+- The `parentId` (folder node id) for KB upload comes from `kb.tree_roots` / `kb.node_children`; if omitted, it attaches to the KB root
+- `as.url` / `as.download` require an already-obtained `artifactId` or `artifact://` URI (usually from a previous `as.upload` response, or a reference someone else sent)
+- For the full parameter dependency tree, see [`SKILL.md` Efficiency Shortcuts > Parameter Resolution](../SKILL.md)
 
 ---
 
-> Layer 3 操作参考。本文档与 `src/cli/as.js` dispatch 表保持 1:1 对应。
-> 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
+> Layer 3 operations reference. This document maintains 1:1 correspondence with the `src/cli/as.js` dispatch table.
+> The authoritative paths are per the cws-core OpenAPI: `https://zylos01.jinglever.com/cws-core/openapi.json`
 
-CLI 位置:`src/cli/as.js`
-调用方式:`node src/cli/as.js <command> '<json>'`
+CLI location: `src/cli/as.js`
+Invocation: `node src/cli/as.js <command> '<json>'`
 
-> `as.js` 在 zylos-openmax 里有**双重角色**:
-> - 作为 CLI:Agent 显式调用 `node src/cli/as.js <cmd>`
-> - 作为库:`scripts/send.js`、`src/comm-bridge.js`、`src/cli/kb.js` 都从这个文件 `import` `uploadMedia` / `getMediaUrl` / `downloadMedia` —— 仓库**唯一**的上传 / 下载实现入口
+> `as.js` has a **dual role** within zylos-openmax:
+> - As a CLI: the Agent explicitly calls `node src/cli/as.js <cmd>`
+> - As a library: `scripts/send.js`, `src/comm-bridge.js`, and `src/cli/kb.js` all `import` `uploadMedia` / `getMediaUrl` / `downloadMedia` from this file — the repo's **only** entry point for upload / download implementation
 >
-> 所有跟二进制字节有关的事情都走这里,不要再写第二份。
+> Everything involving binary bytes goes through here; do not write a second copy.
 
-状态:✅ v5 路径全部走 cws-core BFF(`/api/v1/...`),底层 cws-core 再 connect-RPC 到 cws-as。
+Status: ✅ All v5 paths go through the cws-core BFF (`/api/v1/...`), and the underlying cws-core then does connect-RPC to cws-as.
 
-## 环境变量
+## Environment Variables
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF 基地址 |
-| `COCO_API_PREFIX` | `/api/v1` | 路径前缀 |
-| `COCO_AUTH_TOKEN` | (空) | Bearer token(跟 tm / kb / comm / core CLI 共用) |
-| `COCO_ORG_ID` | (空) | 覆盖 `config.org_id` |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF base address |
+| `COCO_API_PREFIX` | `/api/v1` | Path prefix |
+| `COCO_AUTH_TOKEN` | (empty) | Bearer token (shared with the tm / kb / comm / core CLIs) |
+| `COCO_ORG_ID` | (empty) | Overrides `config.org_id` |
 
 ---
 
-## ⚠ 上传走哪条路径?IM 还是 KB?
+## ⚠ Which upload path do you take? IM or KB?
 
-**`as.upload` 是双模入口,根据有没有 `conversationId` 决定走哪条服务端路径。选错了会失败。**
+**`as.upload` is a dual-mode entry point that decides which server-side path to take based on whether `conversationId` is present. Choosing wrong will fail.**
 
-| 你的目的 | 走 IM 上传 还是 KB 上传 | 怎么调 CLI |
+| Your purpose | Take IM upload or KB upload | How to call the CLI |
 |---|---|---|
-| **聊天 / 会话里发图、发文件**(用户给 agent / agent 给用户) | **IM 上传** | `as.upload {filePath, conversationId, mediaType:"image"/"file"}` —— **必须带 conversationId** |
-| **归档资料到 KB**(项目交付物、研究笔记附件) | **KB 上传** | `kb.upload {kbId, filePath, parentId?}` 或 `as.upload {filePath, parentId?}` —— **不带 conversationId** |
-| Agent 出站发媒体消息(`scripts/send.js [MEDIA:image]/path`) | **IM 上传**(send.js 内部自动选)| 直接 `c4-send.js openmax "<conv>" "[MEDIA:image]/path"` |
+| **Send images / files in a chat / conversation** (user to agent / agent to user) | **IM upload** | `as.upload {filePath, conversationId, mediaType:"image"/"file"}` — **must include conversationId** |
+| **Archive material to the KB** (project deliverables, research note attachments) | **KB upload** | `kb.upload {kbId, filePath, parentId?}` or `as.upload {filePath, parentId?}` — **without conversationId** |
+| Agent outbound media message (`scripts/send.js [MEDIA:image]/path`) | **IM upload** (send.js selects automatically internally) | Directly `c4-send.js openmax "<conv>" "[MEDIA:image]/path"` |
 
-### 服务端路径对照
+### Server-side path comparison
 
-| 模式 | prepare 端点 | finalize 端点 | 返回字段 |
+| Mode | prepare endpoint | finalize endpoint | Returned fields |
 |---|---|---|---|
-| **IM** | `POST /api/v1/conversations/{cid}/uploads/prepare` | `POST /api/v1/conversations/uploads/finalize` | `{media_id, artifact_id, ...}` — 给 `comm.send` / `send.js` 的 attachments 用 |
-| **KB** | `POST /api/v1/uploads/prepare`(body 带 `parent_id`) | `POST /api/v1/uploads/finalize` | `{node_id, artifact_id, tree_node, ...}` — KB 树里直接出现一个 file 节点 |
+| **IM** | `POST /api/v1/conversations/{cid}/uploads/prepare` | `POST /api/v1/conversations/uploads/finalize` | `{media_id, artifact_id, ...}` — used for the attachments of `comm.send` / `send.js` |
+| **KB** | `POST /api/v1/uploads/prepare` (body includes `parent_id`) | `POST /api/v1/uploads/finalize` | `{node_id, artifact_id, tree_node, ...}` — a file node appears directly in the KB tree |
 
-### 选错了会怎样
+### What happens if you choose wrong
 
-- **要发会话却没带 conversationId** → CLI 走 KB 路径,文件挂到 KB 根目录,**不会出现在对话框里**,接收方完全看不到。
-- **要归档到 KB 却带了 conversationId** → CLI 走 IM 路径,artifact 跟某条会话挂上但**不在 KB 树里**,KB 检索 / `kb.search` 都找不到。
-- **两种路径的 artifact_id 字段位置不同**,把 IM `media_id` 当成 KB `node_id` 塞回 KB 操作(比如想用 `kb.file_create artifactId=...`)会失败。
+- **Want to send to a conversation but omit conversationId** → the CLI takes the KB path, the file attaches to the KB root directory, **does not appear in the chat box**, and the recipient sees nothing at all.
+- **Want to archive to the KB but include conversationId** → the CLI takes the IM path, the artifact attaches to some conversation but is **not in the KB tree**, and neither KB retrieval nor `kb.search` can find it.
+- **The artifact_id field is located differently in the two paths**; stuffing an IM `media_id` back into a KB operation as if it were a KB `node_id` (e.g. trying to use `kb.file_create artifactId=...`) will fail.
 
-⚠️ 这条规则跟 cws-comm / cws-kb 后端架构强相关:IM 路径下 artifact 跟 `conversation_id` 绑,KB 路径下 artifact 跟 `org_id` + `kb_id` 绑。决定走哪条**只能由调用方在 prepare 阶段定**,后期想换得重传。
+⚠️ This rule is strongly tied to the cws-comm / cws-kb backend architecture: on the IM path the artifact is bound to `conversation_id`, and on the KB path the artifact is bound to `org_id` + `kb_id`. Which path to take **can only be decided by the caller during the prepare stage**; switching later requires re-uploading.
 
 ---
 
-## v5 三步上传(每次 `as.upload` 都走这条)
+## v5 three-step upload (every `as.upload` goes through this)
 
-v5 把上传按"用途"拆成两条并行流,共享同一个 prepare → PUT → finalize 节奏,只是 prepare / finalize 的 namespace 不同。`as.upload` 根据有没有 `conversationId` 自动选分支。
+v5 splits uploads into two parallel flows by "purpose", sharing the same prepare → PUT → finalize rhythm, only with a different namespace for prepare / finalize. `as.upload` automatically selects the branch based on whether `conversationId` is present.
 
 ```
-                本地文件
+                 local file
                     │
         ┌───────────┴───────────┐
         │                       │
-   有 conversationId         无 conversationId
+   has conversationId       no conversationId
         │                       │
         ▼                       ▼
    ┌──────────────┐        ┌──────────────┐
-   │   IM 上传    │        │   KB 上传    │
+   │  IM upload   │        │  KB upload   │
    └──────────────┘        └──────────────┘
         │                       │
   1. POST /api/v1/conversations  1. POST /api/v1/uploads/prepare
@@ -102,17 +102,17 @@ v5 把上传按"用途"拆成两条并行流,共享同一个 prepare → PUT →
         │                       │
         └───────────┬───────────┘
                     │
-              共同响应字段:
+            common response fields:
               {upload_token, upload_url, headers,
                expires_at, instant_upload}
                     │
         ┌───────────┴───────────┐
-        ├─► instant_upload=true ──► 跳过 PUT(秒传命中,字节已在 S3)
+        ├─► instant_upload=true ──► skip PUT (instant-upload hit, bytes already in S3)
         │
         │  2. PUT <upload_url>
-        │     Body: 原始字节
-        │     Headers: 响应里的 headers(Content-Type 等)
-        │     (字节直传 S3 / MinIO / R2,不经过 cws-core / cws-as)
+        │     Body: raw bytes
+        │     Headers: the headers from the response (Content-Type, etc.)
+        │     (bytes go directly to S3 / MinIO / R2, not through cws-core / cws-as)
         │
         ▼
    ┌──────────────┐        ┌──────────────┐
@@ -122,7 +122,7 @@ v5 把上传按"用途"拆成两条并行流,共享同一个 prepare → PUT →
   3. POST /api/v1/conversations  3. POST /api/v1/uploads/finalize
      /uploads/finalize             Body: {upload_token}
      Body: {upload_token}          Resp: <tree_node>
-     Resp: {media_id,                    (KB 文件节点,含 artifact_id)
+     Resp: {media_id,                    (KB file node, includes artifact_id)
             artifact_id}
         │                       │
         └───────────┬───────────┘
@@ -131,156 +131,156 @@ v5 把上传按"用途"拆成两条并行流,共享同一个 prepare → PUT →
  fileName, mimeType, sizeBytes, instantUpload}
 ```
 
-底层 cws-core 拿到 prepare / finalize 后通过 connect-RPC 调 cws-as 完成 artifact 注册、SHA-256 校验、状态机推进等;Agent 这一侧只看到 cws-core BFF 上面这 3 步。
+After the underlying cws-core receives the prepare / finalize, it calls cws-as via connect-RPC to complete artifact registration, SHA-256 verification, state machine advancement, etc.; the Agent side only sees these 3 steps on the cws-core BFF.
 
-**秒传 (`instant_upload`)**:服务端按 SHA-256 去查已有 active artifact,匹配就直接返回 `instant_upload=true`,客户端跳过 PUT 这一步。Agent 反复上传同一个文件(比如截图)只第一次真传字节。
+**Instant upload (`instant_upload`)**: the server looks up an existing active artifact by SHA-256, and on a match returns `instant_upload=true` directly, and the client skips the PUT step. When the Agent repeatedly uploads the same file (e.g. a screenshot), only the first time actually transfers the bytes.
 
-**老路径已下线**:contract-v4 时代曾有 `POST /api/v1/artifacts` 直接建 artifact + `POST /api/v1/artifacts/{id}/finalize` 收尾的单流上传,v5 已经废弃,cws-core 不再注册这两条路由。如果在老代码里看到这种调用方式,迁移成上面两条 namespace 之一。
+**Old path retired**: in the contract-v4 era there was a single-flow upload that directly created an artifact via `POST /api/v1/artifacts` + wrapped it up via `POST /api/v1/artifacts/{id}/finalize`; this is deprecated in v5, and cws-core no longer registers these two routes. If you see this style of call in old code, migrate it to one of the two namespaces above.
 
-## 命令清单
+## Command List
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input params | Real endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `as.upload` | 双模上传:有 `conversationId` 走 IM(会话附件),没有走 KB(归档进 KB 树) | `{filePath, conversationId?, parentId?, mediaType?, contentType?, filename?}` | 双模 prepare/finalize(见上面流程图) |
-| ✅ | `as.url` | 拿单个 artifact 的预签名下载 URL(默认 attachment,可选 inline 预览) | `{artifactId\|uri, inline?}` | `POST /api/v1/artifacts/resolve`(取第一条 `download_url`) |
-| ✅ | `as.download` | `as.url` + 字节 GET,下载到 `~/zylos/components/openmax/media/<filename>` | `{artifactId\|uri, filename?}` | `as.url` + 字节下载到本地 |
-| ✅ | `as.resolve` | 批量解析 `artifact://<id>` URI 数组拿预签名 URL(服务间调用用) | `{uris:["artifact://<id>", ...], inline?}` | `POST /api/v1/artifacts/resolve` |
+| ✅ | `as.upload` | Dual-mode upload: with `conversationId` takes IM (conversation attachment), without takes KB (archive into the KB tree) | `{filePath, conversationId?, parentId?, mediaType?, contentType?, filename?}` | Dual-mode prepare/finalize (see the flow diagram above) |
+| ✅ | `as.url` | Get the pre-signed download URL for a single artifact (attachment by default, optional inline preview) | `{artifactId\|uri, inline?}` | `POST /api/v1/artifacts/resolve` (takes the first `download_url`) |
+| ✅ | `as.download` | `as.url` + byte GET, downloads to `~/zylos/components/openmax/media/<filename>` | `{artifactId\|uri, filename?}` | `as.url` + byte download to local |
+| ✅ | `as.resolve` | Batch-resolve an array of `artifact://<id>` URIs to get pre-signed URLs (for inter-service calls) | `{uris:["artifact://<id>", ...], inline?}` | `POST /api/v1/artifacts/resolve` |
 
-> **v5 BFF 主动收窄**:旧版 cws-as 直连的 artifact CRUD(`as.list / as.get / as.update / as.delete / as.abort`,对应 `GET\|PATCH\|DELETE /artifacts/{id}` + `POST /artifacts/{id}/abort`)**v5 已经不再通过 cws-core BFF 暴露**——这些端点都返回 404。如果以后要恢复某项能力,要先在 cws-core BFF 加路由再补 CLI。Artifact 字节不可变,正常工作流是 `as.upload` 重新建一条新的,旧的留作历史。
+> **v5 BFF deliberately narrows the surface**: the old cws-as direct-connect artifact CRUD (`as.list / as.get / as.update / as.delete / as.abort`, corresponding to `GET\|PATCH\|DELETE /artifacts/{id}` + `POST /artifacts/{id}/abort`) is **no longer exposed through the cws-core BFF in v5** — these endpoints all return 404. If some capability needs to be restored later, you must first add the route in the cws-core BFF and then supplement the CLI. Artifact bytes are immutable; the normal workflow is for `as.upload` to create a new one, leaving the old one as history.
 
-### `as.upload` 详细
+### `as.upload` details
 
-| 参数 | 类型 | 说明 |
+| Parameter | Type | Description |
 | --- | --- | --- |
-| `filePath` | string | **必填**,本地绝对路径 |
-| `conversationId` | uuid | **设这个 → IM 上传**(会话附件)。返回里有 `mediaId` 给 `comm.send` attachments 用 |
-| `parentId` | uuid | 仅 KB 上传时用,KB 树里某 folder 节点 id;不传则挂 KB 根 |
-| `mediaType` | `image\|video\|audio\|voice\|file\|sticker` | 默认 `file`;影响 MIME 自动推断 |
-| `contentType` | string | 显式 MIME(覆盖 mediaType 推断) |
-| `filename` | string | 覆盖默认文件名(默认取 filePath basename) |
+| `filePath` | string | **Required**, local absolute path |
+| `conversationId` | uuid | **Set this → IM upload** (conversation attachment). The return contains `mediaId` for `comm.send` attachments |
+| `parentId` | uuid | Only used for KB upload; the id of some folder node in the KB tree; if omitted, attaches to the KB root |
+| `mediaType` | `image\|video\|audio\|voice\|file\|sticker` | Defaults to `file`; affects automatic MIME inference |
+| `contentType` | string | Explicit MIME (overrides mediaType inference) |
+| `filename` | string | Overrides the default filename (defaults to the filePath basename) |
 
-**`conversationId` 跟 `parentId` 互斥**:IM 路径不接受 parent_id,KB 路径不接受 conversation_id。同时传只有 `conversationId` 生效(走 IM)。
+**`conversationId` and `parentId` are mutually exclusive**: the IM path does not accept parent_id, and the KB path does not accept conversation_id. If both are passed, only `conversationId` takes effect (takes IM).
 
-返回(IM 模式):
+Return (IM mode):
 
 ```json
 {
   "mediaId":       "art_01JDKF7M2NQRSTUVWXYZ012345",
   "artifactId":    "art_01JDKF7M2NQRSTUVWXYZ012345",
-  "fileName":      "Q2-产品规划.pdf",
+  "fileName":      "Q2-product-plan.pdf",
   "mimeType":      "application/pdf",
   "sizeBytes":     5242880,
   "instantUpload": false
 }
 ```
 
-KB 模式额外带 `nodeId` + `treeNode` 字段。`mediaId` 是 `artifactId` 的别名(向后兼容历史调用方)。
+KB mode additionally carries the `nodeId` + `treeNode` fields. `mediaId` is an alias for `artifactId` (backward compatibility for historical callers).
 
-### `as.url` 详细
+### `as.url` details
 
-| 参数 | 类型 | 说明 |
+| Parameter | Type | Description |
 | --- | --- | --- |
-| `artifactId` / `uri` | string | 必填(`artifact://<id>` 形式或裸 id 都接受) |
-| `inline` | bool | true → 走 inline disposition(浏览器内嵌预览),false → attachment(强制下载) |
+| `artifactId` / `uri` | string | Required (accepts both the `artifact://<id>` form or a bare id) |
+| `inline` | bool | true → uses inline disposition (in-browser embedded preview), false → attachment (force download) |
 
-返回 `{url, expiresAt, contentType, contentLength, name}`。URL 是预签名的(GCS / S3),TTL 默认 15 分钟。
+Returns `{url, expiresAt, contentType, contentLength, name}`. The URL is pre-signed (GCS / S3), with a default TTL of 15 minutes.
 
-### `as.download` 详细
+### `as.download` details
 
-| 参数 | 类型 | 说明 |
+| Parameter | Type | Description |
 | --- | --- | --- |
-| `artifactId` / `uri` | string | 必填 |
-| `filename` | string | 落地文件名,默认从 artifact 元数据取 |
+| `artifactId` / `uri` | string | Required |
+| `filename` | string | Landing filename, defaults to being taken from the artifact metadata |
 
-返回 `{localPath}`,落到 `~/zylos/components/openmax/media/<filename>`。内部 = `as.url` + 字节 GET。Agent 拿到 `localPath` 即可作为 vision / 文件读取输入。
+Returns `{localPath}`, landing at `~/zylos/components/openmax/media/<filename>`. Internally = `as.url` + byte GET. Once the Agent gets `localPath`, it can be used as vision / file-read input.
 
-### `as.resolve` 详细
+### `as.resolve` details
 
-批量把 `artifact://<id>` 形式的 URI 解析成预签名下载 URL,带 Redis 缓存。无权限的 artifact 不会 403,而是返回 partial results(列在 `failed` 字段)。
+Batch-resolves URIs in the `artifact://<id>` form into pre-signed download URLs, with Redis caching. Artifacts without permission do not 403 but return partial results (listed in the `failed` field).
 
 ```bash
 node src/cli/as.js as.resolve '{"uris":["artifact://art_y","artifact://art_z"]}'
 # -> {resolved:{...}, failed:[...]}
 ```
 
-## 典型流程
+## Typical Flows
 
-### Agent 发图给用户(`scripts/send.js` 自动走这条)
+### Agent sends an image to the user (`scripts/send.js` takes this automatically)
 
 ```bash
-# 通过 C4 出站:
+# Outbound via C4:
 node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js \
   openmax '<conv-uuid>' '[MEDIA:image]/tmp/chart.png'
 ```
 
-`scripts/send.js` 内部:
+Inside `scripts/send.js`:
 
-1. 解析 `[MEDIA:image]/tmp/chart.png`
+1. Parses `[MEDIA:image]/tmp/chart.png`
 2. `as.uploadMedia('/tmp/chart.png', {mediaType:'image'})` → `{artifactId, mediaId, ...}`
 3. `POST /api/v1/conversations/{id}/messages` body `{content:[{type:"image", body:"<media_id>"}], ...}`
 
-### Agent 看用户发来的图(`comm-bridge.js` 自动走这条)
+### Agent views an image the user sent (`comm-bridge.js` takes this automatically)
 
-WS 推过来一帧 `{content:{media_id:"art_xyz"}, ...}`,comm-bridge 内部:
+WS pushes over a frame `{content:{media_id:"art_xyz"}, ...}`, inside comm-bridge:
 
 1. `as.getMediaUrl("art_xyz")` → `{url:"https://storage.googleapis.com/.../signed?...", expiresAt}`
 2. `as.downloadMedia(url, filename)` → `/home/cocoai/zylos/components/openmax/media/<file>`
-3. 把本地路径塞进 C4 出站文本里 `---- image: <localPath>` —— Agent 看见 tag 自动调用 vision
+3. Stuffs the local path into the C4 outbound text as `---- image: <localPath>` — the Agent sees the tag and automatically invokes vision
 
-### Agent 主动调用 CLI
+### Agent proactively calls the CLI
 
-通常**不需要直接调 as.js CLI**,因为 send.js 和 comm-bridge 自动用了。手动管理时:
+Usually **there is no need to call the as.js CLI directly**, because send.js and comm-bridge use it automatically. For manual management:
 
 ```bash
-# 上传一份 PDF(KB 模式:不带 conversationId)
+# Upload a PDF (KB mode: without conversationId)
 node src/cli/as.js as.upload '{
   "filePath":"/tmp/report.pdf",
   "mediaType":"file"
 }'
 # -> {artifactId:"art_...", nodeId:"...", treeNode:{...}, instantUpload:false}
 
-# 拿临时链接分享给别人
+# Get a temporary link to share with someone
 node src/cli/as.js as.url '{"artifactId":"art_..."}'
 # -> {url:"https://...", expiresAt:"...", contentType:"...", name:"..."}
 
-# 下到本地做分析
+# Download locally for analysis
 node src/cli/as.js as.download '{"artifactId":"art_..."}'
 # -> {localPath:"/home/cocoai/zylos/components/openmax/media/<filename>"}
 
-# 批量解析多个 URI(给服务间调用用)
+# Batch-resolve multiple URIs (for inter-service calls)
 node src/cli/as.js as.resolve '{"uris":["artifact://art_a","artifact://art_b"]}'
 # -> {resolved:{...}, failed:[...]}
 ```
 
-## 选型对照
+## Selection Comparison
 
-| 信号 | 走哪里 |
+| Signal | Where to go |
 | --- | --- |
-| 内容能用 Markdown 表达 | KB Page(`kb.page_create`) |
-| 二进制(图片 / PDF / 数据集) | `as.upload` + 在消息 / KB 里引用 `media_id` |
-| 体积大(MB / GB 级) | `as.upload` —— 走预签名 PUT 直传 S3,字节不经服务端 |
-| 临时分享到对话里 | `as.upload`(IM 模式)+ `comm.send` 引用 |
-| 项目交付物长期引用 | `as.upload`(KB 模式)+ KB 页面登记 `artifact://` URI |
-| 多次上同一文件 | 服务端按 SHA-256 自动秒传(`instant_upload=true`) |
+| Content can be expressed in Markdown | KB Page (`kb.page_create`) |
+| Binary (image / PDF / dataset) | `as.upload` + reference `media_id` in a message / KB |
+| Large volume (MB / GB scale) | `as.upload` — uses pre-signed PUT to transfer directly to S3, bytes do not pass through the server |
+| Temporary sharing into a conversation | `as.upload` (IM mode) + `comm.send` reference |
+| Long-term referenced project deliverable | `as.upload` (KB mode) + register the `artifact://` URI on a KB page |
+| Uploading the same file multiple times | The server automatically instant-uploads by SHA-256 (`instant_upload=true`) |
 
-## 与 SKILL.md 的关系
+## Relationship with SKILL.md
 
-本文档是 [`SKILL.md`](../SKILL.md) 的 Layer 3 子 skill,只负责 AS CLI 的**命令机制**(加上 IM vs KB 双模这个独特的"选哪条路径"问题)。下面这些行为面内容**在 SKILL.md 里**,本文档不重复:
+This document is a Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible only for the **command mechanics** of the AS CLI (plus the unique "which path to choose" question of IM vs KB dual-mode). The following behavioral-surface content is **in SKILL.md** and is not repeated in this document:
 
-| 想看 | 去 SKILL.md 的哪节 |
+| Want to see | Which section of SKILL.md to go to |
 |---|---|
-| Lead 经验沉淀 vs Worker 任务产出时该挂哪 | [角色模型](../SKILL.md)(KB 写入那行) |
-| `as.upload` 的产物如何通过 `contextPageIds` 传给 Task | [效率捷径 > 上下文传递](../SKILL.md) |
-| 通用错误防护(不要 curl 直传 / 不要绕 CLI) | [行为护栏 > 常见错误](../SKILL.md) |
+| Where to attach Lead experience distillation vs Worker task output | [Role Model](../SKILL.md) (the KB writing line) |
+| How the output of `as.upload` is passed to a Task via `contextPageIds` | [Efficiency Shortcuts > Context Passing](../SKILL.md) |
+| General error protection (do not curl direct-upload / do not bypass the CLI) | [Behavior Guardrails > Common Mistakes](../SKILL.md) |
 
-## AS 专属注意事项
+## AS-specific Notes
 
-- Artifact 不可变,"修改"=新建,旧的留作历史
-- `artifact_id` 是 ULID 形态(`art_01JDKF...`,服务端生成)
-- 单文件大小上限 5 GB(超出返回 `payload_too_large` 413)
-- `mime_type` 黑名单:可执行文件(`.exe` / `.sh` 等)返回 `unsupported_media_type` 415
-- 预签名 PUT URL TTL 1 小时;超时需要重新调对应的 prepare 端点(IM:`POST /api/v1/conversations/{cid}/uploads/prepare`;KB:`POST /api/v1/uploads/prepare`)拿新 `upload_token` + `upload_url`
-- 大文件(>100MB)cws-as 会自动选 Multipart 模式(`upload_mode:"multipart"`),目前的 `uploadMedia()` 还是单 PUT,大文件场景需要扩展(标 TODO)
-- `as.resolve` 是给服务间调用用的:无权限的 artifact 跳过而不是 403,避免一个失败拖整批
-- `media_id` / `artifactId` 是同义词(向后兼容),返回里都给
-- IM 模式 vs KB 模式选错是最常见的踩坑——返回字段不同 + 后续操作可见性不同,详见上面"⚠ 上传走哪条路径"
+- Artifacts are immutable; "modifying" = creating anew, leaving the old one as history
+- `artifact_id` is in ULID form (`art_01JDKF...`, server-generated)
+- Single-file size limit is 5 GB (exceeding returns `payload_too_large` 413)
+- `mime_type` blacklist: executable files (`.exe` / `.sh`, etc.) return `unsupported_media_type` 415
+- Pre-signed PUT URL TTL is 1 hour; on timeout you need to re-call the corresponding prepare endpoint (IM: `POST /api/v1/conversations/{cid}/uploads/prepare`; KB: `POST /api/v1/uploads/prepare`) to get a new `upload_token` + `upload_url`
+- For large files (>100MB), cws-as automatically selects Multipart mode (`upload_mode:"multipart"`); the current `uploadMedia()` is still a single PUT, and the large-file scenario needs to be extended (marked TODO)
+- `as.resolve` is for inter-service calls: artifacts without permission are skipped rather than 403, to avoid one failure dragging down the whole batch
+- `media_id` / `artifactId` are synonyms (backward compatibility), and both are given in the return
+- Choosing wrong between IM mode vs KB mode is the most common pitfall — different return fields + different downstream operation visibility, see "⚠ Which upload path do you take" above

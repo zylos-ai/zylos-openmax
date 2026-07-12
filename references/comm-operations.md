@@ -1,136 +1,136 @@
-# Comm 操作指南
+# Comm Operations Guide
 
-**作用**:Agent 主动发起的 IM 操作——建会话、发消息、拉历史、查未读、WS 重连补漏、page 搜索。所有命令通过 cws-core BFF 落到 cws-comm。
+**Purpose**: Agent-initiated IM operations — creating conversations, sending messages, pulling history, checking unread, WS reconnect gap-fill, page search. All commands go through the cws-core BFF down to cws-comm.
 
-**何时加载本文档**:
+**When to load this document**:
 
-- 想主动 DM / 拉群跟某个人或一群人沟通(`comm.create_dm` / `comm.create_group` → `comm.send`)
-- 需要往某个已知 conversationId 里发消息(`comm.send`)
-- 拉历史消息上下文(`comm.get_messages` / `comm.get_message`)
-- 查会话未读数或 WS 重连后补漏(`comm.unread` / `comm.sync`)
-- 在 KB 里关键词搜索 page(`comm.search`,v5 唯一的搜索入口)
+- Want to proactively DM / create a group to communicate with a person or a group of people (`comm.create_dm` / `comm.create_group` → `comm.send`)
+- Need to send a message into a known conversationId (`comm.send`)
+- Pull historical message context (`comm.get_messages` / `comm.get_message`)
+- Check a conversation's unread count or fill gaps after a WS reconnect (`comm.unread` / `comm.sync`)
+- Keyword-search pages in a KB (`comm.search`, the sole search entry point in v5)
 
-**不在本文档范围**:
+**Out of scope for this document**:
 
-- **被动接消息**(人类发进来 → Agent 回复)走 C4 bridge 自动路由,不需要手动调 CLI
-- 消息附件 / 媒体上传 → `references/as-operations.md`(`as.upload` 带 conversationId)
-- 任务管理 / 状态机 → `references/tm-operations.md`
-- KB page 内容读写 → `references/kb-operations.md`
-- 成员 / 角色目录查询 → `references/core-operations.md`
+- **Passively receiving messages** (human sends in → Agent replies) goes through the C4 bridge's automatic routing; no manual CLI call needed
+- Message attachments / media upload → `references/as-operations.md` (`as.upload` with conversationId)
+- Task management / state machine → `references/tm-operations.md`
+- KB page content read/write → `references/kb-operations.md`
+- Member / role directory queries → `references/core-operations.md`
 
-**依赖前置**:
+**Prerequisites**:
 
-- 调用前先 `core.me` 拿当前 `member_id`,DM / Group 创建时它就是隐含的"我"
-- DM 之前先 `core.member_list` 找到对方的 member_id
-- 引用消息附件前先 `as.upload` 拿到 `media_id`
-- 完整参数依赖树见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)
+- Before calling, first run `core.me` to get the current `member_id`; when creating a DM / Group it is the implicit "me"
+- Before a DM, first run `core.member_list` to find the other party's member_id
+- Before referencing a message attachment, first run `as.upload` to get the `media_id`
+- Full parameter dependency tree, see [`SKILL.md` Efficiency Shortcuts > Parameter Resolution](../SKILL.md)
 
 ---
 
-> Layer 3 操作参考。本文档与 `src/cli/comm.js` dispatch 表保持 1:1 对应。
-> 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
+> Layer 3 operations reference. This document maintains a 1:1 correspondence with the `src/cli/comm.js` dispatch table.
+> The authoritative paths are per the cws-core OpenAPI: `https://zylos01.jinglever.com/cws-core/openapi.json`
 
-CLI 位置:`src/cli/comm.js`
-调用方式:`node src/cli/comm.js <command> '<json>'`
+CLI location: `src/cli/comm.js`
+Invocation: `node src/cli/comm.js <command> '<json>'`
 
-实时事件推送(`message.created` 等)走 WebSocket,由 `src/comm-bridge.js` 处理,不在本 CLI 范围。
+Real-time event push (`message.created`, etc.) goes over WebSocket, handled by `src/comm-bridge.js`, and is outside the scope of this CLI.
 
-## 环境变量
+## Environment Variables
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF 基地址 |
-| `COCO_AUTH_TOKEN` | (空) | Bearer token |
-| `COCO_API_PREFIX` | `/api/v1` | 路径前缀 |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF base address |
+| `COCO_AUTH_TOKEN` | (empty) | Bearer token |
+| `COCO_API_PREFIX` | `/api/v1` | Path prefix |
 
-## 命令清单
+## Command List
 
-### 会话
+### Conversations
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.list_conversations` | 列我参与的所有会话(分页) | `{pageSize?, pageToken?}` | `GET /api/v1/conversations` |
-| ✅ | `comm.create_dm` | 跟单人开 DM(已存在直接返回,幂等) | `{participantId}` | `POST /api/v1/conversations/dm` |
-| ✅ | `comm.create_group` | 拉群,自己 + participantIds 组成成员表 | `{title, participantIds[]}` | `POST /api/v1/conversations/groups` |
-| ✅ | `comm.get_conversation` | 取单个会话详情 | `{conversationId}` | `GET /api/v1/conversations/{id}` |
+| ✅ | `comm.list_conversations` | List all conversations I participate in (paginated) | `{pageSize?, pageToken?}` | `GET /api/v1/conversations` |
+| ✅ | `comm.create_dm` | Open a DM with a single person (returns directly if it already exists, idempotent) | `{participantId}` | `POST /api/v1/conversations/dm` |
+| ✅ | `comm.create_group` | Create a group; self + participantIds form the member list | `{title, participantIds[]}` | `POST /api/v1/conversations/groups` |
+| ✅ | `comm.get_conversation` | Get details of a single conversation | `{conversationId}` | `GET /api/v1/conversations/{id}` |
 
-`participantIds` 必须是 UUID 数组。DM 用一个 `participantId`(无 `title`),group 用多个 + `title`。
+`participantIds` must be a UUID array. DM uses a single `participantId` (no `title`); group uses multiple + `title`.
 
-### 消息
+### Messages
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.send` | 发消息;`content` 支持字符串 / markdown / 数组结构 | `{conversationId, content, replyTo?, clientMsgId?}` | `POST /api/v1/conversations/{id}/messages` |
-| ✅ | `comm.get_messages` | 拉历史消息列表(基于 seq 的范围) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
-| ✅ | `comm.get_message` | 取单条消息详情(展开 content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
+| ✅ | `comm.send` | Send a message; `content` supports string / markdown / array structure | `{conversationId, content, replyTo?, clientMsgId?}` | `POST /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.get_messages` | Pull the historical message list (seq-based range) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.get_message` | Get details of a single message (expands content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
-`content` 接受四种输入,CLI 自动归一为 cws-core 的 `MessageContent[]`:
+`content` accepts four kinds of input, which the CLI automatically normalizes into cws-core's `MessageContent[]`:
 
 ```text
 "hello"                              → [{type:"text",     body:"hello"}]
-"# header\n..."                      → [{type:"markdown", body:"# header\n..."}]   (启发式)
+"# header\n..."                      → [{type:"markdown", body:"# header\n..."}]   (heuristic)
 {text:"hi", markdown:true}           → [{type:"markdown", body:"hi"}]
 {type:"image", body:"<media_id>"}    → [{type:"image",    body:"<media_id>"}]
-[{type:"text", body:"..."}, ...]     → 原样透传(已经是数组形式)
+[{type:"text", body:"..."}, ...]     → passed through as-is (already in array form)
 ```
 
-`clientMsgId` 用于服务端 5 分钟幂等去重,不传会自动生成 `cmsg_<uuid>`。同一条逻辑消息重试请用同一个 id。
+`clientMsgId` is used for server-side 5-minute idempotent deduplication; if not provided, `cmsg_<uuid>` is auto-generated. For retries of the same logical message, use the same id.
 
-### 已读 / 未读
+### Read / Unread
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.unread` | 查会话的未读消息计数 | `{conversationId}` | `GET /api/v1/conversations/{id}/unread` |
-| ✅ | `comm.mark_read` | 标记会话已读(推进 read cursor) | `{conversationId, seq}` | `POST /api/v1/conversations/{id}/read` |
+| ✅ | `comm.unread` | Query a conversation's unread message count | `{conversationId}` | `GET /api/v1/conversations/{id}/unread` |
+| ✅ | `comm.mark_read` | Mark a conversation as read (advance the read cursor) | `{conversationId, seq}` | `POST /api/v1/conversations/{id}/read` |
 
-### 同步
+### Sync
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.sync` | WS 断线重连后,按 `sinceSeq` 拉漏掉的事件 | `{sinceSeq, deviceId, limit?}` | `POST /api/v1/sync` |
+| ✅ | `comm.sync` | After a WS disconnect/reconnect, pull the missed events by `sinceSeq` | `{sinceSeq, deviceId, limit?}` | `POST /api/v1/sync` |
 
-### 搜索
+### Search
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.search` | KB page 全文搜索(v5 唯一搜索入口;名字带 comm 是历史包袱)| `{query, kbId?, limit?, offset?, sort?}` | `GET /api/v1/search/pages` |
+| ✅ | `comm.search` | KB page full-text search (the sole search entry point in v5; the `comm` in the name is historical baggage) | `{query, kbId?, limit?, offset?, sort?}` | `GET /api/v1/search/pages` |
 
-### Owner(归属 owner;cws-core 为权威源)
+### Owner (ownership owner; cws-core is the authoritative source)
 
-cws-core 是 agent owner 的权威源(可通过 `POST /api/v1/platform-agents/{member_id}/transfer-owner`
-转让)。本地 `config.json` 的 `orgs.<slug>.owner` 只是缓存。**comm-bridge 在每次 WS(重)连接时
-自动从 core 拉取并同步**(免重启);下面几条命令是手动 / 触发用途。`org` 入参可填 config 里的 slug
-或 org UUID,单 org 部署可省略。
+cws-core is the authoritative source for the agent owner (can be transferred via `POST /api/v1/platform-agents/{member_id}/transfer-owner`).
+The local `config.json` `orgs.<slug>.owner` is only a cache. **comm-bridge automatically pulls from core and syncs on every WS (re)connect**
+(no restart needed); the commands below are for manual / trigger use. The `org` input can be filled with the slug from config
+or the org UUID; for single-org deployments it can be omitted.
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.get_owner` | 对比本地缓存 owner 与 core 权威 owner | `{org?}` | `GET /api/v1/members/{self}` |
-| ✅ | `comm.set_owner` | 覆盖本地 owner 缓存(memberId 传空=清空,回到未绑定→首次 DM 自动绑定兜底)| `{memberId, name?, org?}` | 仅写本地 config |
-| ✅ | `comm.sync_owner` | 从 core 拉权威 owner 写入 config(运行中的服务经 config watcher 即时生效);core 无 owner 时不动本地 | `{org?}` | `GET /api/v1/members/{self}` |
+| ✅ | `comm.get_owner` | Compare the local cached owner with core's authoritative owner | `{org?}` | `GET /api/v1/members/{self}` |
+| ✅ | `comm.set_owner` | Override the local owner cache (memberId passed empty = clear, revert to unbound → first DM auto-binding fallback) | `{memberId, name?, org?}` | writes local config only |
+| ✅ | `comm.sync_owner` | Pull the authoritative owner from core and write it into config (a running service takes effect immediately via config watcher); does not touch local when core has no owner | `{org?}` | `GET /api/v1/members/{self}` |
 
-> 注意:owner 的**权威变更**发生在 cws-core(转让端点),不在本地。`comm.set_owner` 只改本地缓存,
-> 下次重连会被 core 的权威值覆盖。要持久改归属,走 core 的 transfer-owner(由 owner 本人或 org-admin 操作)。
+> Note: the **authoritative change** of the owner happens in cws-core (the transfer endpoint), not locally. `comm.set_owner` only changes the local cache,
+> and will be overwritten by core's authoritative value on the next reconnect. To persistently change ownership, go through core's transfer-owner (performed by the owner themselves or an org-admin).
 
-## 典型流程
+## Typical Flows
 
-### Agent 主动联系一个人
+### Agent proactively contacts a person
 
 ```bash
-# 1. 建立 DM 会话(已存在直接返回)
+# 1. Establish a DM conversation (returns directly if it already exists)
 node src/cli/comm.js comm.create_dm '{"participantId":"<member-uuid>"}'
 # -> {data:{id:"<conversation-uuid>", type:"dm", ...}}
 
-# 2. 发消息
+# 2. Send a message
 node src/cli/comm.js comm.send '{
   "conversationId":"<conversation-uuid>",
-  "content":"周报准备好了,你方便的时候看看"
+  "content":"The weekly report is ready; take a look when you get a chance"
 }'
 ```
 
-### 群里发带附件的消息
+### Sending a message with an attachment in a group
 
 ```bash
-# 1. 先上传附件(IM 模式,带 conversationId),拿 media_id
+# 1. First upload the attachment (IM mode, with conversationId), get the media_id
 node src/cli/as.js as.upload '{
   "conversationId":"<conv-uuid>",
   "filePath":"/tmp/weekly.pdf",
@@ -138,75 +138,75 @@ node src/cli/as.js as.upload '{
 }'
 # -> {mediaId:"<media-uuid>", ...}
 
-# 2. 发消息引用 media_id
+# 2. Send a message referencing the media_id
 node src/cli/comm.js comm.send '{
   "conversationId":"<conv-uuid>",
-  "content":[{"type":"text","body":"本周周报"},
+  "content":[{"type":"text","body":"This week's weekly report"},
              {"type":"file","body":"<media-uuid>"}]
 }'
 ```
 
-### WS 重连后补漏
+### Filling gaps after a WS reconnect
 
 ```bash
-# 用最后已知 seq + device_id 拉漏掉的事件
+# Use the last known seq + device_id to pull the missed events
 node src/cli/comm.js comm.sync '{
   "sinceSeq":12345,
   "deviceId":"<device-id>",
   "limit":100
 }'
 
-# 看某个会话还有多少未读
+# Check how many unread remain in a conversation
 node src/cli/comm.js comm.unread '{"conversationId":"<conv-uuid>"}'
 ```
 
-## 与 SKILL.md 的关系
+## Relationship with SKILL.md
 
-本文档是 [`SKILL.md`](../SKILL.md) 的 Layer 3 子 skill,只负责 Comm CLI 的**命令机制**。下面这些行为面内容**在 SKILL.md 里**,本文档不重复:
+This document is the Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible only for the **command mechanics** of the Comm CLI. The behavioral-surface content below is **in SKILL.md**; this document does not repeat it:
 
-| 想看 | 去 SKILL.md 的哪节 |
+| What you want to see | Which section of SKILL.md to go to |
 |---|---|
-| 何时该主动通信 vs 走 C4 bridge 被动响应 | [角色模型](../SKILL.md)(Lead 能与人类通信 / Worker 不行) |
-| 参数依赖树 / 上下文锚定 | [效率捷径](../SKILL.md) |
-| 通用错误防护(比如不该绕过 CLI 直接 curl) | [行为护栏 > 常见错误](../SKILL.md) |
+| When to communicate proactively vs. respond passively via the C4 bridge | [Role Model](../SKILL.md) (Lead can communicate with humans / Worker cannot) |
+| Parameter dependency tree / context anchoring | [Efficiency Shortcuts](../SKILL.md) |
+| General error safeguards (e.g. don't bypass the CLI to curl directly) | [Behavioral Guardrails > Common Mistakes](../SKILL.md) |
 
-## Comm 专属注意事项
+## Comm-Specific Notes
 
-- DM 走 `/conversations/dm`、Group 走 `/conversations/groups`,**不是**同一个 POST 通用入口
-- 发消息失败重试时,**保留同一个 `clientMsgId`**,服务端按它做 5 分钟幂等
-- cws-core 的 `SendMessageRequestBody` 是 `additionalProperties:false` —— 不要传 schema 外的字段(会被拒)
-- 实际响应包在 `{data:{...}, ...}` 里;本 CLI 不解包,调用方按需取 `.data`
-- `comm.search` 名字带 `comm` 但实际是 KB page search(`/api/v1/search/pages`),v5 没有独立的全消息搜索
+- DM goes through `/conversations/dm`, Group goes through `/conversations/groups`, **not** the same generic POST entry point
+- When retrying a failed message send, **keep the same `clientMsgId`**; the server does 5-minute idempotency based on it
+- cws-core's `SendMessageRequestBody` is `additionalProperties:false` — do not pass fields outside the schema (they will be rejected)
+- The actual response is wrapped in `{data:{...}, ...}`; this CLI does not unwrap it, so the caller should take `.data` as needed
+- `comm.search` has `comm` in its name but is actually a KB page search (`/api/v1/search/pages`); v5 has no standalone full-message search
 
-## DM 权限管理 CLI
+## DM Permission Management CLI
 
-管理 DM 访问策略和白名单,修改后运行中的服务热加载生效(无需重启)。
+Manage DM access policy and allowlist; after modification a running service hot-reloads the changes (no restart needed).
 
-| 命令 | 说明 | 参数 |
+| Command | Description | Parameters |
 |---|---|---|
-| `comm.dm_policy` | 查看或设置 DM 策略 | `{org?, policy?}` policy: open/allowlist/owner |
-| `comm.dm_list` | 列出当前策略和白名单 | `{org?}` |
-| `comm.dm_allow` | 添加成员到 DM 白名单 | `{memberId\|memberIds, org?}` |
-| `comm.dm_revoke` | 从 DM 白名单移除成员 | `{memberId\|memberIds, org?}` |
+| `comm.dm_policy` | View or set the DM policy | `{org?, policy?}` policy: open/allowlist/owner |
+| `comm.dm_list` | List the current policy and allowlist | `{org?}` |
+| `comm.dm_allow` | Add a member to the DM allowlist | `{memberId\|memberIds, org?}` |
+| `comm.dm_revoke` | Remove a member from the DM allowlist | `{memberId\|memberIds, org?}` |
 
-- `org` 可选 — 单组织部署自动解析,多组织需指定 slug 或 org_id
-- 修改直接写入 `config.json`,运行中的 comm-bridge 通过 `watchConfig` 热加载 `access.*` 字段
-- `dmPolicy=owner` 模式下白名单不生效(仅 owner 可 DM);切到 `allowlist` 后白名单才有意义
+- `org` is optional — auto-resolved for single-org deployments; multi-org requires specifying the slug or org_id
+- Modifications are written directly into `config.json`; the running comm-bridge hot-reloads the `access.*` fields via `watchConfig`
+- Under `dmPolicy=owner` mode the allowlist has no effect (only the owner can DM); the allowlist only becomes meaningful after switching to `allowlist`
 
-示例:
+Examples:
 ```bash
-# 查看当前策略
+# View the current policy
 node src/cli/comm.js comm.dm_list '{}'
 
-# 开放给指定成员
+# Open access to a specific member
 node src/cli/comm.js comm.dm_allow '{"memberId":"019ea63f-b7ff-..."}'
 
-# 批量添加
+# Batch add
 node src/cli/comm.js comm.dm_allow '{"memberIds":["id1","id2"]}'
 
-# 撤销
+# Revoke
 node src/cli/comm.js comm.dm_revoke '{"memberId":"019ea63f-b7ff-..."}'
 
-# 切换策略
+# Switch policy
 node src/cli/comm.js comm.dm_policy '{"policy":"allowlist"}'
 ```

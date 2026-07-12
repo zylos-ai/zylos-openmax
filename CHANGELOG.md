@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- Translated `SKILL.md` and all `references/*-operations.md` (as/comm/core/kb/tm) from Chinese to English. Documentation-only change: the always-loaded behavioral spec and on-demand operation guides are model-facing, and English is comprehended more reliably. No behavioral rules, commands, JSON keys/values, enums, IDs, paths, or code were altered; the `version` in `SKILL.md` frontmatter and `package.json` are unchanged.
+
 ## [2.8.12] — 2026-07-12
 
 ### Fixed
