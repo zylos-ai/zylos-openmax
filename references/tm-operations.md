@@ -1,354 +1,354 @@
-# TM 操作指南
+# TM Operations Guide
 
-**作用**:管理 Task Management 服务的工作流——`Project → Issue → Blueprint → Task → Attempt`。Blueprint 是计划事实源,简单任务也使用一个 step 的 Blueprint;复杂任务使用多 step / 依赖 Blueprint。所有命令通过 cws-core BFF 落到 cws-work。
+**Purpose**: Manage the Task Management service workflow — `Project → Issue → Blueprint → Task → Attempt`. The Blueprint is the source of truth for the plan; simple tasks also use a one-step Blueprint, while complex tasks use a multi-step / dependency Blueprint. All commands go through the cws-core BFF down to cws-work.
 
-**何时加载本文档**:
+**When to load this document**:
 
-- 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,创建 Issue,再创建单 step 或多 step Blueprint 并走计划确认
-- 需要派 task 给别人或自己接活时,查 `task.create` / `task.claim` → `task.start`(接活两步:claim 分配、start 开工)
-- 需要提前停掉一个还没结论的 issue 时,查 `issue.terminate`(终止 + 善后)
-- 工作做完准备收尾时,查 `attempt.transition` → `task.transition` → `issue.deliver` → `accept_delivered` 的顺序;人类不接受时,不要先调 reject,先对话澄清后 `issue.resume`
-- Lead 编排任何 issue 的步骤时,查整套 `blueprint.*`;简单任务也先建一个 step 的 Blueprint
-- Worker 失败 / 阻塞要汇报时,查 `attempt.transition` 的 `failed` / `blocked` 选项
+- When you receive a human's "new requirement / do this for me", load it to look up the `issue.create` parameters, create an Issue, then create a single-step or multi-step Blueprint and go through plan confirmation
+- When you need to dispatch a task to someone else or pick up work yourself, look up `task.create` / `task.claim` → `task.start` (picking up work is two steps: claim to assign, start to begin work)
+- When you need to stop an issue early before it reaches a conclusion, look up `issue.terminate` (terminate + cleanup)
+- When work is done and you are wrapping up, look up the order `attempt.transition` → `task.transition` → `issue.deliver` → `accept_delivered`; when the human does not accept, do not call reject first — clarify through conversation first, then `issue.resume`
+- When a Lead orchestrates the steps of any issue, look up the full `blueprint.*`; even for simple tasks, first build a one-step Blueprint
+- When a Worker needs to report a failure / blockage, look up the `failed` / `blocked` options of `attempt.transition`
 
-**不在本文档范围**:
+**Out of scope for this document**:
 
-- 知识库操作(KB page / folder / file)→ `references/kb-operations.md`
-- 文件 / artifact 上传 → `references/as-operations.md`
-- IM 消息 / 对话管理 → `references/comm-operations.md`
-- 成员 / 角色 / 组织目录查询 → `references/core-operations.md`
+- KnowledgeBase operations (KB page / folder / file) → `references/kb-operations.md`
+- File / artifact upload → `references/as-operations.md`
+- IM messages / conversation management → `references/comm-operations.md`
+- Member / role / org directory queries → `references/core-operations.md`
 
-**依赖前置**:
+**Prerequisites**:
 
-- 调用前先 `core.me` 确认当前 `member_id` 跟意图中的身份匹配
-- 创建 issue 前通常先 `project.list` 拿目标 projectId
-- 需要引用 KB 时,先用 `kb.search` 找到页面,再把链接 / 摘要写进 Issue/Task 描述或评论
-- Worker 接收指派后按 `task.claim` → `task.start` 两步开工；当前不通过任务池抢活
+- Before calling, first run `core.me` to confirm the current `member_id` matches the identity in your intent
+- Before creating an issue, usually first run `project.list` to get the target projectId
+- When you need to reference KB, first use `kb.search` to find the page, then write the link / summary into the Issue/Task description or comment
+- After a Worker receives an assignment, start work with the two steps `task.claim` → `task.start`; currently work is not picked up through a task pool
 
-> 完整的参数依赖树(`core.me → project.list → issue.create → blueprint.create → issue.submit_plan → task.create → ...`)见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)。本文档不重复,只补 TM 命令级细节。
+> The complete parameter dependency tree (`core.me → project.list → issue.create → blueprint.create → issue.submit_plan → task.create → ...`) is in [`SKILL.md` Efficiency Shortcuts > Parameter Resolution](../SKILL.md). This document does not repeat it and only fills in TM command-level details.
 
-> Layer 3 操作参考。本文档与 `src/cli/tm.js` dispatch 表保持 1:1 对应。
-> 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
+> Layer 3 operations reference. This document maintains a 1:1 correspondence with the `src/cli/tm.js` dispatch table.
+> The authoritative real path is the cws-core OpenAPI: `https://zylos01.jinglever.com/cws-core/openapi.json`
 
-CLI 位置:`src/cli/tm.js`
-调用方式:`node src/cli/tm.js <command> '<json>'`
-帮助:`node src/cli/tm.js help`
+CLI location: `src/cli/tm.js`
+Invocation: `node src/cli/tm.js <command> '<json>'`
+Help: `node src/cli/tm.js help`
 
-## 环境变量
+## Environment Variables
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF 基地址 |
-| `COCO_AUTH_TOKEN` | (空) | Bearer token,认证端点必填 |
-| `COCO_API_PREFIX` | `/api/v1` | 路径前缀;非默认场景才需要覆盖 |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF base address |
+| `COCO_AUTH_TOKEN` | (empty) | Bearer token, required for authenticated endpoints |
+| `COCO_API_PREFIX` | `/api/v1` | Path prefix; only needs to be overridden in non-default scenarios |
 
-## 当前覆盖度速览
+## Current Coverage at a Glance
 
-全部 42 个命令均已对齐 cws-core BFF,可直接调用。
+All 42 commands are aligned with the cws-core BFF and can be called directly.
 
-| 域 | 命令数 | 状态 |
+| Domain | Command Count | Status |
 | --- | --- | --- |
-| Project | 6 | ✅ 全部可用 |
-| Issue | 13 | ✅ 全部可用 |
-| Task | 8 | ✅ 全部可用 |
-| Comment | 3 | ✅ 全部可用 |
-| Blueprint | 4 | ✅ 全部可用 |
-| Attempt | 4 | ✅ 全部可用 |
-| Event Binding | 4 | ✅ 全部可用 |
+| Project | 6 | ✅ All available |
+| Issue | 13 | ✅ All available |
+| Task | 8 | ✅ All available |
+| Comment | 3 | ✅ All available |
+| Blueprint | 4 | ✅ All available |
+| Attempt | 4 | ✅ All available |
+| Event Binding | 4 | ✅ All available |
 
-## 错误处理
+## Error Handling
 
-CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code 1。常见错误:
+When the CLI fails, it outputs `{"error":"...","status":<httpStatus>}` to stderr with exit code 1. Common errors:
 
-| HTTP | 含义 | Agent 应对 |
+| HTTP | Meaning | Agent Response |
 | --- | --- | --- |
-| 400 | 入参不合法 | 检查参数后重试 |
-| 404 | 资源不存在或无读权限 | 改用搜索 / 询问 Lead |
-| 409 | 状态冲突 / 已存在 | 重读最新状态后再决定 |
-| 504 | 后端超时 | 退避后重试 |
+| 400 | Invalid parameters | Check parameters and retry |
+| 404 | Resource does not exist or no read permission | Switch to search / ask the Lead |
+| 409 | State conflict / already exists | Re-read the latest state before deciding |
+| 504 | Backend timeout | Back off and retry |
 
-## 命令清单
+## Command Listing
 
-### Project (6 条)
+### Project (6 commands)
 
-| 状态 | 命令 | 说明 | 入参 | 端点 |
+| Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `project.list` | 列项目目录(分页) | `{status?, page?, pageSize?, orderBy?}` | `GET /projects` |
-| ✅ | `project.create` | 新建项目,需指定 leadMemberId | `{name, slug, leadMemberId, description?, descriptionFormat?, isDefault?}` | `POST /projects` |
-| ✅ | `project.get` | 取单个项目详情 | `{id}` | `GET /projects/{id}` |
-| ✅ | `project.update` | 改项目名 / 描述 / lead | `{id, name?, description?, descriptionFormat?, leadMemberId?}` | `PATCH /projects/{id}` |
-| ✅ | `project.archive` | 归档项目(前端"删除"映射到这条,不做硬删) | `{id}` | `POST /projects/{id}/archive` |
-| ✅ | `project.members` | 列项目成员(从 cws-work 拉) | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
+| ✅ | `project.list` | List the project directory (paginated) | `{status?, page?, pageSize?, orderBy?}` | `GET /projects` |
+| ✅ | `project.create` | Create a new project, requires leadMemberId | `{name, slug, leadMemberId, description?, descriptionFormat?, isDefault?}` | `POST /projects` |
+| ✅ | `project.get` | Get details of a single project | `{id}` | `GET /projects/{id}` |
+| ✅ | `project.update` | Change project name / description / lead | `{id, name?, description?, descriptionFormat?, leadMemberId?}` | `PATCH /projects/{id}` |
+| ✅ | `project.archive` | Archive a project (the frontend "delete" maps to this, no hard delete) | `{id}` | `POST /projects/{id}/archive` |
+| ✅ | `project.members` | List project members (pulled from cws-work) | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
 
-### Issue (13 条)
+### Issue (13 commands)
 
-写路径使用 flat path `/issues/{id}`,不使用 `/projects/{pid}/issues/{id}`。每个状态变更是一个带不变量校验和副作用的语义化动作;通用 `POST /issues/{id}/transition` 以及旧验收拒绝接口已删除。
+The write path uses the flat path `/issues/{id}`, not `/projects/{pid}/issues/{id}`. Each state change is a semantic action with invariant validation and side effects; the generic `POST /issues/{id}/transition` and the old acceptance-rejection interface have been removed.
 
-| 状态 | 命令 | 说明 | 入参 | 端点 |
+| Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级 / 归档维度过滤) | `{projectId, status?, statuses?, priority?, includeArchived?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
-| ✅ | `issue.get` | 取单个 issue 详情 | `{id}` | `GET /issues/{id}` |
-| ✅ | `issue.create` | 起 issue;默认进入 `in_progress`,`backlog=true` 时先记录不执行;`ownerMemberId` 是交付验收归属 | `{projectId, title, leadAgentId, ownerMemberId?, priority?, description?, originConversationId?, originMessageId?, backlog?}` | `POST /projects/{pid}/issues` |
-| ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, descriptionFormat?, priority?, dueDate?}` | `PATCH /issues/{id}` |
-| ✅ | `issue.activate` | backlog → in_progress;按 source 决定是否唤醒 Lead | `{id, source?}` | `POST /issues/{id}/activate` |
-| ✅ | `issue.submit_plan` | Lead 把执行计划提交给人类确认,写 Issue comment,状态 → pending_plan;新流程必须带 `blueprintId` | `{id, planText, blueprintId, source?, cardMessageId?}` | `POST /issues/{id}/submit-plan` |
-| ✅ | `issue.accept_plan` | 人类接受执行计划;文本卡片模拟期由 Lead 代点,默认 `source=text_card_proxy`;状态 → in_progress | `{id, source?}` | `POST /issues/{id}/accept-plan` |
+| ✅ | `issue.list_in_project` | List issues within a project (can filter by status / priority / archived dimension) | `{projectId, status?, statuses?, priority?, includeArchived?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
+| ✅ | `issue.get` | Get details of a single issue | `{id}` | `GET /issues/{id}` |
+| ✅ | `issue.create` | Start an issue; defaults to `in_progress`, when `backlog=true` it is recorded but not executed; `ownerMemberId` is the delivery-acceptance owner | `{projectId, title, leadAgentId, ownerMemberId?, priority?, description?, originConversationId?, originMessageId?, backlog?}` | `POST /projects/{pid}/issues` |
+| ✅ | `issue.update` | Change issue metadata (does not touch state) | `{id, title?, description?, descriptionFormat?, priority?, dueDate?}` | `PATCH /issues/{id}` |
+| ✅ | `issue.activate` | backlog → in_progress; decides whether to wake the Lead based on source | `{id, source?}` | `POST /issues/{id}/activate` |
+| ✅ | `issue.submit_plan` | Lead submits the execution plan to the human for confirmation, writes an Issue comment, state → pending_plan; the new flow must include `blueprintId` | `{id, planText, blueprintId, source?, cardMessageId?}` | `POST /issues/{id}/submit-plan` |
+| ✅ | `issue.accept_plan` | Human accepts the execution plan; during the text-card simulation period the Lead clicks on their behalf, defaulting to `source=text_card_proxy`; state → in_progress | `{id, source?}` | `POST /issues/{id}/accept-plan` |
 | ✅ | `issue.deliver` | in_progress → delivered | `{id}` | `POST /issues/{id}/deliver` |
-| ✅ | `issue.resume` | 人类反馈后继续对话、重新计划或返工;pending_plan/delivered → in_progress | `{id, reason?, source?}` | `POST /issues/{id}/resume` |
-| ✅ | `issue.accept_delivered` | delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` — `source` 取 `im` / `explicit` / `text_card_proxy`(默认 `explicit`) |
-| ✅ | `issue.reassign_owner` | 修改 issue 负责人(ownerMemberId);已归档对象不可改 | `{id, newOwnerMemberId (or 'ownerMemberId')}` | `POST /issues/{id}/reassign-owner` |
-| ✅ | `issue.move_project` | 把 issue 整体迁到另一个项目 | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
-| ✅ | `issue.terminate` | 提前终止未结论 issue → terminated;服务端级联取消非终态 Task + 发 `issue.terminated` 事件给 Lead 善后(不回滚已发生副作用) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` 默认 `lead_chat` |
+| ✅ | `issue.resume` | After human feedback, continue the conversation, re-plan, or rework; pending_plan/delivered → in_progress | `{id, reason?, source?}` | `POST /issues/{id}/resume` |
+| ✅ | `issue.accept_delivered` | delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` — `source` takes `im` / `explicit` / `text_card_proxy` (default `explicit`) |
+| ✅ | `issue.reassign_owner` | Change the issue owner (ownerMemberId); archived objects cannot be changed | `{id, newOwnerMemberId (or 'ownerMemberId')}` | `POST /issues/{id}/reassign-owner` |
+| ✅ | `issue.move_project` | Move the entire issue to another project | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
+| ✅ | `issue.terminate` | Terminate an inconclusive issue early → terminated; the server cascades to cancel non-terminal Tasks + sends an `issue.terminated` event to the Lead for cleanup (does not roll back side effects that have already occurred) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` defaults to `lead_chat` |
 
-`ownerMemberId` 是 Issue 的验收 / 治理归属:人类调用可省略并默认自己;Agent 代人类创建时必须传**对话中那个人类的 member id**。文本卡片模拟期允许 Lead 使用 `source=text_card_proxy` 代人类点击 `accept_plan` / `accept_delivered`;代码中已把它标成临时路径,真实卡片上线后应由人类 principal 调同一语义接口。人类不接受计划或交付时,不要调拒绝接口;Lead 先继续对话理解反馈,再 `issue.resume` 回到 `in_progress`,改 Blueprint / Task 后重新 `issue.submit_plan`。
+`ownerMemberId` is the acceptance / governance owner of the Issue: a human caller may omit it and it defaults to themselves; when an Agent creates it on behalf of a human, it must pass **the member id of that human in the conversation**. During the text-card simulation period, the Lead is allowed to use `source=text_card_proxy` to click `accept_plan` / `accept_delivered` on the human's behalf; the code has marked this as a temporary path, and once real cards go live the same semantic interface should be called by the human principal. When the human does not accept the plan or delivery, do not call the reject interface; the Lead first continues the conversation to understand the feedback, then `issue.resume` back to `in_progress`, changes the Blueprint / Task, and re-runs `issue.submit_plan`.
 
-### Task (8 条)
+### Task (8 commands)
 
-`task.create` 使用双重嵌套路径 `/projects/{pid}/issues/{iid}/tasks`;其余使用 flat path `/tasks/{id}`。
+`task.create` uses the doubly-nested path `/projects/{pid}/issues/{iid}/tasks`; the rest use the flat path `/tasks/{id}`.
 
-| 状态 | 命令 | 说明 | 入参 | 端点 |
+| Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `task.list` | 列任务(可按 project / issue / 后端状态 / 归档维度过滤) | `{projectId?, issueId?, status?, includeArchived?, page?, pageSize?, orderBy?}` | `GET /tasks` |
-| ✅ | `task.get` | 取单个 task 详情 | `{id}` | `GET /tasks/{id}` |
-| ✅ | `task.create` | 派 task;带 `assigneeId` 直接进 assigned(已分配,待 start),不带则 pending 等人 claim | `{projectId, issueId, title, description?, assigneeId?, blueprintStepId?, dependsOn?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
-| ✅ | `task.claim` | 自己接 task,**只分配**(pending → assigned);不再自动建 attempt,接完要 `task.start` | `{id}` | `POST /tasks/{id}/claim` |
-| ✅ | `task.start` | 开工(assigned → running)并开 attempt;依赖闸(dependsOn 全 done)在此校验 | `{id}` | `POST /tasks/{id}/start` |
-| ✅ | `task.transition` | 推 task 终态(done / failed / cancelled);所有 attempt 必须先到终态 | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
-| ✅ | `task.status` | `task.transition` 别名 | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
-| ✅ | `task.reassign` | 把已 claim 的 task 重派给别的 member(Lead 专属) | `{id, newAssigneeId (or 'assigneeId')}` | `POST /tasks/{id}/reassign` |
+| ✅ | `task.list` | List tasks (can filter by project / issue / backend status / archived dimension) | `{projectId?, issueId?, status?, includeArchived?, page?, pageSize?, orderBy?}` | `GET /tasks` |
+| ✅ | `task.get` | Get details of a single task | `{id}` | `GET /tasks/{id}` |
+| ✅ | `task.create` | Dispatch a task; with `assigneeId` it goes directly to assigned (assigned, awaiting start), without it, pending awaiting someone to claim | `{projectId, issueId, title, description?, assigneeId?, blueprintStepId?, dependsOn?}` | `POST /projects/{pid}/issues/{iid}/tasks` |
+| ✅ | `task.claim` | Claim a task for yourself, **assign only** (pending → assigned); no longer auto-creates an attempt, run `task.start` after claiming | `{id}` | `POST /tasks/{id}/claim` |
+| ✅ | `task.start` | Begin work (assigned → running) and open an attempt; the dependency gate (all dependsOn done) is validated here | `{id}` | `POST /tasks/{id}/start` |
+| ✅ | `task.transition` | Push the task to a terminal state (done / failed / cancelled); all attempts must reach a terminal state first | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
+| ✅ | `task.status` | Alias for `task.transition` | `{id, targetStatus (or 'status')}` | `POST /tasks/{id}/transition` |
+| ✅ | `task.reassign` | Reassign an already-claimed task to another member (Lead-only) | `{id, newAssigneeId (or 'assigneeId')}` | `POST /tasks/{id}/reassign` |
 
-`task.claim` / `task.start` 均无 body,principal 从 auth header 推断。v0.7 起 claim 与 start 分离:**claim 只把 task 分给自己(assigned),start 才真正开工并建 Attempt**。Worker 接活的标准两步是 `task.claim` → `task.start`。
+`task.claim` / `task.start` both have no body; the principal is inferred from the auth header. Starting from v0.7, claim and start are separated: **claim only assigns the task to yourself (assigned), start actually begins work and creates the Attempt**. The standard two steps for a Worker to pick up work are `task.claim` → `task.start`.
 
-### Comment (3 条)
+### Comment (3 commands)
 
-Issue / Task 的对话、计划说明、状态变更说明和 agent 交接上下文都写 comment。状态变化本身由语义接口完成,comment 用于回溯「为什么这么变」。
+Conversations on an Issue / Task, plan explanations, state-change explanations, and agent handoff context are all written as comments. The state change itself is done by the semantic interfaces; comments are used to trace back "why it changed this way".
 
-| 状态 | 命令 | 说明 | 入参 | 端点 |
+| Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comment.create` | 给 Issue 或 Task 写 Markdown 评论 | `{workType, workId, bodyMarkdown}` | `POST /comments` |
-| ✅ | `comment.get` | 取单条评论 | `{id}` | `GET /comments/{id}` |
-| ✅ | `comment.list` | 列某个 Issue / Task 的评论 | `{workType, workId, page?, pageSize?, orderBy?}` | `GET /comments` |
+| ✅ | `comment.create` | Write a Markdown comment on an Issue or Task | `{workType, workId, bodyMarkdown}` | `POST /comments` |
+| ✅ | `comment.get` | Get a single comment | `{id}` | `GET /comments/{id}` |
+| ✅ | `comment.list` | List the comments of an Issue / Task | `{workType, workId, page?, pageSize?, orderBy?}` | `GET /comments` |
 
-### Blueprint (4 条)
+### Blueprint (4 commands)
 
-`blueprint.create` 和 `blueprint.list` 使用 issue 嵌套路径;`blueprint.set_steps` 是全量替换语义(PUT),不是追加。
+`blueprint.create` and `blueprint.list` use the issue-nested path; `blueprint.set_steps` has full-replacement semantics (PUT), not append.
 
-| 状态 | 命令 | 说明 | 入参 | 端点 |
+| Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `blueprint.create` | 起 blueprint 草稿,steps 一次性给齐(后续可 set_steps 改) | `{issueId, steps[], estimatedBudget?, notes?}` | `POST /issues/{iid}/blueprints` — 服务端从 auth principal 推导 author;CLI 接受 `authorAgentId` 形参但**不发到 body**(向后兼容老调用方) |
-| ✅ | `blueprint.get` | 取 blueprint(含/不含 steps) | `{id, includeSteps?}` | `GET /blueprints/{id}` |
-| ✅ | `blueprint.list` | 列 issue 下的 blueprint 版本(看修订历史) | `{issueId, page?, pageSize?, orderBy?}` | `GET /issues/{iid}/blueprints` |
-| ✅ | `blueprint.set_steps` | 整批替换 steps(全量,不是 append) | `{blueprintId (or 'id'), steps[]}` | `PUT /blueprints/{id}/steps` |
+| ✅ | `blueprint.create` | Start a blueprint draft, provide all steps at once (can later be changed with set_steps) | `{issueId, steps[], estimatedBudget?, notes?}` | `POST /issues/{iid}/blueprints` — the server derives the author from the auth principal; the CLI accepts the `authorAgentId` parameter but **does not send it in the body** (backward compatibility with old callers) |
+| ✅ | `blueprint.get` | Get a blueprint (with/without steps) | `{id, includeSteps?}` | `GET /blueprints/{id}` |
+| ✅ | `blueprint.list` | List the blueprint versions under an issue (view revision history) | `{issueId, page?, pageSize?, orderBy?}` | `GET /issues/{iid}/blueprints` |
+| ✅ | `blueprint.set_steps` | Replace steps in a single batch (full replacement, not append) | `{blueprintId (or 'id'), steps[]}` | `PUT /blueprints/{id}/steps` |
 
-### Attempt (4 条)
+### Attempt (4 commands)
 
-| 状态 | 命令 | 说明 | 入参 | 端点 |
+| Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `attempt.create` | 手动开新一轮(几乎用不到,`task.claim` 已经自带建 attempt) | `{taskId}` | `POST /tasks/{taskId}/attempts` |
-| ✅ | `attempt.get` | 取 attempt 详情(看 status / startedAt / failureReason) | `{id}` | `GET /attempts/{id}` |
-| ✅ | `attempt.list` | 列 task 的所有 attempt(看历次重试 / 失败原因) | `{taskId, page?, pageSize?, orderBy?}` | `GET /tasks/{taskId}/attempts` |
-| ✅ | `attempt.transition` | 推 attempt 状态(done / failed / blocked / cancelled);Worker 用这条标记自己的执行结果 | `{id, targetStatus (or 'status'), failureReason?, blockedOnApprovalRequestIds?}` | `POST /attempts/{id}/transition` |
+| ✅ | `attempt.create` | Manually open a new round (rarely needed, `task.claim` already creates an attempt) | `{taskId}` | `POST /tasks/{taskId}/attempts` |
+| ✅ | `attempt.get` | Get attempt details (view status / startedAt / failureReason) | `{id}` | `GET /attempts/{id}` |
+| ✅ | `attempt.list` | List all attempts of a task (view each retry / failure reason) | `{taskId, page?, pageSize?, orderBy?}` | `GET /tasks/{taskId}/attempts` |
+| ✅ | `attempt.transition` | Push the attempt state (done / failed / blocked / cancelled); a Worker uses this to mark their own execution result | `{id, targetStatus (or 'status'), failureReason?, blockedOnApprovalRequestIds?}` | `POST /attempts/{id}/transition` |
 
-`attempt.create` 通常不需要直接调用——`task.claim` 会自动创建 Attempt。仅在需要手动开启新一轮尝试时使用。
+`attempt.create` usually does not need to be called directly — `task.claim` automatically creates the Attempt. Use it only when you need to manually start a new round of attempts.
 
-### Event Binding (4 条)
+### Event Binding (4 commands)
 
-定时任务 = `EventBinding(sourceKind=timer)`：到点由平台创建 Issue 并派给 lead（你），你只是"接到一份新 Issue"，不感知自己被 cron 调起。
+Scheduled task = `EventBinding(sourceKind=timer)`: when the time comes the platform creates an Issue and dispatches it to the lead (you), and you simply "receive a new Issue" without being aware that you were woken by cron.
 
-| 状态 | 命令 | 说明 | 入参 | 端点 |
+| Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `event-binding.create` | 创建定时任务（create-by-agent 主路径） | `{cronExpr, leadMemberId, ownerMemberId, projectId, title, description?}` | `POST /event-bindings` |
-| ✅ | `event-binding.list` | 列本 org 的定时任务 | `{}` | `GET /event-bindings` |
-| ✅ | `event-binding.get` | 取定时任务详情（看 nextTriggerAt） | `{id}` | `GET /event-bindings/{id}` |
-| ✅ | `event-binding.delete` | 删除定时任务（停止后续触发，不影响已生成的 Issue） | `{id}` | `DELETE /event-bindings/{id}` |
+| ✅ | `event-binding.create` | Create a scheduled task (create-by-agent main path) | `{cronExpr, leadMemberId, ownerMemberId, projectId, title, description?}` | `POST /event-bindings` |
+| ✅ | `event-binding.list` | List the scheduled tasks of this org | `{}` | `GET /event-bindings` |
+| ✅ | `event-binding.get` | Get scheduled task details (view nextTriggerAt) | `{id}` | `GET /event-bindings/{id}` |
+| ✅ | `event-binding.delete` | Delete a scheduled task (stops future triggers, does not affect already-generated Issues) | `{id}` | `DELETE /event-bindings/{id}` |
 
-create-by-agent 护栏（cws-work 强制，违反直接报错）：
+create-by-agent guardrails (enforced by cws-work, violations error out directly):
 
-- `leadMemberId` 必须 = **你自己的 member id**（agent 只能把自己设为 lead）
-- `ownerMemberId` 必须 = **对话中那个人类的 member id**，且不能是你自己（owner 是治理责任人=人类）
-- `cronExpr` 5 段（分 时 日 月 周）
+- `leadMemberId` must = **your own member id** (an agent can only set itself as lead)
+- `ownerMemberId` must = **the member id of that human in the conversation**, and cannot be yourself (owner is the governance responsible party = human)
+- `cronExpr` has 5 fields (minute hour day month weekday)
 
-## 典型使用场景
+## Typical Usage Scenarios
 
-### 1. Lead 接简单 Issue 且自做
+### 1. Lead takes a simple Issue and does it themselves
 
 ```bash
-# 0) 上下文组装:搜 KB 找参考材料,收集 page ID
-node src/cli/kb.js kb.search '{"query":"竞品定价","folderId":"tn-projects-growth"}'
-# -> 命中 pg-pricing-ref-001, pg-market-overview-002
+# 0) Context assembly: search KB for reference material, collect page IDs
+node src/cli/kb.js kb.search '{"query":"competitive pricing","folderId":"tn-projects-growth"}'
+# -> hits pg-pricing-ref-001, pg-market-overview-002
 
-# 1) 创建 Issue(默认进入 in_progress)
+# 1) Create Issue (defaults to in_progress)
 node src/cli/tm.js issue.create '{
   "projectId":"proj-1",
-  "title":"Notion 竞品定价分析","description":"对比 5 个直接竞品的定价层级",
+  "title":"Notion competitive pricing analysis","description":"Compare the pricing tiers of 5 direct competitors",
   "priority":"medium","leadAgentId":"agent-self",
   "ownerMemberId":"human-requester-1",
   "originConversationId":"conv-1","originMessageId":"msg-42"
 }'
 
-# 1.5) 创建单 step Blueprint,作为计划事实源
+# 1.5) Create a single-step Blueprint as the source of truth for the plan
 node src/cli/tm.js blueprint.create '{
   "issueId":"iss-1",
   "steps":[
-    {"temp_id":"s1","description":"完成竞品定价分析并输出结论到 KB"}
+    {"temp_id":"s1","description":"Complete the competitive pricing analysis and output the conclusion to KB"}
   ],
-  "notes":"单 Agent 简单任务,一个 step 即可"
+  "notes":"Single-Agent simple task, one step is enough"
 }'
 
-# 1.6) Lead 发执行计划文本卡片给人类确认;人类回复"接受计划"后,Lead 代点
-node src/cli/tm.js issue.submit_plan '{"id":"iss-1","blueprintId":"bp-1","planText":"1. 完成竞品定价分析\\n2. 输出结论到 KB","source":"lead_chat"}'
+# 1.6) Lead sends the plan text card to the human for confirmation; after the human replies "accept the plan", the Lead clicks on their behalf
+node src/cli/tm.js issue.submit_plan '{"id":"iss-1","blueprintId":"bp-1","planText":"1. Complete the competitive pricing analysis\\n2. Output the conclusion to KB","source":"lead_chat"}'
 node src/cli/tm.js issue.accept_plan '{"id":"iss-1","source":"text_card_proxy"}'
 
-# 2) 按单 step Blueprint 创建 Task 并认领
+# 2) Create a Task per the single-step Blueprint and claim it
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-1","blueprintStepId":"step-1",
-  "title":"竞品定价分析","assigneeId":"agent-self"
+  "title":"Competitive pricing analysis","assigneeId":"agent-self"
 }'
 node src/cli/tm.js task.claim '{"id":"task-1"}'
 
-# 3) 工作完成,流转 Attempt → Task → Issue → 交付
+# 3) Work done, flow Attempt → Task → Issue → deliver
 node src/cli/tm.js attempt.transition '{"id":"att-1","targetStatus":"done"}'
 node src/cli/tm.js task.transition    '{"id":"task-1","targetStatus":"done"}'
 node src/cli/tm.js issue.deliver      '{"id":"iss-1"}'
 
-# 4) owner 人类验收。文本卡片模拟期:人类回复"接受交付"后 Lead 代点
+# 4) The owner human accepts. During the text-card simulation period: after the human replies "accept the delivery", the Lead clicks on their behalf
 node src/cli/tm.js issue.accept_delivered '{"id":"iss-1","source":"text_card_proxy"}'
 ```
 
-### 2. Lead 编排复杂 Blueprint
+### 2. Lead orchestrates a complex Blueprint
 
 ```bash
-# 1) 创建 Issue
+# 1) Create Issue
 node src/cli/tm.js issue.create '{
   "projectId":"proj-1","priority":"high",
-  "title":"季度产品规划","leadAgentId":"agent-self",
+  "title":"Quarterly product planning","leadAgentId":"agent-self",
   "ownerMemberId":"human-requester-1"
 }'
 
-# 2) 起 Blueprint 草稿(含 Steps,一次提交)
+# 2) Start a Blueprint draft (with Steps, submitted at once)
 node src/cli/tm.js blueprint.create '{
   "issueId":"iss-2",
   "steps":[
-    {"temp_id":"s1","description":"Step 1: 调研用户痛点"},
-    {"temp_id":"s2","description":"Step 2: 写需求文档","depends_on_temp_ids":["s1"]}
+    {"temp_id":"s1","description":"Step 1: Research user pain points"},
+    {"temp_id":"s2","description":"Step 2: Write the requirements document","depends_on_temp_ids":["s1"]}
   ]
 }'
 
-# 3) 需要修改 Steps 时,整体替换
+# 3) When you need to modify Steps, replace them wholesale
 node src/cli/tm.js blueprint.set_steps '{
   "blueprintId":"bp-1",
   "steps":[
-    {"temp_id":"s1","description":"Step 1: 调研用户痛点(含问卷)"},
-    {"temp_id":"s2","description":"Step 2: 写需求文档","depends_on_temp_ids":["s1"]},
-    {"temp_id":"s3","description":"Step 3: 技术可行性评估","depends_on_temp_ids":["s2"]}
+    {"temp_id":"s1","description":"Step 1: Research user pain points (including a survey)"},
+    {"temp_id":"s2","description":"Step 2: Write the requirements document","depends_on_temp_ids":["s1"]},
+    {"temp_id":"s3","description":"Step 3: Technical feasibility assessment","depends_on_temp_ids":["s2"]}
   ]
 }'
 
-# 4) Lead 渲染计划文本并提交给人类确认;Blueprint ID 作为机器可执行骨架绑定
-node src/cli/tm.js issue.submit_plan '{"id":"iss-2","blueprintId":"bp-1","planText":"1. 调研用户痛点\\n2. 写需求文档\\n3. 技术可行性评估","source":"lead_chat"}'
+# 4) Lead renders the plan text and submits it to the human for confirmation; the Blueprint ID is bound as the machine-executable skeleton
+node src/cli/tm.js issue.submit_plan '{"id":"iss-2","blueprintId":"bp-1","planText":"1. Research user pain points\\n2. Write the requirements document\\n3. Technical feasibility assessment","source":"lead_chat"}'
 node src/cli/tm.js issue.accept_plan '{"id":"iss-2","source":"text_card_proxy"}'
 
-# 5) 计划接受后,按 Step 派 Worker
+# 5) After the plan is accepted, dispatch Workers per Step
 node src/cli/tm.js task.create '{
   "projectId":"proj-1","issueId":"iss-2",
-  "blueprintStepId":"step-1","title":"用户访谈","assigneeId":"worker-1"
+  "blueprintStepId":"step-1","title":"User interviews","assigneeId":"worker-1"
 }'
 ```
 
-### 3. Worker 执行已指派任务
+### 3. Worker executes an already-assigned task
 
 ```bash
-# 1) 收到调度中心或 Lead 通知后读取任务
+# 1) After receiving a notification from the scheduling center or the Lead, read the task
 node src/cli/tm.js task.get '{"id":"task-7"}'
 
-# 2) 未分配时先认领；已是 ASSIGNED 给自己时可跳过
+# 2) When unassigned, claim it first; if it is already ASSIGNED to you, you can skip
 node src/cli/tm.js task.claim '{"id":"task-7"}'
 
-# 3) 依赖满足后开工，进入 RUNNING 并创建 Attempt
+# 3) After dependencies are satisfied, begin work, enter RUNNING and create the Attempt
 node src/cli/tm.js task.start '{"id":"task-7"}'
 node src/cli/tm.js comment.list '{"workType":"task","workId":"upstream-task-1"}'
 
-# 4) 查看当前 Attempt 信息
+# 4) View the current Attempt info
 node src/cli/tm.js attempt.list '{"taskId":"task-7"}'
 
-# 5) 完成
+# 5) Complete
 node src/cli/tm.js attempt.transition '{"id":"att-3","targetStatus":"done"}'
 node src/cli/tm.js task.transition '{"id":"task-7","targetStatus":"done"}'
 ```
 
-### 4. Worker 遇阻塞 / 失败汇报
+### 4. Worker reports a blockage / failure
 
 ```bash
-# 标记 Attempt 失败(含原因)
+# Mark the Attempt as failed (with reason)
 node src/cli/tm.js attempt.transition '{
   "id":"att-3","targetStatus":"failed","failureReason":"missing_credentials"
 }'
 
-# 需要审批时,标记 blocked
+# When approval is needed, mark it blocked
 node src/cli/tm.js attempt.transition '{
   "id":"att-3","targetStatus":"blocked",
   "blockedOnApprovalRequestIds":["apr-1"]
 }'
 ```
 
-### 5. create-by-agent:帮人类创建定时任务
+### 5. create-by-agent: create a scheduled task for a human
 
-人类在 DM 里说"帮我建一个定时任务"时，你（被选定的 lead agent）负责把它问清楚再建——你最清楚到点跑这个任务需要什么上下文。
+When a human says in a DM "help me set up a scheduled task", you (the selected lead agent) are responsible for asking it out clearly before creating it — you know best what context is needed to run this task when the time comes.
 
 ```bash
-# 0) 交互式问清楚（不要凭空猜，缺上下文是定时任务最大的坑）：
-#    - 多久跑一次 → 转成 5 段 cron（说清时区假设）
-#    - 归属哪个 project
-#    - 到点要做什么 → title / description，尽量把上下文问全
-# 1) 复述确认后创建：leadMemberId=自己，ownerMemberId=对话的人类
+# 0) Interactively ask it out clearly (don't guess out of thin air; missing context is the biggest pitfall of scheduled tasks):
+#    - how often to run → convert to a 5-field cron (state the timezone assumption clearly)
+#    - which project it belongs to
+#    - what to do when the time comes → title / description, ask for as much context as possible
+# 1) Restate and confirm, then create: leadMemberId=yourself, ownerMemberId=the human in the conversation
 node src/cli/tm.js event-binding.create '{
   "cronExpr":"0 9 * * 1",
-  "leadMemberId":"<你自己的 member id>",
-  "ownerMemberId":"<对话人类的 member id>",
+  "leadMemberId":"<your own member id>",
+  "ownerMemberId":"<the conversation human's member id>",
   "projectId":"prj-1",
-  "title":"每周清理过期工件",
-  "description":"清理 7 天前的临时工件，输出清理报告"
+  "title":"Weekly cleanup of expired artifacts",
+  "description":"Clean up temporary artifacts older than 7 days and output a cleanup report"
 }'
-# 2) 回报结果（binding id + nextTriggerAt）
+# 2) Report the result (binding id + nextTriggerAt)
 ```
 
-要点：
+Key points:
 
-- **owner=人类、lead=自己**是硬约束，填错直接被拒（见上方护栏）
-- **上下文不足不在创建期拦**：如果人类坚持信息不全也要建，照建；将来到点跑发现缺东西，把"缺 XX"作为产出投递回该会话，人类再改 binding
-- 这是 v0.7 的主路径（agent 直接调 API）；后续版本会改成"返回可交互卡片、人类点按钮以人类身份创建"
+- **owner=human, lead=yourself** is a hard constraint; filling it in wrong is rejected directly (see the guardrails above)
+- **Insufficient context is not blocked at creation time**: if the human insists on creating it even with incomplete information, create it anyway; when it later runs at the appointed time and finds something missing, deliver "missing XX" as the output back to that conversation, and the human then changes the binding
+- This is the main path in v0.7 (the agent calls the API directly); a later version will change it to "return an interactive card, the human clicks a button and creates it as the human"
 
-## 与 SKILL.md 的关系
+## Relationship with SKILL.md
 
-本文档是 [`SKILL.md`](../SKILL.md) 的 Layer 3 子 skill,只负责 TM CLI 的**命令机制**(入参 / 端点 / 顺序 / 典型流程)。下面这些行为面内容**在 SKILL.md 里**,本文档不重复:
+This document is a Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible only for the **command mechanics** of the TM CLI (parameters / endpoints / ordering / typical flows). The following behavioral content is **in SKILL.md** and is not repeated here:
 
-| 想看 | 去 SKILL.md 的哪节 |
+| Want to see | Which section of SKILL.md |
 |---|---|
-| Lead 与 Worker 的能力边界对照表 | [角色模型](../SKILL.md) |
-| Worker 自己流转 task / attempt 的契约 | [角色模型 > Worker 状态流转的明确边界](../SKILL.md) |
-| Issue / Task / Attempt 状态机完整图 | [状态机](../SKILL.md) |
-| 通用的"常见错误"清单(15 条) | [行为护栏 > 常见错误](../SKILL.md) |
-| 参数依赖树 / 上下文锚定 | [效率捷径](../SKILL.md) |
-| 记忆持久化的时机 | [记忆触发点](../SKILL.md) |
+| The capability-boundary comparison table for Lead and Worker | [Role Model](../SKILL.md) |
+| The contract for a Worker to flow their own task / attempt | [Role Model > Explicit Boundaries of Worker State Transitions](../SKILL.md) |
+| The complete Issue / Task / Attempt state machine diagram | [State Machine](../SKILL.md) |
+| The generic "common mistakes" list (15 items) | [Behavioral Guardrails > Common Mistakes](../SKILL.md) |
+| Parameter dependency tree / context anchoring | [Efficiency Shortcuts](../SKILL.md) |
+| The timing of memory persistence | [Memory Triggers](../SKILL.md) |
 
-也就是说:**SKILL.md 讲行为,本文档讲机制**,两份配套使用。
+In other words: **SKILL.md covers behavior, this document covers mechanics**, and the two are used together.
 
-## TM 专属注意事项
+## TM-Specific Notes
 
-下面几条是 SKILL.md "常见错误"没单独覆盖的 TM 命令级细节:
+The following are TM command-level details that SKILL.md's "common mistakes" does not cover separately:
 
-- **不要**把 IM 消息原文整段复制进 task description / 评论 —— 只写必要背景、KB 链接和产出地址
-- **不要**直接调 `attempt.create` 来代替 `task.claim` —— `claim` 已内置建 attempt,手动 create 会撞冲突
-- **不要**忘记 `task.reassign` 后老 attempt 已自动 cancelled —— 新 assignee 走的是新 attempt,旧 attempt 不要再操作
-- **description 必须使用 Markdown 格式**：Project / Issue / Task 的 description 字段均支持 Markdown。CLI 默认传 `description_format: "markdown"`,前端按此渲染富文本。写 description 时使用标题(`##`)、列表(`-`)、加粗(`**`)、代码块(`` ``` ``)、链接(`[text](url)`)等标准 Markdown 语法。示例：
+- **Do not** copy the entire IM message text into the task description / comment — write only the necessary background, KB links, and output addresses
+- **Do not** call `attempt.create` directly to replace `task.claim` — `claim` already builds the attempt built in, and a manual create will hit a conflict
+- **Do not** forget that after `task.reassign` the old attempt is already auto-cancelled — the new assignee runs on a new attempt, and the old attempt should not be operated on again
+- **The description must use Markdown format**: the description fields of Project / Issue / Task all support Markdown. The CLI passes `description_format: "markdown"` by default, and the frontend renders rich text accordingly. When writing a description, use standard Markdown syntax such as headings (`##`), lists (`-`), bold (`**`), code blocks (`` ``` ``), and links (`[text](url)`). Example:
   ```json
-  {"title":"用户增长分析","description":"## 目标\n\n分析 Q2 用户增长趋势。\n\n## 产出\n\n- 增长漏斗分析报告\n- 关键指标 dashboard\n- 改进建议清单"}
+  {"title":"User growth analysis","description":"## Goal\n\nAnalyze Q2 user growth trends.\n\n## Deliverables\n\n- Growth funnel analysis report\n- Key-metrics dashboard\n- List of improvement suggestions"}
   ```
 
-## 后续版本计划
+## Future Version Plans
 
-以下功能不在当前 zylos 操作面中:
+The following features are not in the current zylos operation surface:
 
-- Link(WorkConversationLink 锚定)
-- System(工作区初始化 / 审批决策 / 自动归档)
-- Blueprint 细粒度操作(单 Step 增删改、预算/备注设置、修订版创建)
+- Link (WorkConversationLink anchoring)
+- System (workspace initialization / approval decisions / auto-archiving)
+- Blueprint fine-grained operations (single-Step add/delete/modify, budget/notes settings, revision creation)

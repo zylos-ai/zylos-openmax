@@ -2,10 +2,11 @@
 name: openmax
 version: 2.8.12
 description: >-
-  OpenMax 任务代理 (Guided Autonomy)。凡通过 openmax 收到的用户消息，
-  处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
-  确认归属项目 + 知识库 → 登记 Issue→Task（谁执行谁建，Issue owner=发起人）→ 执行 → owner 发起人验收通过才算完成，
-  不要跳过流程直接开干。含效率捷径 / 状态机 / 行为护栏 / 记忆触发点。
+  OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
+  you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
+  if it is a task you MUST run the full flow —
+  confirm the owning project + KnowledgeBase → register Issue→Task (whoever executes creates it, Issue owner=originator) → execute → it counts as complete only after the owner/originator accepts it,
+  do not skip the flow and just start working. Includes efficiency shortcuts / state machine / behavioral guardrails / memory triggers.
   Config at ~/zylos/components/openmax/config.json.
   Service: pm2 zylos-openmax.
 type: communication
@@ -66,479 +67,478 @@ dependencies:
 
 # Agent Skill
 
-> 设计规范源：`cws-work/docs/skill-design/agent-skill-spec.md`
-> 范式：Guided Autonomy — 不规定流程步骤，只提供捷径、护栏和触发点。
+> Design spec source: `cws-work/docs/skill-design/agent-skill-spec.md`
+> Paradigm: Guided Autonomy — it does not prescribe process steps, only provides shortcuts, guardrails, and trigger points.
 
-## 角色模型
+## Role Model
 
-角色由运行时指派关系决定，不是 Agent 固有属性：
+Roles are determined by the runtime assignment relationship, not by an inherent Agent attribute:
 
-| 指派关系 | 角色 |
+| Assignment relationship | Role |
 |---|---|
-| `Issue.leadAgentId = self` | Lead（编排者）|
-| `Task.assigneeId = self` | Worker（执行者）|
-| 两者同时 | Lead 自做 |
+| `Issue.leadAgentId = self` | Lead (orchestrator) |
+| `Task.assigneeId = self` | Worker (executor) |
+| Both at once | Lead does it itself |
 
-同一 Agent 可同时在 Issue A 中当 Lead、Issue B 中当 Worker。
+The same Agent can be Lead in Issue A and Worker in Issue B at the same time.
 
-**角色边界按 Issue/Task 范围生效，不是 session 级**：
+**Role boundaries take effect at Issue/Task scope, not session scope**:
 
-| 能力 | Lead | Worker |
+| Capability | Lead | Worker |
 |---|---|---|
-| 与人类直接通信 | 是 | 否（通过 Lead 转达）|
-| Issue 操作（创建/流转/关闭）| 是 | 否 |
-| Task 创建/派发 | 是 | 否 |
-| Task 领取（claim 自己的 task）| 仅监控 | 是 |
-| Task 状态流转（own task → done/failed/cancelled）| 仅监控 | **是** |
-| Task 重派（reassign 到别的 agent）| 是 | 否 |
-| Attempt 状态流转（own attempt → done/failed/cancelled/blocked）| 仅监控 | **是** |
-| Blueprint 操作 | 是 | 否 |
-| KB 写入 | 经验沉淀 | 任务产出（Lead 指定位置）|
+| Direct communication with humans | Yes | No (relayed via the Lead) |
+| Issue operations (create/transition/close) | Yes | No |
+| Task creation/dispatch | Yes | No |
+| Task claim (claim one's own task) | Monitor only | Yes |
+| Task state transition (own task → done/failed/cancelled) | Monitor only | **Yes** |
+| Task reassign (reassign to another agent) | Yes | No |
+| Attempt state transition (own attempt → done/failed/cancelled/blocked) | Monitor only | **Yes** |
+| Blueprint operations | Yes | No |
+| KB writes | Experience distillation | Task output (location specified by the Lead) |
 
-Worker 的"不创建 Issue""不与人类通信"仅在该 Worker 角色上下文中生效。同一 Agent 在 Lead 角色中正常行使 Lead 权限。
+The Worker's "does not create Issues" / "does not communicate with humans" only takes effect within that Worker role context. The same Agent exercises Lead privileges normally when in the Lead role.
 
-**Worker 状态流转的明确边界**（避免保守过头拒绝合法操作）：
+**Explicit boundaries of Worker state transitions** (to avoid being overly conservative and rejecting legitimate operations):
 
-- 自己 attempt 走完、失败、被 Lead 通知取消 → Worker **自己**调 `attempt.transition` 到 done/failed/cancelled
-- 自己 task 所有 attempt 在终态后（或被 Lead 通知 cancel）→ Worker **自己**调 `task.transition` 到 done/failed/cancelled
-- 不需要等 Lead 来推流转，也不需要先确认"这是不是 Lead 权限"
-- Lead 只在跨 task / 重派 / 接收 Worker 失败汇报后做 task 终态决策时介入
+- Own attempt runs to completion, fails, or is notified of cancellation by the Lead → the Worker calls `attempt.transition` to done/failed/cancelled **itself**
+- After all attempts of one's own task reach a terminal state (or are notified to cancel by the Lead) → the Worker calls `task.transition` to done/failed/cancelled **itself**
+- No need to wait for the Lead to push the transition, and no need to first confirm "is this a Lead privilege"
+- The Lead only steps in for cross-task / reassign / task terminal-state decisions after receiving a Worker's failure report
 
-Worker **不该**做的:任何 issue 生命周期动作（如 `issue.submit_plan` / `issue.accept_plan` / `issue.deliver` / `issue.resume` / `issue.accept_delivered`）、`task.reassign`、替别人派单式的 `task.create`。
-**例外（谁执行谁建）**：被指派执行某 Issue 时，执行 bot 可在该 Issue 下**为自己的工作** `task.create` 并认领——这是「登记自己要做的任务」，不是替别人派单，不算越权。Lead 派发时只建 Issue、不替执行 bot 建 Task。
+What the Worker **should not** do: any issue lifecycle action (such as `issue.submit_plan` / `issue.accept_plan` / `issue.deliver` / `issue.resume` / `issue.accept_delivered`), `task.reassign`, or dispatch-style `task.create` on behalf of others.
+**Exception (whoever executes creates it)**: when assigned to execute a certain Issue, the executing bot may `task.create` and claim **for its own work** under that Issue — this is "registering the task it is going to do itself", not dispatching on behalf of others, and does not count as overstepping. When dispatching, the Lead only creates the Issue and does not create Tasks for the executing bot.
 
-## 服务调用铁律（TM / KB / AS / Comm / Core 一律走 CLI）
+## Iron Rule of Service Calls (TM / KB / AS / Comm / Core all go through the CLI)
 
-**所有 Workspace 服务操作——Issue / Task / Attempt / Blueprint、知识库(KB)、文件(AS)、主动 IM(Comm)、成员/项目/组织查询(Core)——必须通过 openmax 的 CLI 调用：`src/cli/{tm,kb,as,comm,core}.js`。严禁手搓 BFF REST（curl / fetch / 直接拼 HTTP 路径）。**
+**All Workspace service operations — Issue / Task / Attempt / Blueprint, KnowledgeBase (KB), files (AS), proactive IM (Comm), member/project/org queries (Core) — MUST go through openmax's CLI: `src/cli/{tm,kb,as,comm,core}.js`. Hand-rolling BFF REST (curl / fetch / directly assembling HTTP paths) is strictly forbidden.**
 
-- **不确定命令/参数时**：先跑 `node src/cli/<svc>.js`（无参看命令清单），或查 `references/<svc>-operations.md`——**不要凭 REST 惯例猜路径**（确切端点/字段以 CLI 与 ops 文档为准）。
-- 这是**硬性约束、不是建议**：绕过 CLI 直连 BFF = 破窗。
+- **When unsure of the command/parameters**: first run `node src/cli/<svc>.js` (no args shows the command list), or check `references/<svc>-operations.md` — **do not guess paths from REST conventions** (the exact endpoints/fields are defined by the CLI and the ops docs).
+- This is a **hard constraint, not a suggestion**: bypassing the CLI to hit BFF directly = broken window.
 
-## 任务分类与执行流程
+## Task Classification and Execution Flow
 
-### 工作对象引用
+### Work Object References
 
-消息中的 `proj://<uuid>` 和 `issue://<uuid>` 是已有 Project / Issue 的 canonical 引用。通信桥会把它们解析到 `<work-references>`；引用只建立本轮对话上下文，不启动工作，也不授予任何权限。
+The `proj://<uuid>` and `issue://<uuid>` in a message are canonical references to an existing Project / Issue. The communication bridge resolves them into `<work-references>`; a reference only establishes the context of the current conversation turn, does not start work, and does not grant any permission.
 
-- 不得仅因为消息包含引用就创建 Issue、Blueprint 或 Task。
-- 不得根据 Markdown label 做有副作用的操作；label 是发送时快照，id 才是对象身份。
-- 需要当前详情时，使用自己的 Agent Principal 通过 CLI 调用 `project.get {id}` 或 `issue.get {id}`。无权限时明确告知用户，禁止借用发送者身份读取。
-- `issue://` 指向已有 Issue。查询、汇报进度、评审等请求直接围绕该 Issue 处理，不重复创建 Issue。
-- 用户明确要求在已有 Issue 中继续工作时，先读取 Issue 当前状态、Blueprint 和 Task，再沿现有生命周期推进；不要套用“新任务先登记 Issue”的分支。
-- `proj://` 只确认 Project 上下文。它本身不是任务；只有消息其余内容构成工作目标时才进入任务流程，此时无需再次询问归属 Project。
-- 多个引用导致目标不明确，或引用对象与请求内容冲突时，先向用户确认。
+- Do not create an Issue, Blueprint, or Task merely because a message contains a reference.
+- Do not perform side-effecting operations based on the Markdown label; the label is a snapshot at send time, the id is the object identity.
+- When you need the current details, use your own Agent Principal to call `project.get {id}` or `issue.get {id}` via the CLI. When you lack permission, tell the user explicitly; borrowing the sender's identity to read is forbidden.
+- `issue://` points to an existing Issue. Handle requests to query, report progress, review, etc. directly around that Issue; do not re-create the Issue.
+- When the user explicitly asks to continue work in an existing Issue, first read the Issue's current state, Blueprint, and Task, then advance along the existing lifecycle; do not apply the "new task first registers an Issue" branch.
+- `proj://` only confirms the Project context. It is not itself a task; enter the task flow only when the rest of the message content constitutes a work goal, and in that case there is no need to ask again about the owning Project.
+- When multiple references make the goal unclear, or a referenced object conflicts with the request content, confirm with the user first.
 
-**触发（每条消息都要做）**：凡是通过 openmax 组件收到的用户消息，先判断它**是不是一个"任务"（工作目标）**，而不是简单问答 / 闲聊。
+**Trigger (do this for every message)**: for any user message received via the openmax component, first decide whether it **is a "task" (a work goal)**, rather than a simple Q&A / chat.
 
-- **不是任务**（简单问答、闲聊、查询）→ 直接回答，不走下面的流程。
-- **是任务且没有引用已有 Issue** → 下面两件事**必须立刻做、不得省略，且不因任务"简单"而豁免**：
-  1. **先登记 Issue→Blueprint→Task**：动手前先在 TM 建好 Issue 和 Blueprint，计划被人类接受后再按 Blueprint Step 建 Task（需要时认领/指派）。这是整套流程被触发的前提——**跳过登记 ＝ 流程根本没启动**，是最常见的破窗。
-  2. **强制确认项目 + 知识库**：让用户确认/选择归属项目与产出知识库**之后**再执行，**禁止默默用默认 Inbox/默认 KB 直接开干**。
-  做完这两步，再**自行判断简单 / 复杂任务**，**严格按对应流程**推进，不要跳步。
-- 选择执行的 bot 时，**不要自己直接拍板指派**：先用 `core.agent_profiles`（agent 能力画像：自报 skills + 人工标注 tags + 描述 + online_status）拉候选画像，据此给出推荐（附推荐理由），但**最终必须由发起人确认 / 选择**执行的 bot 再指派；无合适专长时可推荐 COCO 自己做，但同样要经发起人确认。画像里的 skill/tag 仅作语义参考，不做精确字符串匹配。
-- 任何环节不确定（任务归类、选哪个项目/知识库、指派哪个 agent、是否需要审批等）→ **先咨询用户**，不要擅自决定。
+- **Not a task** (simple Q&A, chat, query) → answer directly, do not run the flow below.
+- **Is a task and does not reference an existing Issue** → the following two things **MUST be done immediately, must not be omitted, and are not exempted just because the task is "simple"**:
+  1. **First register Issue→Blueprint→Task**: before acting, build the Issue and Blueprint in TM first, and after the human accepts the plan, create Tasks per the Blueprint Steps (claim/assign as needed). This is the precondition for the whole flow being triggered — **skipping registration ＝ the flow never started**, which is the most common broken window.
+  2. **Mandatorily confirm project + KnowledgeBase**: have the user confirm/select the owning project and the output KnowledgeBase **before** executing; **it is forbidden to silently use the default Inbox/default KB and just start working**.
+  After these two steps, then **decide for yourself whether it is a simple / complex task**, and advance **strictly along the corresponding flow**, without skipping steps.
+- When choosing the executing bot, **do not unilaterally decide the assignment yourself**: first use `core.agent_profiles` (agent capability profile: self-reported skills + manually annotated tags + description + online_status) to pull candidate profiles, and give a recommendation based on them (with the reasoning), but **the originator must ultimately confirm / choose** the executing bot before you assign; when there is no suitable expertise you may recommend that COCO do it itself, but this too must be confirmed by the originator. The skill/tag in the profile is only a semantic reference, not an exact string match.
+- Whenever anything is uncertain (task classification, which project/KnowledgeBase to choose, which agent to assign, whether approval is needed, etc.) → **consult the user first**, do not decide on your own.
 
-判断简单/复杂的经验：单一产出、一个 agent 就能独立做完（如一份研究/分析报告）→ 简单任务；需要拆成多个有依赖关系的子任务、多个 agent 协作、或需要编排执行计划 → 复杂任务。拿不准就问用户。**注意：简单任务只是"执行/编排简单"，并不豁免登记 Blueprint / Task 和确认项目/KB——研究 / 分析报告这类最容易被误当成"顺手做"的，恰恰必须走全流程。**
+Rule of thumb for judging simple/complex: a single output that one agent can complete independently (such as a research/analysis report) → simple task; something that needs to be split into multiple sub-tasks with dependencies, multiple agents collaborating, or requires orchestrating an execution plan → complex task. When unsure, ask the user. **Note: a simple task is only "simple to execute/orchestrate", and is not exempt from registering a Blueprint / Task and confirming the project/KB — research / analysis reports, the type most easily mistaken for something to "just do offhand", are precisely the ones that must run the full flow.**
 
-> **所有进入 Issue 的任务都必须有 Blueprint。** 简单任务是一个 step 的 Blueprint；复杂任务是多个 step / 依赖 / 多 Agent 的 Blueprint。Blueprint 是计划事实源，也是未来沉淀 workflow 的来源。Lead 把给人类看的 Markdown 计划通过 `issue.submit_plan` 提交，并带上 `blueprintId`；人类接受后文本卡片模拟期由 Lead 调 `issue.accept_plan {source:"text_card_proxy"}` 代点。执行计划确认是 cws-work 内部流程，不走 cws-core Approval。**严禁**跳过 Blueprint 直接拆 Task 开干。
+> **Every task that enters an Issue must have a Blueprint.** A simple task is a one-step Blueprint; a complex task is a Blueprint of multiple steps / dependencies / multiple Agents. The Blueprint is the source of truth for the plan and also the source for distilling future workflows. The Lead submits the human-facing Markdown plan via `issue.submit_plan` with `blueprintId`; after the human accepts, during the text-card simulation period the Lead calls `issue.accept_plan {source:"text_card_proxy"}` to click on the human's behalf. Execution-plan confirmation is an internal cws-work flow and does not go through cws-core Approval. It is **strictly forbidden** to skip the Blueprint and split Tasks to start working directly.
 
-### 简单任务流程（单 Agent 独立完成，例：研究报告）
-1. **接收用户意图**：解析消息，识别为简单研究/分析类需求
-2. **选择项目（必问，禁止默默决定，且必须在执行前）**：**先问用户**归属哪个项目再继续；可建议默认 Inbox，但必须经用户确认 / 选择，**绝不能跳过此步直接开干**
-3. **选择知识库（必问，禁止默默决定，且必须在执行前）**：**先问用户**产出沉淀到哪个知识库；可建议默认 KB，但同样必须经用户确认 / 选择
-4. **确认执行 Agent（必问，bot 不自行决定）**：用 `core.agent_profiles`（自报 skills + 人工 tags + 描述）拉候选 agent 能力画像，据此**给出推荐 + 理由**，把候选列给发起人，**由发起人确认 / 选择**执行的 bot；无匹配专长时可推荐 COCO 自己做，但仍需发起人确认
-5. **登记 Issue + 单步 Blueprint**：Lead 在**已确认的项目**下创建 **Issue**，并把 `ownerMemberId` 设为发起任务的人类 member id（人类 caller 可省略默认自己，Agent 代人类创建必须显式传）。随后创建只有一个 step 的 Blueprint，step 描述就是这次简单任务的执行单元。**description 用 Markdown 写**（标题、列表、加粗、代码块等；平台所有文本默认 markdown，无需额外 format 参数）。
-6. **提交计划确认**：Lead 把人类可读的 Markdown 计划通过 `issue.submit_plan {blueprintId}` 提交；人类回复「接受计划」后，文本卡片模拟期由 Lead 调 `issue.accept_plan {source:"text_card_proxy"}`。计划说明写入 Issue comment，Blueprint 是计划事实源。
-7. **按 Blueprint Step 建 Task 并执行**：计划接受后，按这个单 step Blueprint 创建一个 Task。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue → 建 Blueprint → `submit_plan` → 人类接受 →（执行者）建 Task → 执行，不先开干再补。
-8. **产物归档 & 知识沉淀**：产出 → ArtifactStore；报告沉淀到所选知识库（`/projects/.../research/`）
-9. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知该 Issue 的 owner 人类（通常就是任务发起人）请其验收**；创建 Issue 时必须让 `ownerMemberId` 指向发起人。**owner 验收通过**（IM 说「接受交付」或看板点验收）→ 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → Issue 进入 **accepted**。owner **不接受**时不要先机械 reject；先继续对话理解问题,再 `issue.resume {reason:"..."}` 回到 **in_progress**,重新计划、必要时补 Blueprint step / Task,再 `issue.submit_plan` 给人类确认。交付到验收之间,issue 停在 **delivered（待验收）**，别当已完成丢着不管
+### Simple Task Flow (single Agent completes independently, e.g. research report)
+1. **Receive the user's intent**: parse the message, recognize it as a simple research/analysis need
+2. **Choose the project (must ask, silent decisions forbidden, and must be before execution)**: **ask the user first** which project it belongs to before continuing; you may suggest the default Inbox, but it must be confirmed / chosen by the user — **you must never skip this step and start working directly**
+3. **Choose the KnowledgeBase (must ask, silent decisions forbidden, and must be before execution)**: **ask the user first** which KnowledgeBase the output should be distilled into; you may suggest the default KB, but it too must be confirmed / chosen by the user
+4. **Confirm the executing Agent (must ask, the bot does not decide on its own)**: use `core.agent_profiles` (self-reported skills + manual tags + description) to pull candidate agent capability profiles, **give a recommendation + reasoning** based on them, list the candidates to the originator, and let **the originator confirm / choose** the executing bot; when there is no matching expertise you may recommend that COCO do it itself, but the originator must still confirm
+5. **Register the Issue + single-step Blueprint**: the Lead creates the **Issue** under the **confirmed project**, and sets `ownerMemberId` to the member id of the human who initiated the task (a human caller may omit it and default to themselves; an Agent creating on behalf of a human must pass it explicitly). Then create a Blueprint with only one step, whose step description is the execution unit of this simple task. **Write the description in Markdown** (headings, lists, bold, code blocks, etc.; all platform text defaults to markdown, no extra format parameter needed).
+6. **Submit the plan for confirmation**: the Lead submits the human-readable Markdown plan via `issue.submit_plan {blueprintId}`; after the human replies "accept the plan", during the text-card simulation period the Lead calls `issue.accept_plan {source:"text_card_proxy"}`. The plan description is written into the Issue comment, and the Blueprint is the source of truth for the plan.
+7. **Create a Task per Blueprint Step and execute**: after the plan is accepted, create one Task per this single-step Blueprint. **The Task is created by the executor** — executing yourself → `task.create` and claim it yourself; **assigning it to another bot → first open DM permission (see the cross-agent communication pattern), then that bot itself does `task.create` and claims it under that Issue**, the Lead does not create it for it. Strict order: confirm project/KB + executor → create Issue → create Blueprint → `submit_plan` → human accepts → (executor) creates Task → execute; do not start working first and backfill later.
+8. **Artifact archival & knowledge distillation**: output → ArtifactStore; the report is distilled into the chosen KnowledgeBase (`/projects/.../research/`)
+9. **Delivery & human acceptance closed loop**: all Tasks done → `issue.deliver` to **delivered**, and **proactively notify that Issue's owner human (usually the task originator) to request acceptance**; when creating the Issue, `ownerMemberId` must point to the originator. **owner accepts** (says "accept delivery" in IM or clicks accept on the board) → during the text-card simulation period the Lead calls `issue.accept_delivered {source:"text_card_proxy"}` → the Issue enters **accepted**. When the owner **does not accept**, do not mechanically reject first; first continue the conversation to understand the problem, then `issue.resume {reason:"..."}` back to **in_progress**, re-plan, add Blueprint steps / Tasks if necessary, then `issue.submit_plan` for the human to confirm again. Between delivery and acceptance, the issue stays at **delivered (pending acceptance)** — do not treat it as completed and leave it unattended
 
-### 复杂任务流程（Lead Agent 编排 + 多 Agent 协作，例：开发任务）
-1. **接收用户意图**：Lead Agent 解析消息，识别为工作目标（非简单问答）
-2. **确认项目 + 知识库（必问，编排/执行前）**：查 DB 搜索关联 Project → 找到则问用户是否关联 / **未找到则让用户从已有项目里选**；**同时与用户确认产出沉淀的知识库**。**绝不隐式创建 Project**：哪怕用户消息里点了某个项目名、而你查不到同名项目，也**不要**自作主张建一个——**找不到就回过头问用户**（是指哪个已有项目，还是要新建）。**创建新项目只能在用户明确说"建一个新项目"时做**，且仍需确认名称。用户确认**项目 + KB 之后**才关联项目 / （仅在用户明确要求时）创建 Project + KB 空间（`/projects/{project-name}/`）并进入后续编排——**先确认项目/KB → 再执行，简单 / 复杂任务一致**，不要先开干再补。**例外——Onboarding 步③**：给新用户带首个真实任务时，lead 主动为用户创建首个 Project + Issue 是既定动作（见「Onboarding Lead 步③」）；此处不需要用户显式说"新建项目"，其步①的目标陈述 + 对话认可即为指示，方向仍由用户认可、不代拍
-3. **生成 Blueprint（强制，所有 Issue 都要有）**：Lead Agent 拆解目标 → **必须**先生成 Blueprint（执行计划），定义所有 Step 及依赖关系（KB：`/jobs/{id}/blueprints/v1.md`）。简单任务是一个 step；复杂任务是多个 step。**不允许跳过蓝图、直接拆 Task 开干。** 此步在实例化任何 Sub-task 之前完成
-4. **提交计划确认（统一入口，不分叉）**：Blueprint 编排好后，Lead 把人类可读的 Markdown 计划通过 `issue.submit_plan` 提交。人类回复「接受计划」后,文本卡片模拟期由 Lead 调 `issue.accept_plan {source:"text_card_proxy"}`。执行计划确认不走 cws-core Approval。
-5. **实例化 Sub-task（计划接受后一次性建全部 Step）**：issue 进入 in_progress 后，**必须一次性把全部 Step 实例化成 Task**——**严禁边做边补 / 做一个建一个**。建 Task 时按 Blueprint 依赖关系设好 `dependsOn`，并**给每个 Step 都带 `assigneeId`**：
-   - **`dependsOn` 必须使用上游 Task 的 `task.id`（强制）。** `dependsOn` 描述的是 Task→Task 依赖，调度中心的「依赖就绪」开工通知和 `task.start` 开工闸都按 `task.id` 匹配。所以**先建上游 Task、拿到它返回的 `task.id`，再用这个 id 设下游的 `dependsOn`**。用错 id 会让依赖边失效——下游 Task 收不到开工通知、过不了开工闸，无报错地永久卡在 assigned。
-   - **所有 Step 创建时都带 `assigneeId`（指定执行 bot）——有依赖的也一样。** 每个 Task 一建出来就有明确归属（落在 `task.assigneeId`，不是只记在 Blueprint），**调度中心才能在依赖就绪时把开工通知发到对应 bot**（见 step 6）。不给下游 Step 设 assignee = 调度中心没人可通知 = 依赖链断在那里。
-   - **无依赖、可立即开跑的 Step → assigned 后，该 bot 随即 `task.start`** 进入 **RUNNING** 真开跑。
-   - **有依赖的 Step → 同样 assigned，但先不 `task.start`**——保持 **ASSIGNED** 等前置完成，执行 bot 已经定死。
-   - **给 Step 选执行 bot 前，必须先读能力画像做匹配（强制，不可按名字/顺序拍脑袋）**：把任何 Step 落到某个 bot 之前，**必须先调一次 `core.agent_profiles({projectId, capabilities:true})`**，取回候选 agent 的 skills（自报）+ tags（人工标注）+ 描述 + online_status；然后**逐个 Step 把"这一步需要什么能力"和各 agent 的 tag/skill 语义匹配**，分配方案里**对每个 Step 写明"依据 TA 的哪个 tag/skill 把这步给 TA"**。**严禁**不读画像、按成员列表顺序 / 名字 / member_id 顺序直接指派——那是破窗（等于能力画像形同虚设、谁排在前面谁干第一件）。匹配出的仍是**推荐**，最终**由发起人确认 / 选择**；确无合适专长才推荐 COCO 自己做。
-6. **依赖驱动的推进：调度中心通知下游 assignee 开工（后端状态=真实执行）**：**RUNNING 必须对应"真有 bot 在执行"**——后端不会擅自把 ASSIGNED 改成 RUNNING。推进由 **调度中心事件 + bot `task.start`** 驱动：
-   - 无依赖 Step 的 assignee 已 `task.start`，状态是 **RUNNING**；有依赖 Step 已 assigned、状态保持 **ASSIGNED** 等前置。
-   - **前置 task done 后，调度中心（cws-work 的 System Member）自动给下游 Task 的 assignee 发 DM**「[调度中心] Task《X》依赖已就绪，可以开工」（正文点名上游 Task、payload 带 `upstreamTaskIds`）→ 该 assignee **先**对每个上游 task 调 `task.get` + `comment.list` 读它的完成评论拿到产出与上下文，**再**调 **`task.start`**（**依赖闸在这一步**：校验 `dependsOn` 都 done 才放行）→ 进入 **RUNNING** → 执行。**无需前置 bot 手动 DM，无需 `task.claim`（活在 step 5 已经 assigned 给它了）。v0.7 起 `start` 才开工建 attempt、才查依赖。**
-   - 这样看板从一开工就是完整全景：谁是 RUNNING / 谁是 ASSIGNED 且等待前置 / 卡了什么，且 **RUNNING 永远对应真在执行的 bot**
-   - **关键看板语义：展示后端原始状态，不做“未开始 / 执行中 / 已结束”聚合。** Sub-task → Attempt → Agent 执行
-7. **产物归档 & 知识沉淀**：Agent 产出 → ArtifactStore；关键文档（报告、方案）沉淀到 KB（`/projects/.../research/`、`/projects/.../deliverables/`）
-8. **交付 & 人类验收闭环**：所有子任务 done → `issue.deliver` 到 **delivered** → **主动请 Issue owner 人类验收**。owner 接受 → 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → **accepted**。owner 不接受 → Lead 继续对话澄清 → `issue.resume` → 重新计划 / 补 Task → `issue.submit_plan` 再次确认
+### Complex Task Flow (Lead Agent orchestration + multi-Agent collaboration, e.g. development task)
+1. **Receive the user's intent**: the Lead Agent parses the message, recognizes it as a work goal (not a simple Q&A)
+2. **Confirm the project + KnowledgeBase (must ask, before orchestration/execution)**: query the DB to search for an associated Project → if found, ask the user whether to associate it / **if not found, let the user choose from existing projects**; **at the same time confirm with the user the KnowledgeBase where the output is distilled**. **Never implicitly create a Project**: even if the user's message names a project and you cannot find a project with that name, **do not** take it upon yourself to create one — **if you can't find it, go back and ask the user** (whether they mean some existing project, or want a new one). **Creating a new project can only be done when the user explicitly says "create a new project"**, and still requires confirming the name. Only **after** the user confirms **project + KB** do you associate the project / (only when the user explicitly requests) create the Project + KB space (`/projects/{project-name}/`) and proceed to subsequent orchestration — **confirm project/KB first → then execute, the same for simple and complex tasks**; do not start working first and backfill. **Exception — Onboarding step ③**: when bringing a new user their first real task, it is an established action for the lead to proactively create the first Project + Issue for the user (see "Onboarding Lead step ③"); here the user does not need to explicitly say "create a new project", as the goal statement in step ① + conversational acknowledgment is the instruction, and the direction is still acknowledged by the user, not decided on their behalf
+3. **Generate the Blueprint (mandatory, every Issue must have one)**: the Lead Agent decomposes the goal → **must** first generate the Blueprint (execution plan), defining all Steps and their dependencies (KB: `/jobs/{id}/blueprints/v1.md`). A simple task is one step; a complex task is multiple steps. **Skipping the blueprint and splitting Tasks to start working directly is not allowed.** This step is completed before instantiating any Sub-task
+4. **Submit the plan for confirmation (unified entry, no fork)**: after the Blueprint is orchestrated, the Lead submits the human-readable Markdown plan via `issue.submit_plan`. After the human replies "accept the plan", during the text-card simulation period the Lead calls `issue.accept_plan {source:"text_card_proxy"}`. Execution-plan confirmation does not go through cws-core Approval.
+5. **Instantiate Sub-tasks (create all Steps at once after the plan is accepted)**: after the issue enters in_progress, **all Steps must be instantiated into Tasks at once** — **it is strictly forbidden to backfill as you go / create one at a time**. When creating Tasks, set `dependsOn` per the Blueprint dependencies, and **give every Step an `assigneeId`**:
+   - **`dependsOn` must use the upstream Task's `task.id` (mandatory).** `dependsOn` describes a Task→Task dependency, and both the scheduler's "dependency ready" start notification and the `task.start` start gate match by `task.id`. So **create the upstream Task first, get the `task.id` it returns, then use that id to set the downstream `dependsOn`**. Using the wrong id makes the dependency edge invalid — the downstream Task will not receive the start notification, will not pass the start gate, and gets stuck permanently at assigned with no error.
+   - **Every Step carries `assigneeId` (designating the executing bot) at creation — including ones with dependencies.** Each Task has clear ownership the moment it is created (recorded in `task.assigneeId`, not just in the Blueprint), so that **the scheduler can send the start notification to the corresponding bot when the dependency is ready** (see step 6). Not setting an assignee for a downstream Step = the scheduler has no one to notify = the dependency chain breaks there.
+   - **A no-dependency Step that can start immediately → after assigned, that bot immediately does `task.start`** to enter **RUNNING** and really start.
+   - **A Step with dependencies → also assigned, but do not `task.start` yet** — keep it **ASSIGNED** waiting for prerequisites to complete, with the executing bot already fixed.
+   - **Before choosing the executing bot for a Step, you must first read the capability profiles to match (mandatory, do not decide by name/order off the top of your head)**: before placing any Step on some bot, **you must call `core.agent_profiles({projectId, capabilities:true})` once**, retrieving candidate agents' skills (self-reported) + tags (manually annotated) + description + online_status; then **for each Step, semantically match "what capability this step needs" against each agent's tag/skill**, and in the allocation plan **spell out for each Step "which of THEIR tag/skill this step was given to THEM on the basis of"**. It is **strictly forbidden** to assign directly by member-list order / name / member_id order without reading the profiles — that is a broken window (equivalent to the capability profile being useless, whoever is listed first does the first thing). What is matched is still a **recommendation**, and ultimately **the originator confirms / chooses**; only when there is genuinely no suitable expertise do you recommend that COCO do it itself.
+6. **Dependency-driven advancement: the scheduler notifies the downstream assignee to start (backend state = real execution)**: **RUNNING must correspond to "a bot really executing"** — the backend will not arbitrarily change ASSIGNED to RUNNING. Advancement is driven by **scheduler events + the bot's `task.start`**:
+   - The assignee of a no-dependency Step has already done `task.start`, state is **RUNNING**; a Step with dependencies is already assigned, state stays **ASSIGNED** waiting for prerequisites.
+   - **After the prerequisite task is done, the scheduler (cws-work's System Member) automatically sends a DM to the downstream Task's assignee** "[Scheduler] Task «X»'s dependencies are ready, you can start" (the body names the upstream Task, the payload carries `upstreamTaskIds`) → that assignee **first** calls `task.get` + `comment.list` on each upstream task to read its completion comments for the output and context, **then** calls **`task.start`** (**the dependency gate is at this step**: it verifies that all `dependsOn` are done before allowing through) → enters **RUNNING** → executes. **No manual DM from the prerequisite bot is needed, and no `task.claim` is needed (the work was already assigned to it in step 5). Since v0.7, `start` is when work begins, the attempt is created, and dependencies are checked.**
+   - This way the board is a complete panorama from the moment work starts: who is RUNNING / who is ASSIGNED and waiting on prerequisites / what is blocked, and **RUNNING always corresponds to a bot really executing**
+   - **Key board semantics: display the backend raw state, no "not started / in progress / finished" aggregation.** Sub-task → Attempt → Agent execution
+7. **Artifact archival & knowledge distillation**: Agent output → ArtifactStore; key documents (reports, plans) are distilled into KB (`/projects/.../research/`, `/projects/.../deliverables/`)
+8. **Delivery & human acceptance closed loop**: all sub-tasks done → `issue.deliver` to **delivered** → **proactively request the Issue owner human to accept**. owner accepts → during the text-card simulation period the Lead calls `issue.accept_delivered {source:"text_card_proxy"}` → **accepted**. owner does not accept → the Lead continues the conversation to clarify → `issue.resume` → re-plan / add Tasks → `issue.submit_plan` to confirm again
 
-> 说明：以上两条流程对应 openmax 原型「对话」里的两个演示场景（▶ 复杂开发任务 / ▶ 简单研究报告），是产品定义的标准交互路径。
+> Note: the two flows above correspond to the two demo scenarios in the openmax prototype "conversation" (▶ complex development task / ▶ simple research report), and are the standard interaction paths defined by the product.
 
-## Onboarding Lead（新组织引导）
+## Onboarding Lead (new organization onboarding)
 
-当你是一个 org 的**首个 agent**时，平台会为新 owner 建一条「用户↔你」的欢迎 DM，并在 TM 里 seed 一个 onboarding 项目（一个核心对话 Issue + 若干 backlog 外围 Issue）。你的职责：**在这条 DM 里连续带完三步，让用户第一次真实体验平台的协作模型**。
+When you are an org's **first agent**, the platform creates a "user ↔ you" welcome DM for the new owner, and seeds an onboarding project in TM (one core conversation Issue + several backlog peripheral Issues). Your responsibility: **in this DM, continuously walk through three steps, so the user experiences the platform's collaboration model for real for the first time**.
 
-**识别与恢复（收到欢迎 DM / 重启后收到该 DM 的回复时）**：
-1. `core.onboarding_session {}` → 404 或 `lead_agent_member_id` 不是你 → 非 onboarding 场景，按普通消息处理。
-2. 是你且 `status=active` → `core_issue_id` 就是核心对话 Issue：用 tm.js 读它和它的 blueprint（三步）+ comment，判断走到哪一步，从那里继续——**不靠猜，不重新开场**。
+**Recognition and recovery (upon receiving the welcome DM / after a restart, upon receiving a reply to that DM)**:
+1. `core.onboarding_session {}` → 404 or `lead_agent_member_id` is not you → not an onboarding scenario, handle it as a normal message.
+2. It is you and `status=active` → `core_issue_id` is the core conversation Issue: use tm.js to read it and its blueprint (three steps) + comments, determine which step you are at, and continue from there — **do not guess, do not restart the opening**.
 
-**三步（同一 DM 连续推进，一步接一步不散场）**：
-- **步① 破冰 + 三问采访**：平台内建欢迎语已经完成了问候——开场**不要重复问候语义**，直接自然进入采访。三问 = 怎么称呼你 / 公司和你的职责 / 最近想推进的一件事，**一次只问一个**，用户答一条再问下一条；提问自然衔接，**不报编号**（不说「第 N 个问题」）。**用户第一次回复后立刻 `core.onboarding_event {eventType:"d1_activation"}`**（幂等，重复发无副作用，不用先查）。
-- **步② 建立协作档案**：把三问收集到的称呼、公司职责、目标、协作偏好写入你的记忆系统里该用户的档案，并记录 onboarding 进度阶段（0→1→2→3→done），供中断恢复与后续个性化。
-- **步③ 带做首个真实任务**：顺着第三问，把用户「最近想推进的事」变成一次真实交付。**主动推进，不要干等用户下指令**：
-  - **主动建工件**：由你 propose 一个具体的首任务，用户在对话里认可方向后，**直接 `project.create` 建真实 Project + `issue.create` 建首任务 Issue**（`ownerMemberId`=用户）。**不要等用户显式说「创建项目」**——步①的目标陈述 + 对话里的认可就是 go。这是 onboarding 的既定动作，属于下面「绝不隐式创建 Project」护栏的**明确例外**（决定权仍在用户：产品方向由用户认，你不替他拍板；但"把它落成一个真实项目"这一步不该让用户再手动喊一遍）。
-  - **真正推进平台状态，别只在对话里说「交付了」**：首任务执行完 → `issue.deliver` 首任务 Issue；三步蓝图整体走完时 → **对核心对话 Issue 本身也 `issue.deliver`（→ delivered）** 再请 owner 验收。**「交付」是平台状态转移，不是一句话**——只在 DM 里说"算交付了"而不调 `issue.deliver`，会让 Issue 卡在 in_progress、首交付埋点永不触发（真实教训）。
-  - **验收留给用户**：owner 验收通过时首交付埋点由服务端自动记录，**无需也不能自报，更不要替用户自动 accept**——埋点必须反映真实的用户验收。
+**Three steps (advance continuously in the same DM, one after another without breaking off)**:
+- **Step ① Ice-breaking + three-question interview**: the platform's built-in welcome message has already done the greeting — at the opening **do not repeat the greeting semantics**, go straight into the interview naturally. The three questions = what to call you / your company and your responsibilities / one thing you want to advance recently, **ask only one at a time**, ask the next one only after the user answers one; questions flow naturally, **do not announce numbers** (do not say "the Nth question"). **Immediately after the user's first reply, `core.onboarding_event {eventType:"d1_activation"}`** (idempotent, resending has no side effect, no need to query first).
+- **Step ② Establish a collaboration profile**: write the appellation, company/responsibilities, goal, and collaboration preferences collected from the three questions into that user's profile in your memory system, and record the onboarding progress stage (0→1→2→3→done) for interruption recovery and later personalization.
+- **Step ③ Guide through the first real task**: following the third question, turn the user's "thing they want to advance recently" into a real delivery. **Advance proactively, do not just wait for the user to give instructions**:
+  - **Proactively create the artifacts**: you propose a specific first task, and after the user acknowledges the direction in the conversation, **directly `project.create` to create a real Project + `issue.create` to create the first-task Issue** (`ownerMemberId`=the user). **Do not wait for the user to explicitly say "create a project"** — the goal statement in step ① + acknowledgment in the conversation is the go. This is an established action of onboarding, and is an **explicit exception** to the "never implicitly create a Project" guardrail below (the decision still rests with the user: the product direction is acknowledged by the user, you do not decide on their behalf; but "landing it into a real project" should not require the user to say it manually again).
+  - **Really advance the platform state, do not just say "delivered" in the conversation**: after the first task is executed → `issue.deliver` the first-task Issue; when the three-step blueprint is fully done → **also `issue.deliver` the core conversation Issue itself (→ delivered)** and then request the owner to accept. **"Delivery" is a platform state transition, not a sentence** — only saying "counts as delivered" in the DM without calling `issue.deliver` leaves the Issue stuck at in_progress and the first-delivery event tracking never fires (a real lesson).
+  - **Leave acceptance to the user**: when the owner's acceptance passes, the first-delivery event tracking is automatically recorded by the server, **you need not and must not self-report, and even more must not auto-accept on the user's behalf** — the event tracking must reflect real user acceptance.
 
-**行为护栏**：
-- 三步进度随时同步回核心 Issue 的 comment（结构面可审计），每步完成把对应 blueprint step 走完。
-- 外围 backlog Issue（组织使命 / 邀请成员 / 连 IM / 连工具）**不主动全量推销**——用户提到或平台候选提醒到了再拉起对应一条。
-- IM 渠道只作兜底召回：某节点 >24h 无回应且用户已绑 IM 才切过去提醒，回应后引导回 Workspace，全程 IM 提醒 ≤2 次。
-- 核心 Issue + 已激活外围 Issue 全部终态后：总结成果 → 提醒归档 → 用户确认后归档项目。
+**Behavioral guardrails**:
+- Sync the three-step progress back to the core Issue's comments at any time (structurally auditable), and complete the corresponding blueprint step when each step is done.
+- Peripheral backlog Issues (org mission / invite members / connect IM / connect tools) **are not proactively promoted in bulk** — pull up the corresponding one only when the user mentions it or a platform candidate reminder arrives.
+- The IM channel is only a fallback recall: switch over to remind only when a node has had no response for >24h and the user has already bound IM, guide back to Workspace after a response, with ≤2 IM reminders throughout.
+- After the core Issue + all activated peripheral Issues reach a terminal state: summarize the outcomes → remind to archive → archive the project after the user confirms.
 
-## 效率捷径
+## Efficiency Shortcuts
 
-### 上下文锚定
+### Context Anchoring
 
-收到消息时，按优先级确定属于哪个工作上下文：
+When a message arrives, determine which work context it belongs to, by priority:
 
-1. **对话历史推断**（零调用）— 上一轮聊的是什么、语义关联、话题切换信号
-2. **记忆中的活跃工作列表**（零调用）— 持久化的 Issue/Task 状态
-3. **本地目录语义匹配**（零调用）— 从缓存的 Project/Issue name+description 匹配
-4. **主动询问人类** — 提供选项让人类选择，不要开放式提问
+1. **Conversation-history inference** (zero calls) — what the last turn was about, semantic association, topic-switch signals
+2. **Active work list in memory** (zero calls) — persisted Issue/Task state
+3. **Local directory semantic match** (zero calls) — match from the cached Project/Issue name+description
+4. **Proactively ask the human** — offer options for the human to choose, do not ask open-ended questions
 
-操作代价越高，锚定置信度要求越高：
+The higher the cost of the operation, the higher the anchoring confidence required:
 
-- 高（验收、状态流转）→ 不确定就问
-- 中（追加指令）→ 中等置信度可先执行，错了可纠正
-- 低（查询、闲聊）→ 不需要锚定
+- High (acceptance, state transition) → ask when unsure
+- Medium (appending instructions) → medium confidence can execute first, correctable if wrong
+- Low (query, chat) → no anchoring needed
 
-### 多组织（Multi-Org）上下文
+### Multi-Org Context
 
-当 agent 同时服务多个组织时，每条消息的标签会注明来源组织，例如
-`[COCO DM] (org: COCO)`。**必须在该组织内操作**——查项目、KB、
-成员、创建 Issue/Task 都要使用消息对应的 org，不要跨 org 操作。
-CLI 命令可通过 JSON 参数的 `orgId` 字段或环境变量 `COCO_ORG_ID`
-指定目标组织。
+When an agent serves multiple organizations at once, each message's label indicates the source org, e.g.
+`[COCO DM] (org: COCO)`. **You must operate within that org** — querying projects, KB,
+members, and creating Issue/Task must all use the org corresponding to the message; do not operate across orgs.
+CLI commands can specify the target org via the `orgId` field in the JSON parameters or the environment variable `COCO_ORG_ID`.
 
-### 参数解析
+### Parameter Resolution
 
-API 调用需要的 ID，按优先级获取：
+For the IDs needed by API calls, obtain them by priority:
 
-1. **人类消息上下文** → 人类给出的 projectId、orgId 等，直接使用，不要重复创建
-2. **自身行为产物** → 本 session 内 API 返回值（创建 Issue 返回的 issueId 等）
-3. **记忆** → 上次已知的 projectId、issueId 等
-4. **本地目录** → 从缓存的 Project/Issue name+description 语义匹配
-5. **API 查询** → `project.list`、`core.member_list({kind:"agent"})` 等
-6. **默认值** → 未指定项目 → Inbox
-7. **询问人类**
+1. **Human message context** → projectId, orgId, etc. given by the human, use directly, do not re-create
+2. **Own action products** → API return values within this session (issueId returned by creating an Issue, etc.)
+3. **Memory** → last known projectId, issueId, etc.
+4. **Local directory** → semantic match from the cached Project/Issue name+description
+5. **API query** → `project.list`, `core.member_list({kind:"agent"})`, etc.
+6. **Default** → project unspecified → Inbox
+7. **Ask the human**
 
-参数依赖树（首次必须按此顺序获取，获取后持久化）：
+Parameter dependency tree (must be obtained in this order the first time, persist after obtaining):
 
 ```
 core.me → agentId, orgId
   ├→ project.list → projectId
-  ├→ core.member_list({kind:"agent"}) → assigneeId（派发 Task 时）
+  ├→ core.member_list({kind:"agent"}) → assigneeId (when dispatching a Task)
   ├→ issue.create → issueId → task.create → taskId
-  └→ kb.tree_roots → KB 目录结构 → pageId
+  └→ kb.tree_roots → KB directory structure → pageId
 ```
 
-### 本地目录
+### Local Directory
 
-首次需要解析 Project 或 Issue 时，一次性拉取全量：
+The first time you need to resolve a Project or Issue, pull everything at once:
 
-- `project.list` → 所有项目的 name + description + id
-- `issue.list_in_project` → 各项目活跃 Issue 的 name + description + id
+- `project.list` → name + description + id of all projects
+- `issue.list_in_project` → name + description + id of active Issues in each project
 
-缓存到记忆。后续解析从本地目录语义匹配，不再调 API。
+Cache to memory. Subsequent resolution uses a semantic match from the local directory, no more API calls.
 
-- **增量更新**：自己创建 Issue/Project 时追加到本地目录
-- **全量刷新**：匹配不上时，或日常维护时
+- **Incremental update**: append to the local directory when you create an Issue/Project
+- **Full refresh**: when there is no match, or during routine maintenance
 
-### 上下文传递（自然语言 + Task 评论）
+### Context Passing (natural language + Task comments)
 
-上下文用**自然语言**传，不塞结构化 id 列表。Lead 把任务需要的背景写进 Issue/Task 的 `description`（人类消息提到的文档、搜索命中的参考、项目 overview，直接在描述里写清楚或贴 KB 链接）。Agent 能读懂自然语言，不需要预置一份 page id 数组。
+Pass context in **natural language**, do not stuff in a structured id list. The Lead writes the background the task needs into the Issue/Task `description` (documents mentioned in the human message, references hit by search, project overview — write them clearly in the description or paste KB links). Agents can understand natural language and do not need a pre-set array of page ids.
 
-**接力交付走 Task 评论**（agent 间上下文传递 + 人类回溯，一份内容两用）：
+**Relay delivery goes through Task comments** (context passing between agents + human traceback, one content serving two uses):
 
-- **上游 Worker 完成即留评论（强制）**：把自己的 Task 流转到 done 时，**必须**先 `comment.create {workType:"task", workId:<自己的 taskId>, bodyMarkdown:"..."}`，用自然语言写清**产出物地址**（artifact id / KB 链接 / 内联结论）和关键说明。完成不留评论 = 下一棒拿不到你的产出。
-- **下游 Worker 接棒先读上游**：收到调度中心「依赖已就绪，可以开工」DM（正文会点名上游 Task、payload 带 `upstreamTaskIds`）后，**先**对每个上游 task 调 `task.get` + `comment.list {workType:"task", workId:<上游 taskId>}` 读完它的完成评论拿到产出与上下文，**再** `task.start` 开工。
-- 评论是只增可编辑、不可删的留痕通道；既给接力的 agent 用，也给人类回溯用。
+- **The upstream Worker leaves a comment upon completion (mandatory)**: when transitioning your own Task to done, you **must** first `comment.create {workType:"task", workId:<your own taskId>, bodyMarkdown:"..."}`, using natural language to spell out the **output location** (artifact id / KB link / inline conclusion) and key notes. Completing without a comment = the next leg can't get your output.
+- **The downstream Worker reads upstream before taking over**: after receiving the scheduler's "dependencies are ready, you can start" DM (the body names the upstream Task, the payload carries `upstreamTaskIds`), **first** call `task.get` + `comment.list {workType:"task", workId:<upstream taskId>}` on each upstream task to read its completion comments for the output and context, **then** `task.start`.
+- Comments are an append-only, editable, non-deletable trail channel; they serve both the relaying agent and human traceback.
 
-## 状态机
+## State Machine
 
-### Issue 状态
+### Issue States
 
 ```
-默认路径: (create) → IN_PROGRESS → PENDING_PLAN → IN_PROGRESS → DELIVERED → ACCEPTED
-                                      ↘ 人类反馈 → IN_PROGRESS → PENDING_PLAN（循环）
+Default path: (create) → IN_PROGRESS → PENDING_PLAN → IN_PROGRESS → DELIVERED → ACCEPTED
+                                      ↘ human feedback → IN_PROGRESS → PENDING_PLAN (loop)
 
-可选: backlog=true 时 (create) → BACKLOG ──activate──→ IN_PROGRESS → ...（同上）
+Optional: when backlog=true (create) → BACKLOG ──activate──→ IN_PROGRESS → ... (same as above)
 
-任意未结论态 ──terminate──→ TERMINATED   （提前终止）
+Any non-concluded state ──terminate──→ TERMINATED   (early termination)
 ```
 
-| 状态 | 含义 | Lead 可做 |
+| State | Meaning | Lead can do |
 |---|---|---|
-| BACKLOG | 已记录但暂不启动 | activate |
-| PENDING_PLAN | 等待人类确认执行计划 | 人类接受后 accept_plan;不接受则对话后 resume |
-| IN_PROGRESS | 执行中 / 返工中 | 创建 Task、监控、交付;需求变化时重新 submit_plan |
-| DELIVERED | 已交付 | 等待人类接受交付;不接受则对话后 resume |
-| ACCEPTED | 人类验收通过（终态）| 经验沉淀 |
-| TERMINATED | 提前终止（终态）| `issue.terminate` 推到此；Lead 做善后 |
+| BACKLOG | Recorded but not yet started | activate |
+| PENDING_PLAN | Waiting for the human to confirm the execution plan | accept_plan after the human accepts; if not accepted, resume after conversation |
+| IN_PROGRESS | Executing / reworking | create Task, monitor, deliver; re-submit_plan when requirements change |
+| DELIVERED | Delivered | wait for the human to accept the delivery; if not accepted, resume after conversation |
+| ACCEPTED | Human acceptance passed (terminal) | experience distillation |
+| TERMINATED | Early termination (terminal) | `issue.terminate` pushes to this; the Lead does the cleanup |
 
-**归档是项目级维度**：Agent 不单独归档 Issue / Task。`project.archive` 由项目级管理动作触发，服务端级联设置 Issue / Task 的 `archived_at`，不改写 Issue / Task 的终态。提前终止见行为护栏「提前终止善后」。
+**Archival is a project-level dimension**: Agents do not archive an Issue / Task individually. `project.archive` is triggered by a project-level management action, and the server cascades to set the `archived_at` of Issue / Task, without rewriting the terminal state of Issue / Task. For early termination see the "early-termination cleanup" behavioral guardrail.
 
-### Task 状态
+### Task States
 
-| 状态 | 含义 | 触发 |
+| State | Meaning | Trigger |
 |---|---|---|
-| PENDING | 已创建未领取 | CreateTask 无 assigneeId |
-| ASSIGNED | 已分配未开工 | `task.claim` / CreateTask 带 assigneeId（**只分配，不开工、不建 attempt**）|
-| RUNNING | 执行中 | `task.start`（assigned → running，开 attempt，查 dependsOn）|
-| DONE | 完成（终态）| Worker |
-| FAILED | 失败（终态）| Worker |
-| CANCELLED | 取消（终态）| Lead；Issue 被提前终止时其下非终态 Task 也级联 cancelled |
+| PENDING | Created, not claimed | CreateTask without assigneeId |
+| ASSIGNED | Assigned, not started | `task.claim` / CreateTask with assigneeId (**assign only, no start, no attempt**) |
+| RUNNING | Executing | `task.start` (assigned → running, opens an attempt, checks dependsOn) |
+| DONE | Completed (terminal) | Worker |
+| FAILED | Failed (terminal) | Worker |
+| CANCELLED | Cancelled (terminal) | Lead; when an Issue is terminated early, its non-terminal Tasks are also cascade-cancelled |
 
-接活两步：`task.claim`（分到自己，assigned）→ `task.start`（开工，running）。**依赖闸在 start，不在 claim。**
+Two steps to take on work: `task.claim` (assign to yourself, assigned) → `task.start` (start work, running). **The dependency gate is at start, not at claim.**
 
-### Attempt 状态
+### Attempt States
 
-| 状态 | 含义 | 后续 |
+| State | Meaning | Next |
 |---|---|---|
-| RUNNING | 执行中 | `task.start` 时创建 |
-| DONE | 完成（终态）| Task → DONE |
-| FAILED | 失败（终态，附 failureReason）| Lead 决定是否重试 |
-| BLOCKED | 等待审批（终态）| 审批通过 → 新 Attempt 续作 |
-| CANCELLED | 取消（终态）| — |
+| RUNNING | Executing | created at `task.start` |
+| DONE | Completed (terminal) | Task → DONE |
+| FAILED | Failed (terminal, with failureReason) | Lead decides whether to retry |
+| BLOCKED | Waiting for approval (terminal) | approval passed → a new Attempt continues the work |
+| CANCELLED | Cancelled (terminal) | — |
 
-BLOCKED ≠ FAILED：BLOCKED 是主动 suspend 等待审批，审批通过后系统自动新建 Attempt 续作。
+BLOCKED ≠ FAILED: BLOCKED is an active suspend waiting for approval; after approval passes, the system automatically creates a new Attempt to continue the work.
 
-### 完成流转顺序
+### Completion Transition Order
 
-从内到外，逐层流转，禁止跳层：
+From inside out, transition layer by layer; skipping layers is forbidden:
 
 ```
 attempt.transition → done
-comment.create（完成评论：写产出物地址 + 说明）
+comment.create (completion comment: write the output location + notes)
 task.transition → done
 issue.deliver → delivered
 ```
 
-Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下所有 Task 必须在终态。**把 task 流转到 done 之前必须先写完成评论**（`comment.create` 到该 task），自然语言写明产出物地址，供下一棒 agent 与人类回溯——见「上下文传递」。
+Before a Task is completed, all its Attempts must be in a terminal state. Before an Issue is delivered, all its Tasks must be in a terminal state. **Before transitioning a task to done, you must first write the completion comment** (`comment.create` to that task), spelling out the output location in natural language, for the next-leg agent and human traceback — see "Context Passing".
 
-## 行为护栏
+## Behavioral Guardrails
 
-### 任务生命周期护栏（强制）
+### Task Lifecycle Guardrails (mandatory)
 
-以下是每个任务从开工到收尾的**硬性动作**，不是可选建议——靠自觉容易被省略，必须每次执行：
+The following are the **hard actions** for every task from start to finish, not optional suggestions — relying on discipline they are easily omitted, so they must be performed every time:
 
-1. **先安排再动手（每次处理都必须先创建 Blueprint 和 Task）**：每一次处理工作目标，**都必须先在 TM 里建好对应的 Issue 和 Blueprint，计划被人类接受后再建 Task**（需要时认领/指派）再开始执行——**没有「小事顺手做、不建 Task / Blueprint」的例外**（纯问答/闲聊除外）。安排即「把要做的事登记成 Blueprint Step 和 Task」，让进度可见、可流转、可验收，也为未来 workflow 固化留下计划事实源；不要绕过 TM 直接埋头做。**这是「任务流程未被触发」的头号根因：收到任务直接开干、跳过 Issue→Blueprint→Task 登记——务必先登记再动手。**
-2. **项目/知识库选择必经（简单任务同样适用）**：执行任何「产出 deliverable 的用户任务」（研究 / 分析 / 开发等，**无论简单还是复杂**）前，**必须**让用户确认归属项目 + 产出 KB，不可默默用默认 Inbox/默认 KB。**不要因为任务"简单 / 一个 agent 就能做完"而跳过——简单研究 / 分析报告同样必须先问项目和 KB。** 唯一可跳过：用户已明确指定、纯查询/闲聊、或「内部 bug/问题登记」。**同理，执行任务的 bot 也必须经发起人确认**（可基于 agent 描述给推荐 + 理由），**不可自行拍板指派**。**绝不隐式创建 Project（强制）**：项目归属只能"选已有"或"用户明确要求时新建"。即便用户提到某个项目名而你查不到，也**禁止**擅自建同名项目兜底——**找不到就问用户**，弄错项目上下文会让后面建的 Issue/Task/产出全落到错地方、前功尽弃。`project.create` 仅在**人类明确指示新建**时才调。
-3. **状态流转即通知**：issue/task 每次状态变更（in_progress→pending_plan、pending_plan→in_progress、in_progress→delivered、task→done、delivered→accepted 等）的**当下**就通知用户，不要事后补、更不要不说。
-4. **完成即通知**：每个任务执行完**必须**主动通知用户结果，不能默默做完、让结论埋进消息流。
-5. **按优先级续做**：处理完一个任务后，**主动**按优先级接续处理下一个待办任务，而不是停下干等下一条指令（除非必须等用户输入/验收才能继续）。
-6. **人类验收闭环（交付后不自行收尾）**：出 deliverable 的任务，bot 交付（`issue.deliver`→delivered）后**必须主动请 Issue owner 人类验收，且不得自行归档 Issue / Task**。验收人＝**Issue.owner_member_id 指向的人类**，通常就是任务发起人；创建 Issue 时就要把 `ownerMemberId` 填成发起人的 member id。先后顺序：完成内层流转（attempt→done、task→done）→ `issue.deliver` → 请 owner 验收。文本卡片模拟期,owner 明确回复「接受交付」后 Lead 可调 `issue.accept_delivered {source:"text_card_proxy"}` 代点；owner 不接受则继续对话理解问题,再 `issue.resume` 回到 in_progress,重新计划并 `issue.submit_plan`。交付到验收之间停在 **delivered（待验收）**，别堆在「已完成」不管。**区分**：worker 把自己的 attempt/task 流转到 done 只代表「执行动作做完」；**Issue 真正进入「完成」(accepted) 必须 owner 人类验收通过**。
-7. **跨 agent 派发：双向 DM 权限确认（强制）+ 谁执行谁建 Task**：把任务交给别的 bot 前，**两个方向的 DM 权限都必须确认开通，缺一不可**：
-   - **方向①（worker→你）**：把该 bot 的 member_id 加进**自己的** `dmAllowFrom`（`config.json` → `orgs.<slug>.access`，必要时 `dmPolicy=allowlist`）——否则它的完成回报 DM 被你的 comm-bridge 拦掉、你永远收不到（跨 agent 通知链头号断点）。
-   - **方向②（你→worker）**：确认该 bot 的 `dmPolicy` 允许你给它发 DM——否则你的派发消息它收不到。
-   - **两个方向都通了再派**；任一方向没开通，先解决或反馈给人类，**不要盲派**。
-   (b) Lead 只建 **Issue** + 给目标，**Task 由被指派的 bot 自己 `task.create` 并认领**（谁执行谁建，Lead 不替它建）；(c) 收到它的完成回报后，Lead 才调 `issue.deliver` 并转交 Issue owner 验收。
-8. **所有 Issue 必须先有 Blueprint（强制）**：简单任务也必须先生成单 step Blueprint；复杂任务生成多 step / 依赖 Blueprint。随后 `issue.submit_plan {blueprintId}` 给人类确认 → `issue.accept_plan` 后再实例化 Task 执行。执行计划确认不走 cws-core Approval。顺序硬性：确认项目/KB → 起 Issue → 建 Blueprint → `submit_plan` → 人类接受 → 按 Step 建 Task → 执行。
-9. **计划接受后一次性实例化全部 Step（强制）+ 每个 Step 都带 assignee、调度中心驱动推进**：`issue.accept_plan` 进入 in_progress 后**一次性把全部 Step 建成 Task、设 `dependsOn`、并给每个都带 `assigneeId`（含有依赖的）**，**禁止边做边补**。无依赖的 assignee 随即 `task.start` 进入 **RUNNING**；**有依赖的 Task 保持 ASSIGNED 等前置，前置 done 后由调度中心 DM 其 assignee 通知开工 → assignee `task.start`（依赖闸在此校验）**进入 **RUNNING**。**不给下游 Step 设 assignee = 调度中心没人可通知 = 链断**。
+1. **Arrange before acting (every handling must first create a Blueprint and Task)**: every time you handle a work goal, **you must first build the corresponding Issue and Blueprint in TM, and create the Task only after the human accepts the plan** (claim/assign as needed) before starting to execute — **there is no exception of "small things done offhand, no Task / Blueprint created"** (pure Q&A/chat excepted). To arrange is to "register what needs doing as Blueprint Steps and Tasks", making progress visible, transitionable, and acceptable, and also leaving a plan source of truth for solidifying future workflows; do not bypass TM and just do it head-down. **This is the number-one root cause of "the task flow was not triggered": receiving a task and starting to work directly, skipping the Issue→Blueprint→Task registration — be sure to register first, then act.**
+2. **Project/KnowledgeBase selection is mandatory (applies to simple tasks too)**: before executing any "user task that produces a deliverable" (research / analysis / development, etc., **whether simple or complex**), **you must** have the user confirm the owning project + output KB, and must not silently use the default Inbox/default KB. **Do not skip it because the task is "simple / one agent can finish it" — a simple research / analysis report likewise must ask about the project and KB first.** The only cases that can be skipped: the user has already explicitly specified it, pure query/chat, or "internal bug/issue registration". **Likewise, the bot that executes the task must be confirmed by the originator** (you may give a recommendation + reasoning based on the agent description), **you must not unilaterally decide the assignment**. **Never implicitly create a Project (mandatory)**: project ownership can only be "choose an existing one" or "create a new one when the user explicitly requests it". Even if the user mentions a project name and you cannot find it, **it is forbidden** to take it upon yourself to create a same-named project as a fallback — **if you can't find it, ask the user**; getting the project context wrong makes all subsequently created Issues/Tasks/outputs land in the wrong place and wastes all the effort. Call `project.create` only when a **human explicitly instructs to create a new one**.
+3. **State transition means notification**: at the **moment** of every issue/task state change (in_progress→pending_plan, pending_plan→in_progress, in_progress→delivered, task→done, delivered→accepted, etc.), notify the user then and there, do not backfill afterward, and even less say nothing.
+4. **Completion means notification**: after every task is executed you **must** proactively notify the user of the result; do not silently finish and let the conclusion get buried in the message stream.
+5. **Continue by priority**: after finishing one task, **proactively** continue with the next pending task by priority, rather than stopping and idly waiting for the next instruction (unless you must wait for user input/acceptance to continue).
+6. **Human acceptance closed loop (do not wrap up on your own after delivery)**: for tasks that produce a deliverable, after the bot delivers (`issue.deliver`→delivered) it **must proactively request the Issue owner human to accept, and must not archive the Issue / Task on its own**. The acceptor ＝ **the human that Issue.owner_member_id points to**, usually the task originator; when creating the Issue, `ownerMemberId` must be filled with the originator's member id. Order: complete the inner transitions (attempt→done, task→done) → `issue.deliver` → request owner acceptance. During the text-card simulation period, after the owner explicitly replies "accept delivery", the Lead may call `issue.accept_delivered {source:"text_card_proxy"}` to click on their behalf; if the owner does not accept, continue the conversation to understand the problem, then `issue.resume` back to in_progress, re-plan and `issue.submit_plan`. Between delivery and acceptance it stays at **delivered (pending acceptance)**, do not pile it up under "completed" and ignore it. **Distinguish**: a worker transitioning its own attempt/task to done only means "the execution action is done"; **the Issue truly entering "completed" (accepted) requires the owner human's acceptance to pass**.
+7. **Cross-agent dispatch: two-way DM permission confirmation (mandatory) + whoever executes creates the Task**: before handing a task to another bot, **DM permission in both directions must be confirmed and opened, neither can be missing**:
+   - **Direction ① (worker→you)**: add that bot's member_id into **your own** `dmAllowFrom` (`config.json` → `orgs.<slug>.access`, set `dmPolicy=allowlist` if needed) — otherwise its completion-report DM is dropped by your comm-bridge and you will never receive it (the number-one break point in the cross-agent notification chain).
+   - **Direction ② (you→worker)**: confirm that bot's `dmPolicy` allows you to send it a DM — otherwise it won't receive your dispatch message.
+   - **Dispatch only after both directions are open**; if either direction is not open, resolve it first or report back to the human, **do not blindly dispatch**.
+   (b) The Lead only creates the **Issue** + gives the goal, **the assigned bot itself does `task.create` and claims it** (whoever executes creates it, the Lead does not create it for it); (c) only after receiving its completion report does the Lead call `issue.deliver` and hand over to the Issue owner for acceptance.
+8. **Every Issue must have a Blueprint first (mandatory)**: a simple task must also first generate a single-step Blueprint; a complex task generates a multi-step / dependency Blueprint. Then `issue.submit_plan {blueprintId}` for the human to confirm → after `issue.accept_plan`, instantiate Tasks and execute. Execution-plan confirmation does not go through cws-core Approval. Hard order: confirm project/KB → start Issue → create Blueprint → `submit_plan` → human accepts → create Task per Step → execute.
+9. **Instantiate all Steps at once after the plan is accepted (mandatory) + every Step carries an assignee, scheduler-driven advancement**: after `issue.accept_plan` enters in_progress, **create all Steps into Tasks at once, set `dependsOn`, and give each an `assigneeId` (including ones with dependencies)**, **it is forbidden to backfill as you go**. The assignee of a no-dependency one immediately does `task.start` to enter **RUNNING**; **a Task with dependencies stays ASSIGNED waiting for prerequisites, and after the prerequisite is done the scheduler DMs its assignee to notify it to start → the assignee `task.start` (the dependency gate verifies here)** to enter **RUNNING**. **Not setting an assignee for a downstream Step = the scheduler has no one to notify = the chain breaks**.
 
-10. **提前终止善后（收到 `issue.terminated` 事件，Lead 专属）**：当一个未结论 Issue 被 `issue.terminate` 主动停下，系统已**机械收尾**（级联取消其下非终态 Task、叫停在跑 Attempt），并给 Lead 发 `issue.terminated` 事件。Lead 收到后按以下 SOP 善后，**不要闷头处理**：
-    - **不复活**：terminated 是终态，**不得**把该 Issue / Task 重新拉起或续作；善后只能是**向前补偿**（发撤回说明、清理外部记录等），不是撤销终止。
-    - **三桶分诊，产出善后清单**：① 在途/预留（系统已撤，Lead 只核对，无需动作）；② 已实现的内部产物（Artifact / KB 页 / comment）——**默认保留**，仅明显是临时草稿且无外部引用才清理；③ 外部不可逆动作（经 Connection 发生过的外部写）——逐项列出，标注是否建议补偿。
-    - **与人类共同决定（硬性）**：默认把善后清单带回 **origin conversation** 和人类一起拍；**凡有外部不可逆影响的补偿动作，一律先经人类确认再执行，Lead 不得自授**。仅当**纯内部、无外部影响、产物明显可保留**时才可自行收尾，事后报一句结论。
-    - **closure**：善后落定后在 origin conversation 给人类收尾消息（终止已确认 + 留了什么 / 撤了什么 / 人类拍了什么）。
+10. **Early-termination cleanup (upon receiving the `issue.terminated` event, Lead-exclusive)**: when a non-concluded Issue is actively stopped via `issue.terminate`, the system has already **mechanically wrapped up** (cascade-cancelled its non-terminal Tasks, halted running Attempts) and sends the Lead an `issue.terminated` event. After receiving it, the Lead cleans up per the following SOP, **do not handle it head-down**:
+    - **No revival**: terminated is a terminal state, you **must not** re-raise or continue that Issue / Task; cleanup can only be **forward compensation** (send a retraction note, clean up external records, etc.), not undoing the termination.
+    - **Three-bucket triage, produce a cleanup checklist**: ① in-flight/reserved (the system has already withdrawn, the Lead only verifies, no action needed); ② already-realized internal products (Artifact / KB page / comment) — **kept by default**, clean up only if obviously a temporary draft with no external reference; ③ external irreversible actions (external writes that happened via a Connection) — list them item by item, annotating whether compensation is recommended.
+    - **Decide together with the human (hard)**: by default bring the cleanup checklist back to the **origin conversation** and decide together with the human; **any compensation action with an external irreversible impact must be confirmed by the human before executing, the Lead must not self-authorize**. Only when it is **purely internal, has no external impact, and the products are obviously keepable** may you wrap up on your own and report a one-line conclusion afterward.
+    - **closure**: after the cleanup settles, give the human a wrap-up message in the origin conversation (termination confirmed + what was kept / what was withdrawn / what the human decided).
 
-11. **激活即规划（收到 `issue.activated` 事件，Lead 专属）**：backlog Issue 被 owner 经 `issue.activate` 激活（→ in_progress），调度中心给 Lead 发 `issue.activated` 事件「[调度中心] Issue《X》已被激活，请接手并启动执行」。**激活是 owner 最新的、显式的「开始处理」信号——直接接手做需求澄清和计划,然后 `issue.submit_plan` 给 owner 确认，不要回头问 owner「要不要开始 / 要不要保持 backlog」。**
-    - **新信号压过旧备注**：即便描述或历史里有「先不开发 / 暂不开发」之类旧表述，**激活这个更新的决策已经覆盖它**，不得用旧的 hold 备注去否决刚收到的激活（要保持 backlog，owner 就不会激活）。
-    - **缺的是需求不是许可**：开工后若发现执行所需上下文确有缺失（如 Issue 只是占位、没有可执行的实质内容），**DM 该 Issue 的 owner 人类去补齐那部分需求**（具体内容 / 链接 / 验收标准），**而不是问「要不要开始」**；补齐后继续执行。区分：缺信息 → 问 owner 要信息，不是缺许可。
+11. **Activation means planning (upon receiving the `issue.activated` event, Lead-exclusive)**: when a backlog Issue is activated by the owner via `issue.activate` (→ in_progress), the scheduler sends the Lead an `issue.activated` event "[Scheduler] Issue «X» has been activated, please take over and start execution". **Activation is the owner's latest, explicit "start handling" signal — take over directly to do requirement clarification and planning, then `issue.submit_plan` for the owner to confirm; do not turn back and ask the owner "should we start / should we keep it backlog".**
+    - **The new signal overrides the old note**: even if the description or history has old phrasings like "hold off on development / not developing for now", **this newer activation decision has already overridden it**, and you must not use an old hold note to veto the just-received activation (if they wanted to keep it backlog, the owner would not have activated it).
+    - **What is missing is requirements, not permission**: if after starting you find the context needed for execution is genuinely missing (e.g. the Issue is just a placeholder with no executable substance), **DM that Issue's owner human to fill in that part of the requirements** (specific content / links / acceptance criteria), **rather than asking "should we start"**; continue executing after it's filled in. Distinguish: missing information → ask the owner for information, not missing permission.
 
-12. **创建 backlog Issue 时先做需求澄清（Lead）**：为「暂不启动」的工作登记 backlog Issue（`backlog=true`，此刻不编排、不执行）时，**主动 DM 该 Issue 的 owner 人类确认是否需要补齐需求**（内容、链接、范围、验收标准），把上下文在 backlog 阶段就做完备——这样**日后被激活时即可直接开工（见 #11），不必到那时才发现是空壳**。区分：backlog 阶段只做**需求澄清**让上下文完备，Blueprint 与 Task 仍等激活后再说。
+12. **Do requirement clarification first when creating a backlog Issue (Lead)**: when registering a backlog Issue (`backlog=true`, no orchestration or execution right now) for "not-yet-started" work, **proactively DM that Issue's owner human to confirm whether the requirements need filling in** (content, links, scope, acceptance criteria), completing the context already at the backlog stage — this way **when it is activated later it can start directly (see #11), without discovering it is an empty shell only then**. Distinguish: the backlog stage only does **requirement clarification** to make the context complete; the Blueprint and Tasks still wait until after activation.
 
-> 区分两类动作：「用户任务执行（出 deliverable）」走完整流程（含项目/KB 选择 + 验收 + 通知）；「内部 bug/问题登记」可默认 Inbox、轻量记录，但完成后仍要通知。
+> Distinguish two kinds of actions: "user task execution (produces a deliverable)" runs the full flow (including project/KB selection + acceptance + notification); "internal bug/issue registration" may default to Inbox with lightweight recording, but still notify after completion.
 
-### 常见错误
+### Common Mistakes
 
-| 错误 | 正确做法 |
+| Mistake | Correct approach |
 |---|---|
-| 使用 Claude Code 内置 TaskCreate/TaskUpdate | 所有任务操作走 TM CLI，禁止用平台内置的 task 工具 |
-| 跳过 TM 流程直接执行任务 | 每个需求必须先 Issue → Blueprint → Task → Attempt 推进 |
-| Worker 调 issue 生命周期动作 | Issue 状态只由 Lead 流转；用 `issue.submit_plan` / `issue.accept_plan` / `issue.deliver` / `issue.resume` / `issue.accept_delivered` 等语义命令 |
-| 创建 Issue 没有 leadAgentId | Issue 必须有 Lead |
-| 人类不接受后直接改产出 | 先继续对话理解反馈,再 `issue.resume` 回到 in_progress,重新计划并 `issue.submit_plan` |
-| 简单任务跳过 Blueprint | 简单任务也必须先建一个 step 的 Blueprint；建好后 `issue.submit_plan {blueprintId}` 给人类确认 |
-| 复杂任务绕过 Blueprint 直接拆 Task 开干 | 复杂（多步/多 agent/有依赖）任务必须先建多 step Blueprint，计划接受后才能按 Step 实例化 Task |
-| agent 自己判断「要不要审批」/ 走 cws-core Approval | 执行计划确认不走 cws-core Approval：建好 Blueprint 一律 `issue.submit_plan` 给人类确认 |
-| 不读能力画像、按成员顺序/名字给 Step 派 bot | 派 bot 前**必须先 `core.agent_profiles({projectId,capabilities:true})`**，逐 Step 把任务需求和 agent 的 tag/skill 语义匹配，方案里写明每步选谁的依据；按顺序/名字拍脑袋＝能力画像形同虚设 |
-| Blueprint 通过后只建当前一步 Task、边做边补（piecemeal） | 一次性把全部 Step 建成 Task + 设 dependsOn + 每个都带 assignee；无依赖的进入 RUNNING，有依赖的保持 ASSIGNED，前置完成后调度中心通知其 assignee 开工，看板呈现后端原始状态 |
-| 给有依赖的 Step 建 Task 时不带 assigneeId（指望"自认领"）| **每个 Step 都要带 assigneeId**（含有依赖的）；不带则依赖就绪时调度中心没人可通知、链断在那。CreateTask 带 assigneeId 只是 assigned（不开工、不建 attempt），不会顶成 RUNNING |
-| 期待"前置 done 下游自动开工"或"前置 bot 手动 DM 下游去 claim" | 前置 done 后**调度中心自动 DM 下游 Task 的 assignee** 通知开工；assignee 收到后 `task.start`（校验依赖）才进入 RUNNING。无需手动 DM、无需 claim（已 assigned）——RUNNING 必须对应真在执行的 bot |
-| claim 完就以为开工了 / 等 attempt | v0.7 claim 只分配（assigned）；必须再 `task.start` 才进 running、才建 attempt、才查依赖 |
-| 想把已 terminated 的 Issue/Task 重新拉起 | terminated 是终态，不复活；善后只做向前补偿，且外部不可逆动作先经人类确认 |
-| 单独归档 Issue / Task | 不允许单独归档；归档只从 `project.archive` 级联发生，Issue / Task 用 `archived_at` 表达归档维度 |
-| Worker 自行创建新 Attempt 重试 | 汇报失败，等 Lead 决定 |
-| CreateTask 不带 projectId | 必须传 issueId 或 projectId |
-| 对 ⏳ 命令反复重试 | 404/501 → 降级到对话流 |
-| 人类提供了 Project ID 仍自创 Project | 直接使用人类给出的 ID，不要 project.create 重复创建 |
-| 用 curl/fetch 直接调 TM/KB/AS API / 手搓 BFF REST 路径 | 一律走 CLI `src/cli/{tm,kb,as,comm,core}.js`，禁止直接 HTTP（见顶部「服务调用铁律」）；不确定先 `node src/cli/<svc>.js` 看命令或查 ops 文档，别猜路径 |
-| Task done 但 Attempt 仍在 running | 先 attempt.transition → done，再 task.transition → done |
-| 工作做完但 Issue 没有 deliver | 所有 Task done 后必须 `issue.deliver` |
-| 交付后 bot 自行验收 / 自行归档 | delivered 后必须**等 Issue owner 人类验收通过**；bot 不代调验收 |
-| 找错 owner / 随便哪个用户验收 | 验收人＝**Issue.owner_member_id 指向的人类**（创建时应设为发起人），不是 bot 自己、不是随便哪个用户 |
-| 交付后把任务堆在「已完成」不管 | delivered=待验收，主动请 Issue owner 验收；任务做完≠结束，owner 验收通过才归档 |
-| 先开干再补登记 Issue/Task | 先确认项目/KB → 再登记 Issue→Task → 再执行，顺序不能颠倒 |
-| 自行决定派哪个 bot 执行 | 按 agent 描述给推荐 + 理由，由发起人确认/选择执行 bot，不自行拍板 |
-| 派任务给 bot 但没把它加进 dmAllowFrom | 派发前先把 worker member_id 加进自己的 dmAllowFrom（必要时 dmPolicy=allowlist），否则它的完成回报 DM 被拦、收不到 |
-| Lead 替 worker 建 Task 再派给它 | Lead 只建 Issue + 给目标 + 开权限；Task 由执行的 bot 自己 task.create 并认领（谁执行谁建）|
-| worker 把 task 流转到 done 就当任务完成 | task done 只是「执行动作做完」；进入 accepted/「完成」必须人类验收通过 |
-| 人类拒收后直接修改产出 | 先对话澄清 → `issue.resume` → 重新 plan → `issue.submit_plan`，再补 Task 重做 |
-| worker 把 task 流转到 done 却不留产出评论 | 流转 done 前先 `comment.create` 写明产出物地址，下一棒/人类才能拿到 |
-| 接棒前不读上游产出，直接 task.start 重做 | 收到「依赖已就绪」DM 后先 `task.get` + `comment.list` 读上游完成评论，再开工 |
+| Using Claude Code's built-in TaskCreate/TaskUpdate | All task operations go through the TM CLI; using the platform's built-in task tools is forbidden |
+| Skipping the TM flow and executing the task directly | Every requirement must advance via Issue → Blueprint → Task → Attempt |
+| Worker calling issue lifecycle actions | Issue state is transitioned only by the Lead; use semantic commands like `issue.submit_plan` / `issue.accept_plan` / `issue.deliver` / `issue.resume` / `issue.accept_delivered` |
+| Creating an Issue without a leadAgentId | An Issue must have a Lead |
+| Modifying output directly after the human does not accept | First continue the conversation to understand the feedback, then `issue.resume` back to in_progress, re-plan and `issue.submit_plan` |
+| A simple task skipping the Blueprint | A simple task must also first create a one-step Blueprint; after building it, `issue.submit_plan {blueprintId}` for the human to confirm |
+| A complex task bypassing the Blueprint and splitting Tasks to start directly | A complex (multi-step/multi-agent/with-dependencies) task must first create a multi-step Blueprint, and Tasks can be instantiated per Step only after the plan is accepted |
+| An agent deciding "whether approval is needed" on its own / going through cws-core Approval | Execution-plan confirmation does not go through cws-core Approval: once the Blueprint is built, always `issue.submit_plan` for the human to confirm |
+| Not reading the capability profiles, assigning a bot to a Step by member order/name | Before assigning a bot **you must first `core.agent_profiles({projectId,capabilities:true})`**, semantically match the task requirements against agents' tag/skill per Step, and spell out in the plan the basis for choosing each; deciding by order/name off the top of your head ＝ the capability profile is useless |
+| After the Blueprint passes, creating only the current step's Task and backfilling as you go (piecemeal) | Create all Steps into Tasks at once + set dependsOn + give each an assignee; no-dependency ones enter RUNNING, ones with dependencies stay ASSIGNED, and after prerequisites complete the scheduler notifies their assignee to start, the board shows the backend raw state |
+| Creating a Task for a Step with dependencies without an assigneeId (counting on "self-claim") | **Every Step must carry an assigneeId** (including ones with dependencies); without it, when the dependency is ready the scheduler has no one to notify and the chain breaks there. CreateTask with assigneeId is only assigned (no start, no attempt), it will not bump up to RUNNING |
+| Expecting "the downstream starts automatically when the prerequisite is done" or "the prerequisite bot manually DMs the downstream to claim" | After the prerequisite is done **the scheduler automatically DMs the downstream Task's assignee** to notify it to start; after the assignee receives it, `task.start` (verifies dependencies) is what enters RUNNING. No manual DM, no claim (already assigned) — RUNNING must correspond to a bot really executing |
+| Thinking work has started as soon as claim is done / waiting for an attempt | Since v0.7 claim only assigns (assigned); you must `task.start` again to enter running, create the attempt, and check dependencies |
+| Wanting to re-raise an already-terminated Issue/Task | terminated is a terminal state, no revival; cleanup only does forward compensation, and external irreversible actions are confirmed by the human first |
+| Archiving an Issue / Task individually | Archiving individually is not allowed; archival cascades only from `project.archive`, and Issue / Task express the archival dimension via `archived_at` |
+| Worker creating a new Attempt on its own to retry | Report the failure, wait for the Lead to decide |
+| CreateTask without a projectId | Must pass issueId or projectId |
+| Repeatedly retrying a ⏳ command | 404/501 → degrade to the conversation flow |
+| The human provided a Project ID but you still create a Project | Use the ID the human gave directly, do not project.create to re-create |
+| Calling the TM/KB/AS API directly with curl/fetch / hand-rolling BFF REST paths | Always go through the CLI `src/cli/{tm,kb,as,comm,core}.js`, direct HTTP is forbidden (see the "Iron Rule of Service Calls" at the top); when unsure, first `node src/cli/<svc>.js` to see the commands or check the ops docs, do not guess paths |
+| Task done but Attempt still running | First attempt.transition → done, then task.transition → done |
+| Work finished but the Issue is not delivered | After all Tasks are done you must `issue.deliver` |
+| The bot accepting / archiving on its own after delivery | After delivered you must **wait for the Issue owner human's acceptance to pass**; the bot does not call acceptance on their behalf |
+| Finding the wrong owner / letting any user accept | The acceptor ＝ **the human that Issue.owner_member_id points to** (should be set to the originator at creation), not the bot itself, not some arbitrary user |
+| Piling the task up under "completed" and ignoring it after delivery | delivered=pending acceptance, proactively request the Issue owner to accept; a task being done ≠ finished, it is archived only after the owner's acceptance passes |
+| Starting work first and backfilling Issue/Task registration | First confirm project/KB → then register Issue→Task → then execute, the order cannot be reversed |
+| Deciding on your own which bot executes | Give a recommendation + reasoning based on the agent description, let the originator confirm/choose the executing bot, do not decide unilaterally |
+| Dispatching a task to a bot but not adding it to dmAllowFrom | Before dispatching, first add the worker member_id to your own dmAllowFrom (set dmPolicy=allowlist if needed), otherwise its completion-report DM is blocked and not received |
+| Lead creating the Task for the worker and then dispatching it to it | The Lead only creates the Issue + gives the goal + opens permissions; the Task is created and claimed by the executing bot itself (whoever executes creates it) |
+| The worker treating a task transitioned to done as the task being complete | task done is only "the execution action is done"; entering accepted/"completed" requires the human's acceptance to pass |
+| Modifying output directly after the human rejects | First clarify via conversation → `issue.resume` → re-plan → `issue.submit_plan`, then add Tasks to redo |
+| The worker transitioning a task to done without leaving an output comment | Before transitioning to done, first `comment.create` to spell out the output location, so the next leg/human can get it |
+| Redoing before taking over without reading the upstream output, directly task.start | After receiving the "dependencies are ready" DM, first `task.get` + `comment.list` to read the upstream completion comments, then start work |
 
-### API 降级
+### API Degradation
 
-CLI 命令返回 404 或 501（cws-core 网关暂未接通）时：
+When a CLI command returns 404 or 501 (cws-core gateway not yet connected):
 
-1. 在 IM 中告知相关方当前操作暂不支持
-2. 用对话流完成等价动作（人类口头确认代替 API 调用）
-3. 在 IM 消息中保留 Issue/Task ID，便于系统就绪后补录
-4. 不反复重试，不阻塞
-5. 可用的读操作（project.list 等）仍正常调用
+1. Inform the relevant parties in IM that the current operation is temporarily unsupported
+2. Complete the equivalent action via the conversation flow (a human verbal confirmation replaces the API call)
+3. Keep the Issue/Task ID in the IM message, to backfill once the system is ready
+4. Do not retry repeatedly, do not block
+5. Available read operations (project.list, etc.) are still called normally
 
-### Lead-Worker 契约
+### Lead-Worker Contract
 
-**Lead 对 Worker**：完成时通过 IM 汇报且流转 TM 状态；遇阻主动请求澄清；产出位置符合 Lead 指定。
+**Lead to Worker**: report via IM upon completion and transition the TM state; proactively request clarification when blocked; the output location matches the Lead's specification.
 
-**Worker 对 Lead**：派发时把参考材料写进 task `description`（自然语言 / KB 链接）；澄清请求及时响应；完成时先 `comment.create` 写产出评论再流转 done；不在执行中途无预警取消 Task。
+**Worker to Lead**: when dispatching, write the reference materials into the task `description` (natural language / KB link); respond to clarification requests promptly; upon completion, first `comment.create` to write the output comment before transitioning to done; do not cancel the Task mid-execution without warning.
 
-### 跨 agent 沟通模式（Lead ↔ Worker）
+### Cross-agent Communication Pattern (Lead ↔ Worker)
 
-Lead 派任务给另一个 agent 之后，**绝大多数协调都通过 bot-to-bot DM 完成**（不是给人类发 IM）。完整流程：
+After the Lead dispatches a task to another agent, **the vast majority of coordination is done via bot-to-bot DM** (not by sending IM to the human). Full flow:
 
-1. **找 worker 的 member_id**：
-   `core.member_list({kind:"agent", search:"<worker 显示名>"})` 拿 `member_id`。常用 worker 的 member_id 应该已经在记忆里，记忆里有就别再查。
+1. **Find the worker's member_id**:
+   `core.member_list({kind:"agent", search:"<worker display name>"})` to get the `member_id`. The member_id of commonly-used workers should already be in memory; if it's in memory, don't query again.
 
-2. **双向开放 DM 权限（关键！否则收不到回报）**：
-   - **把 worker 的 member_id 加进自己的 `dmAllowFrom`**（`config.json` → `orgs.<slug>.access`，必要时把 `dmPolicy` 设为 `allowlist`）。否则 `dmPolicy=owner/allowlist` 会把 worker 的回报 DM **直接丢弃**，Lead 永远收不到「已完成」——这正是跨 agent 通知链最常断的地方。**派一个 worker 就加一个**。
-   - **确认 worker 那边也对自己开放**（worker 的 `dmPolicy` 允许 Lead 发 DM）。派发 DM 若迟迟没被处理，多半是对方没放行——反馈给人类，别干等。
+2. **Open DM permission in both directions (critical! otherwise you won't receive the report)**:
+   - **Add the worker's member_id into your own `dmAllowFrom`** (`config.json` → `orgs.<slug>.access`, set `dmPolicy` to `allowlist` if needed). Otherwise `dmPolicy=owner/allowlist` will **directly drop** the worker's report DM, and the Lead will never receive "completed" — this is exactly where the cross-agent notification chain most often breaks. **Add one per worker dispatched.**
+   - **Confirm the worker side is also open to you** (the worker's `dmPolicy` allows the Lead to send a DM). If a dispatch DM goes unhandled for a long time, it's most likely the other side didn't allow it — report back to the human, don't idly wait.
 
-3. **拿/建会话**：
-   `comm.create_dm({participantId})` 返回 `conversationId`（幂等；持久化到记忆复用）。
+3. **Get/create the conversation**:
+   `comm.create_dm({participantId})` returns a `conversationId` (idempotent; persist to memory for reuse).
 
-4. **发目标 + 让 worker 自建 Task（谁执行谁建）**：
-   `comm.send({conversationId, content})` 用 markdown 写清**目标、所属 Issue ID、KB 产出位置、退回触发词、判断标准**。**Task 由被指派的 worker 自己在该 Issue 下 `task.create` 并认领执行**——Lead 只建 Issue + 给目标 + 开权限，**不替 worker 建 Task / 不预先 `task.create({assigneeId})`**。
+4. **Send the goal + let the worker create the Task itself (whoever executes creates it)**:
+   `comm.send({conversationId, content})` uses markdown to spell out the **goal, owning Issue ID, KB output location, return-trigger words, judgment criteria**. **The Task is created and claimed by the assigned worker itself under that Issue** — the Lead only creates the Issue + gives the goal + opens permissions, **it does not create the Task for the worker / does not pre-`task.create({assigneeId})`**.
 
-5. **等 worker 回报并转交验收**：
-   不要轮询 `comm.get_messages`。worker 完成后通过 bot DM 回报；**该回报只有在第 2 步开放权限后才会进 Lead 的输入流**。收到回报 → Lead 调 `issue.deliver` → **转交发起人（人类）验收**（见护栏规则 6，验收通过才 accepted）。
+5. **Wait for the worker's report and hand over for acceptance**:
+   Do not poll `comm.get_messages`. After the worker completes, it reports via bot DM; **that report only enters the Lead's input stream after permission is opened in step 2**. Report received → the Lead calls `issue.deliver` → **hand over to the originator (human) for acceptance** (see guardrail rule 6, accepted only after acceptance passes).
 
-**用 TM action 而非聊**：重派用 `task.reassign({newAssigneeId})`；状态流转 worker 自己走 attempt/task transition。但**澄清需求、上下文同步、判断分歧**这些"对话"性质的事，**必须**走 bot DM。
+**Use a TM action rather than chatting**: reassign with `task.reassign({newAssigneeId})`; state transitions the worker does itself via attempt/task transition. But "conversational" matters like **clarifying requirements, syncing context, judgment disagreements** **must** go through bot DM.
 
-## 记忆触发点
+## Memory Triggers
 
-以下时机，持久化关键信息确保 session 切换后可恢复。不指定存储位置，Agent 根据运行时的记忆系统自行决定。
+At the following moments, persist key information to ensure it can be recovered after a session switch. The storage location is not specified; the Agent decides based on the runtime's memory system.
 
-| 时机 | 持久化内容 |
+| Moment | What to persist |
 |---|---|
-| 首次 `core.me` | agentId、orgId |
-| 首次 `project.list` | 项目目录（name + description + id）|
-| 创建 Issue | issueId、projectId、title、status |
-| 领取 Task | taskId、issueId、title、status |
-| 状态流转 | 更新对应 Issue/Task 的 status |
-| 拉取 Issue 列表 | 更新本地 Issue 目录 |
-| Issue accepted | 评估是否沉淀经验 |
+| First `core.me` | agentId, orgId |
+| First `project.list` | project directory (name + description + id) |
+| Creating an Issue | issueId, projectId, title, status |
+| Claiming a Task | taskId, issueId, title, status |
+| State transition | update the corresponding Issue/Task status |
+| Fetching the Issue list | update the local Issue directory |
+| Issue accepted | evaluate whether to distill experience |
 
-**经验沉淀判断**（任一满足则沉淀，全不满足则跳过）：
+**Experience distillation judgment** (distill if any one is satisfied, skip if none are satisfied):
 
-- 执行中遇到意外障碍或踩坑
-- 人类拒收过一次或多次
-- 发现了可复用的模式
+- Hit an unexpected obstacle or pitfall during execution
+- The human rejected once or more
+- Discovered a reusable pattern
 
-沉淀位置遵循 KB 命名空间约定：项目决策 → `/projects/{slug}/decisions/`，调研 → `/projects/{slug}/research/`，Agent 经验 → `/agents/{slug}/lessons/`。
+The distillation location follows the KB namespace convention: project decisions → `/projects/{slug}/decisions/`, research → `/projects/{slug}/research/`, Agent experience → `/agents/{slug}/lessons/`.
 
-## 访问控制（DM / 群消息）
+## Access Control (DM / group messages)
 
-每个 org 在 `config.json` 的 `orgs.<slug>` 下有**独立**的访问策略，DM 与群消息策略**互不影响**。所有名单值都是 cws-core 的 **`member_id`**（不是显示名）。
+Each org has an **independent** access policy under `orgs.<slug>` in `config.json`; the DM and group message policies **do not affect each other**. All list values are cws-core's **`member_id`** (not the display name).
 
 ```jsonc
 // config.json → orgs.<slug>
 {
-  "owner": { "member_id": "", "name": "" },   // 绑定的人类 owner，member_id 为空 = 未绑定
+  "owner": { "member_id": "", "name": "" },   // bound human owner, empty member_id = not bound
   "access": {
     "dmPolicy":    "owner",          // "open" | "allowlist" | "owner"
-    "dmAllowFrom": [],               // member_id 列表，dmPolicy=allowlist 时生效
+    "dmAllowFrom": [],               // member_id list, effective when dmPolicy=allowlist
     "groupPolicy": "allowlist",      // "open" | "allowlist" | "disabled"
-    "groups": {                      // 按 conversation_id 配置，groupPolicy=allowlist 时生效
+    "groups": {                      // configured by conversation_id, effective when groupPolicy=allowlist
       "<conversationId>": {
-        "mode": "mention",           // "mention"（仅被 @ 时响应）| "smart"（收全部消息自行判断）
-        "allowFrom": ["*"]           // ['*'] 或 [] = 群内所有人；否则限定 member_id
+        "mode": "mention",           // "mention" (respond only when @-ed) | "smart" (receive all messages and judge on its own)
+        "allowFrom": ["*"]           // ['*'] or [] = everyone in the group; otherwise limited to member_id
       }
     }
   }
 }
 ```
 
-**私聊（dmPolicy）：**
-1. 是 owner？→ 永远放行
-2. `open`？→ 任何 org 成员都能 DM
-3. `owner`？→ 仅绑定的 owner（首次 DM 自动绑定到 `owner.member_id`）
-4. `allowlist`？→ 仅 `access.dmAllowFrom` 里的 member_id 放行，其余丢弃
+**DM (dmPolicy):**
+1. Is owner? → always allow
+2. `open`? → any org member can DM
+3. `owner`? → only the bound owner (the first DM auto-binds to `owner.member_id`)
+4. `allowlist`? → only the member_ids in `access.dmAllowFrom` are allowed, the rest are dropped
 
-**群消息（groupPolicy）：**
-1. `disabled`？→ 所有群消息丢弃
-2. `open`？→ 任意群里被 @ 即响应
-3. `allowlist`？→ 仅 `access.groups` 里配置的群；未配置的群只有 owner 被 @ 能过，其余静默丢弃
-4. 群内 `allowFrom` 非空且非 `['*']`？→ 仅名单内 member_id 放行（owner 豁免）
-5. `mode: 'smart'`？→ 收群里全部消息、无需被 @；`mode: 'mention'`（默认）→ 仅处理 @ 机器人的消息
+**Group messages (groupPolicy):**
+1. `disabled`? → all group messages dropped
+2. `open`? → respond when @-ed in any group
+3. `allowlist`? → only the groups configured in `access.groups`; in an unconfigured group only the owner being @-ed gets through, the rest are silently dropped
+4. In-group `allowFrom` non-empty and not `['*']`? → only the member_ids in the list are allowed (owner exempt)
+5. `mode: 'smart'`? → receive all messages in the group, no @ needed; `mode: 'mention'` (default) → only handle messages that @ the bot
 
-**要点：**
-- `dmPolicy` 与 `groupPolicy` 完全独立，改一个不影响另一个
-- owner 仅豁免 allowlist / 群名单检查；`groupPolicy: disabled` 连 owner 的群消息也拦
-- 名单用 `member_id`，不是显示名；安装期 `COCO_OWNER_MEMBER_ID` 会预绑定 owner 并隐含 `dmPolicy=owner`
-- 策略按 org 维度配置（每个 org 有独立的 `access` 块）
+**Key points:**
+- `dmPolicy` and `groupPolicy` are fully independent, changing one does not affect the other
+- owner is only exempt from the allowlist / group-list check; `groupPolicy: disabled` blocks even the owner's group messages
+- Lists use `member_id`, not the display name; at install time `COCO_OWNER_MEMBER_ID` pre-binds the owner and implies `dmPolicy=owner`
+- Policies are configured per org (each org has an independent `access` block)
 
-**System Member（调度中心等平台播报）：**
+**System Member (scheduler and other platform broadcasts):**
 
-- 平台事件（Task 完成、Issue 终止/验收、审批结果等）由 **System Member**（`sender_type=SYSTEM`，如「调度中心」）以 DM 形式投递。这类发送者**不受 dmPolicy/owner 绑定约束**，comm-bridge 直接放行注入 session。
-- System Member 是**只写身份**，没有"接收/消费"语义。收到调度中心等系统播报后，**回到对应的 Issue/Task 上下文去行动**（认领、推进、善后等；如 `issue.activated` → 需求澄清后 `issue.submit_plan`，见行为护栏 #11），**不要回复这条系统 DM**——没有人会消费你的回复，回写只会污染会话。
-- 消息正文已是自然语言，可直接据此行动；如需精确字段（issueId/taskId 等）可解析 `metadata.systemEvent.payload`。
+- Platform events (Task completion, Issue termination/acceptance, approval results, etc.) are delivered as DMs by the **System Member** (`sender_type=SYSTEM`, such as the "Scheduler"). Such senders are **not subject to dmPolicy/owner-binding constraints**; comm-bridge lets them through directly and injects them into the session.
+- The System Member is a **write-only identity**, with no "receive/consume" semantics. After receiving a system broadcast such as one from the scheduler, **go back to the corresponding Issue/Task context to act** (claim, advance, clean up, etc.; e.g. `issue.activated` → `issue.submit_plan` after requirement clarification, see behavioral guardrail #11), **do not reply to this system DM** — no one will consume your reply, and writing back only pollutes the conversation.
+- The message body is already natural language and can be acted on directly; if you need exact fields (issueId/taskId, etc.) you can parse `metadata.systemEvent.payload`.
 
-## 前端链接（Frontend URL Patterns）
+## Frontend Links (Frontend URL Patterns)
 
-分享 Workspace 资源链接时，**必须**加上 `/workspace` 前缀（Next.js `basePath`，见 `cws-fe/apps/web/src/lib/base-path.ts`）。直接拼 BFF 路径会 404。
+When sharing Workspace resource links, **you must** prepend the `/workspace` prefix (Next.js `basePath`, see `cws-fe/apps/web/src/lib/base-path.ts`). Assembling the BFF path directly will 404.
 
-| 资源 | URL 模板 | 来源 |
+| Resource | URL template | Source |
 |---|---|---|
-| 项目列表 | `{domain}/workspace/projects` | sidebar.tsx |
-| 项目详情（选中项目） | `{domain}/workspace/projects?project={project_id}` | projects/page.tsx (fusion page) |
-| Issue 详情（选中项目+Issue） | `{domain}/workspace/projects?project={project_id}&issue={issue_id}` | projects/page.tsx (fusion page) |
-| KB 列表 | `{domain}/workspace/knowledge` | sidebar.tsx |
-| KB 详情 | `{domain}/workspace/knowledge?kb={kb_id}` | knowledge/page.tsx |
-| KB 页面 | `{domain}/workspace/knowledge?kb={kb_id}&node={tree_node_id}` | knowledge/page.tsx |
+| Project list | `{domain}/workspace/projects` | sidebar.tsx |
+| Project detail (selected project) | `{domain}/workspace/projects?project={project_id}` | projects/page.tsx (fusion page) |
+| Issue detail (selected project+Issue) | `{domain}/workspace/projects?project={project_id}&issue={issue_id}` | projects/page.tsx (fusion page) |
+| KB list | `{domain}/workspace/knowledge` | sidebar.tsx |
+| KB detail | `{domain}/workspace/knowledge?kb={kb_id}` | knowledge/page.tsx |
+| KB page | `{domain}/workspace/knowledge?kb={kb_id}&node={tree_node_id}` | knowledge/page.tsx |
 
-- `{domain}` = 环境域名
-- 项目和 Issue 现在是**融合页**（fusion page），通过 query 参数选择当前项目和 Issue，不再用嵌套路径。
-- 旧路径自动重定向：`/projects/{id}` → `/projects?project={id}`，`/projects/{id}/issues/{iid}` → `/projects?project={id}&issue={iid}`，`/issues` → `/projects`。
-- 任务没有单独页面；任务在 Issue 详情内以看板/列表形式展示。
-- KB 的 `node` 参数是**树节点 ID**（tree node id），不是 page content id。通过 KB tree API 获取，或在 `kb.get_tree` 返回的节点中取 `id` 字段。
+- `{domain}` = the environment domain
+- Projects and Issues are now a **fusion page**, selecting the current project and Issue via query parameters, no longer using nested paths.
+- Old paths auto-redirect: `/projects/{id}` → `/projects?project={id}`, `/projects/{id}/issues/{iid}` → `/projects?project={id}&issue={iid}`, `/issues` → `/projects`.
+- Tasks have no separate page; tasks are shown within the Issue detail as a board/list.
+- KB's `node` parameter is the **tree node ID**, not the page content id. Obtain it via the KB tree API, or take the `id` field from the nodes returned by `kb.get_tree`.
 
-可用 CLI 一步生成：`node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=xxx&node=yyy"}'`，输出完整 URL。
+You can generate it in one step with the CLI: `node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=xxx&node=yyy"}'`, which outputs the full URL.
 
-## 操作指南索引（Layer 3，按需加载）
+## Operation Guide Index (Layer 3, load on demand)
 
-**本文件（SKILL.md）是 Layer 1+2**，负责行为护栏 + 角色边界 + 状态机 + 通用错误防护——**任何 CLI 操作之前都要符合这些规则**。`references/*-operations.md` 是 Layer 3，只补"具体命令怎么调"的机制层细节，**不复述**这里的行为面规则。
+**This file (SKILL.md) is Layer 1+2**, responsible for behavioral guardrails + role boundaries + state machine + general error protection — **any CLI operation must comply with these rules first**. `references/*-operations.md` is Layer 3, only supplementing the mechanism-layer details of "how exactly to call a specific command", **not restating** the behavioral rules here.
 
-**加载策略**：本表只给摘要；不确定该开哪份就先扫"负责什么"那一列，再去对应文件查命令清单。
+**Loading strategy**: this table gives only a summary; when unsure which one to open, first scan the "responsible for what" column, then go to the corresponding file to check the command list.
 
-| 模块 | 负责什么 | 典型触发场景 | 文件 |
+| Module | Responsible for what | Typical trigger scenario | File |
 |---|---|---|---|
-| **TM** | Project / Issue / Task / Attempt 四层工作流 + Blueprint 编排骨架 | 收到新需求、派单、attempt→task→issue 状态流转、计划确认 | `references/tm-operations.md` |
-| **KB** | KB 实例 + 目录树 + page 内容/版本/trash 三态 + 跨 page 搜索 + 文件附件 | 写笔记沉淀经验、整理目录、搜参考资料、归档文件 | `references/kb-operations.md` |
-| **AS** | 文件上传（IM/KB 双模）+ 下载 URL 解析 + 本地下载 | 发会话附件、归档文件到 KB、下载远端 artifact 做 vision/分析 | `references/as-operations.md` |
-| **Comm** | Agent **主动发起**的 IM：会话/消息/未读/WS 同步/KB page 搜索 | 主动 DM 同事、拉群、定向搜 page、WS 重连补漏 | `references/comm-operations.md` |
-| **Core** | 身份 + 成员/项目/角色/邀请目录查询 + org 切换 + 平台 agent 生命周期 | `core.me` 确认身份、找派单候选、发邀请、切 org | `references/core-operations.md` |
+| **TM** | Project / Issue / Task / Attempt four-layer workflow + Blueprint orchestration skeleton | new requirement received, dispatching, attempt→task→issue state transition, plan confirmation | `references/tm-operations.md` |
+| **KB** | KB instance + directory tree + page content/version/trash three states + cross-page search + file attachments | write notes to distill experience, organize the directory, search reference materials, archive files | `references/kb-operations.md` |
+| **AS** | File upload (IM/KB dual mode) + download URL resolution + local download | send conversation attachments, archive files to KB, download remote artifacts for vision/analysis | `references/as-operations.md` |
+| **Comm** | IM that the Agent **proactively initiates**: conversation/message/unread/WS sync/KB page search | proactively DM a colleague, create a group, search a page in a targeted way, WS reconnect to fill gaps | `references/comm-operations.md` |
+| **Core** | Identity + member/project/role/invitation directory queries + org switching + platform agent lifecycle | `core.me` to confirm identity, find dispatch candidates, send invitations, switch org | `references/core-operations.md` |
 
-每份 Layer 3 doc 顶部都有自己的 `作用` / `何时加载本文档` / `不在本文档范围` / `依赖前置` 四段摘要，加载到内存后先扫这段确认是不是要的，再往下看命令清单。
+The top of each Layer 3 doc has its own four-part summary of `Purpose` / `When to load this document` / `Out of scope for this document` / `Prerequisites`; after loading it into memory, first scan this section to confirm it is the one you want, then read on to the command list.

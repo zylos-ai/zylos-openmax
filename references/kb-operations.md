@@ -1,147 +1,147 @@
-# KB 操作指南
+# KB Operations Guide
 
-**作用**:Knowledge Base 操作——管 KB 实例本身、目录树(folder / file / page 节点)、page 内容 + revision + trash 三态、跨 page 搜索、文件上传与下载。链路 `kb.js → cws-core (/api/v1) → cws-kb`。
+**Purpose**: Knowledge Base operations — managing KB instances themselves, the directory tree (folder / file / page nodes), the page content + revision + trash three-state model, cross-page search, and file upload/download. Chain: `kb.js → cws-core (/api/v1) → cws-kb`.
 
-**何时加载本文档**:
+**When to load this document**:
 
-- Lead 上下文组装,从 KB 里搜参考材料(`kb.search` + `kb.page_content`)
-- 沉淀经验 / 写决策文档 / 记笔记到 KB(`kb.page_create` / `kb.page_content_write`)
-- 整理 KB 目录(`kb.folder_create` / `kb.node_move` / `kb.node_rename`)
-- 给 page 改内容 / 回滚到旧 revision(`kb.page_update` / `kb.page_restore`)
-- 软删除 page / 永久删除(`kb.page_trash` → `kb.page_delete` 三态链)
-- 把文件附件登记到 KB 树(`kb.upload` 或 `as.upload` 不带 conversationId)
-- 项目交付物拿预签名链接批量下载(`kb.file_batch_download`)
+- Lead context assembly, searching the KB for reference material (`kb.search` + `kb.page_content`)
+- Distilling experience / writing decision documents / taking notes into the KB (`kb.page_create` / `kb.page_content_write`)
+- Organizing the KB directory (`kb.folder_create` / `kb.node_move` / `kb.node_rename`)
+- Editing page content / rolling back to an old revision (`kb.page_update` / `kb.page_restore`)
+- Soft-deleting a page / permanently deleting (the `kb.page_trash` → `kb.page_delete` three-state chain)
+- Registering a file attachment into the KB tree (`kb.upload` or `as.upload` without conversationId)
+- Batch-downloading project deliverables via pre-signed links (`kb.file_batch_download`)
 
-**不在本文档范围**:
+**Out of scope for this document**:
 
-- IM 消息附件(走会话):`as.upload` 带 `conversationId` → `references/as-operations.md`
-- 任务 / Issue / Blueprint workflow → `references/tm-operations.md`
-- 主动发消息 / 拉群 → `references/comm-operations.md`
-- 成员 / 项目 / 角色目录 → `references/core-operations.md`
+- IM message attachments (going through a conversation): `as.upload` with `conversationId` → `references/as-operations.md`
+- Task / Issue / Blueprint workflow → `references/tm-operations.md`
+- Proactive messaging / creating groups → `references/comm-operations.md`
+- Member / project / role directory → `references/core-operations.md`
 
-**依赖前置**:
+**Prerequisites**:
 
-- 任何带 `kbId` 的命令,前面先 `kb.list` 确认 KB 存在(每个 org 默认 1 个 KB,`is_default=true`)
-- `kb.page_create` 需要 `parentId`(folder node id);从 `kb.tree_roots` / `kb.node_children` 拿
-- `kb.page_update` / `kb.page_content_write` 需要 `baseRevisionId`,先 `kb.page_get` 拿当前 `revision_id`
-- 完整参数依赖树见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)
+- For any command that takes `kbId`, first run `kb.list` to confirm the KB exists (each org has 1 default KB, `is_default=true`)
+- `kb.page_create` needs `parentId` (folder node id); get it from `kb.tree_roots` / `kb.node_children`
+- `kb.page_update` / `kb.page_content_write` need `baseRevisionId`; first run `kb.page_get` to get the current `revision_id`
+- For the full parameter dependency tree, see [`SKILL.md` Efficiency Shortcuts > Parameter Resolution](../SKILL.md)
 
 ---
 
-> Layer 3 操作参考。本文档与 `src/cli/kb.js` dispatch 表保持 1:1 对应。
-> 真实路径以 cws-core OpenAPI 为准:`https://zylos01.jinglever.com/cws-core/openapi.json`
+> Layer 3 operation reference. This document stays in 1:1 correspondence with the `src/cli/kb.js` dispatch table.
+> The authoritative paths follow the cws-core OpenAPI: `https://zylos01.jinglever.com/cws-core/openapi.json`
 
-CLI 位置:`src/cli/kb.js`
-调用方式:`node src/cli/kb.js <command> '<json>'`
+CLI location: `src/cli/kb.js`
+Invocation: `node src/cli/kb.js <command> '<json>'`
 
-状态:✅ cws-core BFF 已暴露(全部命令都能从 CLI 触达)。
+Status: ✅ cws-core BFF already exposes it (all commands are reachable from the CLI).
 
-## 环境变量
+## Environment Variables
 
-| 变量 | 默认值 | 说明 |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF 基地址 |
-| `COCO_API_PREFIX` | `/api/v1` | 路径前缀 |
-| `COCO_AUTH_TOKEN` | (空) | Bearer token(跟 tm / as / comm / core CLI 共用) |
-| `COCO_ORG_ID` | (空) | 覆盖 `config.org_id` |
+| `COCO_API_URL` | `http://127.0.0.1:8080` | cws-core BFF base address |
+| `COCO_API_PREFIX` | `/api/v1` | Path prefix |
+| `COCO_AUTH_TOKEN` | (empty) | Bearer token (shared with the tm / as / comm / core CLIs) |
+| `COCO_ORG_ID` | (empty) | Overrides `config.org_id` |
 
-## 数据模型
+## Data Model
 
 ```
-Org(组织,scope 单位)
-  └─ KB Config(每 org 1 个,storage_quota / search 开关等)
+Org (organization, the scope unit)
+  └─ KB Config (1 per org, storage_quota / search toggle, etc.)
        │
-       ├─ Tree Node(目录树节点)
-       │    ├─ kind="folder"  → 文件夹,只有子节点
-       │    └─ kind="page"    → 页面外壳,关联一个 Page
+       ├─ Tree Node (directory tree node)
+       │    ├─ kind="folder"  → folder, has only child nodes
+       │    └─ kind="page"    → page shell, linked to one Page
        │
-       └─ Page(内容主体,与 tree node 1:1)
-            └─ Revision(版本,从 1 开始自增)
+       └─ Page (the content body, 1:1 with a tree node)
+            └─ Revision (version, auto-incrementing from 1)
 ```
 
-`org_id` 是所有 KB 操作的 scope 单位——从 `config.org_id` 或 `COCO_ORG_ID` env 取,安装时配。
+`org_id` is the scope unit for all KB operations — taken from `config.org_id` or the `COCO_ORG_ID` env var, configured at install time.
 
-## 命令清单
+## Command List
 
-### KB 集合
+### KB Collection
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `kb.init` | 给当前 org 初始化默认 KB(幂等,重复调返已有) | `{}` | `POST /api/v1/kbs/init` |
-| ✅ | `kb.list` | 列当前 org 的 KB 实例(目前每 org 通常 1 个) | `{limit?, offset?}` | `GET /api/v1/kbs` |
-| ✅ | `kb.create` | 新建 KB 实例;`visibility` 取 `open` / `closed` / `private`(默认 closed);slug 服务端从 name 派生 | `{name, visibility?, description?, icon?}` | `POST /api/v1/kbs` |
-| ✅ | `kb.get` | 取单个 KB 实例详情 | `{kbId}` | `GET /api/v1/kbs/{kb_id}` |
-| ✅ | `kb.update` | 改 KB 元数据;`set_description` / `set_icon` 是 tri-state(显式清空 vs 不动)| `{kbId, name?, description?, setDescription?, visibility?, icon?, setIcon?}` | `PATCH /api/v1/kbs/{kb_id}` |
-| ✅ | `kb.delete` | 永久删 KB(物理删,慎用) | `{kbId}` | `DELETE /api/v1/kbs/{kb_id}` |
-| ✅ | `kb.archive` | 归档 KB(可恢复) | `{kbId}` | `POST /api/v1/kbs/{kb_id}/archive` |
-| ✅ | `kb.unarchive` | 归档恢复 active | `{kbId}` | `POST /api/v1/kbs/{kb_id}/unarchive` |
+| ✅ | `kb.init` | Initialize the default KB for the current org (idempotent; repeated calls return the existing one) | `{}` | `POST /api/v1/kbs/init` |
+| ✅ | `kb.list` | List the KB instances of the current org (currently usually 1 per org) | `{limit?, offset?}` | `GET /api/v1/kbs` |
+| ✅ | `kb.create` | Create a new KB instance; `visibility` is one of `open` / `closed` / `private` (default closed); the slug is derived server-side from name | `{name, visibility?, description?, icon?}` | `POST /api/v1/kbs` |
+| ✅ | `kb.get` | Get the details of a single KB instance | `{kbId}` | `GET /api/v1/kbs/{kb_id}` |
+| ✅ | `kb.update` | Edit KB metadata; `set_description` / `set_icon` are tri-state (explicit clear vs leave untouched)| `{kbId, name?, description?, setDescription?, visibility?, icon?, setIcon?}` | `PATCH /api/v1/kbs/{kb_id}` |
+| ✅ | `kb.delete` | Permanently delete a KB (physical delete, use with caution) | `{kbId}` | `DELETE /api/v1/kbs/{kb_id}` |
+| ✅ | `kb.archive` | Archive a KB (recoverable) | `{kbId}` | `POST /api/v1/kbs/{kb_id}/archive` |
+| ✅ | `kb.unarchive` | Restore an archived KB back to active | `{kbId}` | `POST /api/v1/kbs/{kb_id}/unarchive` |
 
-### 目录树
+### Directory Tree
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `kb.tree_roots` | 列 KB 根下所有顶层节点(folder / page / file) | `{kbId}` | `GET /api/v1/kbs/{kb_id}/tree/roots` |
-| ✅ | `kb.folder_create` | 新建文件夹节点(KB 唯一显式建节点的入口) | `{kbId, parentId?, name}` | `POST /api/v1/kbs/{kb_id}/tree/folders` |
-| ✅ | `kb.node_get` | 取节点详情(folder / page / file 通用) | `{kbId, nodeId}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}` |
-| ✅ | `kb.node_breadcrumb` | 拿节点的祖先路径(root → ... → 当前) | `{kbId, nodeId}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/breadcrumb` |
-| ✅ | `kb.node_children` | 列某节点下的直接子节点 | `{kbId, parentId}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{parent_id}/children` |
-| ✅ | `kb.node_move` | 把节点移到另一个 parent(同 KB 内) | `{kbId, nodeId, parentId}` | `POST /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/move` |
-| ✅ | `kb.node_rename` | 改节点显示名 | `{kbId, nodeId, name}` | `PATCH /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/rename` |
-| ✅ | `kb.node_delete` | 删节点(folder 要先空;page / file 走对应的 trash → delete) | `{kbId, nodeId}` | `DELETE /api/v1/kbs/{kb_id}/tree/nodes/{node_id}` |
+| ✅ | `kb.tree_roots` | List all top-level nodes under the KB root (folder / page / file) | `{kbId}` | `GET /api/v1/kbs/{kb_id}/tree/roots` |
+| ✅ | `kb.folder_create` | Create a folder node (the KB's only explicit node-creation entry point) | `{kbId, parentId?, name}` | `POST /api/v1/kbs/{kb_id}/tree/folders` |
+| ✅ | `kb.node_get` | Get node details (common to folder / page / file) | `{kbId, nodeId}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}` |
+| ✅ | `kb.node_breadcrumb` | Get a node's ancestor path (root → ... → current) | `{kbId, nodeId}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/breadcrumb` |
+| ✅ | `kb.node_children` | List the direct child nodes under a given node | `{kbId, parentId}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{parent_id}/children` |
+| ✅ | `kb.node_move` | Move a node to another parent (within the same KB) | `{kbId, nodeId, parentId}` | `POST /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/move` |
+| ✅ | `kb.node_rename` | Change a node's display name | `{kbId, nodeId, name}` | `PATCH /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/rename` |
+| ✅ | `kb.node_delete` | Delete a node (a folder must be empty first; page / file go through their respective trash → delete) | `{kbId, nodeId}` | `DELETE /api/v1/kbs/{kb_id}/tree/nodes/{node_id}` |
 
-节点 ID 形态:`tn-{uuid}`。Page 通过 `kb.page_create` 间接建出对应 tree node,不走 folder_create。
+Node ID form: `tn-{uuid}`. A Page indirectly creates its corresponding tree node via `kb.page_create`, not through folder_create.
 
-**⚠️ page_id ≠ node_id — 拼接 KB 页面链接时,`?node=` 参数必须用 node_id,不能用 page_id。** 详见下方 [前端链接拼接](#前端链接拼接agent-易错必读) 专节。
+**⚠️ page_id ≠ node_id — when assembling a KB page link, the `?node=` parameter must use node_id, not page_id.** See the dedicated [Frontend Link Assembly](#frontend-link-assembly-agent-error-prone-must-read) section below.
 
-### 页面
+### Pages
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `kb.pages` | 列 page(可按 parent 过滤,分页) | `{kbId, parentId?, cursor?, limit?, offset?}` | `GET /api/v1/pages` |
-| ✅ | `kb.page_get` | 取 page 元数据(含当前 revision_id) | `{pageId}` | `GET /api/v1/pages/{page_id}` |
-| ✅ | `kb.page_create` | 在指定 folder 下建 page;同时建出对应 tree node | `{kbId, title, parentId?, format?, body, message?}` | `POST /api/v1/kbs/{kb_id}/pages` |
-| ✅ | `kb.page_update` | 改 page 任意属性(title / parent / 内容均可);乐观并发,需带 baseRevisionId | `{pageId, title?, path?, content?, baseRevisionId, commitMessage?}` | `PATCH /api/v1/pages/{page_id}` |
-| ✅ | `kb.page_delete` | 永久删(物理删);page 必须先在 `trashed` 状态,否则 404 | `{pageId}` | `DELETE /api/v1/pages/{page_id}` |
-| ✅ | `kb.page_content` | 取 page 当前正文内容 | `{pageId}` | `GET /api/v1/pages/{page_id}/content` |
-| ✅ | `kb.page_content_write` | 只改内容主体(更专的写入入口,适合大段编辑);乐观并发 | `{pageId, body, message?, baseRevisionId?, autoSave?}` | `POST /api/v1/pages/{page_id}/content` |
-| ✅ | `kb.page_revisions` | 列 page 的所有 revision | `{pageId, limit?, offset?}` | `GET /api/v1/pages/{page_id}/revisions` |
-| ✅ | `kb.page_revision` | 取指定 revision 的快照内容 | `{pageId, revisionId}` | `GET /api/v1/pages/{page_id}/revisions/{rev_id}` |
-| ✅ | `kb.page_diff` | 两个 revision 之间的 diff(unified format) | `{pageId, fromRevisionId, toRevisionId}` | `GET /api/v1/pages/{page_id}/diff` |
-| ✅ | `kb.page_restore` | 回滚 page 内容到旧 revision(status 不变,**不是** trash-restore) | `{pageId, revisionId}` | `POST /api/v1/pages/{page_id}/restore-version` |
-| ✅ | `kb.page_trash` | 软删除(status → `trashed`,进回收站) | `{pageId}` | `POST /api/v1/pages/{page_id}/trash` |
-| ✅ | `kb.page_restore_trash` | 从回收站恢复(status → `active`,**不是** revision restore) | `{pageId}` | `POST /api/v1/pages/{page_id}/restore` |
-| ✅ | `kb.pages_trashed` | 列当前 org 在回收站里的 page | `{limit?, offset?}` | `GET /api/v1/pages/trashed` |
-| ✅ | `kb.page_freeze` | 把 page 标只读(后续写入被拒) | `{pageId}` | `POST /api/v1/pages/{page_id}/freeze` |
-| ✅ | `kb.page_references` | 列引用本 page 的位置(其它 page / context_page_ids 等) | `{pageId}` | `GET /api/v1/pages/{page_id}/references` |
+| ✅ | `kb.pages` | List pages (can filter by parent, paginated) | `{kbId, parentId?, cursor?, limit?, offset?}` | `GET /api/v1/pages` |
+| ✅ | `kb.page_get` | Get page metadata (including the current revision_id) | `{pageId}` | `GET /api/v1/pages/{page_id}` |
+| ✅ | `kb.page_create` | Create a page under a given folder; also creates the corresponding tree node | `{kbId, title, parentId?, format?, body, message?}` | `POST /api/v1/kbs/{kb_id}/pages` |
+| ✅ | `kb.page_update` | Edit any page attribute (title / parent / content are all allowed); optimistic concurrency, requires baseRevisionId | `{pageId, title?, path?, content?, baseRevisionId, commitMessage?}` | `PATCH /api/v1/pages/{page_id}` |
+| ✅ | `kb.page_delete` | Permanent delete (physical delete); the page must first be in the `trashed` state, otherwise 404 | `{pageId}` | `DELETE /api/v1/pages/{page_id}` |
+| ✅ | `kb.page_content` | Get the page's current body content | `{pageId}` | `GET /api/v1/pages/{page_id}/content` |
+| ✅ | `kb.page_content_write` | Edit only the content body (a more specialized write entry point, suited to large edits); optimistic concurrency | `{pageId, body, message?, baseRevisionId?, autoSave?}` | `POST /api/v1/pages/{page_id}/content` |
+| ✅ | `kb.page_revisions` | List all revisions of a page | `{pageId, limit?, offset?}` | `GET /api/v1/pages/{page_id}/revisions` |
+| ✅ | `kb.page_revision` | Get the snapshot content of a specified revision | `{pageId, revisionId}` | `GET /api/v1/pages/{page_id}/revisions/{rev_id}` |
+| ✅ | `kb.page_diff` | The diff between two revisions (unified format) | `{pageId, fromRevisionId, toRevisionId}` | `GET /api/v1/pages/{page_id}/diff` |
+| ✅ | `kb.page_restore` | Roll back page content to an old revision (status unchanged, **not** trash-restore) | `{pageId, revisionId}` | `POST /api/v1/pages/{page_id}/restore-version` |
+| ✅ | `kb.page_trash` | Soft delete (status → `trashed`, goes to the recycle bin) | `{pageId}` | `POST /api/v1/pages/{page_id}/trash` |
+| ✅ | `kb.page_restore_trash` | Restore from the recycle bin (status → `active`, **not** a revision restore) | `{pageId}` | `POST /api/v1/pages/{page_id}/restore` |
+| ✅ | `kb.pages_trashed` | List the current org's pages in the recycle bin | `{limit?, offset?}` | `GET /api/v1/pages/trashed` |
+| ✅ | `kb.page_freeze` | Mark a page read-only (subsequent writes are rejected) | `{pageId}` | `POST /api/v1/pages/{page_id}/freeze` |
+| ✅ | `kb.page_references` | List the locations referencing this page (other pages / context_page_ids, etc.) | `{pageId}` | `GET /api/v1/pages/{page_id}/references` |
 
-页面 ID 形态:`pg-{uuid}`。Revision 是每页自增整数从 1 起。
+Page ID form: `pg-{uuid}`. A Revision is a per-page auto-incrementing integer starting from 1.
 
-**两个写入入口的区别**:
+**The difference between the two write entry points**:
 
-- `kb.page_update`(`PATCH /pages/{pid}`):改页面**任意属性**(标题、parent、内容…),body 里能传哪个传哪个
-- `kb.page_content_write`(`POST /pages/{pid}/content`):**只**改内容主体,语义更专,适合 Agent 后续大段编辑
+- `kb.page_update` (`PATCH /pages/{pid}`): edits **any page attribute** (title, parent, content…); pass whichever ones you want in the body
+- `kb.page_content_write` (`POST /pages/{pid}/content`): edits **only** the content body; more specialized semantics, suited to large follow-up edits by the Agent
 
-两者都支持乐观并发:先 `kb.page_get` 拿 `revision_id`,写时把它当 `baseRevisionId` 传过去,服务端若发现不一致返回 409 + 当前 revision_id,客户端重读后合并再写。
+Both support optimistic concurrency: first run `kb.page_get` to get `revision_id`, and pass it as `baseRevisionId` when writing; if the server detects a mismatch it returns 409 + the current revision_id, and the client re-reads, merges, then writes again.
 
-**两个 "restore" 不是一回事,Agent 经常搞错**:
+**The two "restore" operations are not the same thing, and the Agent often confuses them**:
 
-- `kb.page_restore`(`POST /pages/{pid}/restore-version`):**回滚到一个旧 revision**,page 的 status 不变。用于"撤销最近 N 次编辑"。
-- `kb.page_restore_trash`(`POST /pages/{pid}/restore`):**从回收站恢复**,把 status 从 `trashed` 改回 `active`。跟 revision 无关。
-- 路径相似但语义不同,**别看名字猜**——遇到 "restore" 先弄清楚是 trash-restore 还是 revision-restore。
+- `kb.page_restore` (`POST /pages/{pid}/restore-version`): **rolls back to an old revision**; the page's status is unchanged. Used to "undo the last N edits".
+- `kb.page_restore_trash` (`POST /pages/{pid}/restore`): **restores from the recycle bin**, changing status from `trashed` back to `active`. Unrelated to revisions.
+- The paths are similar but the semantics differ; **don't guess from the name** — when you encounter "restore", first figure out whether it is trash-restore or revision-restore.
 
-**三态保护链:trash → permanent_delete**:
+**Three-state protection chain: trash → permanent_delete**:
 
-- `kb.page_delete` 是**永久删**(物理删),不可恢复,所以 cws-kb 强制要求 page 已经在 `trashed` 状态:必须先 `kb.page_trash` 把 page 丢进回收站,再 `kb.page_delete`。
-- 直接对 `active` page 调 `kb.page_delete`,cws-kb 会返 404(语义不太诚实,这是 cws-kb#193;但语义保护本身保留,不要绕)。
-- 完整流程:`page_create → ... → page_trash → page_delete`。如果中间想撤销,用 `page_restore_trash` 把它捞回来,**再删时还得先 trash 一次**。
+- `kb.page_delete` is a **permanent delete** (physical delete), unrecoverable, so cws-kb requires the page to already be in the `trashed` state: you must first run `kb.page_trash` to throw the page into the recycle bin, then `kb.page_delete`.
+- Calling `kb.page_delete` directly on an `active` page returns 404 from cws-kb (not the most honest semantics; this is cws-kb#193; but the semantic protection itself is retained, so don't work around it).
+- Full flow: `page_create → ... → page_trash → page_delete`. If you want to undo partway through, use `page_restore_trash` to pull it back, and **when you delete again you must trash it once more first**.
 
-### 搜索 ⭐
+### Search ⭐
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `kb.search` | 跨 page 全文搜索;ReBAC 过滤(只返调用者有 viewer+ 权限的 page) | `{query, kbId?, folderId?, authorId?, format?, pageSize?, pageToken?, sync?}` | `GET /api/v1/search/pages` |
+| ✅ | `kb.search` | Cross-page full-text search; ReBAC filtering (returns only pages where the caller has viewer+ permission) | `{query, kbId?, folderId?, authorId?, format?, pageSize?, pageToken?, sync?}` | `GET /api/v1/search/pages` |
 
-底层:**Meilisearch(模糊 + typo 容错 + 中文分词)+ NATS 事件驱动索引**。返回结构:
+Underlying: **Meilisearch (fuzzy + typo tolerance + Chinese word segmentation) + NATS event-driven indexing**. Return structure:
 
 ```json
 {
@@ -149,7 +149,7 @@ Org(组织,scope 单位)
     {
       "page": { "id": "pg-...", "title": "...", "path": "...", "format": "markdown" },
       "highlights": [
-        { "field": "title", "snippet": "Week 21 <mark>周会纪要</mark>" },
+        { "field": "title", "snippet": "Week 21 <mark>Weekly Meeting Minutes</mark>" },
         { "field": "body",  "snippet": "..." }
       ],
       "score": 0.98
@@ -159,62 +159,62 @@ Org(组织,scope 单位)
 }
 ```
 
-**`sync=true` 给 Agent 用**:Agent 刚写完一页就搜,异步索引可能还没建好。`sync=true` 等 Meilisearch task 完成才返回(最长 5s 超时),保证读到刚写的。人类用户默认走 async,UX 快。
+**`sync=true` is for the Agent**: when the Agent searches right after writing a page, the async index may not be built yet. `sync=true` waits for the Meilisearch task to complete before returning (up to a 5s timeout), guaranteeing you read what was just written. Human users default to async for fast UX.
 
-限流:1000 次/分钟/工作区。
+Rate limit: 1000 requests/minute/workspace.
 
-### 文件附件(KB 上传专用)
+### File Attachments (KB Upload Only)
 
-| 状态 | 命令 | 说明 | 入参 | 真实端点 |
+| Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `kb.upload` | 上传文件并在 KB 树里登记 file 节点(KB 模式上传的语糖) | `{kbId, filePath, parentId?, contentType?, filename?}` | 委托给 `as.uploadMedia()` → prepare/PUT/finalize 三步,见 `references/as-operations.md` |
-| ✅ | `kb.file_create` | 用已有 artifact 在 KB 树里登记 file 节点(`kb.upload` 内部最后一步) | `{kbId, name, artifactId, parentId?}` | `POST /api/v1/kbs/{kb_id}/tree/files` |
-| ✅ | `kb.file_preview` | 拿 file 节点的 inline 预览 URL(浏览器内嵌) | `{kbId, nodeId}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/preview` |
-| ✅ | `kb.file_download` | 拿单个 file 节点的下载 URL(可选 inline) | `{kbId, nodeId, inline?}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/download` |
-| ✅ | `kb.file_batch_download` | 一次拿多个 file 节点的预签名下载 URL | `{kbId, nodeIds, inline?}` | `POST /api/v1/kbs/{kb_id}/tree/files/batch-download` |
+| ✅ | `kb.upload` | Upload a file and register a file node in the KB tree (syntactic sugar for KB-mode upload) | `{kbId, filePath, parentId?, contentType?, filename?}` | Delegates to `as.uploadMedia()` → the three prepare/PUT/finalize steps, see `references/as-operations.md` |
+| ✅ | `kb.file_create` | Register a file node in the KB tree using an existing artifact (the last internal step of `kb.upload`) | `{kbId, name, artifactId, parentId?}` | `POST /api/v1/kbs/{kb_id}/tree/files` |
+| ✅ | `kb.file_preview` | Get a file node's inline preview URL (embedded in the browser) | `{kbId, nodeId}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/preview` |
+| ✅ | `kb.file_download` | Get a single file node's download URL (inline optional) | `{kbId, nodeId, inline?}` | `GET /api/v1/kbs/{kb_id}/tree/nodes/{node_id}/download` |
+| ✅ | `kb.file_batch_download` | Get pre-signed download URLs for multiple file nodes at once | `{kbId, nodeIds, inline?}` | `POST /api/v1/kbs/{kb_id}/tree/files/batch-download` |
 
-`kb.upload` = `as.upload` 不带 `conversationId` 的 KB 模式语糖,**会在 KB 树里出现一个 file 节点**(返回里有 `nodeId` + `treeNode`),后续可以 `kb.node_get` / `kb.file_preview` / `kb.file_download` 操作它。
+`kb.upload` is syntactic sugar for `as.upload` without `conversationId` in KB mode, and **a file node will appear in the KB tree** (the response has `nodeId` + `treeNode`); afterwards you can operate on it with `kb.node_get` / `kb.file_preview` / `kb.file_download`.
 
-**不要用 `kb.upload` 发会话附件**:会话 / DM 里的图片或文件要走 **IM 上传**(`as.upload` 带 `conversationId`,详见 [as-operations.md](./as-operations.md) 顶部的"上传走哪条路径"),否则文件挂到 KB 但接收方对话框里看不到。
+**Do not use `kb.upload` to send conversation attachments**: images or files in a conversation / DM must go through **IM upload** (`as.upload` with `conversationId`; see "Which upload path to use" at the top of [as-operations.md](./as-operations.md)), otherwise the file is attached to the KB but the recipient cannot see it in their chat window.
 
-返回的 `mediaId` / `artifactId` 也可以塞到 Page body 里(比如 markdown 里写 `![](artifact://<id>)`),让页面正文直接引用这份 artifact。
+The returned `mediaId` / `artifactId` can also be dropped into a Page body (e.g. writing `![](artifact://<id>)` in markdown), letting the page body directly reference this artifact.
 
-## 典型流程
+## Typical Flows
 
-### Agent 写一页周会纪要后立即搜索验证
+### Agent writes a page of weekly meeting minutes then immediately searches to verify
 
 ```bash
-# 1. 创建页面
+# 1. Create the page
 node src/cli/kb.js kb.page_create '{
   "kbId":"<kb-uuid>",
-  "title":"2026-05-21 周会纪要",
+  "title":"2026-05-21 Weekly Meeting Minutes",
   "parentId":"<folder-node-id>",
   "format":"markdown",
-  "body":"# 2026-05-21 周会纪要\n\n## 议题\n\n...",
-  "message":"feat: Agent 自动生成周会纪要"
+  "body":"# 2026-05-21 Weekly Meeting Minutes\n\n## Agenda\n\n...",
+  "message":"feat: Agent auto-generated weekly meeting minutes"
 }'
 # -> {id:"pg-...", current_revision_id:1, ...}
 
-# 2. 立即搜索验证(sync=true 等索引建好)
-node src/cli/kb.js kb.search '{"query":"周会纪要","sync":true,"limit":5}'
+# 2. Immediately search to verify (sync=true waits for the index to be built)
+node src/cli/kb.js kb.search '{"query":"weekly meeting minutes","sync":true,"limit":5}'
 # -> {results:[{page:{id:"pg-..."}, highlights:[...], score:0.95}], ...}
 ```
 
-### Lead 上下文组装 —— 找项目的设计决策文档
+### Lead context assembly — finding a project's design decision document
 
 ```bash
-# 1. 在指定 folder 内搜索
+# 1. Search within a given folder
 node src/cli/kb.js kb.search '{
-  "query":"架构决策",
+  "query":"architecture decisions",
   "folderId":"tn-projects-growth",
   "format":"markdown",
   "limit":20
 }'
 
-# 2. 拿到 page_id 后读详细内容
+# 2. After getting the page_id, read the detailed content
 node src/cli/kb.js kb.page_content '{"pageId":"pg-arch-decisions-001"}'
 
-# 3. 看历史改动(如果发现内容不太对)
+# 3. Look at the change history (if the content seems off)
 node src/cli/kb.js kb.page_revisions '{"pageId":"pg-arch-decisions-001"}'
 node src/cli/kb.js kb.page_diff '{
   "pageId":"pg-arch-decisions-001",
@@ -223,118 +223,118 @@ node src/cli/kb.js kb.page_diff '{
 }'
 ```
 
-### Agent 产出物挂到 KB 节点下
+### Attaching an Agent's output under a KB node
 
 ```bash
-# 1. 通过 as.js 上传产出文件(KB 模式,不带 conversationId)
+# 1. Upload the output file via as.js (KB mode, without conversationId)
 node src/cli/as.js as.upload '{
   "filePath":"/tmp/q2-report.pdf",
   "mediaType":"file"
 }'
 # -> {artifactId:"art_...", nodeId:"tn-...", treeNode:{...}, instantUpload:false}
 
-# 2. 写一页 deliverables 索引,引用这个 artifact
+# 2. Write a deliverables index page that references this artifact
 node src/cli/kb.js kb.page_create '{
   "kbId":"<kb-uuid>",
   "parentId":"<deliverables-folder-id>",
-  "title":"Q2 交付物索引",
-  "body":"# Q2 交付物\n\n- [报告](artifact://art_...)"
+  "title":"Q2 Deliverables Index",
+  "body":"# Q2 Deliverables\n\n- [Report](artifact://art_...)"
 }'
 ```
 
-## 与 SKILL.md 的关系
+## Relationship to SKILL.md
 
-本文档是 [`SKILL.md`](../SKILL.md) 的 Layer 3 子 skill,只负责 KB CLI 的**命令机制**。下面这些行为面内容**在 SKILL.md 里**,本文档不重复:
+This document is a Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible only for the KB CLI's **command mechanics**. The behavioral content below is **in SKILL.md** and is not repeated here:
 
-| 想看 | 去 SKILL.md 的哪节 |
+| Want to see | Which SKILL.md section |
 |---|---|
-| Lead vs Worker 的 KB 写入边界(经验沉淀 vs 任务产出) | [角色模型](../SKILL.md) |
-| 何时通过 `contextPageIds` 把 page 传给 Issue/Task | [效率捷径 > 上下文传递](../SKILL.md) |
-| KB 经验沉淀的时机和位置(`/projects/{slug}/decisions/` 等) | [记忆触发点 > 经验沉淀判断](../SKILL.md) |
-| 通用错误防护(比如不该用 curl 直接调 KB API) | [行为护栏 > 常见错误](../SKILL.md) |
+| The KB-write boundary between Lead vs Worker (experience distillation vs task output) | [Role Model](../SKILL.md) |
+| When to pass a page to an Issue/Task via `contextPageIds` | [Efficiency Shortcuts > Context Passing](../SKILL.md) |
+| The timing and location of KB experience distillation (`/projects/{slug}/decisions/`, etc.) | [Memory Triggers > Experience Distillation Judgment](../SKILL.md) |
+| General error prevention (e.g. you shouldn't call the KB API directly with curl) | [Behavioral Guardrails > Common Errors](../SKILL.md) |
 
-## 前端链接拼接（Agent 易错，必读）
+## Frontend Link Assembly (Agent-Error-Prone, Must Read)
 
-KB 页面有**两种 ID**,混用会导致链接打开空白或 404:
+A KB page has **two kinds of ID**, and mixing them up causes the link to open blank or 404:
 
-| ID 类型 | 来源 | 用途 | 示例 |
+| ID Type | Source | Use | Example |
 |---|---|---|---|
-| **page_id** | `kb.page_create` / `kb.page_get` 返回的 `id` | 页面内容操作（读写、revision、trash） | `019ed02a-62cc-...` |
-| **node_id** | `kb.node_get` / `kb.node_children` 返回的 `id` | 目录树操作 + **前端 URL** | `019ed02a-62d5-...` |
+| **page_id** | the `id` returned by `kb.page_create` / `kb.page_get` | Page content operations (read/write, revision, trash) | `019ed02a-62cc-...` |
+| **node_id** | the `id` returned by `kb.node_get` / `kb.node_children` | Directory tree operations + **frontend URL** | `019ed02a-62d5-...` |
 
-**核心规则：前端 URL 的 `node=` 参数只接受 node_id。page_id 放进去链接会指向错误位置。**
+**Core rule: the frontend URL's `node=` parameter only accepts node_id. Putting a page_id in makes the link point to the wrong location.**
 
-### 为什么容易搞错
+### Why it's easy to get wrong
 
-`kb.page_create` 会同时创建 page 和对应的 tree node,但返回值**只有 page_id,没有 node_id**:
+`kb.page_create` creates both the page and its corresponding tree node, but the return value **has only page_id, not node_id**:
 
 ```json
-// kb.page_create 返回
+// kb.page_create response
 {"id": "019ed02a-62cc-...", "kb_id": "...", "title": "...", "path": "...", ...}
-//  ↑ 这是 page_id,不是 node_id
+//  ↑ this is the page_id, not the node_id
 ```
 
-`kb.page_get` 同理——返回 `id`(page_id)、`kb_id`、`revision_id`,**不含 node_id**。
+`kb.page_get` is the same — it returns `id` (page_id), `kb_id`, `revision_id`, but **does not include node_id**.
 
-### 正确的链接生成流程
+### The correct link-generation flow
 
-创建页面后要分享链接,**必须多走一步拿 node_id**:
+To share a link after creating a page, you **must take one extra step to get the node_id**:
 
 ```bash
-# 1. 创建页面 → 拿到 page_id
+# 1. Create the page → get the page_id
 node src/cli/kb.js kb.page_create '{
   "kbId":"<kb-uuid>",
-  "title":"设计方案",
+  "title":"Design Proposal",
   "parentId":"<folder-node-id>",
-  "body":"# 方案内容..."
+  "body":"# Proposal content..."
 }'
 # → {"id":"pg-abc123", ...}    ← page_id
 
-# 2. 用 parentId 列子节点 → 匹配 page_id → 拿到 node_id
+# 2. List child nodes by parentId → match the page_id → get the node_id
 node src/cli/kb.js kb.node_children '{"kbId":"<kb-uuid>","parentId":"<folder-node-id>"}'
 # → [{
-#      "id": "tn-xyz789",           ← 这才是 node_id
-#      "page_id": "pg-abc123",      ← 匹配刚创建的 page
+#      "id": "tn-xyz789",           ← this is the node_id
+#      "page_id": "pg-abc123",      ← matches the page just created
 #      "node_type": "page",
 #      ...
 #    }]
 
-# 3. 用 node_id 拼前端链接
+# 3. Assemble the frontend link with the node_id
 node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=<kb-uuid>&node=tn-xyz789"}'
-# → https://xxx/cws/knowledge?kb=...&node=tn-xyz789    ✅ 正确
+# → https://xxx/cws/knowledge?kb=...&node=tn-xyz789    ✅ correct
 ```
 
-**反面示例（错误）**:
+**Counter-example (wrong)**:
 ```bash
-# ❌ 直接拿 page_create 返回的 id 当 node 参数
+# ❌ Directly using the id returned by page_create as the node parameter
 node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=<kb-uuid>&node=pg-abc123"}'
-# → 链接能打开但显示空白或指向错误位置
+# → the link opens but shows blank or points to the wrong location
 ```
 
-### 已有 page_id 但不知道 node_id
+### You have a page_id but don't know the node_id
 
-如果只有 page_id（比如从 `kb.search` 结果拿到的）,用 `kb.page_get` 读 `path` 字段定位目录,再 `kb.node_children` 在对应 folder 下按 `page_id` 匹配。
+If you have only the page_id (e.g. obtained from `kb.search` results), use `kb.page_get` to read the `path` field to locate the directory, then use `kb.node_children` to match by `page_id` under the corresponding folder.
 
-### URL 格式速查
+### URL Format Quick Reference
 
-完整 URL 模板见 [`SKILL.md` 前端链接](../SKILL.md)。速查:
+For the full URL template, see [`SKILL.md` Frontend Links](../SKILL.md). Quick reference:
 
 ```
 {bff_url}/cws/knowledge?kb={kb_id}&node={node_id}
-                                         ↑ 必须是 tree node_id,不是 page_id
+                                         ↑ must be the tree node_id, not the page_id
 ```
 
-可用 `core.frontend_url` CLI 一步生成,避免手拼域名和前缀出错。
+You can generate it in one step with the `core.frontend_url` CLI, avoiding errors from hand-assembling the domain and prefix.
 
-## KB 专属注意事项
+## KB-Specific Caveats
 
-- **org_id 必填**:每个命令都要 scope。`config.org_id` 没设就 throw。
-- `kb.list` 一个 org 通常只有 1 个 KB(per `kb_org_configs`),但 list 返回数组以便未来扩展
-- 页面写入有限流:60 次/分钟/用户(`rate_limited` 429)
-- `kb.search` 结果受 ReBAC 过滤:只返回调用者有 `viewer+` 权限的页
-- `format` 取值:`markdown` / `code` / `pdf` / `image` / `archive` / `other`
-- 树节点排序:同 parent 下按 `sort_order` 排,移动节点时可指定新 `sortOrder`
-- 跨 org 引用通过 `kb://pg-{uuid}` URI(stable ID,移动 / 重命名不变)
-- `kb.page_delete` 直接调会 404 — 必须先 `kb.page_trash`,这是 cws-kb 的三态保护链(不要绕)
-- `kb.page_restore` vs `kb.page_restore_trash` 名字像、语义完全不同,见上面"两个 restore 不是一回事"
-- **前端 URL 只接受 node_id**:`kb.page_create` 返回的 `id` 是 page_id,拼到 `?node=` 里链接会错。必须用 `kb.node_children` 拿 tree node_id。详见上方"前端链接拼接"专节
+- **org_id is required**: every command needs a scope. If `config.org_id` is not set, it throws.
+- `kb.list`: an org usually has only 1 KB (per `kb_org_configs`), but list returns an array to allow future expansion
+- Page writes are rate-limited: 60 requests/minute/user (`rate_limited` 429)
+- `kb.search` results are ReBAC-filtered: only pages where the caller has `viewer+` permission are returned
+- `format` values: `markdown` / `code` / `pdf` / `image` / `archive` / `other`
+- Tree node ordering: nodes under the same parent are ordered by `sort_order`; when moving a node you can specify a new `sortOrder`
+- Cross-org references use the `kb://pg-{uuid}` URI (a stable ID, unchanged by move / rename)
+- `kb.page_delete` called directly returns 404 — you must run `kb.page_trash` first; this is cws-kb's three-state protection chain (don't work around it)
+- `kb.page_restore` vs `kb.page_restore_trash` have similar names but completely different semantics; see "The two restore operations are not the same thing" above
+- **The frontend URL only accepts node_id**: the `id` returned by `kb.page_create` is a page_id, and putting it into `?node=` makes the link wrong. You must use `kb.node_children` to get the tree node_id. See the dedicated "Frontend Link Assembly" section above
