@@ -7,6 +7,7 @@ import {
   agentOriginCache,
   PLAN_STATE_TTL_MS,
   PLAN_STATE_TIMEOUT_MS,
+  AGENT_ORIGIN_TIMEOUT_MS,
   OVERDUE_NOTICE,
   shouldSendOverdueNotice,
   overdueNoticeCache,
@@ -201,6 +202,44 @@ test('origin is permanently cached: second call does not re-fetch the member', a
 test('resolveAgentOrigin: tolerates non-unwrapped envelope (body.data.agent_origin)', async () => {
   const getForOrg = async () => ({ data: { agent_origin: 'external_invited' } });
   assert.equal(await resolveAgentOrigin(org(), { getForOrg }), 'external_invited');
+});
+
+test('resolveAgentOrigin: member lookup hangs → null within timeout, NOT cached', async () => {
+  // getForOrg for /members never resolves within the deadline. The setTimeout is
+  // deliberately left ref'd so the test runner stays alive while the (unref'd,
+  // production-correct) deadline timer fires during the await.
+  let calls = 0;
+  const getForOrg = (_orgId, path) => {
+    if (isMembersPath(path)) {
+      calls += 1;
+      return new Promise((resolve) => {
+        setTimeout(() => resolve({ agent_origin: 'platform_created' }), 60);
+      });
+    }
+    return Promise.resolve({ usage_snapshot: { enforcement_suspended: true } });
+  };
+  const origin = await resolveAgentOrigin(org(), { getForOrg, timeoutMs: 10, warn: () => {} });
+  assert.equal(origin, null, 'timeout treated as unknown origin');
+  assert.equal(agentOriginCache.size, 0, 'timeout not cached');
+  assert.equal(calls, 1, 'no retry on timeout');
+});
+
+test('origin lookup hangs → isOrgLLMSuspended returns false (fail-open), plan-state not called', async () => {
+  const getForOrg = (_orgId, path) => {
+    if (isMembersPath(path)) {
+      return new Promise((resolve) => {
+        setTimeout(() => resolve({ agent_origin: 'platform_created' }), 60);
+      });
+    }
+    throw new Error('plan-state must not be called when origin is unresolved');
+  };
+  const val = await isOrgLLMSuspended(org(), { getForOrg, timeoutMs: 10, warn: () => {} });
+  assert.equal(val, false, 'unresolved origin fails open');
+  assert.equal(agentOriginCache.size, 0, 'timeout not cached');
+});
+
+test('AGENT_ORIGIN_TIMEOUT_MS default is ~800ms', () => {
+  assert.equal(AGENT_ORIGIN_TIMEOUT_MS, 800);
 });
 
 test('resolveAgentOrigin: missing self.member_id → null and not cached', async () => {

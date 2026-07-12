@@ -51,6 +51,13 @@ export const PLAN_STATE_TTL_MS = 30_000;
 // so we race the query against this deadline and fail-open on expiry. No retry.
 export const PLAN_STATE_TIMEOUT_MS = 800;
 
+// Hard timeout on the agent-origin member lookup — mirrors the plan-state
+// deadline so a stalled /members BFF call can never wedge the inbound pipeline.
+// Raced, no retry; on expiry we treat origin as unknown (return null, not
+// cached) exactly like the error path, which fails open (message allowed
+// through, plan-state skipped).
+export const AGENT_ORIGIN_TIMEOUT_MS = 800;
+
 // org_id → { value: boolean, ts: number(ms) }. Exported for tests.
 export const planStateCache = new Map();
 
@@ -133,17 +140,18 @@ export function shouldSendOverdueNotice(orgId, target, deps = {}) {
  * envelope; we also tolerate a non-unwrapped `body.data.agent_origin`).
  *
  * @param {{org_id?: string, self?: {member_id?: string}, slug?: string}} orgConfig
- * @param {object} [deps]  test seam — { getForOrg, warn }.
+ * @param {object} [deps]  test seam — { getForOrg, warn, timeoutMs }.
  * @returns {Promise<'platform_created'|'external_invited'|null>}  the origin
  *        string, or null when it cannot be determined (missing member_id,
- *        lookup error, or absent field). Only definitive values are cached
- *        (permanently); null results are never cached so the next message
- *        retries.
+ *        lookup error, or timeout, or absent field). Only definitive values are
+ *        cached (permanently); null results are never cached so the next
+ *        message retries.
  */
 export async function resolveAgentOrigin(orgConfig, deps = {}) {
   const orgId = orgConfig?.org_id;
   const warn = deps.warn || ((...a) => console.warn('[billing-status]', ...a));
   const slug = orgConfig?.slug || orgId || '?';
+  const timeoutMs = Number.isInteger(deps.timeoutMs) ? deps.timeoutMs : AGENT_ORIGIN_TIMEOUT_MS;
 
   // Serve the permanent cache first (immutable origin).
   if (orgId && agentOriginCache.has(orgId)) return agentOriginCache.get(orgId);
@@ -159,7 +167,27 @@ export async function resolveAgentOrigin(orgConfig, deps = {}) {
   const getFor = deps.getForOrg || getForOrg;
   let body;
   try {
-    body = await getFor(orgId, apiPath(`/members/${memberId}`));
+    // Race the member lookup against a hard deadline — no retry. Mirrors the
+    // plan-state timeout: on expiry we treat origin as unknown (return null,
+    // NOT cached) so the next inbound frame re-queries; a null origin fails
+    // open in isOrgLLMSuspended (message allowed through, plan-state skipped).
+    const TIMED_OUT = Symbol('agent-origin-timeout');
+    let timer;
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+      if (timer && typeof timer.unref === 'function') timer.unref();
+    });
+    let result;
+    try {
+      result = await Promise.race([getFor(orgId, apiPath(`/members/${memberId}`)), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+    if (result === TIMED_OUT) {
+      warn(`[${slug}] member lookup for agent origin timed out after ${timeoutMs}ms, treating origin as unknown`);
+      return null; // NOT cached
+    }
+    body = result;
   } catch (err) {
     // Do NOT cache: retry on the next message until a definitive value lands.
     warn(`[${slug}] member lookup for agent origin failed, treating origin as unknown: ${err?.message || err}`);
@@ -212,7 +240,7 @@ export async function isOrgLLMSuspended(orgConfig, deps = {}) {
   // NOT gate them. Resolve origin FIRST and fail open (allow through) unless it
   // is POSITIVELY platform_created — external_invited or unknown/null skips the
   // plan-state query entirely. Threads the same getForOrg + warn seam.
-  const origin = await resolveAgentOrigin(orgConfig, { getForOrg: getFor, warn });
+  const origin = await resolveAgentOrigin(orgConfig, { getForOrg: getFor, warn, timeoutMs: deps.timeoutMs });
   if (origin !== 'platform_created') return false;
 
   const cached = planStateCache.get(orgId);
