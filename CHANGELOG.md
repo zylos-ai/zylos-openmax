@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.2] — 2026-07-13
+
+### Fixed
+
+- **`tm` CLI aligned with the current (post-MR!321) cws-core BFF contracts.** `project.list`, `issue.list`, and `issue.list_in_project` now forward the `query` search parameter; `project.create` forwards `knowledgeBaseId`, `memberIds`, and `isDefault` (project members are explicitly supplied via `memberIds` — the CLI does not inject the caller; Blueprint authors remain derived from the authenticated principal). Added organization-level `issue.list` and Project member add/remove commands. Comment listing now uses cursor pagination (offset pagination retained elsewhere). The shared HTTP client (`src/lib/client.js`) honors the documented `COCO_AUTH_TOKEN` compatibility variable. TM operation docs (`references/tm-operations.md`, `docs/dependency-coverage/cws-tm.md`, `SKILL.md`) refreshed — Task and Attempt transition documentation now lists only valid terminal targets — and CLI wire-contract tests added (`src/cli/tm.test.js`).
+  **Deployment dependency:** the `query` search parameter and `is_default` on project create require cws-core MR!321 to be deployed. Until then, current cws-core silently ignores `query` (list endpoints return unfiltered results) and rejects `project.create` with `isDefault` with a 422 (`unexpected property body.is_default`). These capabilities activate automatically once MR!321 lands; no CLI change needed.
+
 ## [2.9.1] — 2026-07-13
 
 ### Fixed
