@@ -44,12 +44,12 @@ Help: `node src/cli/tm.js help`
 
 ## Current Coverage at a Glance
 
-All 42 commands are aligned with the cws-core BFF and can be called directly.
+All 45 commands are aligned with the cws-core BFF and can be called directly.
 
 | Domain | Command Count | Status |
 | --- | --- | --- |
-| Project | 6 | ✅ All available |
-| Issue | 13 | ✅ All available |
+| Project | 8 | ✅ All available |
+| Issue | 14 | ✅ All available |
 | Task | 8 | ✅ All available |
 | Comment | 3 | ✅ All available |
 | Blueprint | 4 | ✅ All available |
@@ -69,27 +69,30 @@ When the CLI fails, it outputs `{"error":"...","status":<httpStatus>}` to stderr
 
 ## Command Listing
 
-### Project (6 commands)
+### Project (8 commands)
 
 | Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `project.list` | List the project directory (paginated) | `{status?, page?, pageSize?, orderBy?}` | `GET /projects` |
-| ✅ | `project.create` | Create a new project, requires leadMemberId | `{name, slug, leadMemberId, description?, descriptionFormat?, isDefault?}` | `POST /projects` |
+| ✅ | `project.list` | List the project directory (paginated, supports name/description search) | `{status?, query?, page?, pageSize?, orderBy?}` | `GET /projects` |
+| ✅ | `project.create` | Create a new project; members are explicitly supplied through memberIds | `{name, leadMemberId, description?, slug?, isDefault?, knowledgeBaseId?, memberIds?}` | `POST /projects` |
 | ✅ | `project.get` | Get details of a single project | `{id}` | `GET /projects/{id}` |
-| ✅ | `project.update` | Change project name / description / lead | `{id, name?, description?, descriptionFormat?, leadMemberId?}` | `PATCH /projects/{id}` |
+| ✅ | `project.update` | Change project name / description / lead | `{id, name?, description?, leadMemberId?}` | `PATCH /projects/{id}` |
 | ✅ | `project.archive` | Archive a project (the frontend "delete" maps to this, no hard delete) | `{id}` | `POST /projects/{id}/archive` |
 | ✅ | `project.members` | List project members (pulled from cws-work) | `{id, page?, pageSize?, orderBy?}` | `GET /projects/{id}/members` |
+| ✅ | `project.member_add` | Explicitly add a project member | `{id, memberId, role?}` | `POST /projects/{id}/members` |
+| ✅ | `project.member_remove` | Remove a project member | `{id, memberId}` | `DELETE /projects/{id}/members/{memberId}` |
 
-### Issue (13 commands)
+### Issue (14 commands)
 
 The write path uses the flat path `/issues/{id}`, not `/projects/{pid}/issues/{id}`. Each state change is a semantic action with invariant validation and side effects; the generic `POST /issues/{id}/transition` and the old acceptance-rejection interface have been removed.
 
 | Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `issue.list_in_project` | List issues within a project (can filter by status / priority / archived dimension) | `{projectId, status?, statuses?, priority?, includeArchived?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
+| ✅ | `issue.list` | List visible issues in the organization | `{status?, statuses?, priority?, includeArchived?, query?, page?, pageSize?, orderBy?}` | `GET /issues` |
+| ✅ | `issue.list_in_project` | List issues within a project (supports filters and search) | `{projectId, status?, statuses?, priority?, includeArchived?, query?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
 | ✅ | `issue.get` | Get details of a single issue | `{id}` | `GET /issues/{id}` |
 | ✅ | `issue.create` | Start an issue; defaults to `in_progress`, when `backlog=true` it is recorded but not executed; `ownerMemberId` is the delivery-acceptance owner | `{projectId, title, leadAgentId, ownerMemberId?, priority?, description?, originConversationId?, originMessageId?, backlog?}` | `POST /projects/{pid}/issues` |
-| ✅ | `issue.update` | Change issue metadata (does not touch state) | `{id, title?, description?, descriptionFormat?, priority?, dueDate?}` | `PATCH /issues/{id}` |
+| ✅ | `issue.update` | Change issue metadata (does not touch state) | `{id, title?, description?, priority?}` | `PATCH /issues/{id}` |
 | ✅ | `issue.activate` | backlog → in_progress; decides whether to wake the Lead based on source | `{id, source?}` | `POST /issues/{id}/activate` |
 | ✅ | `issue.submit_plan` | Lead submits the execution plan to the human for confirmation, writes an Issue comment, state → pending_plan; the new flow must include `blueprintId` | `{id, planText, blueprintId, source?, cardMessageId?}` | `POST /issues/{id}/submit-plan` |
 | ✅ | `issue.accept_plan` | Human accepts the execution plan; during the text-card simulation period the Lead clicks on their behalf, defaulting to `source=text_card_proxy`; state → in_progress | `{id, source?}` | `POST /issues/{id}/accept-plan` |
@@ -127,7 +130,7 @@ Conversations on an Issue / Task, plan explanations, state-change explanations, 
 | --- | --- | --- | --- | --- |
 | ✅ | `comment.create` | Write a Markdown comment on an Issue or Task | `{workType, workId, bodyMarkdown}` | `POST /comments` |
 | ✅ | `comment.get` | Get a single comment | `{id}` | `GET /comments/{id}` |
-| ✅ | `comment.list` | List the comments of an Issue / Task | `{workType, workId, page?, pageSize?, orderBy?}` | `GET /comments` |
+| ✅ | `comment.list` | List the comments of an Issue / Task | `{workType, workId, cursor?, limit?, orderBy?}` | `GET /comments` |
 
 ### Blueprint (4 commands)
 
@@ -135,7 +138,7 @@ Conversations on an Issue / Task, plan explanations, state-change explanations, 
 
 | Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `blueprint.create` | Start a blueprint draft, provide all steps at once (can later be changed with set_steps) | `{issueId, steps[], estimatedBudget?, notes?}` | `POST /issues/{iid}/blueprints` — the server derives the author from the auth principal; the CLI accepts the `authorAgentId` parameter but **does not send it in the body** (backward compatibility with old callers) |
+| ✅ | `blueprint.create` | Start a blueprint draft, provide all steps at once (can later be changed with set_steps) | `{issueId, steps[], estimatedBudget?, notes?}` | `POST /issues/{iid}/blueprints` — the server derives the author from the auth principal |
 | ✅ | `blueprint.get` | Get a blueprint (with/without steps) | `{id, includeSteps?}` | `GET /blueprints/{id}` |
 | ✅ | `blueprint.list` | List the blueprint versions under an issue (view revision history) | `{issueId, page?, pageSize?, orderBy?}` | `GET /issues/{iid}/blueprints` |
 | ✅ | `blueprint.set_steps` | Replace steps in a single batch (full replacement, not append) | `{blueprintId (or 'id'), steps[]}` | `PUT /blueprints/{id}/steps` |
@@ -144,12 +147,12 @@ Conversations on an Issue / Task, plan explanations, state-change explanations, 
 
 | Status | Command | Description | Parameters | Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `attempt.create` | Manually open a new round (rarely needed, `task.claim` already creates an attempt) | `{taskId}` | `POST /tasks/{taskId}/attempts` |
+| ✅ | `attempt.create` | Manually open a new round (the standard start flow creates the attempt through `task.start`) | `{taskId}` | `POST /tasks/{taskId}/attempts` |
 | ✅ | `attempt.get` | Get attempt details (view status / startedAt / failureReason) | `{id}` | `GET /attempts/{id}` |
 | ✅ | `attempt.list` | List all attempts of a task (view each retry / failure reason) | `{taskId, page?, pageSize?, orderBy?}` | `GET /tasks/{taskId}/attempts` |
 | ✅ | `attempt.transition` | Push the attempt state (done / failed / blocked / cancelled); a Worker uses this to mark their own execution result | `{id, targetStatus (or 'status'), failureReason?, blockedOnApprovalRequestIds?}` | `POST /attempts/{id}/transition` |
 
-`attempt.create` usually does not need to be called directly — `task.claim` automatically creates the Attempt. Use it only when you need to manually start a new round of attempts.
+`attempt.create` usually does not need to be called directly — `task.start` automatically creates the Attempt. Use it only when you need to manually start a new round of attempts.
 
 ### Event Binding (4 commands)
 
@@ -338,9 +341,9 @@ In other words: **SKILL.md covers behavior, this document covers mechanics**, an
 The following are TM command-level details that SKILL.md's "common mistakes" does not cover separately:
 
 - **Do not** copy the entire IM message text into the task description / comment — write only the necessary background, KB links, and output addresses
-- **Do not** call `attempt.create` directly to replace `task.claim` — `claim` already builds the attempt built in, and a manual create will hit a conflict
+- **Do not** call `attempt.create` directly to replace `task.start` — the standard start flow creates the attempt, and a manual create may hit a conflict
 - **Do not** forget that after `task.reassign` the old attempt is already auto-cancelled — the new assignee runs on a new attempt, and the old attempt should not be operated on again
-- **The description must use Markdown format**: the description fields of Project / Issue / Task all support Markdown. The CLI passes `description_format: "markdown"` by default, and the frontend renders rich text accordingly. When writing a description, use standard Markdown syntax such as headings (`##`), lists (`-`), bold (`**`), code blocks (`` ``` ``), and links (`[text](url)`). Example:
+- **Write description content as Markdown**: Project / Issue / Task descriptions accept Markdown content. Use standard Markdown syntax such as headings (`##`), lists (`-`), bold (`**`), code blocks (`` ``` ``), and links (`[text](url)`). Example:
   ```json
   {"title":"User growth analysis","description":"## Goal\n\nAnalyze Q2 user growth trends.\n\n## Deliverables\n\n- Growth funnel analysis report\n- Key-metrics dashboard\n- List of improvement suggestions"}
   ```

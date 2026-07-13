@@ -14,11 +14,20 @@
 - **cws-core**@`contract-v2` tag:`internal/transport/http/{project,issue,task,blueprint,attempt}.go`
 - 与 cws-as / cws-kb 文档不同的是:**TM 整条链路是 cws-core 主动转发(proxy)给 cws-work 的**,不是直连。所以"是否覆盖"看的是 cws-core 这一层是否定义了 forwarding endpoint(以及 connect-rpc 对应调用),而不是 cws-work 是否实现 —— 后者只在 cws-work 已经支持、但 cws-core 还没暴露时才相关(见文末 F-historical F3)。
 
-> 文档初版生成时间 2026-05-28；2026-07-01 已补充 v0.7 Issue / Task 状态与归档语义。**接口描述与参数定义以当前 cws-core BFF + cws-work SDK 为准**。cws-core 路由表有变更时需重新生成本文。
+> 文档初版生成时间 2026-05-28。下方 Coverage Summary、逐项详解与 F-historical 是早期 `contract-v2` 审计记录,不再代表当前完整接口。当前命令以 [`references/tm-operations.md`](../../references/tm-operations.md) 为准。
 >
 > 📌 **当前状态**:`src/cli/tm.js` 已在 contract-v2 基础上继续适配 v0.7 语义化 Issue 动作、Task claim/start 拆分、Project 级联归档和 Issue / Task `archived` 状态移除。下文历史审计区只用于回溯早期错位,不要按旧状态机开发。
 
----
+## 当前对齐增量(2026-07-13)
+
+- 当前共有 45 个命令:Project 8、Issue 14、Task 8、Comment 3、Blueprint 4、Attempt 4、Event Binding 4。
+- `project.create` 当前请求为 `{name, description?, slug?, is_default, lead_member_id, knowledge_base_id?, member_ids?}`；`member_ids` 通过 CreateProject RPC 原子写入。
+- `project.list`、`issue.list` 与 `issue.list_in_project` 均支持 `query`；CLI 已补齐组织级 `issue.list`。
+- Project 成员操作为 `project.member_add` 和 `project.member_remove`。
+- 多数列表使用 `{page, page_size, order_by}`；`comment.list` 例外使用 `{cursor, limit, order_by}`。
+- `task.transition` 只接受 `done / failed / cancelled`；`attempt.transition` 只接受 `done / failed / blocked / cancelled`。
+- Blueprint author 由认证 principal 推导,`blueprint.create` 不接收 `author_agent_id`。
+
 
 ## 修复进展(2026-05-28)
 
@@ -30,7 +39,6 @@
 
 原本暂留的 9 个 endpoint(`blueprint.update_step` 等 8 个细粒度 blueprint 操作 + `taskboard.list`)在 commit `123bb46` 中**已从 tm.js 删除**(cws-core@contract-v2 没有 forwarding,留着只会 404)。等 cws-core 补 forwarding 后再按当时的实际签名加回来。
 
----
 
 ## Coverage Summary
 
@@ -87,7 +95,6 @@
 
 原 `taskboard.list` 已删除。当前没有 project/global TaskBoard 场景,也不再用 `claimable` / `agent_skills` 作为 `task.list` 的替代过滤条件。
 
----
 
 ## 总览统计
 
@@ -107,7 +114,6 @@
 
 **结论**:`src/cli/tm.js` 当前命令以 cws-core BFF 暴露面为准。Blueprint 域保留 create / get / list / set_steps 核心操作；TaskBoard 列表已删除,当前无替代入口。
 
----
 
 ## 逐项详解
 
@@ -159,7 +165,6 @@
 - path: `project_id*`;query: PageParams
 - 出参 data: `projectMemberItem[]`
 
----
 
 ### Issue
 
@@ -212,7 +217,6 @@
 - body: `new_project_id*`(uuid)
 - 出参 data: `issueItem`
 
----
 
 ### Task
 
@@ -255,7 +259,6 @@
 - body: `new_assignee_id*`(uuid)
 - 出参 data: `taskItem`
 
----
 
 ### Blueprint
 
@@ -292,7 +295,6 @@
 - body: `steps[]`(stepInput[],同 #19)
 - 出参 data: `blueprintItem`
 
----
 
 ## 通用类型(节选,均来自 contract-v2)
 
@@ -331,7 +333,6 @@
 
 `src/lib/client.js` 在 commit `7bf54a5` 之后会自动 strip envelope:`DataResponse` unwrap 到 `data`,`PageListResponse` 保留为 `{ data, pagination }`,所以 tm.js 的调用方不再需要手动 unwrap。
 
----
 
 ## F-historical
 
@@ -404,7 +405,6 @@ contract-v2 把所有响应包了一层 envelope。`src/lib/client.js` 的 `requ
 
 `src/comm-bridge.js` 的 `fetchRecentMessages` 兜底链路同步加上 `r?.data`,兼容新形态。
 
----
 
 ## cws-core@contract-v2 暴露但 tm.js 没用的 endpoint(供后续参考)
 
@@ -421,7 +421,6 @@ contract-v2 把所有响应包了一层 envelope。`src/lib/client.js` 的 `requ
 | `GET  /api/v1/attempts/{attempt_id}` | 单个 attempt 详情 |
 | `POST /api/v1/attempts/{attempt_id}/transition` | attempt 状态流转 |
 
----
 
 ## 重新生成本文
 

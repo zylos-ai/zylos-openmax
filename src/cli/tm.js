@@ -17,11 +17,11 @@
  * earlier ⏳ batch (blueprint fine-grained ops + taskboard.list) was removed
  * because cws-core does not yet proxy them; re-add when forwarding ships.
  *
- * Pagination convention (contract-v2 PageParams, offset-based):
+ * Pagination convention:
  *   - User-facing camelCase: page, pageSize, orderBy
  *   - Wire snake_case:       page, page_size, order_by
- *   - (The old page_token / cursor / limit names are gone; cws-core uses
- *     offset paging via {page, page_size} now.)
+ *   - Most list endpoints use offset paging via {page, page_size}.
+ *   - Comment list follows its backend contract and uses {cursor, limit}.
  */
 
 import { get, post, patch, put, del, apiPath } from '../lib/client.js';
@@ -38,6 +38,25 @@ function pageParams(p) {
   };
 }
 
+function cursorParams(p) {
+  return {
+    cursor:   p.cursor,
+    limit:    p.limit,
+    order_by: p.orderBy,
+  };
+}
+
+function issueListParams(p) {
+  return {
+    status:           p.status,
+    statuses:         p.statuses,
+    priority:         p.priority,
+    include_archived: p.includeArchived,
+    query:            p.query,
+    ...pageParams(p),
+  };
+}
+
 const COMMANDS = {
   // =========================================================================
   //  PROJECT
@@ -45,17 +64,20 @@ const COMMANDS = {
 
   'project.list': () => get(apiPath('/projects'), {
     status: params.status,       // enum: active|archived
+    query:  params.query,
     ...pageParams(params),
   }),
 
   // contract-v2 create-project body: { name*, description?, slug*,
-  // is_default, lead_member_id* }
+  // is_default, lead_member_id*, knowledge_base_id?, member_ids? }
   'project.create': () => post(apiPath('/projects'), {
     name:               params.name,
     description:        params.description,
     slug:               params.slug,
     is_default:         params.isDefault,
     lead_member_id:     params.leadMemberId,
+    knowledge_base_id:  params.knowledgeBaseId,
+    member_ids:         params.memberIds,
   }),
 
   'project.get': () => get(apiPath(`/projects/${params.id}`)),
@@ -74,18 +96,26 @@ const COMMANDS = {
     pageParams(params),
   ),
 
+  'project.member_add': () => post(apiPath(`/projects/${params.id}/members`), {
+    member_id: params.memberId,
+    role:      params.role ?? 'member',
+  }),
+
+  'project.member_remove': () => del(
+    apiPath(`/projects/${params.id}/members/${params.memberId}`),
+  ),
+
   // =========================================================================
   //  ISSUE  (✅ all cws-core BFF issue commands — note issue write paths
   //  use the FLAT path /issues/{id}, not /projects/{pid}/issues/{id})
   // =========================================================================
 
-  'issue.list_in_project': () => get(apiPath(`/projects/${params.projectId}/issues`), {
-    status:           params.status,     // single backend status
-    statuses:         params.statuses,   // comma-separated inclusion list
-    priority:         params.priority,   // enum: low|medium|high
-    include_archived: params.includeArchived,
-    ...pageParams(params),
-  }),
+  'issue.list': () => get(apiPath('/issues'), issueListParams(params)),
+
+  'issue.list_in_project': () => get(
+    apiPath(`/projects/${params.projectId}/issues`),
+    issueListParams(params),
+  ),
 
   // Flat path, no project prefix.
   'issue.get': () => get(apiPath(`/issues/${params.id}`)),
@@ -262,7 +292,7 @@ const COMMANDS = {
   'comment.list': () => get(apiPath('/comments'), {
     work_type: params.workType,
     work_id:   params.workId,
-    ...pageParams(params),
+    ...cursorParams(params),
   }),
 
   // =========================================================================
@@ -277,12 +307,8 @@ const COMMANDS = {
   // where each step is { temp_id, description, required_resources?,
   //                     depends_on_temp_ids? }.
   //
-  // NOTE: cws-core's createBlueprintRequest body does NOT accept
-  // `author_agent_id` — the server derives it from the auth principal
-  // (data.author_agent_id in the response surfaces it). Sending
-  // author_agent_id returns 422 "unexpected property". Keep
-  // `authorAgentId` as a tm.js param for backward compat / readability
-  // but do not forward to the body.
+  // NOTE: cws-core derives author_agent_id from the auth principal; it is not
+  // a request field and must not be forwarded.
   'blueprint.create': () => post(
     apiPath(`/issues/${params.issueId}/blueprints`),
     {
@@ -373,15 +399,19 @@ function printUsage() {
 Usage: node src/cli/tm.js <command> '<json-params>'
 
 PROJECT  (all ✅ on contract-v2)
-  project.list           {status?, page?, pageSize?, orderBy?}
-  project.create         {name, slug, leadMemberId, description?, descriptionFormat?, isDefault?}
+  project.list           {status?, query?, page?, pageSize?, orderBy?}
+  project.create         {name, leadMemberId, description?, slug?, isDefault?,
+                          knowledgeBaseId?, memberIds?}
   project.get            {id}
-  project.update         {id, name?, description?, descriptionFormat?, leadMemberId?}
+  project.update         {id, name?, description?, leadMemberId?}
   project.archive        {id}
   project.members        {id, page?, pageSize?, orderBy?}
+  project.member_add     {id, memberId, role?}                               # role default: member
+  project.member_remove  {id, memberId}
 
 ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{pid}/issues/{id})
-  issue.list_in_project  {projectId, status?, statuses?, priority?, includeArchived?, page?, pageSize?, orderBy?}
+  issue.list             {status?, statuses?, priority?, includeArchived?, query?, page?, pageSize?, orderBy?}
+  issue.list_in_project  {projectId, status?, statuses?, priority?, includeArchived?, query?, page?, pageSize?, orderBy?}
   issue.get              {id}
   issue.create           {projectId, title, leadAgentId,
                           ownerMemberId?, priority?,
@@ -411,10 +441,10 @@ TASK  (all ✅ on contract-v2; create uses doubly-nested path)
 COMMENT  (issue/task discussion + agent-to-agent handoff channel)
   comment.create         {workType ('issue'|'task'), workId, bodyMarkdown}       # author from auth; markdown body
   comment.get            {id}                                                    # comments are addressable
-  comment.list           {workType, workId, page?, pageSize?}
+  comment.list           {workType, workId, cursor?, limit?, orderBy?}
 
 BLUEPRINT  (all ✅ on contract-v2)
-  blueprint.create                  {issueId, authorAgentId, steps[], estimatedBudget?, notes?}
+  blueprint.create                  {issueId, steps[], estimatedBudget?, notes?}
   blueprint.get                     {id, includeSteps?}
   blueprint.list                    {issueId, page?, pageSize?, orderBy?}
   blueprint.set_steps               {blueprintId (or 'id'), steps[]}             # replaces ALL steps
