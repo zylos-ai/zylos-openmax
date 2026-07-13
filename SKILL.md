@@ -381,7 +381,7 @@ The following are the **hard actions** for every task from start to finish, not 
 | Wanting to re-raise an already-terminated Issue/Task | terminated is a terminal state, no revival; cleanup only does forward compensation, and external irreversible actions are confirmed by the human first |
 | Archiving an Issue / Task individually | Archiving individually is not allowed; archival cascades only from `project.archive`, and Issue / Task express the archival dimension via `archived_at` |
 | Worker creating a new Attempt on its own to retry | Report the failure, wait for the Lead to decide |
-| CreateTask without a projectId | Must pass issueId or projectId |
+| CreateTask missing projectId or issueId | Both are required; the path identifies the Task by both project and issue |
 | Repeatedly retrying a ⏳ command | 404/501 → degrade to the conversation flow |
 | The human provided a Project ID but you still create a Project | Use the ID the human gave directly, do not project.create to re-create |
 | Calling the TM/KB/AS API directly with curl/fetch / hand-rolling BFF REST paths | Always go through the CLI `src/cli/{tm,kb,as,comm,core}.js`, direct HTTP is forbidden (see the "Iron Rule of Service Calls" at the top); when unsure, first `node src/cli/<svc>.js` to see the commands or check the ops docs, do not guess paths |

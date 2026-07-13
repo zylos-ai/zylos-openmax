@@ -83,6 +83,10 @@ async function resolveToken(orgId) {
   // for "act as user" one-shot ops (e.g. running an admin-only command from
   // the agent runtime by minting a user JWT first). Never persisted.
   if (process.env.COCO_USER_TOKEN) return process.env.COCO_USER_TOKEN;
+  // Historical CLI/smoke-test name. Keep it as a compatibility fallback so
+  // the environment variable documented by every operations reference is
+  // actually honored by one-shot commands.
+  if (process.env.COCO_AUTH_TOKEN) return process.env.COCO_AUTH_TOKEN;
   // Use the token manager: returns a cached or freshly-refreshed JWT for
   // the given org. Falls back to the raw api_key if token.js cannot reach
   // cws-core (e.g. offline). Note: the api_key works as a bearer only on
