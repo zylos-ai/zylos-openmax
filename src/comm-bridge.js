@@ -1891,6 +1891,31 @@ async function bootstrapOrgToken(orgConfig) {
   } catch (err) {
     warn(`[bootstrap] org=${orgConfig.slug} JWT acquire failed: ${err.message} — WS will retry`);
   }
+
+  // Hydrate the authoritative self display_name BEFORE the WS connects. This
+  // whole function is awaited in the pre-connect phase (Promise.allSettled
+  // before the startOrgWs loop), so the WsClient isn't even created until this
+  // returns — the first inbound message/replay therefore matches against the
+  // real display_name, not a stale/empty self.name. Without this, a fresh
+  // start/upgrade with no cached display_name would drop @-messages for up to
+  // one periodic-sync interval (owner-config-sync has no runOnStart). Reconnects
+  // are unaffected: display_name stays in memory for the process lifetime.
+  //
+  // The JWT exchange above wrote member_id back to config.json; reflect it into
+  // this in-memory orgConfig so syncOwnerFromCore (keyed on self.member_id) can
+  // run. Fail-open: on any error we keep the configured self.name (pre-existing
+  // behavior) and let periodic sync heal it — no worse than before this fix.
+  try {
+    if (!orgConfig.self?.member_id) {
+      const freshSelf = loadConfig().orgs?.[orgConfig.slug]?.self;
+      if (freshSelf?.member_id) {
+        orgConfig.self = { ...(orgConfig.self || {}), member_id: freshSelf.member_id };
+      }
+    }
+    await syncOwnerFromCore(orgConfig);
+  } catch (err) {
+    warn(`[bootstrap] org=${orgConfig.slug} self display_name hydrate failed: ${err.message} — falling back to configured self.name until periodic sync`);
+  }
 }
 
 function startOrgWs(orgConfig, wsBaseUrl) {
