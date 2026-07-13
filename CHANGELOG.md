@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.1] — 2026-07-13
+
+### Fixed
+
+- **Group @-mentions of the bot are no longer silently dropped when the hand-configured `self.name` drifts from the agent's real display name — and the authoritative name is now guaranteed ready before any message is processed.** cws-comm-native group messages carry the @ as plain text (no structured `mentions[]`), so mention detection matched only `orgs.<slug>.self.name` — a hand-set value that silently drifts (wrong case / suffix / stale after a rename), causing real @s to be dropped as `group:mention (not @-ed)`. Two-part fix: (a) mention detection now matches against BOTH the authoritative per-org `display_name` from cws-core (read from the existing owner-sync self-member GET, persisted as `self.display_name` via `setSelfDisplayName`, no extra API call) and the configured `self.name` (kept as an alias). (b) A startup/reconnect readiness barrier guarantees the authoritative name is hydrated BEFORE the WS can deliver or replay a single frame: `syncOwnerFromCore` returns an explicit `{ nameReady, reason }` (a skipped or failed self-member read can no longer be mistaken for success), and the new `lib/self-name-hydration.js` hydrator (JWT acquire → member_id write-back backfill → authoritative sync, bounded exponential-backoff retries, per-org sticky success) runs at two structural barrier points — the awaited pre-connect bootstrap, and the `WsClient` `urlProvider`, which is awaited before the socket object exists, covering the initial connect AND every reconnect's catch-up replay. Bounded fail-open so a core outage at boot can't keep an org offline forever: after retries the connection proceeds with the persisted last-known `display_name` when one exists, else with a loud `SELF-NAME NOT HYDRATED` warning and matching degraded to the configured `self.name` until the next reconnect / periodic 5-min sync heals it. Deterministic unit coverage (9 tests) includes the incident regression: drifted `self.name`, no cached `display_name`, and an immediate plain-text `@<core display_name>` replay frame handled correctly on first connect.
+
 ## [2.9.0] — 2026-07-12
 
 ### Docs
