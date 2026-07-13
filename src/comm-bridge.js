@@ -23,7 +23,7 @@
 import path from 'path';
 import { execFile } from 'child_process';
 
-import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName, updateConfig } from './lib/config.js';
+import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName, setSelfDisplayName, updateConfig } from './lib/config.js';
 import { registerConvOrg } from './lib/conv-org.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
@@ -545,7 +545,13 @@ async function shouldHandleMessage(msg, conv, orgConfig) {
   // the raw text without a structured mentions array.
   const mentions = extractMentions(msg).map(String);
   const mentionedById = !!selfMemberId && mentions.includes(String(selfMemberId));
-  const mentionedByText = isSelfNameMentionedInText(msg, orgConfig.self?.name);
+  // Match against BOTH the authoritative cws-core display_name (self.display_name,
+  // auto-synced in syncOwnerFromCore) and any hand-configured self.name (kept as
+  // an alias). This is the only viable path for cws-comm-native messages, whose
+  // @ is plain text with no structured mentions[] — so a mismatched/empty
+  // self.name must not be able to silently drop a real @.
+  const selfNames = [orgConfig.self?.display_name, orgConfig.self?.name].filter(Boolean);
+  const mentionedByText = selfNames.some((n) => isSelfNameMentionedInText(msg, n));
   const mentioned = mentionedById || mentionedByText;
   const ownerMemberId = orgConfig.owner?.member_id;
   const senderIsOwner = !!ownerMemberId && String(senderId) === String(ownerMemberId);
@@ -1718,6 +1724,23 @@ async function syncOwnerFromCore(orgConfig) {
     warn(`[${orgConfig.slug}] owner-sync: fetch self member failed: ${err.message} — keeping local owner`);
     return;
   }
+
+  // Cache our own authoritative display_name (per-org) so inbound @-mention
+  // detection matches the exact name cws-fe shows, instead of a hand-configured
+  // `self.name` that silently drifts (wrong case / suffix / stale → dropped @).
+  // Piggybacks on this existing self-member read — no extra API call; a restart
+  // or the next owner-sync refreshes it (no dedicated polling added).
+  const coreDisplayName = member?.display_name || '';
+  if (coreDisplayName && coreDisplayName !== orgConfig.self?.display_name) {
+    setSelfDisplayName(orgConfig.slug, coreDisplayName);
+    orgConfig.self = { ...(orgConfig.self || {}), display_name: coreDisplayName };
+    const liveSelf = activeOrgConfigs.get(orgConfig.slug);
+    if (liveSelf && liveSelf !== orgConfig) {
+      liveSelf.self = { ...(liveSelf.self || {}), display_name: coreDisplayName };
+    }
+    log(`[${orgConfig.slug}] self display_name synced from core: ${coreDisplayName}`);
+  }
+
   const coreOwnerId = member?.owner_member_id || '';
   // Core has no authoritative owner → leave the local binding as-is so the
   // first-DM auto-bind fallback keeps working. We never clear a local owner here.

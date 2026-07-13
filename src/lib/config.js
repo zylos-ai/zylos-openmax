@@ -107,7 +107,7 @@ export const DEFAULT_CONFIG = {
     //   enabled:  true,
     //   org_id:   '',                       // COCO org UUID
     //   org_name: '',                       // display only
-    //   self:  { member_id: '', name: 'Zylos' },  // agent's member id + display name in this org
+    //   self:  { member_id: '', name: 'Zylos', display_name: '' },  // agent's member id + hand-set name (alias) + display_name auto-synced from cws-core (used for @-mention matching)
     //   owner: { member_id: '', name: '' },        // bound human owner (empty = unbound)
     //   access: {
     //     dmPolicy:    'owner',             // 'open' | 'allowlist' | 'owner'
@@ -280,6 +280,23 @@ export function updateOwnerName(orgSlug, displayName) {
     const org = cfg.orgs?.[orgSlug];
     if (!org?.owner?.member_id) return;
     org.owner.name = displayName;
+  });
+}
+
+/**
+ * Cache the agent's own authoritative display_name (from cws-core) into this
+ * org's `self` block, so inbound @-mention detection matches the exact name
+ * cws-fe shows — rather than a hand-configured `self.name` that silently
+ * drifts (wrong case / suffix / stale) and drops real @s. Per-org so a
+ * multi-org agent keeps each org's identity separate. Populated from the
+ * existing owner-sync self-member read (no extra API call).
+ */
+export function setSelfDisplayName(orgSlug, displayName) {
+  if (!orgSlug || !displayName) return null;
+  return updateConfig((cfg) => {
+    const org = cfg.orgs?.[orgSlug];
+    if (!org) return;
+    org.self = { ...(org.self || {}), display_name: displayName };
   });
 }
 
