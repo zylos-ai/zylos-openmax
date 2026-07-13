@@ -25,6 +25,7 @@ import { execFile } from 'child_process';
 
 import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName, setSelfDisplayName, updateConfig } from './lib/config.js';
 import { registerConvOrg } from './lib/conv-org.js';
+import { createSelfNameHydrator } from './lib/self-name-hydration.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
@@ -1710,19 +1711,26 @@ async function ackSync(orgConfig, seq) {
 // owner recorded — if core reports an owner here it always wins, and when core
 // reports none we leave the local binding untouched so auto-bind still works.
 
+// Returns an explicit readiness result: `{ nameReady: true }` only after the
+// authoritative self-member record was actually read from cws-core (and any
+// display_name it carried was applied to config + the live orgConfig before
+// returning). "member_id not available yet" and "fetch failed" report
+// `nameReady: false` with a reason — the startup hydration barrier
+// (self-name-hydration.js) relies on this distinction; it must not mistake a
+// skipped/failed sync for success. Periodic/event callers ignore the result.
 async function syncOwnerFromCore(orgConfig) {
   const selfMemberId = orgConfig.self?.member_id;
   if (!selfMemberId) {
     // member_id is written back by the token exchange; if it's not there yet
     // we simply skip this round and try again on the next reconnect.
-    return;
+    return { nameReady: false, reason: 'self.member_id not available yet (token exchange write-back pending)' };
   }
   let member;
   try {
     member = await getForOrg(orgConfig.org_id, apiPath(`/members/${selfMemberId}`));
   } catch (err) {
     warn(`[${orgConfig.slug}] owner-sync: fetch self member failed: ${err.message} — keeping local owner`);
-    return;
+    return { nameReady: false, reason: `fetch self member failed: ${err.message}` };
   }
 
   // Cache our own authoritative display_name (per-org) so inbound @-mention
@@ -1744,10 +1752,10 @@ async function syncOwnerFromCore(orgConfig) {
   const coreOwnerId = member?.owner_member_id || '';
   // Core has no authoritative owner → leave the local binding as-is so the
   // first-DM auto-bind fallback keeps working. We never clear a local owner here.
-  if (!coreOwnerId) return;
+  if (!coreOwnerId) return { nameReady: true };
 
   const localOwnerId = orgConfig.owner?.member_id || '';
-  if (coreOwnerId === localOwnerId) return; // already in sync
+  if (coreOwnerId === localOwnerId) return { nameReady: true }; // already in sync
 
   let ownerName = '';
   try { ownerName = (await fetchMemberName(orgConfig.org_id, coreOwnerId)) || ''; }
@@ -1764,6 +1772,7 @@ async function syncOwnerFromCore(orgConfig) {
   // Notify the bot session so it can update memory/references.md with the new
   // owner — config.json is updated but the AI context won't see it until told.
   notifyOwnerChanged(orgConfig.slug, coreOwnerId, ownerName, localOwnerId);
+  return { nameReady: true };
 }
 
 function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) {
@@ -1879,43 +1888,40 @@ let liveOrgCount = 0;
 // `access.groups` take effect without a service restart.
 const activeOrgConfigs = new Map(); // slug → orgConfig (mutable)
 
-async function bootstrapOrgToken(orgConfig) {
-  // Mint a JWT eagerly so token.exchange's member_id write-back lands before
-  // the first WS open (and thus before the first inbound message hits the
-  // self-echo / @-mention filter). Errors here are non-fatal — the WS
-  // urlProvider will retry through its own backoff loop.
-  log(`[bootstrap] org=${orgConfig.slug} (${orgConfig.org_id}) acquiring JWT…`);
-  try {
-    await getAccessToken(orgConfig.org_id);
-    log(`[bootstrap] org=${orgConfig.slug} JWT ready`);
-  } catch (err) {
-    warn(`[bootstrap] org=${orgConfig.slug} JWT acquire failed: ${err.message} — WS will retry`);
-  }
+// Readiness barrier for the authoritative self display_name (see
+// lib/self-name-hydration.js for the full design). Each attempt mints the org
+// JWT (token.exchange writes self.member_id back on fresh installs), backfills
+// member_id into the captured orgConfig, then runs syncOwnerFromCore — which
+// reports `nameReady` explicitly, so a skipped/failed sync can NOT be mistaken
+// for success. Called from two structural barrier points:
+//   1. bootstrapOrgToken — awaited (Promise.allSettled) before the startOrgWs
+//      loop, so the WsClient isn't even created until hydration resolves;
+//   2. the WsClient urlProvider — awaited by ws.js BEFORE the socket object
+//      exists, so on every (re)connect neither live frames nor the onOpen
+//      replay can be dispatched until the retry attempt resolves.
+// Success is sticky per org for the process lifetime; bounded fail-open after
+// retries (cached last-known display_name, else a loud warning) so a core
+// outage at boot degrades to pre-existing behavior instead of keeping the org
+// offline forever.
+const hydrateSelfName = createSelfNameHydrator({
+  acquireToken: async (orgConfig) => { await getAccessToken(orgConfig.org_id); },
+  syncSelf: (orgConfig) => syncOwnerFromCore(orgConfig),
+  loadConfig,
+  log,
+  warn,
+});
 
-  // Hydrate the authoritative self display_name BEFORE the WS connects. This
-  // whole function is awaited in the pre-connect phase (Promise.allSettled
-  // before the startOrgWs loop), so the WsClient isn't even created until this
-  // returns — the first inbound message/replay therefore matches against the
-  // real display_name, not a stale/empty self.name. Without this, a fresh
-  // start/upgrade with no cached display_name would drop @-messages for up to
-  // one periodic-sync interval (owner-config-sync has no runOnStart). Reconnects
-  // are unaffected: display_name stays in memory for the process lifetime.
-  //
-  // The JWT exchange above wrote member_id back to config.json; reflect it into
-  // this in-memory orgConfig so syncOwnerFromCore (keyed on self.member_id) can
-  // run. Fail-open: on any error we keep the configured self.name (pre-existing
-  // behavior) and let periodic sync heal it — no worse than before this fix.
-  try {
-    if (!orgConfig.self?.member_id) {
-      const freshSelf = loadConfig().orgs?.[orgConfig.slug]?.self;
-      if (freshSelf?.member_id) {
-        orgConfig.self = { ...(orgConfig.self || {}), member_id: freshSelf.member_id };
-      }
-    }
-    await syncOwnerFromCore(orgConfig);
-  } catch (err) {
-    warn(`[bootstrap] org=${orgConfig.slug} self display_name hydrate failed: ${err.message} — falling back to configured self.name until periodic sync`);
-  }
+async function bootstrapOrgToken(orgConfig) {
+  // Mint the JWT and hydrate the authoritative self display_name BEFORE the
+  // WS connects — awaited in the pre-connect phase, so the first inbound
+  // message/replay matches against the real display_name, not a stale/empty
+  // self.name. Without this, a fresh start/upgrade with no cached display_name
+  // would drop @-messages for up to one periodic-sync interval
+  // (owner-config-sync has no runOnStart). Never throws — the urlProvider
+  // barrier retries on every (re)connect until an authoritative sync succeeds.
+  log(`[bootstrap] org=${orgConfig.slug} (${orgConfig.org_id}) acquiring JWT + hydrating self display_name…`);
+  const res = await hydrateSelfName(orgConfig);
+  log(`[bootstrap] org=${orgConfig.slug} self-name readiness: ready=${res.ready} source=${res.source}${res.displayName ? ` ("${res.displayName}")` : ''}`);
 }
 
 function startOrgWs(orgConfig, wsBaseUrl) {
@@ -1952,6 +1958,16 @@ function startOrgWs(orgConfig, wsBaseUrl) {
 
   const ws = new WsClient({
     urlProvider: async () => {
+      // Readiness barrier, per-(re)connect leg: ws.js awaits urlProvider
+      // before the WebSocket object is created, so no frame — live or onOpen
+      // replay — can reach the mention gate until this resolves. No-op once an
+      // authoritative sync has succeeded this process; until then each
+      // reconnect retries one hydrate attempt (the WS backoff loop supplies
+      // the retry cadence). Never throws: if hydration still fails but the
+      // ticket below succeeds, we deliberately connect fail-open (loudly
+      // logged) rather than keep the org offline — in practice a core outage
+      // fails the ticket too, so the socket waits out the outage anyway.
+      await hydrateSelfName(orgConfig, { maxAttempts: 1 });
       log(`[ticket] org=${orgConfig.slug} requesting ws-ticket`);
       const ticket = await getWsTicket(orgConfig.org_id);
       log(`[ticket] org=${orgConfig.slug} got ws-ticket, connecting…`);
@@ -2041,9 +2057,11 @@ if (orgs.length === 0) {
   setInterval(() => {}, 1 << 30).unref?.();
 } else {
   log(`booting WS pool: ${orgs.length} org(s) enabled`);
-  // Pre-mint each org's JWT in parallel so member_id write-back happens
+  // Pre-mint each org's JWT and hydrate the authoritative self display_name
+  // in parallel, so member_id write-back AND @-mention name readiness land
   // before the WS handler hits the first message. Each WS still has its own
-  // urlProvider retry loop, so a failed bootstrap doesn't prevent startup.
+  // urlProvider retry loop (which re-runs the hydration barrier per connect),
+  // so a failed bootstrap doesn't prevent startup.
   (async () => {
     await Promise.allSettled(orgs.map(bootstrapOrgToken));
     for (const orgConfig of orgs) {
