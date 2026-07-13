@@ -57,6 +57,13 @@ function issueListParams(p) {
   };
 }
 
+function requireParams(commandName, names) {
+  const missing = names.filter((name) => params[name] == null || params[name] === '');
+  if (missing.length > 0) {
+    throw new Error(`${commandName} requires ${missing.join(', ')}`);
+  }
+}
+
 const COMMANDS = {
   // =========================================================================
   //  PROJECT
@@ -120,20 +127,23 @@ const COMMANDS = {
   // Flat path, no project prefix.
   'issue.get': () => get(apiPath(`/issues/${params.id}`)),
 
-  // create-issue body: requires title*, lead_agent_id*; optional priority
-  // (default medium), owner_member_id, origin_conversation_id,
+  // create-issue body: requires title*, lead_agent_id*, owner_member_id*;
+  // optional priority (default medium), origin_conversation_id,
   // origin_message_id, backlog. Context for the work goes in description
   // (natural language) and later in task comments — not in id lists.
-  'issue.create': () => post(apiPath(`/projects/${params.projectId}/issues`), {
-    title:                  params.title,
-    description:            params.description || '',
-    backlog:                params.backlog,
-    priority:               params.priority,              // low|medium|high (optional, default medium)
-    lead_agent_id:          params.leadAgentId,
-    owner_member_id:        params.ownerMemberId,
-    origin_conversation_id: params.originConversationId,
-    origin_message_id:      params.originMessageId,
-  }),
+  'issue.create': () => {
+    requireParams('issue.create', ['projectId', 'title', 'leadAgentId', 'ownerMemberId']);
+    return post(apiPath(`/projects/${params.projectId}/issues`), {
+      title:                  params.title,
+      description:            params.description || '',
+      backlog:                params.backlog,
+      priority:               params.priority,              // low|medium|high (optional, default medium)
+      lead_agent_id:          params.leadAgentId,
+      owner_member_id:        params.ownerMemberId,
+      origin_conversation_id: params.originConversationId,
+      origin_message_id:      params.originMessageId,
+    });
+  },
 
   // Flat path; body: { title?, description?, priority? }.
   'issue.update': () => patch(
@@ -414,9 +424,9 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.list_in_project  {projectId, status?, statuses?, priority?, includeArchived?, query?, page?, pageSize?, orderBy?}
   issue.get              {id}
   issue.create           {projectId, title, leadAgentId,
-                          ownerMemberId?, priority?,
+                          ownerMemberId, priority?,
                           description?, originConversationId?, originMessageId?,
-                          backlog?}                                          # priority default medium; backlog=true starts in backlog
+                          backlog?}                                          # backlog default true; set false to start in_progress
   issue.update           {id, title?, description?, priority?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
   issue.submit_plan      {id, planText, blueprintId, source?, cardMessageId?}

@@ -60,6 +60,23 @@ async function captureRequest(command, params) {
   }
 }
 
+async function captureFailure(command, params) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [cliPath, command, JSON.stringify(params)],
+      { env: { ...process.env, COCO_RPC_LOG: '0' } },
+      (error, stdout, stderr) => {
+        if (!error) {
+          reject(new Error(`tm.js unexpectedly succeeded: ${stdout}`));
+          return;
+        }
+        resolve(JSON.parse(stderr));
+      },
+    );
+  });
+}
+
 test('project.create forwards atomic project fields and documented auth token', async () => {
   const request = await captureRequest('project.create', {
     name: 'Semantic alignment',
@@ -87,6 +104,31 @@ test('project and organization issue searches forward query', async () => {
 
   assert.equal(projectRequest.url, '/api/v1/projects?query=alpha');
   assert.equal(issueRequest.url, '/api/v1/issues?query=beta');
+});
+
+test('issue.create preserves backlog presence and requires owner and lead', async () => {
+  const backlogRequest = await captureRequest('issue.create', {
+    projectId: 'project-1',
+    title: 'Record discovered issue',
+    leadAgentId: 'agent-1',
+    ownerMemberId: 'human-1',
+  });
+  assert.equal(Object.hasOwn(backlogRequest.body, 'backlog'), false);
+
+  const immediateRequest = await captureRequest('issue.create', {
+    projectId: 'project-1',
+    title: 'Start immediately',
+    leadAgentId: 'agent-1',
+    ownerMemberId: 'human-1',
+    backlog: false,
+  });
+  assert.equal(immediateRequest.body.backlog, false);
+
+  const failure = await captureFailure('issue.create', {
+    projectId: 'project-1',
+    title: 'Missing ownership',
+  });
+  assert.match(failure.error, /leadAgentId, ownerMemberId/);
 });
 
 test('comment.list uses cursor pagination', async () => {

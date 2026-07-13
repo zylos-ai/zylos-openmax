@@ -91,7 +91,7 @@ The write path uses the flat path `/issues/{id}`, not `/projects/{pid}/issues/{i
 | ✅ | `issue.list` | List visible issues in the organization | `{status?, statuses?, priority?, includeArchived?, query?, page?, pageSize?, orderBy?}` | `GET /issues` |
 | ✅ | `issue.list_in_project` | List issues within a project (supports filters and search) | `{projectId, status?, statuses?, priority?, includeArchived?, query?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
 | ✅ | `issue.get` | Get details of a single issue | `{id}` | `GET /issues/{id}` |
-| ✅ | `issue.create` | Start an issue; defaults to `in_progress`, when `backlog=true` it is recorded but not executed; `ownerMemberId` is the delivery-acceptance owner | `{projectId, title, leadAgentId, ownerMemberId?, priority?, description?, originConversationId?, originMessageId?, backlog?}` | `POST /projects/{pid}/issues` |
+| ✅ | `issue.create` | Register an issue; defaults to `backlog`, set `backlog=false` only when it should enter `in_progress` immediately; Owner and Lead are required | `{projectId, title, leadAgentId, ownerMemberId, priority?, description?, originConversationId?, originMessageId?, backlog?}` | `POST /projects/{pid}/issues` |
 | ✅ | `issue.update` | Change issue metadata (does not touch state) | `{id, title?, description?, priority?}` | `PATCH /issues/{id}` |
 | ✅ | `issue.activate` | backlog → in_progress; decides whether to wake the Lead based on source | `{id, source?}` | `POST /issues/{id}/activate` |
 | ✅ | `issue.submit_plan` | Lead submits the execution plan to the human for confirmation, writes an Issue comment, state → pending_plan; the new flow must include `blueprintId` | `{id, planText, blueprintId, source?, cardMessageId?}` | `POST /issues/{id}/submit-plan` |
@@ -103,7 +103,7 @@ The write path uses the flat path `/issues/{id}`, not `/projects/{pid}/issues/{i
 | ✅ | `issue.move_project` | Move the entire issue to another project | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
 | ✅ | `issue.terminate` | Terminate an inconclusive issue early → terminated; the server cascades to cancel non-terminal Tasks + sends an `issue.terminated` event to the Lead for cleanup (does not roll back side effects that have already occurred) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` defaults to `lead_chat` |
 
-`ownerMemberId` is the acceptance / governance owner of the Issue: a human caller may omit it and it defaults to themselves; when an Agent creates it on behalf of a human, it must pass **the member id of that human in the conversation**. During the text-card simulation period, the Lead is allowed to use `source=text_card_proxy` to click `accept_plan` / `accept_delivered` on the human's behalf; the code has marked this as a temporary path, and once real cards go live the same semantic interface should be called by the human principal. When the human does not accept the plan or delivery, do not call the reject interface; the Lead first continues the conversation to understand the feedback, then `issue.resume` back to `in_progress`, changes the Blueprint / Task, and re-runs `issue.submit_plan`.
+`ownerMemberId` is the acceptance / governance owner of the Issue and is always required. An Agent creating on behalf of a human must pass **the member id of that human in the conversation**, while `leadAgentId` must be the creating Agent. During the text-card simulation period, the Lead is allowed to use `source=text_card_proxy` to click `accept_plan` / `accept_delivered` only after the Owner explicitly accepts in the conversation. When the human does not accept the plan or delivery, do not call the reject interface; the Lead first continues the conversation to understand the feedback, then `issue.resume` back to `in_progress`, changes the Blueprint / Task, and re-runs `issue.submit_plan`.
 
 ### Task (8 commands)
 
@@ -180,12 +180,12 @@ create-by-agent guardrails (enforced by cws-work, violations error out directly)
 node src/cli/kb.js kb.search '{"query":"competitive pricing","folderId":"tn-projects-growth"}'
 # -> hits pg-pricing-ref-001, pg-market-overview-002
 
-# 1) Create Issue (defaults to in_progress)
+# 1) Create an Issue for immediate planning/execution
 node src/cli/tm.js issue.create '{
   "projectId":"proj-1",
   "title":"Notion competitive pricing analysis","description":"Compare the pricing tiers of 5 direct competitors",
   "priority":"medium","leadAgentId":"agent-self",
-  "ownerMemberId":"human-requester-1",
+  "ownerMemberId":"human-requester-1","backlog":false,
   "originConversationId":"conv-1","originMessageId":"msg-42"
 }'
 
@@ -225,7 +225,7 @@ node src/cli/tm.js issue.accept_delivered '{"id":"iss-1","source":"text_card_pro
 node src/cli/tm.js issue.create '{
   "projectId":"proj-1","priority":"high",
   "title":"Quarterly product planning","leadAgentId":"agent-self",
-  "ownerMemberId":"human-requester-1"
+  "ownerMemberId":"human-requester-1","backlog":false
 }'
 
 # 2) Start a Blueprint draft (with Steps, submitted at once)

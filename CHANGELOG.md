@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.3] — 2026-07-13
+
+### Changed
+
+- **Issue intake now matches the backlog-first contract.** `issue.create` requires both `ownerMemberId` and `leadAgentId`; omitting `backlog` records the Issue in backlog, while workflows that immediately plan and execute pass `backlog:false`. The Skill now routes work that belongs in another Project by creating a separate target Issue with the original link and necessary context, without moving, closing, or otherwise mutating the original Issue.
+
 ## [2.9.2] — 2026-07-13
 
 ### Fixed
