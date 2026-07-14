@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.4] — 2026-07-14
+
+### Changed
+
+- **onboarding-lead now sends the clickable project link to the user after `project.create` succeeds** (PR #60, closes the guidance gap behind cws-core board #135). The SKILL.md onboarding guide step ③ previously instructed the agent to create the Project + Issue and deliver, but never to send the clickable `/workspace`-prefixed project link — the link-format table existed, the "send it" instruction did not. Docs-only change.
+
 ## [2.9.3] — 2026-07-13
 
 ### Changed
