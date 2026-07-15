@@ -98,7 +98,7 @@ The write path uses the flat path `/issues/{id}`, not `/projects/{pid}/issues/{i
 | ✅ | `issue.accept_plan` | Human accepts the execution plan; during the text-card simulation period the Lead clicks on their behalf, defaulting to `source=text_card_proxy`; state → in_progress | `{id, source?}` | `POST /issues/{id}/accept-plan` |
 | ✅ | `issue.deliver` | in_progress → delivered | `{id}` | `POST /issues/{id}/deliver` |
 | ✅ | `issue.resume` | After human feedback, continue the conversation, re-plan, or rework; pending_plan/delivered → in_progress | `{id, reason?, source?}` | `POST /issues/{id}/resume` |
-| ✅ | `issue.accept_delivered` | delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` — `source` takes `im` / `explicit` / `text_card_proxy` (default `explicit`) |
+| ✅ | `issue.accept_delivered` | Owner accepts the delivery; during the text-card simulation period the Lead clicks on their behalf, defaulting to `source=text_card_proxy`; delivered → accepted | `{id, source?}` | `POST /issues/{id}/accept-delivered` |
 | ✅ | `issue.reassign_owner` | Change the issue owner (ownerMemberId); archived objects cannot be changed | `{id, newOwnerMemberId (or 'ownerMemberId')}` | `POST /issues/{id}/reassign-owner` |
 | ✅ | `issue.move_project` | Move the entire issue to another project | `{id, newProjectId (or 'targetProjectId')}` | `POST /issues/{id}/move` |
 | ✅ | `issue.terminate` | Terminate an inconclusive issue early → terminated; the server cascades to cancel non-terminal Tasks + sends an `issue.terminated` event to the Lead for cleanup (does not roll back side effects that have already occurred) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` defaults to `lead_chat` |

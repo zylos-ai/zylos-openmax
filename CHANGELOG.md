@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`issue.accept_delivered` now defaults to the Lead's documented text-card proxy source.** The CLI previously sent `source=explicit` when the Lead omitted `source`, so cws-work treated the Agent as a non-Owner and returned `WORK_ISSUE_ACCEPTANCE_FORBIDDEN`, even after the Owner had explicitly accepted in chat. The default now matches `issue.accept_plan` and the Skill contract: during the text-card simulation period, the Lead sends `source=text_card_proxy` on the Owner's behalf after explicit human acceptance; callers may still override `source`.
+
 ## [2.9.5] — 2026-07-15
 
 ### Fixed
