@@ -131,6 +131,21 @@ test('issue.create preserves backlog presence and requires owner and lead', asyn
   assert.match(failure.error, /leadAgentId, ownerMemberId/);
 });
 
+test('issue.accept_delivered defaults to the Lead text-card proxy source', async () => {
+  const proxyRequest = await captureRequest('issue.accept_delivered', {
+    id: 'issue-1',
+  });
+  assert.equal(proxyRequest.method, 'POST');
+  assert.equal(proxyRequest.url, '/api/v1/issues/issue-1/accept-delivered');
+  assert.deepEqual(proxyRequest.body, { source: 'text_card_proxy' });
+
+  const explicitRequest = await captureRequest('issue.accept_delivered', {
+    id: 'issue-1',
+    source: 'explicit',
+  });
+  assert.deepEqual(explicitRequest.body, { source: 'explicit' });
+});
+
 test('comment.list uses cursor pagination', async () => {
   const request = await captureRequest('comment.list', {
     workType: 'task',

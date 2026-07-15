@@ -191,9 +191,11 @@ const COMMANDS = {
       source: params.source ?? 'lead_chat',
     },
   ),
+  // Temporary text-card simulation: only after the Owner explicitly accepts
+  // the delivery may the Lead proxy that acceptance with text_card_proxy.
   'issue.accept_delivered': () => post(
     apiPath(`/issues/${params.id}/accept-delivered`),
-    { source: params.source ?? 'explicit' },
+    { source: params.source ?? 'text_card_proxy' },
   ),
 
   // Body field is new_owner_member_id (mirrors task.reassign pattern).
@@ -430,10 +432,10 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.update           {id, title?, description?, priority?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
   issue.submit_plan      {id, planText, blueprintId, source?, cardMessageId?}
-  issue.accept_plan      {id, source?}                                        # default source=text_card_proxy
+  issue.accept_plan      {id, source?}                                        # source: im|explicit|text_card_proxy; default text_card_proxy
   issue.deliver          {id}
   issue.resume           {id, reason?, source?}                               # human feedback → in_progress
-  issue.accept_delivered {id, source?}                                        # source: im|explicit|text_card_proxy
+  issue.accept_delivered {id, source?}                                        # source: im|explicit|text_card_proxy; default text_card_proxy
   issue.reassign_owner   {id, newOwnerMemberId (or 'ownerMemberId')}          # change issue owner
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
   issue.terminate        {id, reason?, source?}                           # 提前终止 → terminated; 级联取消 Task + 发善后事件
