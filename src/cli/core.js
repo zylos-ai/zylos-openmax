@@ -247,7 +247,7 @@ const COMMANDS = {
   'core.invitation_revoke': () => del(apiPath(`/invitations/${params.invitationId}`)),
 
   // Local helper — build a browser-navigable frontend URL. Not an API call.
-  // Uses server.frontend_base_path (default /cws) + bff_url origin.
+  // Returns server.bff_url + path (bff_url already carries any /workspace prefix).
   'core.frontend_url': () => {
     const p = params.path || params.p || '';
     if (!p) throw Object.assign(new Error('path is required'), { status: 400 });
@@ -305,8 +305,8 @@ Invitations
   core.invitation_revoke   {invitationId}
 
 Helpers
-  core.frontend_url        {path}   # build browser-navigable URL: bff_url + frontend_base_path + path
-                           # e.g. {path:"/knowledge?kb=xxx&node=yyy"} → https://cws-int.coco.xyz/cws/knowledge?...
+  core.frontend_url        {path}   # build browser-navigable URL: bff_url + path
+                           # e.g. {path:"/knowledge?kb=xxx&node=yyy"} → https://cws-int.coco.xyz/workspace/knowledge?...
 
 Environment:
   COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)

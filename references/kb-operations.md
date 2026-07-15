@@ -301,7 +301,7 @@ node src/cli/kb.js kb.node_children '{"kbId":"<kb-uuid>","parentId":"<folder-nod
 
 # 3. Assemble the frontend link with the node_id
 node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=<kb-uuid>&node=tn-xyz789"}'
-# → https://xxx/cws/knowledge?kb=...&node=tn-xyz789    ✅ correct
+# → https://xxx/workspace/knowledge?kb=...&node=tn-xyz789    ✅ correct (/workspace comes from bff_url)
 ```
 
 **Counter-example (wrong)**:
@@ -320,11 +320,11 @@ If you have only the page_id (e.g. obtained from `kb.search` results), use `kb.p
 For the full URL template, see [`SKILL.md` Frontend Links](../SKILL.md). Quick reference:
 
 ```
-{bff_url}/cws/knowledge?kb={kb_id}&node={node_id}
-                                         ↑ must be the tree node_id, not the page_id
+{bff_url}/knowledge?kb={kb_id}&node={node_id}
+                                    ↑ must be the tree node_id, not the page_id
 ```
 
-You can generate it in one step with the `core.frontend_url` CLI, avoiding errors from hand-assembling the domain and prefix.
+`bff_url` already includes any mount prefix (e.g. `/workspace`) — do not add it yourself. Generate the full URL in one step with the `core.frontend_url` CLI, avoiding errors from hand-assembling the domain and prefix.
 
 ## KB-Specific Caveats
 

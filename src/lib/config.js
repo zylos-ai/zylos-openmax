@@ -56,13 +56,13 @@ export const DEFAULT_CONFIG = {
     // in DEFAULT_CONFIG — their defaults are hardcoded in src/comm-bridge.js
     // (DEFAULT_WS_RECONNECT_MAX_MS, DEFAULT_WS_HEARTBEAT_MS). Config may
     // override either. `platform` is no longer present (was never read).
+    // bff_url is the single public root for the whole app (REST API, and the
+    // origin+path the SPA is served from). When the deployment mounts the app
+    // under a path prefix (e.g. `/workspace`, stripped by the ingress before it
+    // reaches cws-core), that prefix lives HERE, in bff_url/ws_url — there is no
+    // separate frontend_base_path. frontendUrl() returns bff_url + path directly.
     bff_url: 'http://127.0.0.1:8080',
     ws_url:  'ws://127.0.0.1:8080/ws',
-
-    // Frontend base path — the SPA mount point on the same origin as bff_url.
-    // Used by frontendUrl() to construct browser-navigable links. Override
-    // when the deployment mounts cws-fe at a different path.
-    frontend_base_path: '/workspace',
   },
 
   // Cloudflare Access service-token headers, attached to every outbound REST

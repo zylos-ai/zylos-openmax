@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`/workspace` mount prefix now lives entirely in `bff_url`/`ws_url`; `frontend_base_path` is removed (Scheme 2).** The deployment's domain/ingress now serves the whole app (REST API, WebSocket, and SPA) under a `/workspace` path prefix and strips it before forwarding to cws-core, so the prefix belongs in the URLs the agent dials — not in a separate frontend-only knob. Changes: (1) `config.js` drops the `server.frontend_base_path` default; (2) `client.js` `frontendUrl()` now returns `bff_url + path` directly (no separate prefix); (3) `post-upgrade.js` migrates existing installs on `zylos upgrade openmax` — it inserts `/workspace` into `server.bff_url` and `server.ws_url` (idempotent; new `src/lib/workspace-prefix.js` helper preserves scheme/host/port/path/query and no-ops if already prefixed) and deletes the obsolete `server.frontend_base_path`; (4) SKILL.md + `references/kb-operations.md` frontend-link docs switch from a hardcoded `{domain}/workspace/...` model to `bff_url + path` (the CLI `core.frontend_url` prepends `bff_url`). Backend/cws-core unchanged. **Breaking:** once the domain adds the `/workspace` route, openmax must be on this version to build correct URLs — the upgrade auto-migrates. Unit coverage for the prefix helper and `frontendUrl`. Runtime config target per host: `bff_url: https://<host>/workspace`, `ws_url: wss://<host>/workspace/ws`. Release/live-cutover gated on the domain `/workspace` routing going live.
+
 ## [2.9.5] — 2026-07-15
 
 ### Fixed

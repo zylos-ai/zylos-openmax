@@ -279,18 +279,18 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
 // ============================================================================
 
 /**
- * Build a browser-navigable frontend URL. The frontend SPA is mounted at
- * `server.frontend_base_path` (default `/workspace`) on the same origin as
- * bff_url. Example:
+ * Build a browser-navigable frontend URL. The SPA is served on the same
+ * origin+path as bff_url, so a link is simply bff_url + path. bff_url already
+ * carries any deployment mount prefix (e.g. `/workspace`) — there is no
+ * separate frontend_base_path. Example (bff_url = https://cws-int.coco.xyz/workspace):
  *
  *   frontendUrl('/knowledge?kb=xxx&node=yyy')
- *   → '{bff_url}/workspace/knowledge?kb=xxx&node=yyy'
+ *   → 'https://cws-int.coco.xyz/workspace/knowledge?kb=xxx&node=yyy'
  */
 export function frontendUrl(path) {
   const base = resolveBaseUrl().replace(/\/$/, '');
-  const prefix = (loadConfig().server?.frontend_base_path || '/workspace').replace(/\/$/, '');
   const p = (path && !path.startsWith('/')) ? `/${path}` : (path || '');
-  return `${base}${prefix}${p}`;
+  return `${base}${p}`;
 }
 
 // ============================================================================

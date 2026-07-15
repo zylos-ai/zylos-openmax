@@ -30,6 +30,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { addWorkspacePrefix } from '../src/lib/workspace-prefix.js';
 
 const HOME = process.env.HOME;
 const CONFIG_PATH = path.join(HOME, 'zylos/components/openmax/config.json');
@@ -195,10 +196,28 @@ for (const [slug, org] of Object.entries(config.orgs)) {
   }
 }
 
-// ── server.frontend_base_path: /cws → /workspace ───────────────────────────
-if (config.server?.frontend_base_path === '/cws') {
-  config.server.frontend_base_path = '/workspace';
-  legacyKeysSeen.push('server.frontend_base_path: "/cws" → "/workspace"');
+// ── /workspace path migration ──────────────────────────────────────────────
+// The domain/ingress now serves the whole app (REST + WS + SPA) under a
+// `/workspace` prefix and strips it before forwarding to cws-core. So the
+// prefix lives in bff_url / ws_url themselves, and the old separate
+// frontend_base_path is gone (frontendUrl() now returns bff_url + path). This
+// rewrites older configs on upgrade — idempotent (URLs already under
+// /workspace are left as-is).
+if (config.server) {
+  const beforeBff = config.server.bff_url;
+  const beforeWs  = config.server.ws_url;
+  if (config.server.bff_url) config.server.bff_url = addWorkspacePrefix(config.server.bff_url);
+  if (config.server.ws_url)  config.server.ws_url  = addWorkspacePrefix(config.server.ws_url);
+  if (beforeBff !== config.server.bff_url) {
+    legacyKeysSeen.push(`server.bff_url: "${beforeBff}" → "${config.server.bff_url}" (/workspace prefix)`);
+  }
+  if (beforeWs !== config.server.ws_url) {
+    legacyKeysSeen.push(`server.ws_url: "${beforeWs}" → "${config.server.ws_url}" (/workspace prefix)`);
+  }
+  if (config.server.frontend_base_path !== undefined) {
+    delete config.server.frontend_base_path;
+    legacyKeysSeen.push('server.frontend_base_path (dropped — bff_url now carries the /workspace prefix)');
+  }
 }
 
 // ── drop workspace_id entirely ──────────────────────────────────────────────
