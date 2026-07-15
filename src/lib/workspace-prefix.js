@@ -14,10 +14,10 @@ const WORKSPACE_PREFIX = '/workspace';
 /**
  * Insert the `/workspace` prefix into a URL's path if not already present.
  *
- *   https://cws-int.coco.xyz        → https://cws-int.coco.xyz/workspace
- *   https://cws-int.coco.xyz/       → https://cws-int.coco.xyz/workspace
- *   wss://cws-int.coco.xyz/ws       → wss://cws-int.coco.xyz/workspace/ws
- *   https://cws-int.coco.xyz/workspace/ws (unchanged — already prefixed)
+ *   https://example.com        → https://example.com/workspace
+ *   https://example.com/       → https://example.com/workspace
+ *   wss://example.com/ws       → wss://example.com/workspace/ws
+ *   https://example.com/workspace/ws (unchanged — already prefixed)
  *
  * @param {string} rawUrl
  * @returns {string}

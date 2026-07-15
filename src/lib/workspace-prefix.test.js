@@ -3,15 +3,15 @@ import assert from 'node:assert/strict';
 import { addWorkspacePrefix } from './workspace-prefix.js';
 
 test('adds /workspace to a host-only URL (no path) — bff_url case', () => {
-  assert.equal(addWorkspacePrefix('https://cws-int.coco.xyz'), 'https://cws-int.coco.xyz/workspace');
+  assert.equal(addWorkspacePrefix('https://example.com'), 'https://example.com/workspace');
 });
 
 test('adds /workspace to a URL with only a trailing slash', () => {
-  assert.equal(addWorkspacePrefix('https://cws-int.coco.xyz/'), 'https://cws-int.coco.xyz/workspace');
+  assert.equal(addWorkspacePrefix('https://example.com/'), 'https://example.com/workspace');
 });
 
 test('inserts /workspace before an existing path segment — ws_url case', () => {
-  assert.equal(addWorkspacePrefix('wss://cws-int.coco.xyz/ws'), 'wss://cws-int.coco.xyz/workspace/ws');
+  assert.equal(addWorkspacePrefix('wss://example.com/ws'), 'wss://example.com/workspace/ws');
 });
 
 test('preserves port and query string', () => {
@@ -19,17 +19,17 @@ test('preserves port and query string', () => {
 });
 
 test('idempotent: the exact /workspace root is unchanged', () => {
-  assert.equal(addWorkspacePrefix('https://cws-int.coco.xyz/workspace'), 'https://cws-int.coco.xyz/workspace');
+  assert.equal(addWorkspacePrefix('https://example.com/workspace'), 'https://example.com/workspace');
 });
 
 test('idempotent: a URL already under /workspace/... is unchanged', () => {
-  assert.equal(addWorkspacePrefix('wss://cws-int.coco.xyz/workspace/ws'), 'wss://cws-int.coco.xyz/workspace/ws');
+  assert.equal(addWorkspacePrefix('wss://example.com/workspace/ws'), 'wss://example.com/workspace/ws');
 });
 
 test('does NOT treat a /workspace-lookalike path as already-prefixed', () => {
   assert.equal(
-    addWorkspacePrefix('https://cws-int.coco.xyz/workspace-foo'),
-    'https://cws-int.coco.xyz/workspace/workspace-foo',
+    addWorkspacePrefix('https://example.com/workspace-foo'),
+    'https://example.com/workspace/workspace-foo',
   );
 });
 

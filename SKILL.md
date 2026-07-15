@@ -521,7 +521,7 @@ When sharing Workspace resource links, build them as **`bff_url + path`**. `bff_
 | KB detail | `/knowledge?kb={kb_id}` | knowledge/page.tsx |
 | KB page | `/knowledge?kb={kb_id}&node={tree_node_id}` | knowledge/page.tsx |
 
-- Final URL = `bff_url + path`, e.g. `https://cws-int.coco.xyz/workspace` + `/knowledge?kb=xxx&node=yyy` → `https://cws-int.coco.xyz/workspace/knowledge?kb=xxx&node=yyy`.
+- Final URL = `bff_url + path`, e.g. `{bff_url}` + `/knowledge?kb=xxx&node=yyy` → `{bff_url}/knowledge?kb=xxx&node=yyy` (the mount prefix such as `/workspace` is already inside `bff_url`).
 - Projects and Issues are now a **fusion page**, selecting the current project and Issue via query parameters, no longer using nested paths.
 - Old paths auto-redirect: `/projects/{id}` → `/projects?project={id}`, `/projects/{id}/issues/{iid}` → `/projects?project={id}&issue={iid}`, `/issues` → `/projects`.
 - Tasks have no separate page; tasks are shown within the Issue detail as a board/list.

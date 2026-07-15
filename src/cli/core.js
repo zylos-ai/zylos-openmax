@@ -306,7 +306,7 @@ Invitations
 
 Helpers
   core.frontend_url        {path}   # build browser-navigable URL: bff_url + path
-                           # e.g. {path:"/knowledge?kb=xxx&node=yyy"} → https://cws-int.coco.xyz/workspace/knowledge?...
+                           # e.g. {path:"/knowledge?kb=xxx&node=yyy"} → {bff_url}/knowledge?...
 
 Environment:
   COCO_API_URL       cws-core base URL (default: http://127.0.0.1:8080)
