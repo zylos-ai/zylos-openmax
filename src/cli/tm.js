@@ -435,7 +435,7 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.accept_plan      {id, source?}                                        # default source=text_card_proxy
   issue.deliver          {id}
   issue.resume           {id, reason?, source?}                               # human feedback → in_progress
-  issue.accept_delivered {id, source?}                                        # default source=text_card_proxy
+  issue.accept_delivered {id, source?}                                        # source: im|explicit|text_card_proxy; default text_card_proxy
   issue.reassign_owner   {id, newOwnerMemberId (or 'ownerMemberId')}          # change issue owner
   issue.move_project     {id, newProjectId (or 'targetProjectId')}
   issue.terminate        {id, reason?, source?}                           # 提前终止 → terminated; 级联取消 Task + 发善后事件
