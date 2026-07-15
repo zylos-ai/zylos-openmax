@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.5] — 2026-07-15
+
+### Fixed
+
+- **Runtime-metrics CPU and memory are now container-scoped (cgroup), not node-level.** The reporter previously took CPU/memory from the zylos-dashboard's `/api/state`, which derives them from `os.cpus()` / `os.totalmem()` — not cgroup-aware, so inside a limited container they reported the *host node's* cores/RAM and host-wide utilization instead of the container's quota and actual consumption. New `src/lib/cgroup-resources.js` (a faithful port of `cws-zylos-runtime`'s ops-daemon `resources.go`, `pkg/opsdaemon`) reads the container's real figures: CPU from `cpu.max` / `cpu.stat:usage_usec` (v1 fallback `cpu.cfs_quota_us` / `cpuacct.usage`) with per-tick differential sampling of the cumulative counter; memory from `memory.max` / `memory.current` (v1 `memory.limit_in_bytes` / `memory.usage_in_bytes`) reporting the **working set** (`current − inactive_file`, matching `kubectl top`). cgroup v2 primary with v1 fallback; the `"max"` / `-1` / `PAGE_COUNTER_MAX` unlimited sentinels are all handled. **Disk stays sourced from the dashboard** — its `statfs` on the volume mount is already the correct container-visible scope. The reported payload shape is unchanged; only the source of the CPU/memory numbers moves. When the agent is **not** in a cgroup (external / non-containerized, `cgroup_version` "none") the reporter falls back to the dashboard's node-level CPU/memory (logged once) rather than reporting null. Unit coverage added for the collector (v2/v1, unlimited sentinels, differential sampling, counter reset, no-cgroup) and the reporter's fallback path.
+
 ## [2.9.4] — 2026-07-14
 
 ### Changed
