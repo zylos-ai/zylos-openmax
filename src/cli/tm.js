@@ -432,7 +432,7 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.update           {id, title?, description?, priority?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
   issue.submit_plan      {id, planText, blueprintId, source?, cardMessageId?}
-  issue.accept_plan      {id, source?}                                        # default source=text_card_proxy
+  issue.accept_plan      {id, source?}                                        # source: im|explicit|text_card_proxy; default text_card_proxy
   issue.deliver          {id}
   issue.resume           {id, reason?, source?}                               # human feedback → in_progress
   issue.accept_delivered {id, source?}                                        # source: im|explicit|text_card_proxy; default text_card_proxy
