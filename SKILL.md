@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.9.6
+version: 2.9.7
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -525,7 +525,7 @@ When sharing Workspace resource links, **you must** prepend the `/workspace` pre
 - Projects and Issues are now a **fusion page**, selecting the current project and Issue via query parameters, no longer using nested paths.
 - Old paths auto-redirect: `/projects/{id}` → `/projects?project={id}`, `/projects/{id}/issues/{iid}` → `/projects?project={id}&issue={iid}`, `/issues` → `/projects`.
 - Tasks have no separate page; tasks are shown within the Issue detail as a board/list.
-- KB's `node` parameter is the **tree node ID**, not the page content id. Obtain it via the KB tree API, or take the `id` field from the nodes returned by `kb.get_tree`.
+- KB's `node` parameter is the **tree node ID**, not the page content id. After `kb.page_create`, use the returned `node_id` directly. For an existing page without that create response, resolve its node through the KB tree API.
 
 You can generate it in one step with the CLI: `node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=xxx&node=yyy"}'`, which outputs the full URL.
 

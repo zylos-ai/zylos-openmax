@@ -99,7 +99,7 @@ Node ID form: `tn-{uuid}`. A Page indirectly creates its corresponding tree node
 | --- | --- | --- | --- | --- |
 | ✅ | `kb.pages` | List pages (can filter by parent, paginated) | `{kbId, parentId?, cursor?, limit?, offset?}` | `GET /api/v1/pages` |
 | ✅ | `kb.page_get` | Get page metadata (including the current revision_id) | `{pageId}` | `GET /api/v1/pages/{page_id}` |
-| ✅ | `kb.page_create` | Create a page under a given folder; also creates the corresponding tree node | `{kbId, title, parentId?, format?, body, message?}` | `POST /api/v1/kbs/{kb_id}/pages` |
+| ✅ | `kb.page_create` | Create a page and return both its page metadata and `node_id` | `{kbId, title, parentId?, format?, body, message?}` | `POST /api/v1/kbs/{kb_id}/pages` |
 | ✅ | `kb.page_update` | Edit any page attribute (title / parent / content are all allowed); optimistic concurrency, requires baseRevisionId | `{pageId, title?, path?, content?, baseRevisionId, commitMessage?}` | `PATCH /api/v1/pages/{page_id}` |
 | ✅ | `kb.page_delete` | Permanent delete (physical delete); the page must first be in the `trashed` state, otherwise 404 | `{pageId}` | `DELETE /api/v1/pages/{page_id}` |
 | ✅ | `kb.page_content` | Get the page's current body content | `{pageId}` | `GET /api/v1/pages/{page_id}/content` |
@@ -260,53 +260,44 @@ A KB page has **two kinds of ID**, and mixing them up causes the link to open bl
 | ID Type | Source | Use | Example |
 |---|---|---|---|
 | **page_id** | the `id` returned by `kb.page_create` / `kb.page_get` | Page content operations (read/write, revision, trash) | `019ed02a-62cc-...` |
-| **node_id** | the `id` returned by `kb.node_get` / `kb.node_children` | Directory tree operations + **frontend URL** | `019ed02a-62d5-...` |
+| **node_id** | the `node_id` returned by `kb.page_create`, or the `id` returned by `kb.node_get` / `kb.node_children` | Directory tree operations + **frontend URL** | `019ed02a-62d5-...` |
 
 **Core rule: the frontend URL's `node=` parameter only accepts node_id. Putting a page_id in makes the link point to the wrong location.**
 
-### Why it's easy to get wrong
+### Create response contract
 
-`kb.page_create` creates both the page and its corresponding tree node, but the return value **has only page_id, not node_id**:
+`kb.page_create` creates both the page and its corresponding tree node. Its response returns the page as the top-level object and includes the created tree node as `node_id`:
 
 ```json
 // kb.page_create response
-{"id": "019ed02a-62cc-...", "kb_id": "...", "title": "...", "path": "...", ...}
-//  ↑ this is the page_id, not the node_id
+{"id": "019ed02a-62cc-...", "node_id": "019ed02a-62d5-...", "kb_id": "...", "title": "...", "path": "...", ...}
+//  id is the page_id; node_id is the tree node used by frontend links
 ```
 
-`kb.page_get` is the same — it returns `id` (page_id), `kb_id`, `revision_id`, but **does not include node_id**.
+`kb.page_get` still returns page metadata only. If a page did not come from the current `kb.page_create` response, obtain its node ID from the tree.
 
 ### The correct link-generation flow
 
-To share a link after creating a page, you **must take one extra step to get the node_id**:
+To share a link immediately after creating a page, use the returned `node_id` directly:
 
 ```bash
-# 1. Create the page → get the page_id
+# 1. Create the page → get both page_id and node_id
 node src/cli/kb.js kb.page_create '{
   "kbId":"<kb-uuid>",
   "title":"Design Proposal",
   "parentId":"<folder-node-id>",
   "body":"# Proposal content..."
 }'
-# → {"id":"pg-abc123", ...}    ← page_id
+# → {"id":"pg-abc123", "node_id":"tn-xyz789", ...}
 
-# 2. List child nodes by parentId → match the page_id → get the node_id
-node src/cli/kb.js kb.node_children '{"kbId":"<kb-uuid>","parentId":"<folder-node-id>"}'
-# → [{
-#      "id": "tn-xyz789",           ← this is the node_id
-#      "page_id": "pg-abc123",      ← matches the page just created
-#      "node_type": "page",
-#      ...
-#    }]
-
-# 3. Assemble the frontend link with the node_id
+# 2. Assemble the frontend link with the returned node_id
 node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=<kb-uuid>&node=tn-xyz789"}'
 # → https://xxx/cws/knowledge?kb=...&node=tn-xyz789    ✅ correct
 ```
 
 **Counter-example (wrong)**:
 ```bash
-# ❌ Directly using the id returned by page_create as the node parameter
+# ❌ Using the page id (`id`) instead of `node_id`
 node src/cli/core.js core.frontend_url '{"path":"/knowledge?kb=<kb-uuid>&node=pg-abc123"}'
 # → the link opens but shows blank or points to the wrong location
 ```
@@ -337,4 +328,4 @@ You can generate it in one step with the `core.frontend_url` CLI, avoiding error
 - Cross-org references use the `kb://pg-{uuid}` URI (a stable ID, unchanged by move / rename)
 - `kb.page_delete` called directly returns 404 — you must run `kb.page_trash` first; this is cws-kb's three-state protection chain (don't work around it)
 - `kb.page_restore` vs `kb.page_restore_trash` have similar names but completely different semantics; see "The two restore operations are not the same thing" above
-- **The frontend URL only accepts node_id**: the `id` returned by `kb.page_create` is a page_id, and putting it into `?node=` makes the link wrong. You must use `kb.node_children` to get the tree node_id. See the dedicated "Frontend Link Assembly" section above
+- **The frontend URL only accepts node_id**: after `kb.page_create`, use its `node_id` field, never its page `id`. If only a page_id is available from another operation, resolve the corresponding node from the tree. See the dedicated "Frontend Link Assembly" section above

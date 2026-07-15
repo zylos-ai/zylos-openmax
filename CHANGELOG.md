@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.7] — 2026-07-15
+
+### Fixed
+
+- **Knowledge page links now use the `node_id` returned by `kb.page_create`.** The BFF create-page contract now returns the generated tree node ID together with page metadata, so the Skill no longer tells agents to list the parent folder and match on `page_id`. The frontend `node=` parameter still strictly requires the tree node ID; using the page `id` remains invalid.
+
 ## [2.9.6] — 2026-07-15
 
 ### Fixed
