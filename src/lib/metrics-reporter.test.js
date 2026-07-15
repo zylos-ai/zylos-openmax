@@ -12,7 +12,29 @@ function jsonRes(status, body) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-const DASHBOARD_STATE = { state: 'IDLE', system_metrics: { cpu_pct: 1 }, runtime_info: {} };
+const DASHBOARD_STATE = {
+  state: 'IDLE',
+  // cpu_pct here is deliberately node-level junk the reporter must IGNORE now
+  // that CPU/memory come from the cgroup collector, not the dashboard. disk_*
+  // is still sourced from the dashboard.
+  system_metrics: { cpu_pct: 1, disk_pct: 7, disk_free_bytes: 999 },
+  runtime_info: {},
+};
+
+// Deterministic stand-in for the cgroup collector (cpu/mem source of truth).
+const FAKE_CGROUP = {
+  sample() {},
+  read: () => ({
+    cpu_pct: 12.5,
+    cpu_usage_cores: 0.25,
+    cpu_limit_cores: 2,
+    mem_pct: 40,
+    mem_total_bytes: 800_000_000,
+    mem_used_bytes: 320_000_000,
+    cgroup_version: 'v2',
+    errors: [],
+  }),
+};
 
 const CLI_PATH = '/fake/skills/dashboard/scripts/api-key.js';
 
@@ -51,7 +73,7 @@ const PM2_JLIST_DEFAULT = JSON.stringify([
 
 function makeHarness({
   dashboardApiKey = '', state, exchange, cli, fileExists, nowRef = { t: 0 },
-  zylosList = ZYLOS_LIST_DEFAULT, pm2Jlist = PM2_JLIST_DEFAULT,
+  zylosList = ZYLOS_LIST_DEFAULT, pm2Jlist = PM2_JLIST_DEFAULT, cgroup = FAKE_CGROUP,
 } = {}) {
   const exchangeCalls = [];
   const stateCalls = [];
@@ -108,6 +130,7 @@ function makeHarness({
       fileExists: fileExists ?? (() => true),
       persistKey: (k) => persisted.push(k),
       apiKeyCliPath: CLI_PATH,
+      cgroup,
     },
   );
   return { reporter, exchangeCalls, stateCalls, puts, warns, cliCalls, channelCalls, persisted };
@@ -121,8 +144,47 @@ test('无 key + state 200：直接拉取（不带 Authorization、不换 token�
   assert.equal(stateCalls[0].headers.Authorization, undefined);
   assert.equal(puts.length, 1);
   assert.equal(puts[0].path, '/api/v1/agents/m-1/runtime-metrics');
-  assert.equal(puts[0].payload.resources.cpu_pct, 1);
+  // cpu/mem come from the cgroup collector; disk still from the dashboard.
+  assert.equal(puts[0].payload.resources.cpu_pct, 12.5);
+  assert.equal(puts[0].payload.resources.mem_pct, 40);
+  assert.equal(puts[0].payload.resources.mem_total_bytes, 800_000_000);
+  assert.equal(puts[0].payload.resources.mem_used_bytes, 320_000_000);
+  assert.equal(puts[0].payload.resources.disk_pct, 7);
+  assert.equal(puts[0].payload.resources.disk_free_bytes, 999);
   assert.equal(warns.length, 0);
+});
+
+test('非容器（cgroup_version "none"）：CPU/内存/磁盘全部兜底读 dashboard 节点级值', async () => {
+  const NODE_CGROUP = {
+    sample() {},
+    read: () => ({
+      cpu_pct: null, cpu_usage_cores: null, cpu_limit_cores: null,
+      mem_pct: null, mem_total_bytes: null, mem_used_bytes: null,
+      cgroup_version: 'none',
+      errors: ['cpu_limit_unreadable', 'memory_limit_unreadable', 'memory_usage_unreadable'],
+    }),
+  };
+  const FULL_STATE = {
+    state: 'IDLE',
+    system_metrics: {
+      cpu_pct: 33, mem_pct: 44, mem_total_bytes: 16_000_000_000,
+      mem_used_bytes: 7_000_000_000, disk_pct: 55, disk_free_bytes: 123,
+    },
+    runtime_info: {},
+  };
+  const { reporter, puts } = makeHarness({
+    cgroup: NODE_CGROUP,
+    state: () => jsonRes(200, FULL_STATE),
+  });
+  await reporter();
+  assert.equal(puts.length, 1);
+  const r = puts[0].payload.resources;
+  assert.equal(r.cpu_pct, 33);          // fell back to dashboard node-level
+  assert.equal(r.mem_pct, 44);
+  assert.equal(r.mem_total_bytes, 16_000_000_000);
+  assert.equal(r.mem_used_bytes, 7_000_000_000);
+  assert.equal(r.disk_pct, 55);
+  assert.equal(r.disk_free_bytes, 123);
 });
 
 test('payload 携带顶层 version 字段（openmax package version）', async () => {
@@ -156,6 +218,7 @@ test('多 org：只上报给主（第一个启用的）org，单次 PUT', async 
       apiPath,
       execFile: async () => { throw new Error('skip channels'); },
       fileExists: () => true,
+      cgroup: FAKE_CGROUP,
     },
   );
   await reporter();
@@ -319,7 +382,7 @@ test('无 key + auth 开启 + CLI generate 成功：key 持久化、用新 key �
   assert.equal(exchangeCalls.length, 1);
   assert.equal(exchangeCalls[0].headers.Authorization, 'Bearer zylos_ak_auto1');
   assert.equal(puts.length, 1);
-  assert.equal(puts[0].payload.resources.cpu_pct, 1);
+  assert.equal(puts[0].payload.resources.cpu_pct, 12.5);
   assert.equal(warns.length, 0);
 
   await reporter(); // 之后正常复用缓存 token，不再碰 CLI
