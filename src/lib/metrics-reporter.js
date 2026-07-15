@@ -92,22 +92,28 @@ function getDashboardPort() {
 // callback, not by reconciling a periodic installed-channels report. This
 // reporter now carries only runtime metrics (version / resources / cost).
 
-// CPU and memory come from the cgroup collector (`cg`), NOT the dashboard: the
-// dashboard's os.cpus()/os.totalmem() figures are node-level inside a container
-// and don't reflect this container's cgroup quota (see cgroup-resources.js).
-// Disk stays sourced from the dashboard — its statfs on the volume mount is
-// already the correct, container-visible scope.
+// Resource sourcing depends on whether we're in a container:
+//   - In a cgroup (containerized): CPU and memory come from the cgroup
+//     collector (`cg`), NOT the dashboard — the dashboard's os.cpus()/
+//     os.totalmem() figures are node-level and don't reflect this container's
+//     quota (see cgroup-resources.js). Disk stays from the dashboard (its
+//     statfs on the volume mount is already the correct container scope).
+//   - Not in a cgroup (external / non-containerized agent, cgroup_version
+//     "none"): there is no container quota to read, so fall back to ALL
+//     metrics from the dashboard — node-level numbers are the best available
+//     and beat reporting null. (Gavin's call, 2026-07-15.)
 function buildPayload(dashboard, cg) {
   if (!dashboard) return null;
   const sys = dashboard.system_metrics || {};
   const rt = dashboard.runtime_info || {};
+  const containerized = cg.cgroup_version !== 'none';
   return {
     version: PKG_VERSION,
     resources: {
-      cpu_pct:   cg.cpu_pct ?? null,
-      mem_pct:   cg.mem_pct ?? null,
-      mem_total_bytes: cg.mem_total_bytes ?? null,
-      mem_used_bytes:  cg.mem_used_bytes ?? null,
+      cpu_pct:   containerized ? (cg.cpu_pct ?? null) : (sys.cpu_pct ?? null),
+      mem_pct:   containerized ? (cg.mem_pct ?? null) : (sys.mem_pct ?? null),
+      mem_total_bytes: containerized ? (cg.mem_total_bytes ?? null) : (sys.mem_total_bytes ?? null),
+      mem_used_bytes:  containerized ? (cg.mem_used_bytes ?? null) : (sys.mem_used_bytes ?? null),
       disk_pct:        sys.disk_pct ?? null,
       disk_free_bytes: sys.disk_free_bytes ?? null,
     },
@@ -148,6 +154,7 @@ export function createMetricsReporter(activeOrgConfigs, {
   let provisionPromise = null;        // serialize overlapping ticks onto one attempt
   let authQuiet = false;              // unrecoverable auth state — warned once, quiet until restart
   let cachedToken = null;             // { token, expiresAtMs }
+  let loggedCgroupFallback = false;   // logged once when cgroup is absent (non-containerized)
 
   async function fetchWithTimeout(url, opts = {}) {
     const controller = new AbortController();
@@ -312,7 +319,12 @@ export function createMetricsReporter(activeOrgConfigs, {
     cgroup.sample();
     const dashboard = await fetchDashboardState();
     if (!dashboard) return;
-    const payload = buildPayload(dashboard, cgroup.read());
+    const cg = cgroup.read();
+    if (cg.cgroup_version === 'none' && !loggedCgroupFallback) {
+      loggedCgroupFallback = true;
+      log?.('cgroup unavailable (non-containerized agent) — reporting node-level CPU/memory from dashboard');
+    }
+    const payload = buildPayload(dashboard, cg);
     if (!payload) return;
 
     // Report to the PRIMARY org only (the first enabled org, i.e. the first
