@@ -38,6 +38,7 @@ import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
 import { putForOrg as realPutForOrg, apiPath as realApiPath } from './client.js';
 import { updateConfig } from './config.js';
+import { createCgroupCollector } from './cgroup-resources.js';
 
 const HOME = process.env.HOME;
 const DASHBOARD_CONFIG_PATH = path.join(HOME, 'zylos/components/dashboard/config.json');
@@ -91,17 +92,22 @@ function getDashboardPort() {
 // callback, not by reconciling a periodic installed-channels report. This
 // reporter now carries only runtime metrics (version / resources / cost).
 
-function buildPayload(dashboard) {
+// CPU and memory come from the cgroup collector (`cg`), NOT the dashboard: the
+// dashboard's os.cpus()/os.totalmem() figures are node-level inside a container
+// and don't reflect this container's cgroup quota (see cgroup-resources.js).
+// Disk stays sourced from the dashboard — its statfs on the volume mount is
+// already the correct, container-visible scope.
+function buildPayload(dashboard, cg) {
   if (!dashboard) return null;
   const sys = dashboard.system_metrics || {};
   const rt = dashboard.runtime_info || {};
   return {
     version: PKG_VERSION,
     resources: {
-      cpu_pct:   sys.cpu_pct ?? null,
-      mem_pct:   sys.mem_pct ?? null,
-      mem_total_bytes: sys.mem_total_bytes ?? null,
-      mem_used_bytes:  sys.mem_used_bytes ?? null,
+      cpu_pct:   cg.cpu_pct ?? null,
+      mem_pct:   cg.mem_pct ?? null,
+      mem_total_bytes: cg.mem_total_bytes ?? null,
+      mem_used_bytes:  cg.mem_used_bytes ?? null,
       disk_pct:        sys.disk_pct ?? null,
       disk_free_bytes: sys.disk_free_bytes ?? null,
     },
@@ -133,6 +139,7 @@ export function createMetricsReporter(activeOrgConfigs, {
   fileExists = fs.existsSync,
   persistKey = persistKeyToConfig,
   apiKeyCliPath = DEFAULT_API_KEY_CLI,
+  cgroup = createCgroupCollector(),
 } = {}) {
   let warnedEndpoint404 = false;     // cws-core runtime-metrics endpoint missing
   let warnedStateUnavailable = false; // dashboard state fetch failing — re-armed on success
@@ -299,8 +306,13 @@ export function createMetricsReporter(activeOrgConfigs, {
   }
 
   return async function reportMetrics() {
+    // Sample CPU every tick — cumulative usage_usec needs a differential window,
+    // and sampling unconditionally (before the dashboard fetch, which can fail)
+    // keeps the window evenly spaced across dashboard outages.
+    cgroup.sample();
     const dashboard = await fetchDashboardState();
-    const payload = buildPayload(dashboard);
+    if (!dashboard) return;
+    const payload = buildPayload(dashboard, cgroup.read());
     if (!payload) return;
 
     // Report to the PRIMARY org only (the first enabled org, i.e. the first
