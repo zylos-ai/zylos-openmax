@@ -62,7 +62,7 @@
 
 ```bash
 # 共享
-export COCO_API_URL=https://cws-int.coco.xyz
+export COCO_API_URL=https://<your-bff-host>
 export TEST_USER_TOKEN=<owner JWT,用来代表用户向两个 conv 发消息>
 export TEST_ORG_ID=<目标 org uuid>
 export TEST_PROJECT_ID=<smoke 跑在哪个 project>
@@ -113,7 +113,7 @@ NL 单 case 跑时长 3-7 分钟(双 agent NL 各处理一次或多次)。smoke-
 
 ## 已知服务端依赖
 
-- **case 7/4/5 涉及 KB 内容验证**:避开 `GET /api/v1/pages` 端点(cws-kb#199 — 该端点 cws-int 上 100% 502),改用 `kb.tree_roots + kb.node_get + kb.page_content` 三段式定位
+- **case 7/4/5 涉及 KB 内容验证**:避开 `GET /api/v1/pages` 端点(cws-kb#199 — 该端点在目标环境上 100% 502),改用 `kb.tree_roots + kb.node_get + kb.page_content` 三段式定位
 - 跨 agent / Lead-only 权限边界由 agent 自身角色契约保证(skill 文档),server 端 ReBAC 还在 develop-mode
 
 ## 未覆盖(下一批可选)

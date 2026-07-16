@@ -12,7 +12,7 @@
  *
  * Single user NL: only LEAD gets one natural-language instruction.
  *
- * Avoids `kb.pages` (broken on cws-int per cws-kb#199) — instead walks
+ * Avoids `kb.pages` (broken on the staging environment per cws-kb#199) — instead walks
  * `kb.tree_roots` to locate pages by title prefix.
  */
 

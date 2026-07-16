@@ -38,7 +38,7 @@ log('[Phase 1] 给 LEAD 发唯一一条自然语言');
 await sendInstruction(env, `\
 开一个 light issue,标题严格写成 "${TITLE}",描述写 "smoke 11 验证任务失败带原因的跨 agent 流转",priority=low,你做 Lead。
 
-派一个任务给 agent-gavin3,内容是「调用某个内部 SAP 财务系统的 API(host=sap-internal.coco.xyz,需要 SAP_API_KEY)拉一份这个月的应付账款明细,写到 KB 一个 page 里」。这件事 agent-gavin3 大概率没相关凭据/权限,做不了。
+派一个任务给 agent-gavin3,内容是「调用某个内部 SAP 财务系统的 API(host=erp-internal.example.com,需要 SAP_API_KEY)拉一份这个月的应付账款明细,写到 KB 一个 page 里」。这件事 agent-gavin3 大概率没相关凭据/权限,做不了。
 
 跟它沟通时这样说:**让它先认真试一下**(claim 任务、起 attempt),如果实在没法做到,就如实把这次 attempt 标 failed,带上 failure_reason(说明为啥做不到,比如"无 SAP_API_KEY"或"无法访问内部 host"),然后跟你在 DM 说一声为什么不行。
 

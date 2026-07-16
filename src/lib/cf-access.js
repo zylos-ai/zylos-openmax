@@ -1,7 +1,7 @@
 // =============================================================================
 // Cloudflare Access service-token headers.
 //
-// Some environments (e.g. cws-int.coco.xyz) sit behind Cloudflare Access, which
+// Some environments (e.g. <bff-host>) sit behind Cloudflare Access, which
 // requires a CF-Access-Client-Id / CF-Access-Client-Secret service-token pair on
 // every outbound REST call and the WebSocket handshake. These are NOT a cws-core
 // auth credential — they only let traffic through the Access gate.

@@ -12,7 +12,7 @@
 ## 1. test client 前置:provision USER2
 
 **这部分不在 NL 里**,由 test client 自己 register + login + invitation
-+ accept 把 `gavin-test-003@example.com` 拉进 org,然后把它的 member_id
++ accept 把 `<test-user-c>@example.com` 拉进 org,然后把它的 member_id
 作为参数注入到 NL 文本里。
 
 ---

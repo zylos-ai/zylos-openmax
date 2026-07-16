@@ -6,7 +6,7 @@
  *
  * 与 Smoke 1/2/3 不同,这个 case 完全走 cws-core REST,不涉及 agent /
  * cws-comm WS 链路。用途:
- *   - 验证 cws-int 网关 + cws-core + cws-work 在"create project"路径上健康
+ *   - 验证目标环境网关 + cws-core + cws-work 在"create project"路径上健康
  *   - 为其他 smoke 用例做 fixture(产出可复用的 TEST_PROJECT_ID)
  *
  * Phase 1: POST /auth/login           → org-scoped access_token
@@ -27,7 +27,7 @@ const env = (() => {
       console.error(`✗ Missing required env: ${k}`);
       console.error(`  Required: ${REQUIRED.join(', ')}`);
       console.error(`  Optional: CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET`);
-      console.error(`              (needed only when cws-int is behind Cloudflare Access)`);
+      console.error(`              (needed only when the target environment is behind Cloudflare Access)`);
       process.exit(2);
     }
   }

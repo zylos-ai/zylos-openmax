@@ -100,7 +100,7 @@ if (ws) {
   config.server.ws_url = bff.replace(/^http/, 'ws') + '/ws';
 }
 
-// CF-Access service token (for Access-protected envs like cws-int). Persist
+// CF-Access service token (for Access-protected environments). Persist
 // from the supplied values into config.cf_access — never hardcoded in source.
 if (!config.cf_access) config.cf_access = { client_id: '', client_secret: '' };
 if (values.COCO_CF_ACCESS_CLIENT_ID)     config.cf_access.client_id     = values.COCO_CF_ACCESS_CLIENT_ID;

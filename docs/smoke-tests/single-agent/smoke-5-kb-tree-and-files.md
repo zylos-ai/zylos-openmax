@@ -48,7 +48,7 @@
 ### Env
 
 ```
-COCO_API_URL=https://cws-int.coco.xyz
+COCO_API_URL=https://<your-bff-host>
 TEST_USER_TOKEN=<org-scoped JWT>
 TEST_CONV_ID=<DM uuid>
 TEST_AGENT_ID=<agent member_id>

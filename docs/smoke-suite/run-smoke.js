@@ -14,7 +14,7 @@
 //   node docs/smoke/run-smoke.js single-8 multi-5         # subset (by id)
 //   SMOKE_WORKER_API_KEY=cwsk_... node ... run-smoke.js   # enable multi cases
 //   SMOKE_NOTIFY="lark|<endpoint>" node ... run-smoke.js  # report via C4
-//   SMOKE_USER=gavin-test-005 ...                         # drive NL as other user
+//   SMOKE_USER=<test-user-b> ...                         # drive NL as other user
 //
 // Exit code: 0 if all pass, 1 if any fail (so CI / hooks can gate on it).
 

@@ -14,7 +14,7 @@
 
 ## 1. 前置:provision USER3 identity-only
 
-test client 先 register `gavin-test-004-<TS>@example.com`(每次跑 TS 不同,
+test client 先 register `<test-user-d>-<TS>@example.com`(每次跑 TS 不同,
 保证全新身份;若已存在则 409/422 也 OK),identity-only login 拿 user3
 token,这部分**不**在 NL 里。然后 NL 让 agent 发邀请,test client 用
 user3 token 调 accept 完成入组。
@@ -31,7 +31,7 @@ user3 token 调 accept 完成入组。
 ### Round 1 — 发邀请
 
 ```
-我想邀请一个新同事 gavin-test-004-<TS>@example.com 加入我们 org 当 org-member,
+我想邀请一个新同事 <test-user-d>-<TS>@example.com 加入我们 org 当 org-member,
 帮我发一条邀请,附言写 "${NS} 入组测试"。
 
 发完报 invitation id 和 token(两行,格式

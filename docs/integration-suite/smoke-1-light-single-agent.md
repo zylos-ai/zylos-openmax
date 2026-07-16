@@ -59,12 +59,12 @@
 ### Env vars
 
 ```bash
-COCO_API_URL=https://cws-int.coco.xyz
+COCO_API_URL=https://<your-bff-host>
 TEST_USER_TOKEN=<bearer>
 TEST_CONV_ID=<uuid>
 TEST_AGENT_ID=<uuid>
 TEST_PROJECT_ID=<uuid>
-CF_ACCESS_CLIENT_ID=<...>.access     # cws-int 走 CF Access 时必填
+CF_ACCESS_CLIENT_ID=<...>.access     # 目标环境走 CF Access 时必填
 CF_ACCESS_CLIENT_SECRET=<...>        # 同上
 # COCO_AUTH_TOKEN= 可省,缺省 = TEST_USER_TOKEN
 # COCO_TM_CLI=     可省,默认 = installed skill 的 tm.js
@@ -107,7 +107,7 @@ CF_ACCESS_CLIENT_SECRET=<...>        # 同上
 ```bash
 cd ~/zylos/workspace/zylos-openmax
 
-export COCO_API_URL=https://cws-int.coco.xyz
+export COCO_API_URL=https://<your-bff-host>
 export TEST_USER_TOKEN=<test user bearer>
 export TEST_CONV_ID=<conversation id>
 export TEST_AGENT_ID=<agent member id>

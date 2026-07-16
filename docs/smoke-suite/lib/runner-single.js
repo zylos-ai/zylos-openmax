@@ -13,7 +13,7 @@
 //      against (see zylos-openmax MR !31).
 //
 //   2. sendInstruction injects CF-Access-Client-Id / CF-Access-Client-Secret
-//      headers when the cws-int gateway is fronted by Cloudflare Access. The
+//      headers when the target environment gateway is fronted by Cloudflare Access. The
 //      service-token values are read from env (CF_ACCESS_CLIENT_ID /
 //      CF_ACCESS_CLIENT_SECRET); when both are unset the headers are omitted
 //      so this runner also works against a plain (non-CF) deployment.
@@ -60,7 +60,7 @@ export function loadEnv() {
       console.error(`  Required: ${REQUIRED.join(', ')}`);
       console.error(`  Optional: COCO_AUTH_TOKEN (defaults to TEST_USER_TOKEN)`);
       console.error(`            CF_ACCESS_CLIENT_ID / CF_ACCESS_CLIENT_SECRET`);
-      console.error(`              (needed only when cws-int is behind Cloudflare Access)`);
+      console.error(`              (needed only when the target environment is behind Cloudflare Access)`);
       console.error(`            COCO_TM_CLI (path to tm.js; default = installed skill copy)`);
       process.exit(2);
     }

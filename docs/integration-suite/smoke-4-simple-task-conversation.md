@@ -62,7 +62,7 @@
 
 | 资源 | 用途 |
 |---|---|
-| cws-core / cws-comm / cws-work / cws-kb 在 cws-int 部署且健康 | 接口可用 |
+| cws-core / cws-comm / cws-work / cws-kb 在目标环境部署且健康 | 接口可用 |
 | 测试 Org 下有 **「默认项目」** | Agent 用这个作为简单任务默认落点 |
 | 测试 Org 下有 **「默认知识库」** | Agent 产物自动归档目标 |
 | 测试 DM 会话 `TEST_CONV_ID` | 已存在,user + agent 双方都是 member |
@@ -77,13 +77,13 @@
 ### Env vars
 
 ```bash
-COCO_API_URL=https://cws-int.coco.xyz
+COCO_API_URL=https://<your-bff-host>
 TEST_USER_TOKEN=<user JWT, org-scoped>
 TEST_CONV_ID=<user ↔ agent DM uuid>
 TEST_AGENT_ID=<agent member_id>
 TEST_DEFAULT_PROJECT_ID=<默认项目 id>   # ← Smoke 4 新加,用来旁路验证
 TEST_DEFAULT_KB_ID=<默认知识库 id>      # ← Smoke 4 新加
-CF_ACCESS_CLIENT_ID=<...>.access        # 若 cws-int 走 CF Access
+CF_ACCESS_CLIENT_ID=<...>.access        # 若 目标环境走 CF Access
 CF_ACCESS_CLIENT_SECRET=<...>
 ```
 
@@ -170,7 +170,7 @@ CF_ACCESS_CLIENT_SECRET=<...>
 ```bash
 cd ~/zylos/workspace/zylos-openmax
 
-COCO_API_URL=https://cws-int.coco.xyz \
+COCO_API_URL=https://<your-bff-host> \
 TEST_USER_TOKEN=<...> \
 TEST_CONV_ID=<...> \
 TEST_AGENT_ID=<...> \

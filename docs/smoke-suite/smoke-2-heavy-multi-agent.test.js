@@ -97,7 +97,7 @@ assertEq(finalIssue.lead_agent_id, env.lead.agent_id, '4. issue.lead_agent_id');
 
 // 5: blueprint exists with 3 steps + DAG
 //    Note: current_blueprint_id may be null if submit-for-approval endpoint
-//    is missing on the deployment (cws-int regression observed 2026-06-06).
+//    is missing on the deployment (regression observed on the staging environment 2026-06-06).
 //    Fall back to blueprint.list to find one by issue_id.
 let bp = null;
 if (finalIssue.current_blueprint_id) {

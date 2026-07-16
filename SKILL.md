@@ -56,7 +56,7 @@ config:
     - name: COCO_SELF_NAME
       description: Agent's display name in COCO_ORG_ID (proto self.name)
     - name: COCO_CF_ACCESS_CLIENT_ID
-      description: Cloudflare Access service-token client id (for Access-protected envs like cws-int); written to config.cf_access. Omit for direct/unprotected cws-core.
+      description: Cloudflare Access service-token client id (for Access-protected environments); written to config.cf_access. Omit for direct/unprotected cws-core.
     - name: COCO_CF_ACCESS_CLIENT_SECRET
       description: Cloudflare Access service-token client secret; written to config.cf_access. Never hardcoded in source.
       sensitive: true

@@ -60,7 +60,7 @@
 
 ```bash
 # 必需
-export COCO_API_URL=https://cws-int.coco.xyz          # cws-core gateway(通常带 CF Access 保护)
+export COCO_API_URL=https://<your-bff-host>          # cws-core gateway(通常带 CF Access 保护)
 export TEST_USER_TOKEN=<test user bearer JWT>          # /auth/login 拿到的 user access_token
 export TEST_CONV_ID=<conversation uuid>                # user ↔ agent 的 DM 或 group
 export TEST_AGENT_ID=<agent member uuid>               # agent 在测试 org 的 member id
@@ -68,12 +68,12 @@ export TEST_PROJECT_ID=<project uuid>                  # 用于 issue.list_in_pr
 
 # 可选 ——
 export COCO_AUTH_TOKEN=<bearer>                        # 跟 TEST_USER_TOKEN 不同时才用;默认 fallback
-export CF_ACCESS_CLIENT_ID=<...>.access                # cws-int 走 CF Access 时必填
+export CF_ACCESS_CLIENT_ID=<...>.access                # 目标环境走 CF Access 时必填
 export CF_ACCESS_CLIENT_SECRET=<...>                   # 同上
 export COCO_TM_CLI=/path/to/tm.js                      # 覆盖默认 tm.js 路径
 ```
 
-> **CF Access 必填场景**:cws-int.coco.xyz 整个域名被 Cloudflare Zero Trust Access 保护。没带 service token 的请求会被 302 到 `bitlayer.cloudflareaccess.com/cdn-cgi/access/login`。本 runner 检测到两个 env 都设了才注入对应头,否则不加(留给 plain HTTP 部署场景)。
+> **CF Access 必填场景**:<bff-host> 整个域名被 Cloudflare Zero Trust Access 保护。没带 service token 的请求会被 302 到 `bitlayer.cloudflareaccess.com/cdn-cgi/access/login`。本 runner 检测到两个 env 都设了才注入对应头,否则不加(留给 plain HTTP 部署场景)。
 >
 > **TEST_PROJECT_ID 怎么拿**:create-organization 时 cws-core 会尽力创建一个 `slug: inbox` 的默认 project;没有的话用 `node src/cli/tm.js project.create '{...}'` 手工建一个,或者 `node src/cli/tm.js project.list '{}'` 看 org 下已有项目。
 

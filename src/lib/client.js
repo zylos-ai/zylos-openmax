@@ -399,8 +399,8 @@ export function asClient(orgId) {
  *
  * Pre-signed URLs carry their own AWS SigV4 auth in the query string, so we
  * don't add a Bearer token. We DO inject `CF-Access-Client-*` headers on
- * every outbound request — the cws-int gateway fronts both the API and the
- * artifact storage (`cws-int.coco.xyz/cws-artifacts/*`) through the same
+ * every outbound request — the BFF gateway fronts both the API and the
+ * artifact storage (`{bff_url}/cws-artifacts/*`) through the same
  * Cloudflare Access zone, and any request without service-token headers
  * gets 302'd to the login page. Sending CF headers to a pure third-party
  * S3/MinIO endpoint is harmless (the headers are ignored).
