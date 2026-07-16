@@ -42,6 +42,7 @@ import { createInboxLedger } from './lib/inbox-ledger.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter } from './lib/metrics-reporter.js';
+import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
 
@@ -1873,6 +1874,12 @@ function periodicSync() {
 const METRICS_REPORT_INTERVAL_MS = (config.metricsReport?.intervalSeconds || 60) * 1000;
 const METRICS_REPORT_INITIAL_DELAY_MS = 15_000;
 
+// Channel-liveness reporting — enumerate the 13 IM channels' pm2 status, push
+// to cws-core, on the same ~60s cadence as runtime-metrics. Offset the first
+// tick from metrics so the two don't spawn pm2 / hit the dashboard at once.
+const CHANNEL_LIVENESS_INTERVAL_MS = (config.channelLiveness?.intervalSeconds || 60) * 1000;
+const CHANNEL_LIVENESS_INITIAL_DELAY_MS = 20_000;
+
 // =============================================================================
 // WS pool — one connection per enabled org
 // =============================================================================
@@ -2151,6 +2158,15 @@ if (config.metricsReport?.enabled !== false) {
     delay: METRICS_REPORT_INITIAL_DELAY_MS,
   });
 }
+if (config.channelLiveness?.enabled !== false) {
+  const reportChannelLiveness = createChannelLivenessReporter(activeOrgConfigs, {
+    log, warn,
+  });
+  tasks.register('channel-liveness', reportChannelLiveness, CHANNEL_LIVENESS_INTERVAL_MS, {
+    delay: CHANNEL_LIVENESS_INITIAL_DELAY_MS,
+  });
+}
 tasks.start('frame-metrics');
 tasks.start('owner-config-sync');
 if (config.metricsReport?.enabled !== false) tasks.start('metrics-report');
+if (config.channelLiveness?.enabled !== false) tasks.start('channel-liveness');

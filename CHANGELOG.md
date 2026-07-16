@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] — 2026-07-16
+
+### Added
+
+- **Channel-liveness reporter (`src/lib/channel-liveness-reporter.js`).** On the same ~60s periodic tick that drives runtime-metrics, openmax now enumerates the 13 IM channel components' pm2 online/offline status and self-reports it to cws-core via `PUT /api/v1/agents/{member_id}/channel-liveness` (HTTP 202). Body is `{ "channels": [{ "channel_type": ..., "online": ... }, ...] }`; identity is derived from the JWT (not the body).
+  - **Reuses existing pm2/channel plumbing.** The channel → pm2-process mapping is the existing `CHANNEL_COMPONENT` table (its keys already are the cws-connect catalog `channel_type` values), and pm2 status is read via a single shared `readPm2Statuses` helper extracted from `channel-connector.js` (one `pm2 jlist`, also now used by `defaultVerify`). No new pm2 logic.
+  - **Mirrors the runtime-metrics self-report path.** Uses the authenticated org-scoped client (`putForOrg`/`apiPath`) and reports per active org with that org's own `self.member_id`. No new HTTP/auth path.
+  - **Safety guard.** If `pm2 jlist` fails or returns nothing, the tick is skipped (warned once, re-armed on recovery) — never reports "all 13 offline" on a pm2 error. Best-effort: individual PUTs are guarded (a missing endpoint 404 is warned once then skipped) and the report never throws into the shared metrics loop.
+  - **Config gating.** New `channelLiveness` block mirrors `metricsReport`: enabled unless `channelLiveness.enabled: false`; cadence via `channelLiveness.intervalSeconds` (default 60s).
+  - E2E requires cws-core (with the channel-liveness endpoint) deployed to the targeted environment (currently prod openmax.com); code-complete but E2E-pending-deploy.
+
 ## [2.9.8] — 2026-07-16
 
 ### Security
