@@ -6,10 +6,10 @@
 # run `pm2 start <skill>/ecosystem.config.cjs` afterwards.
 #
 # Required env:
-#   COCO_BFF_URL                 e.g. https://cws-int.coco.xyz
+#   COCO_BFF_URL                 e.g. https://<your-bff-host>
 #
 # Optional env (endpoints):
-#   COCO_WS_URL                  e.g. wss://cws-int.coco.xyz/ws (derived from BFF if absent)
+#   COCO_WS_URL                  e.g. wss://<your-bff-host>/ws (derived from BFF if absent)
 #
 # Optional env (agent identity — BYO; all 3 or auto-register):
 #   COCO_IDENTITY_ID             agent identity uuid
@@ -17,7 +17,7 @@
 #   COCO_MEMBER_ID               agent's member_id in COCO_ORG_ID
 #
 # Optional env (org-1 seed; channel-auth proto-aligned):
-#   COCO_ORG_ID                  e.g. 019e8b9b-...
+#   COCO_ORG_ID                  e.g. <your-org-id>
 #   COCO_ORG_NAME                display
 #   COCO_OWNER_MEMBER_ID         human owner's member_id (pre-binds dmPolicy=owner)
 #   COCO_OWNER_NAME              display
@@ -30,7 +30,7 @@
 set -euo pipefail
 
 # -------- Cloudflare Access service-token (from env, persisted to config) -----
-# For Access-protected environments (e.g. cws-int.coco.xyz). Supply via env:
+# For Access-protected environments (e.g. behind Cloudflare Access). Supply via env:
 #   COCO_CF_ACCESS_CLIENT_ID, COCO_CF_ACCESS_CLIENT_SECRET
 # These only let traffic through the Cloudflare Access gate; they are NOT an
 # authentication credential against cws-core itself. Never hardcoded here —
