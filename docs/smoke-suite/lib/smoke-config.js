@@ -16,7 +16,7 @@
 //     dynamically via create_dm — no conversation ids baked in.
 //
 // Only the two human test USERS that drive the natural-language messages are
-// embedded (throwaway cws-int test-org accounts — confirmed OK by the owner).
+// embedded (throwaway staging test-org accounts — confirmed OK by the owner).
 // No agent credentials are committed here.
 // =============================================================================
 
@@ -40,20 +40,20 @@ function loadSmokeFile() {
 }
 const SMOKE = loadSmokeFile();
 
-export const API_URL = process.env.COCO_API_URL || SMOKE.api_url || 'https://cws-int.coco.xyz';
+export const API_URL = process.env.COCO_API_URL || SMOKE.api_url || 'https://<your-bff-host>';
 
 export const CF_ACCESS = {
   clientId:     process.env.CF_ACCESS_CLIENT_ID     || SMOKE.cf_access?.client_id     || '',
   clientSecret: process.env.CF_ACCESS_CLIENT_SECRET || SMOKE.cf_access?.client_secret || '',
 };
 
-export const ORG_ID     = process.env.SMOKE_ORG_ID     || SMOKE.org_id     || ''; // e.g. Coco Test Org2
-export const PROJECT_ID = process.env.SMOKE_PROJECT_ID || SMOKE.project_id || ''; // e.g. slug fe-teset
+export const ORG_ID     = process.env.SMOKE_ORG_ID     || SMOKE.org_id     || ''; // e.g. <test-org-id>
+export const PROJECT_ID = process.env.SMOKE_PROJECT_ID || SMOKE.project_id || ''; // e.g. slug <test-project-id>
 
 // Human test users that drive user→agent NL. Loaded from the smoke config file
-// (test-org accounts). Pick via SMOKE_USER (default gavin-test-002).
+// (test-org accounts). Pick via SMOKE_USER (default <test-user-a>).
 export const USERS = SMOKE.users || {};
-export const DEFAULT_USER = process.env.SMOKE_USER || SMOKE.default_user || 'gavin-test-002';
+export const DEFAULT_USER = process.env.SMOKE_USER || SMOKE.default_user || '<test-user-a>';
 
 // Password used to provision throwaway test accounts that a smoke registers on
 // the fly (fixed-email accounts need a stable value). Sourced from env or the
@@ -149,7 +149,7 @@ export async function createDm(token, peerMemberId) {
 }
 
 // Populate process.env.TEST_* so the copied runners work unchanged.
-//   opts.user        — NL-driving user key (default gavin-test-002)
+//   opts.user        — NL-driving user key (default <test-user-a>)
 //   opts.needWorker  — true for multi-agent cases
 //   opts.workerApiKey — worker agent api_key (else SMOKE_WORKER_API_KEY)
 export async function applyEnv(opts = {}) {

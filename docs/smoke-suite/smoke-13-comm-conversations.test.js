@@ -98,8 +98,8 @@ async function currentSeq() {
 log(`=== Smoke 13 (NL): Comm 会话生命周期 ===  ${NS}`);
 
 // ---------- 前置:provision USER2 ----------
-log('[前置] provision USER2 (gavin-test-003)');
-const USER2_EMAIL = 'gavin-test-003@example.com';
+log('[前置] provision USER2 (<test-user-c>)');
+const USER2_EMAIL = '<test-user-c>@example.com';
 const USER2_PASS  = PROVISION_PASSWORD;
 if (!USER2_PASS) die('provision password missing — set TEST_PASSWORD or provision_password in smoke-config.json');
 
@@ -247,7 +247,7 @@ if (lastMsg) {
 
 // ---- Cleanup ---------------------------------------------------------------
 // No conversation delete API exists — group and messages persist.
-// USER2 is a throwaway test account (gavin-test-003) — no cleanup needed.
+// USER2 is a throwaway test account (<test-user-c>) — no cleanup needed.
 log('');
 log('[Cleanup] comm 无 conversation 删除 API,群聊数据保留');
 

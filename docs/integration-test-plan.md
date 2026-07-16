@@ -196,9 +196,9 @@ docs/cross-service-suite/
 
 | 项 | 值 |
 |----|---|
-| 目标环境 | `https://cws-int.coco.xyz`（staging） |
+| 目标环境 | `https://<your-bff-host>`（staging） |
 | 认证 | CF-Access headers + 测试账号 JWT |
-| 测试用户 | gavin-test-002 (org-owner), gavin-test-005 (org-member) |
+| 测试用户 | <test-user-a> (org-owner), <test-user-b> (org-member) |
 | 测试 Agent | 动态创建（通过 invitation 接口），测试后清理 |
 | 数据隔离 | 每次运行创建独立 project，测试后 archive |
 

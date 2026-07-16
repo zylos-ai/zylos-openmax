@@ -101,7 +101,7 @@ log(`=== Smoke 16 (NL): Invitations ===  ${NS}`);
 // semantic body, not a raw PG error / 500. Until then, isolate each
 // run by timestamping.
 log('[前置] provision USER3');
-const USER3_EMAIL = `gavin-test-004-${TS}@example.com`;
+const USER3_EMAIL = `<test-user-d>-${TS}@example.com`;
 // Throwaway account created fresh this run (email is timestamped), so the
 // password can be dynamic — no hardcoded literal. Override with TEST_PASSWORD.
 const USER3_PASS  = process.env.TEST_PASSWORD || `Aa1!${TS}`;

@@ -6,7 +6,7 @@
  * groupPolicy / owner-binding gates that exist to filter human/agent senders
  * must not apply to it — see comm-bridge `shouldHandleMessage`.
  *
- * Wire shape (cws-int 实测，DM 019ec4ea 的 SYSTEM 消息)：
+ * Wire shape (目标环境实测，DM <dm-id> 的 SYSTEM 消息)：
  *   { sender_type: "SYSTEM", type: "TEXT",
  *     content: { content_type: "text", body: { text: "[调度中心] …" } } }
  * 当前部署的系统消息**尚未携带** `metadata.systemEvent`，所以 priority 读取要

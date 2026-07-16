@@ -37,11 +37,11 @@ Actors are **not** hardcoded:
   issued JWT. Nothing about the worker is committed.
 - **Conversations** (user↔lead / user↔worker / lead↔worker) are resolved
   dynamically via `create_dm` — no conversation ids baked in.
-- **Users** (NL drivers, hardcoded test-org accounts): `gavin-test-002`
-  (org-owner, default) / `gavin-test-005` (org-member). Pick via `SMOKE_USER`.
-- **Org**: Coco Test Org2 (`019e8b9b…`), **project**: `ae5fa2ef…` (fe-teset).
+- **Users** (NL drivers, hardcoded test-org accounts): `<test-user-a>`
+  (org-owner, default) / `<test-user-b>` (org-member). Pick via `SMOKE_USER`.
+- **Org**: `<test-org-id>`, **project**: `<test-project-id>`.
 
-> ⚠️ Only the two human test-user credentials are embedded (throwaway cws-int
+> ⚠️ Only the two human test-user credentials are embedded (throwaway staging
 > test-org accounts, confirmed OK by the owner). No agent credentials are
 > committed — the worker key is supplied at run time.
 
@@ -61,7 +61,7 @@ SMOKE_WORKER_API_KEY=cwsk_... node docs/smoke/smoke-5-as-file-handoff.test.js
 SMOKE_NOTIFY="lark|<endpoint>" SMOKE_WORKER_API_KEY=cwsk_... node docs/smoke/run-smoke.js
 
 # drive NL as the other user
-SMOKE_USER=gavin-test-005 node docs/smoke/smoke-8-tm-metadata-edges.test.js
+SMOKE_USER=<test-user-b> node docs/smoke/smoke-8-tm-metadata-edges.test.js
 ```
 
 `run-smoke.js` exits non-zero if any case fails, so a deploy hook / CI step can

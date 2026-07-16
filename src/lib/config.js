@@ -67,7 +67,7 @@ export const DEFAULT_CONFIG = {
 
   // Cloudflare Access service-token headers, attached to every outbound REST
   // call and the WS handshake when present (gates traffic into Access-protected
-  // environments like cws-int.coco.xyz). Empty by default — NOT a cws-core auth
+  // environments like <bff-host>). Empty by default — NOT a cws-core auth
   // credential. Populated into config.json at install time from operator-
   // supplied env (COCO_CF_ACCESS_CLIENT_ID / COCO_CF_ACCESS_CLIENT_SECRET).
   // When both are empty, no CF-Access headers are sent (direct/unprotected

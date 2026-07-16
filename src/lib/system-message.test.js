@@ -19,7 +19,7 @@ test('isSystemSender: 人类/agent/缺省都不命中', () => {
 });
 
 test('systemEventPriority: 无 systemEvent 返回 undefined（当前现网系统消息形态）', () => {
-  // cws-int 实测：content 仅有 content_type/body，无 metadata。
+  // 目标环境实测：content 仅有 content_type/body，无 metadata。
   assert.equal(
     systemEventPriority({ content: { content_type: 'text', body: { text: '[调度中心] …' } } }),
     undefined,

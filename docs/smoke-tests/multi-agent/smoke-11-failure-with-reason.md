@@ -26,7 +26,7 @@
 预期序列:
 1. LEAD task.create → WORKER
 2. WORKER claim → attempt#1 running → 尝试(可能调 web 工具发现没凭据,或直接评估自己没能力)
-3. WORKER attempt.transition→failed (failure_reason="无 SAP_API_KEY 凭据,无法访问 sap-internal.coco.xyz")
+3. WORKER attempt.transition→failed (failure_reason="无 SAP_API_KEY 凭据,无法访问 erp-internal.example.com")
 4. WORKER DM LEAD:解释为啥不行
 5. LEAD task.transition→failed
 6. LEAD issue.transition→delivered → set_acceptance(true, explicit)
