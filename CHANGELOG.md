@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.8] — 2026-07-16
+
+### Security
+
+- **Bump `ws` to `^8.21.0` (resolves to 8.21.1).** `ws` `<8.21.0` is affected by a high-severity WebSocket memory-exhaustion DoS (GHSA-96hv-2xvq-fx4p) from tiny fragments and data chunks; the lockfile previously resolved to the affected `8.20.1`. `npm audit` is now clean.
+
 ## [2.9.7] — 2026-07-15
 
 ### Fixed
