@@ -16,11 +16,15 @@
  *
  * Org / member targeting — mirrors the runtime-metrics self-report
  * ----------------------------------------------------------------
- * Reported per active org, using that org's own `self.member_id` as the path
- * member id (cws-core derives identity from the JWT; the path must be the
- * caller's own member id — self-report). Reuses the authenticated org-scoped
- * client (`putForOrg` / `apiPath` from client.js), so there is no new HTTP or
- * auth path. Identity is NOT placed in the body.
+ * A single PUT per tick to the PRIMARY org only — the same org/member that
+ * runtime-metrics targets, resolved via the shared `selectPrimaryOrg` helper
+ * (metrics-reporter.js) so the two reports stay consistent. The org's own
+ * `self.member_id` is the path member id (cws-core derives identity from the
+ * JWT; the path must be the caller's own member id — self-report). cws-connect
+ * keys channel state on identity (cross-org-stable), so one report under the
+ * primary org is sufficient — per-org would be redundant. Reuses the
+ * authenticated org-scoped client (`putForOrg` / `apiPath` from client.js), so
+ * there is no new HTTP or auth path. Identity is NOT placed in the body.
  *
  * Safety guard (required)
  * -----------------------
@@ -38,6 +42,7 @@
  */
 
 import { putForOrg as realPutForOrg, apiPath as realApiPath } from './client.js';
+import { selectPrimaryOrg } from './metrics-reporter.js';
 import {
   CHANNEL_COMPONENT,
   readPm2Statuses as realReadPm2Statuses,
@@ -100,34 +105,32 @@ export function createChannelLivenessReporter(activeOrgConfigs, {
       const payload = { channels };
       const onlineCount = channels.reduce((n, c) => n + (c.online ? 1 : 0), 0);
 
-      if (activeOrgConfigs.size === 0) {
+      // Self-report to the PRIMARY org only — same target as runtime-metrics.
+      const primary = selectPrimaryOrg(activeOrgConfigs);
+      if (!primary) {
         warn('no active org configured — channel-liveness not reported');
         return;
       }
-
-      // Self-report per active org (member_id is per-org). One PUT per org.
-      for (const [slug, orgConfig] of activeOrgConfigs) {
-        const selfMemberId = orgConfig.self?.member_id;
-        if (!selfMemberId) {
-          warn(`[${slug}] org has no self.member_id — channel-liveness not reported`);
-          continue;
-        }
-        try {
-          await putForOrg(
-            orgConfig.org_id,
-            apiPath(`/agents/${selfMemberId}/channel-liveness`),
-            payload,
-          );
-          log?.(`[${slug}] channel-liveness reported: ${onlineCount}/${CHANNEL_TYPES.length} channels online`);
-        } catch (err) {
-          if (err.status === 404) {
-            if (!warnedEndpoint404) {
-              warn(`[${slug}] channel-liveness endpoint not available (404), skipping`);
-              warnedEndpoint404 = true;
-            }
-          } else {
-            warn(`[${slug}] channel-liveness report failed: ${err.message}`);
+      const { slug, orgConfig, selfMemberId } = primary;
+      if (!selfMemberId) {
+        warn(`[${slug}] primary org has no self.member_id — channel-liveness not reported`);
+        return;
+      }
+      try {
+        await putForOrg(
+          orgConfig.org_id,
+          apiPath(`/agents/${selfMemberId}/channel-liveness`),
+          payload,
+        );
+        log?.(`[${slug}] channel-liveness reported: ${onlineCount}/${CHANNEL_TYPES.length} channels online`);
+      } catch (err) {
+        if (err.status === 404) {
+          if (!warnedEndpoint404) {
+            warn(`[${slug}] channel-liveness endpoint not available (404), skipping`);
+            warnedEndpoint404 = true;
           }
+        } else {
+          warn(`[${slug}] channel-liveness report failed: ${err.message}`);
         }
       }
     } catch (err) {

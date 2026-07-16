@@ -78,6 +78,22 @@ function persistKeyToConfig(key) {
   });
 }
 
+/**
+ * Resolve the PRIMARY org to self-report under: the first entry of the
+ * insertion-ordered `activeOrgConfigs` Map (the first enabled org). Returns
+ * `{ slug, orgConfig, selfMemberId }` (selfMemberId may be undefined when the
+ * primary org has no `self.member_id`), or `null` when no org is active. The
+ * caller decides how to warn on each dead end, so its message text can name
+ * the specific report (runtime-metrics / channel-liveness). Shared so every
+ * periodic self-report targets the exact same org/member.
+ */
+export function selectPrimaryOrg(activeOrgConfigs) {
+  const [primary] = activeOrgConfigs;
+  if (!primary) return null;
+  const [slug, orgConfig] = primary;
+  return { slug, orgConfig, selfMemberId: orgConfig.self?.member_id };
+}
+
 function getDashboardPort() {
   try {
     const cfg = JSON.parse(fs.readFileSync(DASHBOARD_CONFIG_PATH, 'utf8'));
@@ -329,13 +345,12 @@ export function createMetricsReporter(activeOrgConfigs, {
 
     // Report to the PRIMARY org only (the first enabled org, i.e. the first
     // entry of the insertion-ordered Map) — a single PUT, not one per org.
-    const [primary] = activeOrgConfigs;
+    const primary = selectPrimaryOrg(activeOrgConfigs);
     if (!primary) {
       warn('no active org configured — runtime-metrics not reported');
       return;
     }
-    const [slug, orgConfig] = primary;
-    const selfMemberId = orgConfig.self?.member_id;
+    const { slug, orgConfig, selfMemberId } = primary;
     if (!selfMemberId) {
       warn(`[${slug}] primary org has no self.member_id — runtime-metrics not reported`);
       return;

@@ -50,7 +50,7 @@ test('CHANNEL_TYPES is exactly the 13 cws-connect catalog values', () => {
   );
 });
 
-test('healthy pm2: PUTs 13 channels with correct online flags to the org self.member_id', async () => {
+test('healthy pm2: single PUT of 13 channels with correct online flags to the primary org self.member_id', async () => {
   const { report, puts, warns } = harness({
     readPm2Statuses: async () => pm2Map(['zylos-telegram', 'zylos-slack']),
     orgs: [{ slug: 'orgA', org_id: 'org-A', self: { member_id: 'm-A' } }],
@@ -104,7 +104,7 @@ test('pm2 recovers after a failure → once-guard re-arms and reports', async ()
   assert.deepEqual(online, ['lark']);
 });
 
-test('multi-org: one PUT per active org with its own member_id', async () => {
+test('multi-org: reports ONCE to the primary (first) org only — a single PUT', async () => {
   const { report, puts } = harness({
     readPm2Statuses: async () => pm2Map(['zylos-discord']),
     orgs: [
@@ -113,14 +113,12 @@ test('multi-org: one PUT per active org with its own member_id', async () => {
     ],
   });
   await report();
-  assert.equal(puts.length, 2);
-  assert.deepEqual(puts.map((p) => p.path).sort(), [
-    '/api/v1/agents/m-A/channel-liveness',
-    '/api/v1/agents/m-B/channel-liveness',
-  ]);
+  assert.equal(puts.length, 1);
+  assert.equal(puts[0].orgId, 'org-A');
+  assert.equal(puts[0].path, '/api/v1/agents/m-A/channel-liveness');
 });
 
-test('org without self.member_id → warned and skipped, others still reported', async () => {
+test('primary org without self.member_id → warned, no PUT (does not fall through to other orgs)', async () => {
   const { report, puts, warns } = harness({
     readPm2Statuses: async () => pm2Map([]),
     orgs: [
@@ -129,9 +127,8 @@ test('org without self.member_id → warned and skipped, others still reported',
     ],
   });
   await report();
-  assert.equal(puts.length, 1);
-  assert.equal(puts[0].orgId, 'org-B');
-  assert.match(warns.find((w) => /orgA/.test(w)), /no self\.member_id/);
+  assert.equal(puts.length, 0);
+  assert.match(warns.find((w) => /orgA/.test(w)), /primary org has no self\.member_id/);
 });
 
 test('endpoint 404 → warn once, no throw, does not report again quietly', async () => {
