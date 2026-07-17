@@ -61,6 +61,11 @@ const DEFAULT_DEDUP_MAX_ENTRIES = 3000;
 // heartbeat_interval}` may override either; if absent, these apply.
 const DEFAULT_WS_RECONNECT_MAX_MS = 30 * 1000;    // 30_000
 const DEFAULT_WS_HEARTBEAT_MS     = 30 * 1000;    // 30_000
+// Client-initiated WS ping cadence. Must stay comfortably below the ws.js
+// frame-watchdog window (heartbeatIntervalMs*2 + 5s = 65s at defaults) so the
+// watchdog never starves when server pings don't reach us. Overridable via
+// `config.server.ws_ping_interval_seconds` (seconds).
+const DEFAULT_WS_PING_INTERVAL_MS = 20 * 1000;    // 20_000
 
 const tasks = new TaskRegistry();
 
@@ -1984,6 +1989,9 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     clientVersion:       config.agent?.app_version,
     reconnectMaxMs:      config.server?.reconnect_max_delay ?? DEFAULT_WS_RECONNECT_MAX_MS,
     heartbeatIntervalMs: config.server?.heartbeat_interval  ?? DEFAULT_WS_HEARTBEAT_MS,
+    pingIntervalMs:      config.server?.ws_ping_interval_seconds != null
+      ? config.server.ws_ping_interval_seconds * 1000
+      : DEFAULT_WS_PING_INTERVAL_MS,
 
     onOpen: async () => {
       log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
