@@ -646,6 +646,31 @@ function defaultWriteConfig(component, patch, { home = HOME, fsDep = fs } = {}) 
 }
 
 /**
+ * One-shot pm2 process enumeration. Runs `pm2 jlist` and returns a Map of
+ * process name → online boolean (`pm2_env.status === 'online'`). Returns
+ * `null` when pm2 is unavailable or its output can't be parsed, so callers can
+ * distinguish "pm2 error / unknown" from "process is offline" (never throws).
+ *
+ * This is the single source of pm2 status truth reused by both `defaultVerify`
+ * (connect health-check) and the channel-liveness reporter — do not duplicate
+ * the jlist parsing elsewhere.
+ */
+export async function readPm2Statuses(execFile = realExecFile) {
+  try {
+    const { stdout } = await execFile('pm2', ['jlist']);
+    const procs = JSON.parse(String(stdout));
+    if (!Array.isArray(procs)) return null;
+    const byName = new Map();
+    for (const p of procs) {
+      if (p?.name) byName.set(p.name, p?.pm2_env?.status === 'online');
+    }
+    return byName;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Default connect verification: bounded poll that the pm2 service reaches
  * `online`. NOTE: this is a PROCESS-HEALTH check only — it does NOT confirm the
  * IM side (e.g. the Feishu websocket handshake / bot login) actually succeeded,
@@ -656,16 +681,8 @@ function defaultWriteConfig(component, patch, { home = HOME, fsDep = fs } = {}) 
 async function defaultVerify(spec, { execFile, timeoutMs = VERIFY_TIMEOUT_MS, pollMs = VERIFY_POLL_MS } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    let online = false;
-    try {
-      const { stdout } = await execFile('pm2', ['jlist']);
-      const procs = JSON.parse(String(stdout));
-      if (Array.isArray(procs)) {
-        const p = procs.find((x) => x?.name === spec.pm2Service);
-        online = p?.pm2_env?.status === 'online';
-      }
-    } catch { /* pm2 unavailable — retry until deadline */ }
-    if (online) return true;
+    const byName = await readPm2Statuses(execFile);
+    if (byName?.get(spec.pm2Service) === true) return true;
     if (Date.now() >= deadline) return false;
     await sleep(pollMs);
   }

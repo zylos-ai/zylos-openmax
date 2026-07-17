@@ -143,6 +143,16 @@ export const DEFAULT_CONFIG = {
     dashboardApiKey: '',
   },
 
+  // Channel-liveness reporting (periodic tick in src/comm-bridge.js —
+  // enumerates the 13 IM channel components' pm2 online/offline status and
+  // PUTs it to cws-core `/agents/{member_id}/channel-liveness`). Mirrors the
+  // metricsReport toggle: `enabled` / `intervalSeconds` are NOT in
+  // DEFAULT_CONFIG — their defaults are hardcoded in src/comm-bridge.js
+  // (enabled unless explicitly false; ~60s cadence). Set
+  // `channelLiveness.enabled: false` to disable, or
+  // `channelLiveness.intervalSeconds` to change the cadence.
+  channelLiveness: {},
+
   // `message.context_messages` / `message.dedup_ttl` / `message.dedup_max_entries`
   // are NOT in DEFAULT_CONFIG. Defaults are hardcoded in src/comm-bridge.js
   // (DEFAULT_CONTEXT_MESSAGES, DEFAULT_DEDUP_TTL_MS, DEFAULT_DEDUP_MAX_ENTRIES) —
