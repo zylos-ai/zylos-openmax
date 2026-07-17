@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.1] — 2026-07-17
+
+### Fixed
+
+- **Client-side WS keepalive ping (`src/lib/ws.js`).** The WS client's frame-watchdog terminates the connection when no inbound frame arrives for `heartbeatIntervalMs*2 + 5s` (65s at defaults), and was designed assuming the SERVER pings every 30s to feed it. On prod the client receives **zero** server pings (they don't traverse the prod path), so on quiet orgs the watchdog starved every ~65-90s and the connection churned — close code **1006** every few minutes. On int, server pings arrive every 30s and it stayed stable, masking the issue.
+  - **Fix:** the client now sends its own WS-level ping every `pingIntervalMs` (default **20000**, comfortably below the 65s watchdog window) starting on `open`. An RFC-compliant server — or the nearest terminating proxy — auto-replies with a pong, which the existing `on('pong')` handler uses to advance `lastFrameAt`. This feeds the watchdog without depending on server pings arriving, and keeps the pipe warm through intermediaries (the standard IM keepalive direction).
+  - **Purely additive / client-side.** The server-side ping path, the watchdog, and cws-comm are unchanged. The ping timer is armed on `open` (guarded against double-arming) and cleared in `_clearTimers()` so reconnects/closes don't leak timers.
+  - **Config.** New `config.server.ws_ping_interval_seconds` (seconds) overrides the 20s default; wired through `comm-bridge.js` alongside the other WS options.
+  - If control-frame ping/pong ever turns out to be stripped end-to-end, an app-level JSON heartbeat (would need a cws-comm handler) is the documented fallback — not in this change.
+
 ## [2.10.0] — 2026-07-16
 
 ### Added

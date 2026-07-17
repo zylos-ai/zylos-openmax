@@ -56,10 +56,20 @@ export class WsClient {
     clientVersion,
     reconnectMaxMs = 30000,
     heartbeatIntervalMs = 30000,
+    // Client-initiated WS-level ping cadence. The server-side path does NOT
+    // guarantee that server pings reach us (on prod they don't traverse the
+    // path at all), so the client must feed the frame-watchdog itself by
+    // sending its own periodic ping; the elicited pong advances lastFrameAt.
+    // Must stay comfortably below the watchdog window
+    // (heartbeatIntervalMs * 2 + FRAME_GRACE_MS = 65s at defaults).
+    pingIntervalMs = 20000,
     onOpen,
     onMessage,
     onClose,
     onFatal,
+    // Optional factory for the underlying WebSocket, for testability. Defaults
+    // to the real `ws` implementation.
+    wsFactory,
   }) {
     this.url = url;
     this.urlProvider = urlProvider || null;
@@ -69,16 +79,19 @@ export class WsClient {
     this.clientVersion = clientVersion || '';
     this.reconnectMaxMs = reconnectMaxMs;
     this.heartbeatIntervalMs = heartbeatIntervalMs;
+    this.pingIntervalMs = pingIntervalMs;
     this.onOpen    = onOpen    || (() => {});
     this.onMessage = onMessage || (() => {});
     this.onClose   = onClose   || (() => {});
     this.onFatal   = onFatal   || (() => {});
+    this.wsFactory = wsFactory || ((u, opts) => new WebSocket(u, opts));
 
     this.ws = null;
     this.stopped = false;
     this.reconnectAttempt = 0;
     this.frameWatchdog = null;
     this.reconnectTimer = null;
+    this.pingTimer = null;
     this.lastFrameAt = 0;
   }
 
@@ -136,12 +149,13 @@ export class WsClient {
     if (this.deviceId)      headers['X-Device-Id']     = this.deviceId;
     if (this.clientVersion) headers['X-Client-Version'] = this.clientVersion;
 
-    this.ws = new WebSocket(url, { headers });
+    this.ws = this.wsFactory(url, { headers });
     this.lastFrameAt = Date.now();
 
     this.ws.on('open', () => {
       this.reconnectAttempt = 0;
       this._startFrameWatchdog();
+      this._startKeepalivePing();
       this.onOpen(this);
     });
 
@@ -223,9 +237,30 @@ export class WsClient {
     }, this.heartbeatIntervalMs);
   }
 
+  /**
+   * Send our own WS-level ping on a fixed cadence so the frame-watchdog is fed
+   * regardless of whether SERVER pings ever reach us. On prod, server pings do
+   * not traverse the path, so a quiet org would otherwise starve the watchdog
+   * (heartbeatIntervalMs*2 + grace) and churn with close code 1006 every few
+   * minutes. An RFC-compliant server — or the nearest terminating proxy —
+   * auto-replies with a pong, and the existing `on('pong')` handler advances
+   * lastFrameAt. This also keeps the pipe warm through intermediaries (the
+   * standard IM keepalive direction). Purely additive: the server-side ping
+   * path and the watchdog are unchanged.
+   */
+  _startKeepalivePing() {
+    if (this.pingTimer) return;   // guard against double-arming
+    this.pingTimer = setInterval(() => {
+      try {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.ping();
+      } catch {}
+    }, this.pingIntervalMs);
+  }
+
   _clearTimers() {
     if (this.frameWatchdog) { clearInterval(this.frameWatchdog); this.frameWatchdog = null; }
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
   }
 }
 
