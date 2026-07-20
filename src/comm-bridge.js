@@ -1739,6 +1739,13 @@ async function syncOwnerFromCore(orgConfig) {
     return { nameReady: false, reason: `fetch self member failed: ${err.message}` };
   }
 
+  // Authoritative server-side view of our own presence. cws-comm flips this to
+  // 'offline' when it stops seeing traffic from our WS (e.g. a half-open
+  // connection the in-band frame watchdog can't detect). We surface it so the
+  // periodic caller can force a reconnect (issue #71, suggestion #2). Absent on
+  // older cores → null (no action).
+  const onlineStatus = member?.online_status ?? null;
+
   // Cache our own authoritative display_name (per-org) so inbound @-mention
   // detection matches the exact name cws-fe shows, instead of a hand-configured
   // `self.name` that silently drifts (wrong case / suffix / stale → dropped @).
@@ -1758,10 +1765,10 @@ async function syncOwnerFromCore(orgConfig) {
   const coreOwnerId = member?.owner_member_id || '';
   // Core has no authoritative owner → leave the local binding as-is so the
   // first-DM auto-bind fallback keeps working. We never clear a local owner here.
-  if (!coreOwnerId) return { nameReady: true };
+  if (!coreOwnerId) return { nameReady: true, onlineStatus };
 
   const localOwnerId = orgConfig.owner?.member_id || '';
-  if (coreOwnerId === localOwnerId) return { nameReady: true }; // already in sync
+  if (coreOwnerId === localOwnerId) return { nameReady: true, onlineStatus }; // already in sync
 
   let ownerName = '';
   try { ownerName = (await fetchMemberName(orgConfig.org_id, coreOwnerId)) || ''; }
@@ -1778,7 +1785,7 @@ async function syncOwnerFromCore(orgConfig) {
   // Notify the bot session so it can update memory/references.md with the new
   // owner — config.json is updated but the AI context won't see it until told.
   notifyOwnerChanged(orgConfig.slug, coreOwnerId, ownerName, localOwnerId);
-  return { nameReady: true };
+  return { nameReady: true, onlineStatus };
 }
 
 function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) {
@@ -1861,10 +1868,40 @@ async function syncConfigToComm(orgConfig) {
 // Periodic sync — owner from core + local policy to comm, every 5 min.
 const PERIODIC_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 
+// Half-open backstop (issue #71): if cws-core's self-check reports our agent
+// `online_status=offline` while we still believe our WS is connected, force a
+// reconnect. This catches the failure the in-band frame watchdog cannot see —
+// an intermediary that pongs our keepalive on behalf of a dead backend, so
+// `lastFrameAt` keeps advancing yet the server receives nothing from us. Only
+// fires once the socket has been open at least this long, so a just-connected
+// socket (whose server-side online_status hasn't propagated yet) is not torn
+// down. Overridable via `config.server.offline_reconnect_min_open_seconds`.
+const WS_OFFLINE_RECONNECT_MIN_OPEN_MS =
+  (config.server?.offline_reconnect_min_open_seconds ?? 90) * 1000;
+
+// slug → WsClient lookup, so the online_status backstop can address the right
+// connection. Populated in startOrgWs.
+const wsClientBySlug = new Map();
+
+function maybeForceReconnectOnOffline(slug, res) {
+  if (!res || res.onlineStatus == null) return;                 // no signal
+  if (String(res.onlineStatus).toLowerCase() !== 'offline') return;
+  const ws = wsClientBySlug.get(slug);
+  if (!ws || !ws.isOpen()) return;   // not connected → normal reconnect handles it
+  const forced = ws.forceReconnect(
+    'cws-core reports online_status=offline while WS believed connected',
+    { minOpenMs: WS_OFFLINE_RECONNECT_MIN_OPEN_MS },
+  );
+  if (forced) {
+    warn(`[${slug}] cws-core reports agent offline while WS open — forcing reconnect + sync catch-up`);
+  }
+}
+
 function periodicSync() {
   for (const [slug, orgConfig] of activeOrgConfigs) {
-    syncOwnerFromCore(orgConfig).catch(e =>
-      warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
+    syncOwnerFromCore(orgConfig)
+      .then(res => maybeForceReconnectOnOffline(slug, res))
+      .catch(e => warn(`[${slug}] periodic owner-sync failed: ${e.message}`));
     syncConfigToComm(orgConfig).catch(e =>
       warn(`[${slug}] periodic config-sync failed: ${e.message}`));
     // Onboarding online-report: heals transient failures on a stable WS
@@ -2036,6 +2073,7 @@ function startOrgWs(orgConfig, wsBaseUrl) {
   });
 
   wsClients.push({ slug: orgConfig.slug, ws });
+  wsClientBySlug.set(orgConfig.slug, ws);
   inboxLedgers.push(inboxLedger);
   activeOrgConfigs.set(orgConfig.slug, orgConfig);
   liveOrgCount += 1;

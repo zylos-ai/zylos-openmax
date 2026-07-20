@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.2] — 2026-07-20
+
+### Fixed
+
+- **Half-open WebSocket now detected via the server's `online_status` (`src/comm-bridge.js`, `src/lib/ws.js`).** In a production incident the WS connection died half-open: inbound frame counters froze for ~24 min, cws-core flipped the agent `online_status` online→offline, yet outbound HTTP RPC kept succeeding so PM2 saw a healthy process and the agent silently received nothing until a manual `pm2 restart` (whose sync catch-up then replayed the missed events). The in-band frame watchdog (added in 2.10.1) could not catch this class of failure: when an intermediary proxy answers our keepalive pings with pongs on behalf of a dead backend, `lastFrameAt` keeps advancing and the watchdog never fires.
+  - **Act on the signal we already had.** The periodic `GET /members/{id}` self-check already returns `online_status` (previously logged via the `[rpc]` trace but never acted on). `syncOwnerFromCore` now surfaces it, and `periodicSync` forces a reconnect when cws-core reports `offline` while we still believe the WS is connected — reusing the existing close → backoff → reconnect → sync-catch-up path (no new reconnect logic).
+  - **New `WsClient.forceReconnect(reason, { minOpenMs })`.** Tears the socket down (`terminate()`) so the normal reconnect path runs. Guarded: no-op if stopped/not-open, and no-op if the connection is younger than `minOpenMs` so a just-connected socket (whose server-side `online_status` hasn't propagated yet) is never torn down — this bounds the reconnect rate so a flapping/incorrect server signal can't cause a reconnect storm.
+  - **Configurable watchdog window.** The frame-watchdog timeout is now an explicit `frameWatchdogMs` (defaults to `heartbeatIntervalMs*2 + grace`, floored at `pingIntervalMs*3 + grace`), and the watchdog polls at a fraction of the window so detection latency is bounded by the window itself.
+  - **Config.** New `config.server.offline_reconnect_min_open_seconds` (default **90**) gates the `online_status`-triggered reconnect.
+  - **Additive / does not change existing reconnect behavior.** Tests added in `src/lib/ws.test.js` for `forceReconnect` (open/not-open/stopped/`minOpenMs`), the configurable+floored watchdog window, and the reuse-of-reconnect-path.
+
 ## [2.10.1] — 2026-07-17
 
 ### Fixed

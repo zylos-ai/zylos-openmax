@@ -63,6 +63,14 @@ export class WsClient {
     // Must stay comfortably below the watchdog window
     // (heartbeatIntervalMs * 2 + FRAME_GRACE_MS = 65s at defaults).
     pingIntervalMs = 20000,
+    // Frame-watchdog window: if NO inbound WS frame (data, ping, or a pong
+    // elicited by our keepalive) arrives for this long while we believe we're
+    // connected, the connection is dead → terminate + reconnect. Defaults to
+    // heartbeatIntervalMs*2 + FRAME_GRACE_MS (tolerates one fully-missed server
+    // ping cycle), but can be set explicitly to tune half-open detection
+    // latency. Sane floor enforced below so a mis-set tiny value can't cause a
+    // reconnect storm.
+    frameWatchdogMs,
     onOpen,
     onMessage,
     onClose,
@@ -80,6 +88,14 @@ export class WsClient {
     this.reconnectMaxMs = reconnectMaxMs;
     this.heartbeatIntervalMs = heartbeatIntervalMs;
     this.pingIntervalMs = pingIntervalMs;
+    // Explicit override wins; otherwise derive from the heartbeat interval.
+    // Floor at 3× the ping cadence + grace so the watchdog can never fire
+    // before at least a couple of keepalive pings have had a chance to elicit
+    // a pong (guards against a mis-configured sub-ping window flapping us).
+    this.frameWatchdogMs = Math.max(
+      Number(frameWatchdogMs) || ((this.heartbeatIntervalMs * 2) + FRAME_GRACE_MS),
+      (this.pingIntervalMs * 3) + FRAME_GRACE_MS,
+    );
     this.onOpen    = onOpen    || (() => {});
     this.onMessage = onMessage || (() => {});
     this.onClose   = onClose   || (() => {});
@@ -93,6 +109,7 @@ export class WsClient {
     this.reconnectTimer = null;
     this.pingTimer = null;
     this.lastFrameAt = 0;
+    this.openedAt = 0;   // ms timestamp of the last 'open'; 0 while not open
   }
 
   start() {
@@ -124,6 +141,40 @@ export class WsClient {
 
   isOpen() { return this.ws && this.ws.readyState === WebSocket.OPEN; }
 
+  /** ms the current connection has been open, or 0 if not open. */
+  msSinceOpen() { return this.isOpen() ? Date.now() - this.openedAt : 0; }
+
+  /**
+   * Force a reconnect from an OUT-OF-BAND liveness signal — e.g. cws-core's
+   * periodic self-check reports our agent `online_status=offline` while we
+   * still believe our WS is connected. This is the failure the in-band frame
+   * watchdog cannot see: when an intermediary proxy answers our keepalive
+   * pings with pongs on behalf of a dead backend, `lastFrameAt` keeps
+   * advancing and the watchdog never fires, yet the server receives nothing
+   * from us and flips us offline. We tear the socket down so the EXISTING
+   * close → backoff → reconnect → sync-catch-up path runs (identical to a
+   * watchdog-triggered reconnect — no new reconnect logic).
+   *
+   * Guards (so a flapping/wrong server signal can't storm reconnects):
+   *   - no-op if stopped or the socket isn't open;
+   *   - no-op if the connection is younger than `minOpenMs` (the server's
+   *     online_status lags the handshake by a beat; don't fight a socket that
+   *     only just came up).
+   * Returns true iff a teardown was actually issued.
+   */
+  forceReconnect(reason = '', { minOpenMs = 0 } = {}) {
+    if (this.stopped || !this.isOpen()) return false;
+    if (minOpenMs > 0 && this.msSinceOpen() < minOpenMs) {
+      console.log(`[ws] forceReconnect skipped (connection only ${this.msSinceOpen()}ms old < ${minOpenMs}ms)`);
+      return false;
+    }
+    console.warn(`[ws] forcing reconnect${reason ? `: ${reason}` : ''}`);
+    // terminate() destroys the socket locally and emits 'close', which routes
+    // through the normal onClose → _scheduleReconnect (backoff) path.
+    try { this.ws.terminate(); } catch {}
+    return true;
+  }
+
   async _connect() {
     let url = this.url;
     if (this.urlProvider) {
@@ -154,6 +205,7 @@ export class WsClient {
 
     this.ws.on('open', () => {
       this.reconnectAttempt = 0;
+      this.openedAt = Date.now();
       this._startFrameWatchdog();
       this._startKeepalivePing();
       this.onOpen(this);
@@ -190,6 +242,7 @@ export class WsClient {
 
     this.ws.on('close', (code, reasonBuf) => {
       this._clearTimers();
+      this.openedAt = 0;
       const reason = reasonBuf?.toString?.() || '';
       const terminal = TERMINAL_CLOSE_CODES.has(code);
       const rateLimited = RATE_LIMITED_CLOSE_CODES.has(code);
@@ -228,13 +281,16 @@ export class WsClient {
    */
   _startFrameWatchdog() {
     this._clearTimers();
-    const watchdogMs = (this.heartbeatIntervalMs * 2) + FRAME_GRACE_MS;
+    const watchdogMs = this.frameWatchdogMs;
+    // Poll at a fraction of the window so detection latency is bounded by the
+    // window itself, not by a coarse poll aligned to heartbeatIntervalMs.
+    const pollMs = Math.max(1000, Math.min(this.heartbeatIntervalMs, Math.floor(watchdogMs / 2)));
     this.frameWatchdog = setInterval(() => {
       if (Date.now() - this.lastFrameAt > watchdogMs) {
-        console.warn('[ws] no frames received within watchdog window, terminating');
+        console.warn(`[ws] no frames received within watchdog window (${watchdogMs}ms), terminating`);
         try { this.ws.terminate(); } catch {}
       }
-    }, this.heartbeatIntervalMs);
+    }, pollMs);
   }
 
   /**

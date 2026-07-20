@@ -221,3 +221,130 @@ test('stop() clears the ping timer', () => {
     mock.timers.reset();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Configurable frame-watchdog window (issue #71 — half-open detection)
+// ---------------------------------------------------------------------------
+
+test('frameWatchdogMs defaults to heartbeatIntervalMs*2 + grace and is overridable', () => {
+  const def = new WsClient({ url: 'wss://x/ws', heartbeatIntervalMs: 30000, pingIntervalMs: 20000 });
+  assert.equal(def.frameWatchdogMs, 65000, 'default = 30000*2 + 5000');
+
+  const custom = new WsClient({ url: 'wss://x/ws', heartbeatIntervalMs: 30000, pingIntervalMs: 5000, frameWatchdogMs: 20000 });
+  assert.equal(custom.frameWatchdogMs, 20000, 'explicit override wins');
+});
+
+test('frameWatchdogMs is floored so it cannot fire before a couple of pings could pong', () => {
+  // A too-small window (below 3× ping cadence + grace) is clamped up so a
+  // mis-config can never cause a reconnect storm.
+  const c = new WsClient({ url: 'wss://x/ws', pingIntervalMs: 20000, frameWatchdogMs: 1000 });
+  assert.equal(c.frameWatchdogMs, (20000 * 3) + 5000, 'floored to pingIntervalMs*3 + grace');
+});
+
+test('a shorter frameWatchdogMs terminates a starved connection sooner', () => {
+  mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+  try {
+    // Window floored to pingIntervalMs*3 + 5000 = 3000*3 + 5000 = 14000ms.
+    const { client, sockets } = makeClient({
+      pingIntervalMs: 3000,
+      heartbeatIntervalMs: 30000,
+      frameWatchdogMs: 1, // floored up to 14000
+      autoPong: false,    // nothing feeds the watchdog
+    });
+    assert.equal(client.frameWatchdogMs, 14000);
+    client.start();
+    const ws = sockets[0];
+    ws.emit('open');
+
+    mock.timers.tick(13000);
+    assert.equal(ws.terminateCount, 0, 'not yet past the (floored) window');
+    mock.timers.tick(3000); // now past 14000
+    assert.ok(ws.terminateCount >= 1, 'terminated once the shorter window elapses');
+
+    client.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// forceReconnect() — out-of-band liveness trigger (issue #71, suggestion #2)
+// ---------------------------------------------------------------------------
+
+test('forceReconnect() terminates an open socket and returns true', () => {
+  const { client, sockets } = makeClient({ heartbeatIntervalMs: 10_000_000 });
+  client.start();
+  const ws = sockets[0];
+  ws.emit('open');
+
+  const did = client.forceReconnect('core reports offline');
+  assert.equal(did, true);
+  assert.equal(ws.terminateCount, 1, 'the live socket is torn down');
+  client.stop();
+});
+
+test('forceReconnect() reuses the existing close → reconnect path (new socket created)', () => {
+  mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+  try {
+    const { client, sockets } = makeClient({ heartbeatIntervalMs: 10_000_000 });
+    client.start();
+    const ws = sockets[0];
+    ws.emit('open');
+
+    assert.equal(client.forceReconnect('offline'), true);
+    // Real ws.terminate() emits 'close'; the fake doesn't, so drive it — this
+    // is the SAME close path a watchdog teardown takes.
+    ws.emit('close', 1006, Buffer.from('terminated'));
+    assert.equal(sockets.length, 1, 'reconnect is scheduled with backoff, not immediate');
+
+    mock.timers.tick(1000); // first backoff step (RECONNECT_BASE_MS)
+    assert.equal(sockets.length, 2, 'a fresh socket is created on reconnect');
+
+    client.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('forceReconnect() is a no-op when the socket is not open', () => {
+  const { client, sockets } = makeClient({ heartbeatIntervalMs: 10_000_000 });
+  client.start();
+  const ws = sockets[0];
+  // Never emit 'open' → readyState default is OPEN in the fake, so simulate a
+  // not-open socket explicitly.
+  ws.readyState = 0; // CONNECTING
+  assert.equal(client.forceReconnect('offline'), false);
+  assert.equal(ws.terminateCount, 0);
+  client.stop();
+});
+
+test('forceReconnect() is a no-op after stop()', () => {
+  const { client, sockets } = makeClient({ heartbeatIntervalMs: 10_000_000 });
+  client.start();
+  const ws = sockets[0];
+  ws.emit('open');
+  client.stop();
+  assert.equal(client.forceReconnect('offline'), false, 'stopped client never reconnects');
+});
+
+test('forceReconnect() honors minOpenMs — skips a just-opened connection, fires once aged', () => {
+  mock.timers.enable({ apis: ['setInterval', 'setTimeout', 'Date'] });
+  try {
+    const { client, sockets } = makeClient({ heartbeatIntervalMs: 10_000_000 });
+    client.start();
+    const ws = sockets[0];
+    ws.emit('open');
+
+    // Connection is brand new → guarded away.
+    assert.equal(client.forceReconnect('offline', { minOpenMs: 60000 }), false);
+    assert.equal(ws.terminateCount, 0, 'young connection is not torn down');
+
+    mock.timers.tick(60000); // age past the guard
+    assert.equal(client.forceReconnect('offline', { minOpenMs: 60000 }), true);
+    assert.equal(ws.terminateCount, 1);
+
+    client.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
