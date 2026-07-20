@@ -131,17 +131,113 @@ test('primary org without self.member_id → warned, no PUT (does not fall throu
   assert.match(warns.find((w) => /orgA/.test(w)), /primary org has no self\.member_id/);
 });
 
-test('endpoint 404 → warn once, no throw, does not report again quietly', async () => {
-  const putForOrg = async () => { const e = new Error('not found'); e.status = 404; throw e; };
+test('persistent 404 → disable on first 404, warn once, and STOP issuing the PUT (no error.log flood)', async () => {
+  let putCalls = 0;
+  const putForOrg = async () => { putCalls += 1; const e = new Error('page not found'); e.status = 404; throw e; };
   const { report, warns } = harness({
     readPm2Statuses: async () => pm2Map([]),
     orgs: [{ slug: 'orgA', org_id: 'org-A', self: { member_id: 'm-A' } }],
     putForOrg,
   });
-  await report();
-  await report();
-  const e404 = warns.filter((w) => /endpoint not available \(404\)/.test(w));
-  assert.equal(e404.length, 1);
+  // First tick fires the PUT (gets 404 → disables). Next ~10 ticks must NOT
+  // fire it — this is the flood fix: the HTTP client only logs its [rpc] pair
+  // when the PUT is actually issued.
+  for (let i = 0; i < 11; i++) await report();
+  assert.equal(putCalls, 1, 'PUT issued exactly once, then suppressed');
+  const disableWarns = warns.filter((w) => /returns 404 .*disabling reporter/.test(w));
+  assert.equal(disableWarns.length, 1, 'the 404 is logged exactly once, not every tick');
+});
+
+test('404 backoff re-probes after reprobeEveryTicks and stays quiet if still 404', async () => {
+  let putCalls = 0;
+  const putForOrg = async () => { putCalls += 1; const e = new Error('not found'); e.status = 404; throw e; };
+  const puts = [];
+  const warns = [];
+  const report = createChannelLivenessReporter(orgMap([{ slug: 'orgA', org_id: 'org-A', self: { member_id: 'm-A' } }]), {
+    log: noop, warn: (m) => warns.push(m), apiPath, readPm2Statuses: async () => pm2Map([]), putForOrg,
+    reprobeEveryTicks: 3,
+  });
+  await report();            // tick 1: PUT → 404 → disabled (putCalls=1)
+  await report();            // tick 2: disabled, skip
+  await report();            // tick 3: disabled, skip (ticksSinceDisabled=2 < 3)
+  assert.equal(putCalls, 1, 'no PUT during the backoff window');
+  await report();            // tick 4: re-probe → PUT → still 404 (putCalls=2)
+  assert.equal(putCalls, 2, 're-probe issues exactly one PUT');
+  const disableWarns = warns.filter((w) => /disabling reporter/.test(w));
+  assert.equal(disableWarns.length, 1, 're-probe that still 404s does not re-warn');
+});
+
+test('404 backoff self-heals: a later successful probe re-enables the reporter', async () => {
+  let call = 0;
+  const putForOrg = async () => {
+    call += 1;
+    if (call === 1) { const e = new Error('not found'); e.status = 404; throw e; }
+    // subsequent calls succeed
+  };
+  const logs = [];
+  const report = createChannelLivenessReporter(orgMap([{ slug: 'orgA', org_id: 'org-A', self: { member_id: 'm-A' } }]), {
+    log: (m) => logs.push(m), warn: noop, apiPath, readPm2Statuses: async () => pm2Map(['zylos-lark']), putForOrg,
+    reprobeEveryTicks: 2,
+  });
+  await report();            // 404 → disabled
+  await report();            // skipped (ticksSinceDisabled=1 < 2)
+  await report();            // re-probe → succeeds → re-enabled
+  await report();            // now enabled again → reports normally every tick
+  assert.equal(call, 3, 'two successful PUTs after the single 404 (probe + next tick)');
+  assert.ok(logs.some((m) => /endpoint recovered/.test(m)), 'recovery is announced');
+});
+
+test('disable404Threshold: stays retrying until the threshold, then disables', async () => {
+  let putCalls = 0;
+  const putForOrg = async () => { putCalls += 1; const e = new Error('nf'); e.status = 404; throw e; };
+  const warns = [];
+  const report = createChannelLivenessReporter(orgMap([{ slug: 'orgA', org_id: 'org-A', self: { member_id: 'm-A' } }]), {
+    log: noop, warn: (m) => warns.push(m), apiPath, readPm2Statuses: async () => pm2Map([]), putForOrg,
+    disable404Threshold: 3, reprobeEveryTicks: 100,
+  });
+  await report(); await report(); // 2 x 404, below threshold → still trying, not disabled
+  assert.equal(putCalls, 2);
+  assert.equal(warns.filter((w) => /disabling reporter/.test(w)).length, 0, 'not yet disabled');
+  await report();                 // 3rd 404 hits threshold → disable
+  assert.equal(putCalls, 3);
+  await report();                 // disabled → skipped
+  assert.equal(putCalls, 3, 'no further PUT after the 3rd 404 disables it');
+  assert.equal(warns.filter((w) => /disabling reporter/.test(w)).length, 1);
+});
+
+test('non-404 errors keep retrying and never disable the reporter', async () => {
+  let putCalls = 0;
+  const putForOrg = async () => { putCalls += 1; const e = new Error('boom'); e.status = 503; throw e; };
+  const warns = [];
+  const report = createChannelLivenessReporter(orgMap([{ slug: 'orgA', org_id: 'org-A', self: { member_id: 'm-A' } }]), {
+    log: noop, warn: (m) => warns.push(m), apiPath, readPm2Statuses: async () => pm2Map([]), putForOrg,
+  });
+  await report(); await report(); await report();
+  assert.equal(putCalls, 3, '5xx keeps retrying every tick — unchanged behavior');
+  assert.equal(warns.filter((w) => /disabling reporter/.test(w)).length, 0);
+  assert.ok(warns.filter((w) => /report failed: boom/.test(w)).length >= 1);
+});
+
+test('a 404 streak interrupted by a non-404 error resets the streak', async () => {
+  let call = 0;
+  // 404, then a transient 5xx, then 404 again — with threshold 2 the reporter
+  // must NOT disable, because the 5xx reset the consecutive-404 count.
+  const putForOrg = async () => {
+    call += 1;
+    const e = new Error('x');
+    e.status = call === 2 ? 503 : 404;
+    throw e;
+  };
+  const warns = [];
+  const report = createChannelLivenessReporter(orgMap([{ slug: 'orgA', org_id: 'org-A', self: { member_id: 'm-A' } }]), {
+    log: noop, warn: (m) => warns.push(m), apiPath, readPm2Statuses: async () => pm2Map([]), putForOrg,
+    disable404Threshold: 2, reprobeEveryTicks: 100,
+  });
+  await report(); // 404 (streak=1)
+  await report(); // 503 (streak reset to 0)
+  await report(); // 404 (streak=1, below threshold 2)
+  assert.equal(call, 3, 'all three ticks issued the PUT — never disabled');
+  assert.equal(warns.filter((w) => /disabling reporter/.test(w)).length, 0);
 });
 
 test('non-404 PUT error is caught (best-effort, never throws into the tick)', async () => {

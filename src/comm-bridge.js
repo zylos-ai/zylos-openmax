@@ -2169,6 +2169,12 @@ if (config.metricsReport?.enabled !== false) {
 if (config.channelLiveness?.enabled !== false) {
   const reportChannelLiveness = createChannelLivenessReporter(activeOrgConfigs, {
     log, warn,
+    // 404-backoff knobs (issue #72). Omitted → reporter defaults (disable on
+    // the first 404, re-probe every 30 ticks).
+    ...(config.channelLiveness?.disable404Threshold != null
+      ? { disable404Threshold: config.channelLiveness.disable404Threshold } : {}),
+    ...(config.channelLiveness?.reprobeEveryTicks != null
+      ? { reprobeEveryTicks: config.channelLiveness.reprobeEveryTicks } : {}),
   });
   tasks.register('channel-liveness', reportChannelLiveness, CHANNEL_LIVENESS_INTERVAL_MS, {
     delay: CHANNEL_LIVENESS_INITIAL_DELAY_MS,
