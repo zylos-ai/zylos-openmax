@@ -90,10 +90,10 @@ export function createChannelLivenessReporter(activeOrgConfigs, {
   // tick (the actual error.log flood). Default 1 = disable on the first 404.
   disable404Threshold = 1,
   // While disabled, re-probe once every this many ticks so the reporter
-  // self-heals when the endpoint is eventually deployed. At the ~60s tick, 30
-  // ≈ once every 30 min (a single log pair per probe, vs a pair every 60s).
+  // self-heals when the endpoint is eventually deployed. At the ~60s tick, 180
+  // ≈ once every 3 hours (a single log pair per probe, vs a pair every 60s).
   // Set to 0 to disable re-probing (stay off until the process restarts).
-  reprobeEveryTicks = 30,
+  reprobeEveryTicks = 180,
 } = {}) {
   let warnedPm2Unavailable = false; // pm2 jlist failing/empty — re-armed on success
   let consecutive404 = 0;           // consecutive 404s seen (reset by any non-404 outcome)
