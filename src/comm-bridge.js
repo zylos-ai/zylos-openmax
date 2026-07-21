@@ -27,6 +27,7 @@ import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerN
 import { registerConvOrg } from './lib/conv-org.js';
 import { createSelfNameHydrator } from './lib/self-name-hydration.js';
 import { WsClient, createDeduper } from './lib/ws.js';
+import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
@@ -56,6 +57,12 @@ const DEFAULT_CONTEXT_MESSAGES = 5;
 const DEFAULT_CONTEXT_MAX_MESSAGES = 15;
 // (DEFAULT_DEDUP_TTL_MS removed — deduper is count-based, ttlMs was dead code)
 const DEFAULT_DEDUP_MAX_ENTRIES = 3000;
+// Inbound content-fetch retry. A WS "message" frame carries only metadata; the
+// body is fetched via GET /messages/{id}. On a transient GET failure we retry
+// once before giving up (and skipping the empty forward). Overridable via
+// `config.message.{content_fetch_retries,content_fetch_retry_delay_ms}`.
+const DEFAULT_CONTENT_FETCH_RETRIES = 1;        // extra attempts after the first
+const DEFAULT_CONTENT_FETCH_RETRY_DELAY_MS = 400;
 
 // Hardcoded WS operational defaults. `config.server.{reconnect_max_delay,
 // heartbeat_interval}` may override either; if absent, these apply.
@@ -615,7 +622,7 @@ async function shouldHandleMessage(msg, conv, orgConfig) {
 // Per-org inbound message handler
 // =============================================================================
 
-function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger) {
+function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
   return async function handleIncomingMessage(payload) {
     const notification = payload?.payload || payload;
     const notifId = notification?.id;
@@ -628,7 +635,41 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger) {
       return;
     }
 
-    const detail = await fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id);
+    // Resolve the message body. The WS "message" frame carries only metadata
+    // (id/conv/sender) — the body comes from GET /messages/{id}. Retry the
+    // fetch once so a transient GET failure doesn't degrade to an EMPTY message
+    // being forwarded to the agent (the historical bug: the real text only
+    // arrived later, out of order, via the next /sync catch-up).
+    const contentResult = await resolveInboundContent({
+      getDetail: () => fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id),
+      notification,
+      retries: config.message?.content_fetch_retries ?? DEFAULT_CONTENT_FETCH_RETRIES,
+      delayMs: config.message?.content_fetch_retry_delay_ms ?? DEFAULT_CONTENT_FETCH_RETRY_DELAY_MS,
+    });
+
+    if (contentResult.status !== 'ok') {
+      // Both attempts failed / no usable body. Do NOT forward an empty message,
+      // and do NOT advance read-state or the /sync cursor for it — leave it
+      // "unconsumed" so the next /sync catch-up re-pulls it in seq order. Forget
+      // the dedupe entry recorded above so that re-pull isn't suppressed as a
+      // duplicate.
+      // TODO(persistent-failure alarm): if the SAME message keeps failing across
+      // reconnects the cursor stalls on it; a future PR should alarm on repeated
+      // skips (deliberately out of scope for this fix per owner).
+      dedupe.forget?.(notifId);
+      warn(`[${orgConfig.slug}] msg=${notifId} conv=${notifConv} content fetch failed after ${contentResult.attempts} attempt(s) — forwarding skipped, cursor not advanced` +
+        (contentResult.forceReconnect
+          ? '; forcing WS reconnect to trigger /sync catch-up'
+          : ' (sync-replay path — NOT re-terminating; relying on backoff + un-advanced cursor)'));
+      if (contentResult.forceReconnect) {
+        try { wsRef?.client?.forceReconnect('empty-message-content-fetch-failed'); } catch {}
+      }
+      // Signal the /sync sweep (which awaits this handler) to leave its cursor
+      // BEFORE this event. The realtime dispatcher ignores the return value.
+      return { contentFetchFailed: true };
+    }
+
+    const detail = contentResult.detail;
     const msg = { ...notification, ...(detail || {}) };
     cacheMessageText(notification.id, msg.content?.body?.text);
 
@@ -1597,6 +1638,7 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
     let sinceSeq = startSeq;
     let totalSynced = 0;
     let hasMore = true;
+    let haltedOnEmpty = false;
 
     while (hasMore && totalSynced < SYNC_MAX_EVENTS) {
       const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
@@ -1610,15 +1652,26 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
 
       for (const ev of events) {
         if (!ev?.message_id || !ev.conversation_id) continue;
-        await onMessage({
+        const res2 = await onMessage({
           id:              String(ev.message_id),
           conversation_id: ev.conversation_id,
           seq:             ev.seq,
           _via:            'sync',
         });
+        // Content fetch failed for this event: leave the cursor BEFORE it (do
+        // NOT advance sinceSeq) and halt the sweep so the next reconnect
+        // re-pulls it in order. We do NOT force a WS disconnect here — that is
+        // the realtime path's job; on the sync-replay path the exponential
+        // reconnect backoff + this un-advanced cursor is the safety net.
+        if (res2?.contentFetchFailed) {
+          log(`[${orgConfig.slug}] sync: content unavailable for msg=${ev.message_id} seq=${ev.seq} — halting sweep, cursor stays at ${sinceSeq}`);
+          haltedOnEmpty = true;
+          break;
+        }
         if (typeof ev.seq === 'number' && ev.seq > sinceSeq) sinceSeq = ev.seq;
       }
       totalSynced += events.length;
+      if (haltedOnEmpty) break;
     }
 
     // Persist the sync cursor (inbox seq) so the next reconnect resumes here.
@@ -1965,7 +2018,11 @@ function startOrgWs(orgConfig, wsBaseUrl) {
   if (syncSeq > 0) inboxLedger.setAckedSeq(syncSeq);
   inboxLedger.start();
 
-  const onMessage = makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger);
+  // Mutable holder so the message handler (created before the WsClient exists)
+  // can force a reconnect on the live socket. Filled in right after the
+  // WsClient is constructed below.
+  const wsRef = { client: null };
+  const onMessage = makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef);
   const onFrame = makeOrgFrameDispatcher(orgConfig, onMessage);
 
   const ws = new WsClient({
@@ -2035,6 +2092,7 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     },
   });
 
+  wsRef.client = ws;
   wsClients.push({ slug: orgConfig.slug, ws });
   inboxLedgers.push(inboxLedger);
   activeOrgConfigs.set(orgConfig.slug, orgConfig);
