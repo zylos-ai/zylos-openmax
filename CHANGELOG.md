@@ -7,10 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.10.3] — 2026-07-20
+## [2.11.0-beta.1] — 2026-07-21
+
+Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3, never tagged), the inbound-tag rebrand, and the empty-message fix. Pre-release — stable `zylos upgrade --check` does not pull `-beta` tags; use `--beta` to test. Promote to `2.11.0` (no suffix) once validated.
+
+### Changed
+
+- **Inbound conversation tag rebranded `[COCO …]` → `[OPENMAX …]` (`src/lib/message.js`).** The `TYPE_TAG` prefix the agent sees on each inbound message (`[OPENMAX DM]`/`[OPENMAX GROUP]`/`[OPENMAX THREAD]`) was a hardcoded brand string. The `(org: <name>)` suffix is unchanged (still config `org_name`); `parseEndpoint` still strips the legacy `[COCO …]/` prefix (and now `[OPENMAX …]/`) for back-compat — routing is unaffected (by conversation id). (PR #75)
 
 ### Fixed
 
+- **comm-bridge: retry inbound content fetch; never forward an empty message (`src/lib/inbound-content.js`, `src/comm-bridge.js`).** The WS `message` frame carries only metadata; the body comes from `GET /conversations/{conv}/messages/{id}`. On failure that GET used to return `null` and the handler forwarded a metadata-only **empty** message. Now: retry once (`config.message.content_fetch_retries`, default 1; `content_fetch_retry_delay_ms`, default 400); if still failing, do **not** forward and do **not** advance read-state/cursor — realtime frames `forceReconnect()` so `/sync` replays in order, sync-replay frames just halt cursor advance (no reconnect storm); the incident is warn-logged. (PR #76, closes #13)
 - **channel-liveness reporter no longer floods `error.log` on a persistent 404 (`src/lib/channel-liveness-reporter.js`).** On production, `PUT /api/v1/agents/{member_id}/channel-liveness` returns `404 page not found` on every attempt (the endpoint isn't deployed on that host, while `runtime-metrics`/`reported-policy`/`sync/ack` all 200). The reporter's existing `warnedEndpoint404` guard muted its *own* warn after the first 404, but the PUT was still **issued every ~60s** — so the shared HTTP client (`client.js`) kept logging an `[rpc]` request+response pair per tick, filling `error.log` indefinitely.
   - **A 404 is not transient**, so after `disable404Threshold` (default **1**) consecutive 404s the reporter now **stops issuing the PUT entirely** — which is what actually stops the log flood — and logs the condition **once** at warn level (no per-tick pair).
   - **Self-healing:** while disabled it re-probes once every `reprobeEveryTicks` ticks (default **180**, ≈ once per 3 hours at the 60s cadence); a successful probe re-enables the reporter (logged as recovered). Set `reprobeEveryTicks: 0` to stay disabled until restart.
