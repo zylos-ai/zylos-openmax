@@ -33,9 +33,13 @@
  * on a pm2 error, which would falsely flap every channel down.
  *
  * Best-effort: the report never throws into the metrics loop; every PUT is
- * individually guarded and a missing endpoint (404) is warned once then
- * skipped (mirrors runtime-metrics' 404 handling — E2E is pending the cws-core
- * channel-liveness endpoint being deployed to the targeted environment).
+ * individually guarded. A 404 is NOT transient (the route isn't deployed on
+ * this host), so after `disable404Threshold` consecutive 404s the reporter
+ * STOPS issuing the PUT — warned ONCE — and re-probes only every
+ * `reprobeEveryTicks` ticks, so a doomed call no longer makes the HTTP client
+ * log an `[rpc]` request+response pair every ~60s (see issue #72). A later
+ * successful probe re-enables it. Transient/other errors (5xx, network) keep
+ * retrying unchanged.
  *
  * Deps are injected so the logic is unit-testable without pm2, a live
  * cws-core, or the comm-bridge daemon (see channel-liveness-reporter.test.js).
@@ -79,12 +83,36 @@ export function createChannelLivenessReporter(activeOrgConfigs, {
   putForOrg = realPutForOrg,
   apiPath = realApiPath,
   readPm2Statuses = realReadPm2Statuses,
+  // Endpoint-absent backoff (issue #72). A 404 on the channel-liveness endpoint
+  // is NOT transient — it means cws-core hasn't deployed the route on this host.
+  // After this many consecutive 404s, stop issuing the PUT entirely so the
+  // shared HTTP client stops logging an `[rpc]` request+response pair every
+  // tick (the actual error.log flood). Default 1 = disable on the first 404.
+  disable404Threshold = 1,
+  // While disabled, re-probe once every this many ticks so the reporter
+  // self-heals when the endpoint is eventually deployed. At the ~60s tick, 180
+  // ≈ once every 3 hours (a single log pair per probe, vs a pair every 60s).
+  // Set to 0 to disable re-probing (stay off until the process restarts).
+  reprobeEveryTicks = 180,
 } = {}) {
   let warnedPm2Unavailable = false; // pm2 jlist failing/empty — re-armed on success
-  let warnedEndpoint404 = false;    // cws-core channel-liveness endpoint missing
+  let consecutive404 = 0;           // consecutive 404s seen (reset by any non-404 outcome)
+  let disabledFor404 = false;       // endpoint declared absent → PUT suppressed
+  let ticksSinceDisabled = 0;       // re-probe counter while disabled
 
   return async function reportChannelLiveness() {
     try {
+      // Endpoint-absent backoff: once the endpoint has consistently 404'd we
+      // STOP calling it (not just muting our own warn) — the HTTP client logs
+      // an `[rpc]` request+response pair on every call, so continuing to fire a
+      // doomed PUT every ~60s is what floods error.log. Re-probe sparsely so the
+      // reporter recovers on its own once cws-core ships the endpoint.
+      if (disabledFor404) {
+        ticksSinceDisabled += 1;
+        if (reprobeEveryTicks <= 0 || ticksSinceDisabled < reprobeEveryTicks) return;
+        ticksSinceDisabled = 0; // this tick is a re-probe attempt
+      }
+
       // Safety guard: null = pm2 unavailable / unparseable, empty = pm2 online
       // but reporting no processes. Either way, skip this tick — never report
       // "all offline" on a pm2 error.
@@ -122,14 +150,31 @@ export function createChannelLivenessReporter(activeOrgConfigs, {
           apiPath(`/agents/${selfMemberId}/channel-liveness`),
           payload,
         );
+        // Success — clear any 404 backoff. If we were disabled, this was a
+        // re-probe that found the endpoint newly deployed: announce recovery.
+        if (disabledFor404) {
+          log?.(`[${slug}] channel-liveness endpoint recovered — resuming reports`);
+        }
+        disabledFor404 = false;
+        consecutive404 = 0;
         log?.(`[${slug}] channel-liveness reported: ${onlineCount}/${CHANNEL_TYPES.length} channels online`);
       } catch (err) {
         if (err.status === 404) {
-          if (!warnedEndpoint404) {
-            warn(`[${slug}] channel-liveness endpoint not available (404), skipping`);
-            warnedEndpoint404 = true;
+          consecutive404 += 1;
+          // Cross the threshold once → disable + log ONCE (info/warn, not the
+          // per-tick error pair). Further 404s while disabled stay silent.
+          if (!disabledFor404 && consecutive404 >= disable404Threshold) {
+            disabledFor404 = true;
+            ticksSinceDisabled = 0;
+            const reprobeNote = reprobeEveryTicks > 0
+              ? ` — will re-probe every ${reprobeEveryTicks} ticks`
+              : ' — will not re-probe until restart';
+            warn(`[${slug}] channel-liveness endpoint returns 404 (not deployed?); disabling reporter after ${consecutive404} attempt(s)${reprobeNote}`);
           }
         } else {
+          // Transient / other error (5xx, network) → keep retrying as before,
+          // and reset the 404 streak so a later 404 run starts counting fresh.
+          consecutive404 = 0;
           warn(`[${slug}] channel-liveness report failed: ${err.message}`);
         }
       }
