@@ -2,7 +2,7 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
-import { WsClient } from './ws.js';
+import { WsClient, createDeduper } from './ws.js';
 
 // Minimal fake of the `ws` WebSocket the client drives. Extends EventEmitter so
 // the client's `.on(...)` handlers wire up exactly as with the real lib. We
@@ -220,4 +220,54 @@ test('stop() clears the ping timer', () => {
   } finally {
     mock.timers.reset();
   }
+});
+
+// ---------------------------------------------------------------------------
+// forceReconnect — used to recover from an inbound message whose content could
+// not be fetched. Reuses the frame-watchdog's terminate() so the close handler
+// runs and the reconnect + /sync catch-up path fires.
+// ---------------------------------------------------------------------------
+
+test('forceReconnect terminates the live socket (same mechanism as the watchdog)', () => {
+  const { client, sockets } = makeClient({ heartbeatIntervalMs: 10_000_000 });
+  client.start();
+  const ws = sockets[0];
+  ws.emit('open');
+  const did = client.forceReconnect('empty-message-content-fetch-failed');
+  assert.equal(did, true);
+  assert.equal(ws.terminateCount, 1, 'underlying socket terminated to trigger reconnect');
+  client.stop(); // clear the real interval timers armed on open
+});
+
+test('forceReconnect is a no-op after stop() (avoids reconnect storms)', () => {
+  const { client, sockets } = makeClient({ heartbeatIntervalMs: 10_000_000 });
+  client.start();
+  const ws = sockets[0];
+  ws.emit('open');
+  client.stop();
+  const did = client.forceReconnect('x');
+  assert.equal(did, false, 'stopped client must not reconnect');
+});
+
+test('forceReconnect is a no-op when there is no live socket', () => {
+  const client = new WsClient({ url: 'wss://x/ws' });
+  assert.equal(client.forceReconnect('x'), false);
+});
+
+// ---------------------------------------------------------------------------
+// createDeduper.forget — lets a message that was recorded but not fully
+// processed (content fetch failed) be re-processed on the next /sync re-pull.
+// ---------------------------------------------------------------------------
+
+test('deduper.forget lets a recorded id be re-processed', () => {
+  const dedupe = createDeduper();
+  assert.equal(dedupe('m1'), false, 'first sighting is not a duplicate');
+  assert.equal(dedupe('m1'), true, 'second sighting is a duplicate');
+  assert.equal(dedupe.forget('m1'), true, 'forget drops the recorded id');
+  assert.equal(dedupe('m1'), false, 're-pull is no longer suppressed as a duplicate');
+});
+
+test('deduper.forget on an unknown id is a harmless no-op', () => {
+  const dedupe = createDeduper();
+  assert.equal(dedupe.forget('never-seen'), false);
 });

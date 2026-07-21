@@ -124,6 +124,25 @@ export class WsClient {
 
   isOpen() { return this.ws && this.ws.readyState === WebSocket.OPEN; }
 
+  /**
+   * Force the current socket closed to trigger the normal reconnect path
+   * (close handler → _scheduleReconnect → _connect → onOpen → /sync catch-up).
+   * Uses the same `terminate()` mechanism the frame-watchdog uses, so the
+   * close handler runs and the exponential backoff loop supplies the retry
+   * cadence. Safe no-op when stopped or when there is no live socket.
+   *
+   * Callers use this to recover from an inbound message whose content could
+   * not be fetched: dropping the socket lets the reconnect's /sync sweep
+   * re-pull the missed message in seq order.
+   */
+  forceReconnect(reason = 'forced') {
+    if (this.stopped) return false;
+    if (!this.ws) return false;
+    console.warn(`[ws] force reconnect requested (${reason})`);
+    try { this.ws.terminate(); } catch {}
+    return true;
+  }
+
   async _connect() {
     let url = this.url;
     if (this.urlProvider) {
@@ -326,7 +345,7 @@ export function createDeduper(optsOrLegacyTtl = {}, legacyOpts) {
     flushTimer.unref?.();
   }
 
-  return (id) => {
+  const deduper = (id) => {
     if (!id) return false;
     if (seen.has(id)) return true;
     seen.set(id, Date.now());
@@ -334,4 +353,18 @@ export function createDeduper(optsOrLegacyTtl = {}, legacyOpts) {
     dirty = true; scheduleFlush();
     return false;
   };
+
+  // Drop a previously-recorded id so it is NOT treated as a duplicate the next
+  // time it arrives. Used when an inbound message was recorded as "seen" but
+  // then could not be fully processed (e.g. its content fetch failed): the
+  // message must be re-processable when the next /sync catch-up re-pulls it,
+  // otherwise the dedupe would silently suppress the retry.
+  deduper.forget = (id) => {
+    if (!id || !seen.has(id)) return false;
+    seen.delete(id);
+    dirty = true; scheduleFlush();
+    return true;
+  };
+
+  return deduper;
 }
