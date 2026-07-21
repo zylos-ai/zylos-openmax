@@ -6,21 +6,21 @@
  *   <conversationId>|reply:<messageId>
  *   <conversationId>|thread:<threadConvId>|parent:<parentMsgId>
  *
- * The conversation type ([COCO DM]/[COCO GROUP]/[COCO THREAD]) is NOT part of
+ * The conversation type ([OPENMAX DM]/[OPENMAX GROUP]/[OPENMAX THREAD]) is NOT part of
  * the target: send.js routes purely off the conversation id plus the
  * reply/thread/parent suffixes, so the type prefix was dead weight in the
  * `reply via` string the agent has to copy. `parseEndpoint` still accepts the
- * legacy `[COCO TYPE]/<id>...` form for backward compatibility (in-flight
+ * legacy `[OPENMAX TYPE]/<id>...` (or older `[COCO TYPE]/`) form for backward compatibility (in-flight
  * messages, older callers), but `formatEndpoint` now emits the minimal form.
  *
  * Inbound C4 text format (tag on its own line; the attributed utterance lives
  * inside <current-message> for parity with other C4 channels):
- *   [COCO DM]
+ *   [OPENMAX DM]
  *   <current-message>
  *   <name> said: <content>
  *   </current-message>
  *
- *   [COCO GROUP:<group>]
+ *   [OPENMAX GROUP:<group>]
  *   <group-context>...</group-context>
  *   <current-message>
  *   <name> said: <content>
@@ -31,7 +31,7 @@
 import { randomUUID } from 'crypto';
 import { extractWorkReferences, formatWorkReferenceContext } from './work-reference.js';
 
-const TYPE_TAG = { dm: '[COCO DM]', group: '[COCO GROUP]', thread: '[COCO THREAD]' };
+const TYPE_TAG = { dm: '[OPENMAX DM]', group: '[OPENMAX GROUP]', thread: '[OPENMAX THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
 
 /**
@@ -47,7 +47,7 @@ export function newClientMsgId() {
  *
  * Accepts two forms:
  *   - minimal (current):  `<conversationId>[|reply:..][|thread:..][|parent:..]`
- *   - legacy:             `[COCO TYPE]/<conversationId>[|...]`  (prefix stripped)
+ *   - legacy:             `[OPENMAX TYPE]/<conversationId>[|...]` (or older `[COCO TYPE]/`) (prefix stripped)
  *
  * The leading conversation id is whatever precedes the first `|`. The type
  * prefix, if present, is informational only — routing is driven entirely by
@@ -60,9 +60,10 @@ export function newClientMsgId() {
 export function parseEndpoint(endpoint) {
   let rest = (endpoint || '').trim();
 
-  // Strip the legacy `[COCO TYPE]/` prefix if present (back-compat).
+  // Strip a legacy `[OPENMAX TYPE]/` (or older `[COCO TYPE]/`) prefix if present
+  // (back-compat; prefix is informational only, routing is by conversation id).
   let typeHint = null;
-  const legacy = /^\[COCO (DM|GROUP|THREAD)\]\/(.*)$/.exec(rest);
+  const legacy = /^\[(?:OPENMAX|COCO) (DM|GROUP|THREAD)\]\/(.*)$/.exec(rest);
   if (legacy) { typeHint = legacy[1].toLowerCase(); rest = legacy[2]; }
 
   const segments = rest.split('|');
@@ -148,7 +149,7 @@ function formatContextLine(m) {
  *
  * Output framing mirrors zylos-feishu `src/index.js formatMessage`:
  *   - tag includes the group name for group / thread messages
- *     (`[COCO GROUP:Engineering]`)
+ *     (`[OPENMAX GROUP:Engineering]`)
  *   - context blocks are XML-tagged so the LLM can cleanly separate history
  *     from the current message
  *   - thread context, replying-to, and smart-mode hint blocks are emitted
@@ -174,7 +175,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const safeContent = escapeXml(current?.content ?? '');
 
   const baseTag = TYPE_TAG[type];
-  // baseTag is like "[COCO GROUP]" — inject ":<name>" before the closing "]".
+  // baseTag is like "[OPENMAX GROUP]" — inject ":<name>" before the closing "]".
   const tag = (type === 'group' || type === 'thread')
     ? `${baseTag.slice(0, -1)}:${escapeXml(groupName || conv?.name || 'unknown')}]`
     : baseTag;
