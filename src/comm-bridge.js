@@ -2170,7 +2170,7 @@ if (config.channelLiveness?.enabled !== false) {
   const reportChannelLiveness = createChannelLivenessReporter(activeOrgConfigs, {
     log, warn,
     // 404-backoff knobs (issue #72). Omitted → reporter defaults (disable on
-    // the first 404, re-probe every 30 ticks).
+    // the first 404, re-probe every 180 ticks ≈ 3h at the 60s cadence).
     ...(config.channelLiveness?.disable404Threshold != null
       ? { disable404Threshold: config.channelLiveness.disable404Threshold } : {}),
     ...(config.channelLiveness?.reprobeEveryTicks != null
