@@ -40,6 +40,7 @@ import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './li
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
+import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter } from './lib/metrics-reporter.js';
@@ -63,6 +64,16 @@ const DEFAULT_DEDUP_MAX_ENTRIES = 3000;
 // `config.message.{content_fetch_retries,content_fetch_retry_delay_ms}`.
 const DEFAULT_CONTENT_FETCH_RETRIES = 1;        // extra attempts after the first
 const DEFAULT_CONTENT_FETCH_RETRY_DELAY_MS = 400;
+// In-sweep retry of a content-fetch-failing catch-up head (see sync-head-retry.js).
+// Drives the durable give-up counter to its threshold within a SINGLE /sync
+// sweep so a permanently-unfetchable head is skipped even on a stable connection
+// that never reconnects (the catch-up wedge). The attempt cap is a safety net;
+// it comfortably exceeds the give-up threshold (MAX_CONTENT_FETCH_ATTEMPTS=5 in
+// content-fetch-giveup.js), so the normal path ends on giveUp, not the cap.
+const DEFAULT_SYNC_HEAD_RETRY_DELAY_MS = 400;
+const SYNC_HEAD_MAX_INSWEEP_ATTEMPTS = 10;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Hardcoded WS operational defaults. `config.server.{reconnect_max_delay,
 // heartbeat_interval}` may override either; if absent, these apply.
@@ -1702,25 +1713,45 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart = 
 
       for (const ev of events) {
         if (!ev?.message_id || !ev.conversation_id) continue;
-        const res2 = await onMessage({
-          id:              String(ev.message_id),
-          conversation_id: ev.conversation_id,
-          seq:             ev.seq,
-          _via:            'sync',
-          // First-boot replay: tell the handler to clear any stale dedupe mark
-          // for this id before its duplicate check (see the handler). A
-          // prepare-phase bridge may have persisted the id to dedup.json without
-          // ever delivering it; on a genuine first boot nothing was delivered,
-          // so the replay must not be suppressed as a "duplicate".
-          ...(fromStart ? { _firstBoot: true } : {}),
-        });
+        // Dispatch this event, RE-ATTEMPTING it in-sweep on a transient
+        // content-fetch failure. A `fromStart` sweep only runs on (re)connect;
+        // on a STABLE connection with sync_seq stuck at 0 no further sweep fires
+        // (the in-connection gap-detector takes the non-fromStart path, which
+        // returns early while sync_seq is 0). Without in-sweep retry a single
+        // sweep would halt on a permanently-unfetchable HEAD at failure #1 and
+        // wait forever for a reconnect that never comes — starving the whole
+        // backlog behind it (the catch-up wedge; #79 follow-on). Re-attempting
+        // here drives the DURABLE give-up counter to its threshold within one
+        // sweep, so the head is skipped and the backlog flows, independent of
+        // reconnects. Bounded by SYNC_HEAD_MAX_INSWEEP_ATTEMPTS as a safety net
+        // for the case where the counter cannot advance (see sync-head-retry.js).
+        const { result: res2 } = await deliverWithInSweepRetry(
+          () => onMessage({
+            id:              String(ev.message_id),
+            conversation_id: ev.conversation_id,
+            seq:             ev.seq,
+            _via:            'sync',
+            // First-boot replay: tell the handler to clear any stale dedupe mark
+            // for this id before its duplicate check (see the handler). A
+            // prepare-phase bridge may have persisted the id to dedup.json
+            // without ever delivering it; on a genuine first boot nothing was
+            // delivered, so the replay must not be suppressed as a "duplicate".
+            ...(fromStart ? { _firstBoot: true } : {}),
+          }),
+          {
+            maxAttempts: SYNC_HEAD_MAX_INSWEEP_ATTEMPTS,
+            sleep: () => sleep(config.message?.content_fetch_giveup_retry_delay_ms
+              ?? DEFAULT_SYNC_HEAD_RETRY_DELAY_MS),
+          },
+        );
         // Content fetch failed for this event. Two cases:
-        //   • Gave up (Nth durable consecutive failure): the handler already
+        //   • Gave up (durable give-up threshold reached): the handler already
         //     alarm-logged and advanced the inbox-ledger watermark past this
         //     seq. SKIP it — advance the sweep cursor and continue — so a
         //     permanently-unfetchable head can't wedge the sweep and starve the
         //     backlog behind it forever (catch-up-wedge fix; follow-on to #79).
-        //   • Transient (below the cap): leave the cursor BEFORE it (do NOT
+        //   • Still transient after the in-sweep bound (only reachable when the
+        //     counter couldn't advance): leave the cursor BEFORE it (do NOT
         //     advance sinceSeq) and halt the sweep so the next reconnect re-pulls
         //     it in order. We do NOT force a WS disconnect here — that is the
         //     realtime path's job; on the sync-replay path the exponential
