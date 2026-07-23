@@ -658,16 +658,49 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
     });
 
     if (contentResult.status !== 'ok') {
-      // Both attempts failed / no usable body. Do NOT forward an empty message,
-      // and do NOT advance read-state or the /sync cursor for it — leave it
-      // "unconsumed" so the next /sync catch-up re-pulls it in seq order. Forget
-      // the dedupe entry recorded above so that re-pull isn't suppressed as a
-      // duplicate.
-      // TODO(persistent-failure alarm): if the SAME message keeps failing across
-      // reconnects the cursor stalls on it; a future PR should alarm on repeated
-      // skips (deliberately out of scope for this fix per owner).
+      // Content couldn't be resolved. Do NOT forward an empty message. Forget the
+      // dedupe entry recorded above so a later re-pull isn't suppressed as a
+      // duplicate. What happens next depends on a DURABLE, bounded per-message
+      // give-up counter (persisted in the inbox-ledger file, so it survives the
+      // connect→restart→reconnect legs that define this wedge — an in-memory
+      // counter would reset every restart and never reach the threshold):
+      //
+      //   • Transient (failures 1..N-1, or any no-seq failure): keep PR#76
+      //     ordering — do NOT advance read-state / the /sync cursor, leave it
+      //     "unconsumed" so the next /sync catch-up re-pulls it in seq order.
+      //     Realtime forces a reconnect (unchanged); the sync-replay path relies
+      //     on backoff + the un-advanced cursor.
+      //
+      //   • Give up (the Nth consecutive failure): a permanently-unfetchable
+      //     message at the HEAD of the backlog would otherwise wedge the sweep
+      //     forever and starve everything behind it (the empty seeded-DM catch-up
+      //     wedge; follow-on to #79 / PR#76). Skip it: advance the ledger
+      //     watermark past it (so the gap-detector stops re-triggering /sync on
+      //     it) and tell the sweep to skip+advance instead of halting; alarm-log
+      //     the (possible) data loss.
+      //
+      // Only the /sync catch-up path carries an inbox seq at fetch-fail time; a
+      // realtime failure has no body (so no seq) and keeps its existing transient
+      // forceReconnect behavior — after reconnect it re-appears on the /sync path
+      // WITH a seq and is counted there, so it can't loop forever either.
       dedupe.forget?.(notifId);
-      warn(`[${orgConfig.slug}] msg=${notifId} conv=${notifConv} content fetch failed after ${contentResult.attempts} attempt(s) — forwarding skipped, cursor not advanced` +
+
+      const failSeq = (notification._via === 'sync' && typeof notification.seq === 'number')
+        ? notification.seq
+        : null;
+      const failure = (inboxLedger && failSeq != null)
+        ? inboxLedger.recordContentFetchFailure(failSeq)
+        : null;
+
+      if (failure?.giveUp) {
+        inboxLedger.skip(failSeq);
+        warn(`[${orgConfig.slug}] ALARM gave up on msg=${notifId} conv=${notifConv} seq=${failSeq} after ${failure.failures} consecutive content-fetch failure(s) — SKIPPING it (possible data loss) and advancing past it so the rest of the backlog is delivered`);
+        return { contentFetchFailed: true, giveUp: true };
+      }
+
+      warn(`[${orgConfig.slug}] msg=${notifId} conv=${notifConv} content fetch failed after ${contentResult.attempts} attempt(s)` +
+        (failure ? ` (${failure.failures}/${failure.max} consecutive)` : '') +
+        ` — forwarding skipped, cursor not advanced` +
         (contentResult.forceReconnect
           ? '; forcing WS reconnect to trigger /sync catch-up'
           : ' (sync-replay path — NOT re-terminating; relying on backoff + un-advanced cursor)'));
@@ -693,6 +726,9 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
       ? notification.seq
       : (detail?.inbox_seq ?? detail?.message?.inbox_seq ?? null);
     if (inboxLedger && inboxSeq != null) {
+      // Successful processing resets this seq's consecutive content-fetch-failure
+      // counter, so only truly-consecutive failures count toward the give-up cap.
+      inboxLedger.clearContentFetchFailure(inboxSeq);
       if (!inboxLedger.record(inboxSeq)) {
         log(`[ws] [${orgConfig.slug}] msg=${notifId} inbox_seq=${inboxSeq} already recorded, skipping`);
         return;
@@ -1678,12 +1714,23 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart = 
           // so the replay must not be suppressed as a "duplicate".
           ...(fromStart ? { _firstBoot: true } : {}),
         });
-        // Content fetch failed for this event: leave the cursor BEFORE it (do
-        // NOT advance sinceSeq) and halt the sweep so the next reconnect
-        // re-pulls it in order. We do NOT force a WS disconnect here — that is
-        // the realtime path's job; on the sync-replay path the exponential
-        // reconnect backoff + this un-advanced cursor is the safety net.
+        // Content fetch failed for this event. Two cases:
+        //   • Gave up (Nth durable consecutive failure): the handler already
+        //     alarm-logged and advanced the inbox-ledger watermark past this
+        //     seq. SKIP it — advance the sweep cursor and continue — so a
+        //     permanently-unfetchable head can't wedge the sweep and starve the
+        //     backlog behind it forever (catch-up-wedge fix; follow-on to #79).
+        //   • Transient (below the cap): leave the cursor BEFORE it (do NOT
+        //     advance sinceSeq) and halt the sweep so the next reconnect re-pulls
+        //     it in order. We do NOT force a WS disconnect here — that is the
+        //     realtime path's job; on the sync-replay path the exponential
+        //     reconnect backoff + this un-advanced cursor is the safety net.
         if (res2?.contentFetchFailed) {
+          if (res2.giveUp) {
+            log(`[${orgConfig.slug}] sync: giving up on msg=${ev.message_id} seq=${ev.seq} after repeated content-fetch failures — skipping and advancing cursor past it`);
+            if (typeof ev.seq === 'number' && ev.seq > sinceSeq) sinceSeq = ev.seq;
+            continue;
+          }
           log(`[${orgConfig.slug}] sync: content unavailable for msg=${ev.message_id} seq=${ev.seq} — halting sweep, cursor stays at ${sinceSeq}`);
           haltedOnEmpty = true;
           break;

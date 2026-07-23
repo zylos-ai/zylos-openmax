@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.11.0
+version: 2.11.1
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
