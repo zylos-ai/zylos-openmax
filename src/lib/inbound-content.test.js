@@ -112,3 +112,55 @@ test('delay is applied between attempts via injected sleep', async () => {
   await resolveInboundContent({ getDetail, notification: realtimeFrame, delayMs: 350, sleep });
   assert.deepEqual(delays, [350], 'one delay, before the single retry');
 });
+
+// ---------------------------------------------------------------------------
+// TRANSIENT (getDetail THROWS) vs POISON (getDetail returns empty) — the
+// distinction that stops a brief GET outage from permanently dropping a message.
+// ---------------------------------------------------------------------------
+
+test('getDetail THROWS on every attempt → status "error" (transient), NOT skip-empty', async () => {
+  let calls = 0;
+  const getDetail = async () => { calls += 1; throw new Error('503 upstream'); };
+  const r = await resolveInboundContent({ getDetail, notification: syncFrame, sleep: noSleep });
+  assert.equal(calls, 2, 'first attempt + one retry');
+  assert.equal(r.status, 'error', 'a thrown fetch is transient, never poison');
+  assert.equal(r.via, 'sync');
+  assert.equal(r.forceReconnect, false, 'sync path must not re-terminate mid-sweep');
+  assert.match(r.error, /503/);
+});
+
+test('getDetail THROWS on a REALTIME frame → error + forceReconnect', async () => {
+  const getDetail = async () => { throw new Error('ECONNRESET'); };
+  const r = await resolveInboundContent({ getDetail, notification: realtimeFrame, sleep: noSleep });
+  assert.equal(r.status, 'error');
+  assert.equal(r.forceReconnect, true);
+});
+
+test('transient throw then a successful body → status ok (recovered, not dropped)', async () => {
+  let calls = 0;
+  const getDetail = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('429 rate limited');
+    return { content: { body: { text: 'the real body' } } };
+  };
+  const r = await resolveInboundContent({ getDetail, notification: syncFrame, sleep: noSleep });
+  assert.equal(r.status, 'ok');
+  assert.equal(r.attempts, 2);
+});
+
+test('empty body that never throws → status skip-empty (poison), the only skip-eligible case', async () => {
+  const getDetail = async () => ({ content: { body: { text: '' } } });
+  const r = await resolveInboundContent({ getDetail, notification: syncFrame, sleep: noSleep });
+  assert.equal(r.status, 'skip-empty');
+});
+
+test('bias to transient: last attempt throws (after an empty) → error, not skip-empty', async () => {
+  let calls = 0;
+  const getDetail = async () => {
+    calls += 1;
+    if (calls === 1) return { content: { body: { text: '' } } }; // empty
+    throw new Error('500'); // terminal attempt throws → treat as transient
+  };
+  const r = await resolveInboundContent({ getDetail, notification: syncFrame, sleep: noSleep });
+  assert.equal(r.status, 'error', 'a terminal throw biases to transient (never wrongly skip)');
+});

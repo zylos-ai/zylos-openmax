@@ -30,6 +30,25 @@ test('stable connection, no reconnect: permanent empty head reaches giveUp withi
   assert.equal(backoffs, threshold - 1, 'backs off between attempts, not after the last');
 });
 
+test('a TRANSIENT result stops the loop immediately — never retried toward give-up', async () => {
+  // P2 guard: a transient fetch error (result.transient) must NOT be retried
+  // in-sweep. Retrying would compress reconnect-spaced attempts into a burst and
+  // let a legitimate message hit the give-up cap + be skipped/dropped. The loop
+  // must return after a single attempt so the caller halts and re-pulls in order.
+  let attemptsMade = 0;
+  let backoffs = 0;
+  const transient = async () => { attemptsMade += 1; return { contentFetchFailed: true, transient: true }; };
+  const { result, attempts } = await deliverWithInSweepRetry(transient, {
+    maxAttempts: 10,
+    sleep: async () => { backoffs += 1; },
+  });
+  assert.equal(result.transient, true);
+  assert.ok(!result.giveUp, 'transient must never be turned into a give-up');
+  assert.equal(attempts, 1, 'exactly one attempt — no in-sweep retry for a transient error');
+  assert.equal(attemptsMade, 1);
+  assert.equal(backoffs, 0, 'no backoff/retry on a transient result');
+});
+
 test('transient failure that resolves is delivered without giving up', async () => {
   // Fails twice, then the content becomes available: delivered, never skipped.
   let n = 0;

@@ -64,11 +64,19 @@ export async function deliverWithInSweepRetry(attempt, { maxAttempts, sleep } = 
   for (;;) {
     const result = await attempt();
     attempts += 1;
-    // Delivered, or the give-up threshold was reached (handler already skipped
-    // it): stop retrying.
-    if (!result?.contentFetchFailed || result.giveUp) return { result, attempts };
-    // Transient failure below the cap: brief backoff, then re-attempt the SAME
-    // event. Never advance past it — seq ordering is preserved.
+    // Stop retrying when the event is:
+    //   • delivered (no contentFetchFailed), or
+    //   • given up (the empty-body give-up threshold was reached — handler
+    //     already skipped it), or
+    //   • TRANSIENT (a fetch/HTTP error, not an empty body). A transient failure
+    //     must NOT be retried-to-give-up: doing so would compress failures that
+    //     belong minutes apart (across reconnects) into a ~2s burst and skip a
+    //     legitimate message. The caller halts and re-pulls it in order (PR#76).
+    if (!result?.contentFetchFailed || result.giveUp || result.transient) {
+      return { result, attempts };
+    }
+    // Empty-body (poison) below the give-up cap: brief backoff, then re-attempt
+    // the SAME event. Never advance past it — seq ordering is preserved.
     if (attempts >= maxAttempts) return { result, attempts };
     await backoff();
   }

@@ -671,7 +671,14 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
     // being forwarded to the agent (the historical bug: the real text only
     // arrived later, out of order, via the next /sync catch-up).
     const contentResult = await resolveInboundContent({
-      getDetail: () => fetchMessageDetail(orgConfig.org_id, notification.conversation_id, notification.id),
+      // NB: this thunk THROWS on a fetch/HTTP error (getForOrg rejects on
+      // non-2xx / network failure) — deliberately NOT fetchMessageDetail, which
+      // swallows errors to a null return. resolveInboundContent needs the throw
+      // to classify a TRANSIENT fetch failure ('error') distinctly from a
+      // successful GET that yields an empty body ('skip-empty' / poison); only
+      // the latter is skip-eligible. Collapsing both to null would let a brief
+      // GET outage skip and permanently drop a legitimate message.
+      getDetail: () => getForOrg(orgConfig.org_id, apiPath(`/conversations/${notification.conversation_id}/messages/${notification.id}`)),
       notification,
       retries: config.message?.content_fetch_retries ?? DEFAULT_CONTENT_FETCH_RETRIES,
       delayMs: config.message?.content_fetch_retry_delay_ms ?? DEFAULT_CONTENT_FETCH_RETRY_DELAY_MS,
@@ -680,32 +687,36 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
     if (contentResult.status !== 'ok') {
       // Content couldn't be resolved. Do NOT forward an empty message. Forget the
       // dedupe entry recorded above so a later re-pull isn't suppressed as a
-      // duplicate. What happens next depends on a DURABLE, bounded per-message
-      // give-up counter (persisted in the inbox-ledger file, so it survives the
-      // connect→restart→reconnect legs that define this wedge — an in-memory
-      // counter would reset every restart and never reach the threshold):
+      // duplicate. There are TWO distinct failure modes and they are handled
+      // OPPOSITELY — conflating them is how a transient blip permanently drops a
+      // real message (the PR#76 ordering contract):
       //
-      //   • Transient (failures 1..N-1, or any no-seq failure): keep PR#76
-      //     ordering — do NOT advance read-state / the /sync cursor, leave it
-      //     "unconsumed" so the next /sync catch-up re-pulls it in seq order.
-      //     Realtime forces a reconnect (unchanged); the sync-replay path relies
-      //     on backoff + the un-advanced cursor.
+      //   • status 'error' = TRANSIENT fetch failure (GET threw: 5xx/429/network/
+      //     404-replication-lag). Keep PR#76 ordering: do NOT advance the /sync
+      //     cursor, do NOT count it toward the give-up budget, do NOT skip it —
+      //     halt the sweep so it is re-pulled in seq order on the next reconnect
+      //     (realtime still forces a reconnect). A valid message whose body just
+      //     wasn't fetchable this instant must never be skipped.
       //
-      //   • Give up (the Nth consecutive failure): a permanently-unfetchable
-      //     message at the HEAD of the backlog would otherwise wedge the sweep
-      //     forever and starve everything behind it (the empty seeded-DM catch-up
-      //     wedge; follow-on to #79 / PR#76). Skip it: advance the ledger
-      //     watermark past it (so the gap-detector stops re-triggering /sync on
-      //     it) and tell the sweep to skip+advance instead of halting; alarm-log
-      //     the (possible) data loss.
+      //   • status 'skip-empty' = POISON: the GET SUCCEEDED but the body is
+      //     empty/unusable (e.g. a message persisted with an empty body). Only
+      //     this counts toward a DURABLE, bounded per-seq give-up counter
+      //     (persisted in the inbox-ledger so it survives the connect→restart→
+      //     reconnect legs of the wedge). Below the cap: halt-order like above
+      //     (and in-sweep retry drives the counter up). At the cap: give up —
+      //     advance the ledger watermark past it (gap-detector stops
+      //     re-triggering /sync on it) and tell the sweep to skip+advance
+      //     instead of halting; alarm-log the (possible, bounded) data loss.
       //
       // Only the /sync catch-up path carries an inbox seq at fetch-fail time; a
-      // realtime failure has no body (so no seq) and keeps its existing transient
-      // forceReconnect behavior — after reconnect it re-appears on the /sync path
-      // WITH a seq and is counted there, so it can't loop forever either.
+      // realtime failure has no seq so it is never counted/skipped here — after
+      // its forced reconnect it re-appears on the /sync path WITH a seq.
       dedupe.forget?.(notifId);
 
-      const failSeq = (notification._via === 'sync' && typeof notification.seq === 'number')
+      const isTransient = contentResult.status === 'error';
+
+      // Only POISON (empty body) is eligible for the give-up counter + skip.
+      const failSeq = (!isTransient && notification._via === 'sync' && typeof notification.seq === 'number')
         ? notification.seq
         : null;
       const failure = (inboxLedger && failSeq != null)
@@ -714,11 +725,27 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
 
       if (failure?.giveUp) {
         inboxLedger.skip(failSeq);
-        warn(`[${orgConfig.slug}] ALARM gave up on msg=${notifId} conv=${notifConv} seq=${failSeq} after ${failure.failures} consecutive content-fetch failure(s) — SKIPPING it (possible data loss) and advancing past it so the rest of the backlog is delivered`);
+        warn(`[${orgConfig.slug}] ALARM gave up on msg=${notifId} conv=${notifConv} seq=${failSeq} after ${failure.failures} consecutive EMPTY-BODY fetch(es) — SKIPPING it (possible data loss) and advancing past it so the rest of the backlog is delivered`);
         return { contentFetchFailed: true, giveUp: true };
       }
 
-      warn(`[${orgConfig.slug}] msg=${notifId} conv=${notifConv} content fetch failed after ${contentResult.attempts} attempt(s)` +
+      if (isTransient) {
+        // Transient: do not skip, do not count. Halt + re-pull in order.
+        warn(`[${orgConfig.slug}] msg=${notifId} conv=${notifConv} content fetch ERRORED after ${contentResult.attempts} attempt(s) (${contentResult.error || 'fetch error'}) — TRANSIENT: not counted toward give-up, cursor not advanced, will re-pull in order` +
+          (contentResult.forceReconnect
+            ? '; forcing WS reconnect to trigger /sync catch-up'
+            : ' (sync-replay path — NOT re-terminating; relying on backoff + un-advanced cursor)'));
+        if (contentResult.forceReconnect) {
+          try { wsRef?.client?.forceReconnect('content-fetch-transient-error'); } catch {}
+        }
+        // `transient: true` tells the in-sweep retry loop NOT to retry-to-give-up
+        // (that would compress reconnect-spaced retries into a burst); the sweep
+        // halts and re-pulls in order.
+        return { contentFetchFailed: true, transient: true };
+      }
+
+      // POISON below the give-up cap.
+      warn(`[${orgConfig.slug}] msg=${notifId} conv=${notifConv} EMPTY body after ${contentResult.attempts} attempt(s)` +
         (failure ? ` (${failure.failures}/${failure.max} consecutive)` : '') +
         ` — forwarding skipped, cursor not advanced` +
         (contentResult.forceReconnect
@@ -1782,7 +1809,12 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart = 
             if (typeof ev.seq === 'number' && ev.seq > sinceSeq) sinceSeq = ev.seq;
             continue;
           }
-          log(`[${orgConfig.slug}] sync: content unavailable for msg=${ev.message_id} seq=${ev.seq} — halting sweep, cursor stays at ${sinceSeq}`);
+          // Reached here for a TRANSIENT fetch error (res2.transient — never
+          // skipped, preserves ordering) or an empty body still below the
+          // give-up cap after the in-sweep retry budget was spent. Either way,
+          // halt and leave the cursor BEFORE this seq so the next reconnect
+          // re-pulls it in order.
+          log(`[${orgConfig.slug}] sync: ${res2.transient ? 'transient fetch error' : 'empty body (below give-up cap)'} for msg=${ev.message_id} seq=${ev.seq} — halting sweep, cursor stays at ${sinceSeq}`);
           haltedOnEmpty = true;
           break;
         }
