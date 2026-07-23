@@ -630,6 +630,16 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
     const notifSender = notification?.sender_id;
     log(`[ws] [${orgConfig.slug}] message frame: id=${notifId || '<missing>'} conv=${notifConv || '<missing>'} sender=${notifSender || '?'}`);
     if (!notifId || !notifConv) return;
+    // First-boot replay: a comm-bridge started transiently during the runtime
+    // prepare phase can persist a message id to the deduper (runtime/dedup.json)
+    // and then fail to deliver it to an agent session (none exists yet) — the
+    // C4 forward failure below only warns, it does not forget the id. That
+    // stale mark would make the first-boot /sync replay skip the message as a
+    // "duplicate", so a fresh agent would still never receive its onboarding /
+    // activation DM (#79). On a genuine first boot nothing has been delivered,
+    // so forget any such mark before the duplicate check. This is the id-level
+    // counterpart to inboxLedger.resetReceived() on the same path.
+    if (notification._firstBoot) dedupe.forget?.(notifId);
     if (dedupe(notifId)) {
       log(`[ws] [${orgConfig.slug}] msg=${notifId} duplicate, skipping`);
       return;
@@ -1626,15 +1636,19 @@ const SYNC_MAX_EVENTS = 2000;
 // Per-org guard so a concurrent reconnect doesn't trigger overlapping syncs.
 const _syncInFlight = new Set();
 
-async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
-  if (!sessionRef.sync_seq) return;  // first-ever connect → nothing to catch up
+async function syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart = false } = {}) {
+  // Normally a no-op on the first-ever connect (nothing to catch up). With
+  // `fromStart`, replay the whole inbox from seq 0 and DISPATCH each event —
+  // the first-boot path uses this to deliver a freshly provisioned agent's
+  // backlog (owner welcome + activation DM) instead of discarding it (#79).
+  if (!fromStart && !sessionRef.sync_seq) return;
   if (_syncInFlight.has(orgConfig.slug)) {
     log(`[${orgConfig.slug}] sync already in flight, skipping`);
     return;
   }
   _syncInFlight.add(orgConfig.slug);
   try {
-    const startSeq = sessionRef.sync_seq;
+    const startSeq = fromStart ? 0 : sessionRef.sync_seq;
     let sinceSeq = startSeq;
     let totalSynced = 0;
     let hasMore = true;
@@ -1657,6 +1671,12 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
           conversation_id: ev.conversation_id,
           seq:             ev.seq,
           _via:            'sync',
+          // First-boot replay: tell the handler to clear any stale dedupe mark
+          // for this id before its duplicate check (see the handler). A
+          // prepare-phase bridge may have persisted the id to dedup.json without
+          // ever delivering it; on a genuine first boot nothing was delivered,
+          // so the replay must not be suppressed as a "duplicate".
+          ...(fromStart ? { _firstBoot: true } : {}),
         });
         // Content fetch failed for this event: leave the cursor BEFORE it (do
         // NOT advance sinceSeq) and halt the sweep so the next reconnect
@@ -1694,40 +1714,17 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
 }
 
 // =============================================================================
-// First-connect sync_seq initialization
+// First-connect inbox replay
 // =============================================================================
-// On first-ever connect (sync_seq=0), seek to the END of the inbox so
-// subsequent reconnects only catch up events that arrive after this point.
-// We page through the entire inbox (discarding events) to find the max
-// cursor — one-time cost per new bot, avoids pulling full history later.
-
-async function initSyncSeq(orgConfig, sessionRef) {
-  try {
-    let cursor = 0;
-    let hasMore = true;
-    while (hasMore) {
-      const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
-        since_seq: cursor,
-        device_id: config.agent?.device_id || '',
-        limit:     SYNC_PAGE_SIZE,
-      });
-      const events = Array.isArray(res?.events) ? res.events : [];
-      hasMore = res?.has_more === true;
-      if (events.length > 0) {
-        cursor = Number(res?.next_cursor) || events[events.length - 1].seq;
-      } else {
-        break;
-      }
-    }
-    if (cursor > 0) {
-      sessionRef.sync_seq = cursor;
-      saveOrgSession(orgConfig.slug, { org_id: orgConfig.org_id, sync_seq: cursor });
-      log(`[${orgConfig.slug}] init sync_seq=${cursor} (seeked to inbox end)`);
-    }
-  } catch (err) {
-    warn(`[${orgConfig.slug}] initSyncSeq failed: ${err.message}`);
-  }
-}
+// On first-ever connect (sync_seq=0) the inbox of a freshly provisioned agent
+// holds exactly the messages it must act on — the owner welcome DM and the
+// scheduler/onboarding activation DM the platform sends at creation time.
+//
+// The old behavior seeked to the END of the inbox and DISCARDED that backlog,
+// so a fresh agent silently never received its activation and sat idle (#79 /
+// cws-fe #175 — greeting shows, onboarding guidance never arrives). We now
+// replay the inbox from the start and dispatch each message instead; see the
+// onOpen first-connect branch, which calls `syncMissedEvents(..., {fromStart})`.
 
 // =============================================================================
 // AckSync — tell cws-comm how far we've consumed (best-effort)
@@ -2016,6 +2013,17 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     },
   });
   if (syncSeq > 0) inboxLedger.setAckedSeq(syncSeq);
+  // If the durable ledger is ahead of the session cursor — the session file was
+  // lost or reset but the inbox ledger (persisted separately) survived — adopt
+  // the ledger's watermark as the sync cursor. This keeps onOpen on the normal
+  // catch-up path instead of mistaking a warm agent for a first boot and
+  // replaying its whole inbox from zero.
+  const ledgerAcked = inboxLedger.getAckedSeq();
+  if (!sessionRef.sync_seq && ledgerAcked > 0) {
+    sessionRef.sync_seq = ledgerAcked;
+    saveOrgSession(orgConfig.slug, { sync_seq: ledgerAcked });
+    log(`[${orgConfig.slug}] seeded sync_seq from ledger acked_seq=${ledgerAcked} (session cursor was empty)`);
+  }
   inboxLedger.start();
 
   // Mutable holder so the message handler (created before the WsClient exists)
@@ -2055,9 +2063,19 @@ function startOrgWs(orgConfig, wsBaseUrl) {
       reportAgentOnline(orgConfig).catch(e =>
         warn(`[${orgConfig.slug}] online-report failed: ${e.message} — will retry on next reconnect`));
       if (!sessionRef.sync_seq) {
-        // First-ever connect: initialize sync_seq from current inbox position.
-        await initSyncSeq(orgConfig, sessionRef);
-        // Seed ledger from the initialized sync_seq.
+        // First-ever connect: REPLAY the inbox from the start and dispatch each
+        // message, rather than seeking to the end and discarding the backlog.
+        // A freshly provisioned agent's inbox holds exactly the messages it must
+        // act on (owner welcome + scheduler/onboarding activation DM); the old
+        // seek-to-end dropped them and the agent sat idle (#79 / cws-fe #175).
+        //
+        // Clear any dedupe taint first: a comm-bridge started transiently during
+        // the runtime prepare phase can record inbox seqs it never delivered to
+        // an agent session (none exists yet). On a genuine first boot nothing has
+        // been delivered, so the replay must not be suppressed by those marks.
+        inboxLedger.resetReceived();
+        await syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart: true });
+        // Seed the ledger watermark to the replayed position.
         if (sessionRef.sync_seq) inboxLedger.setAckedSeq(sessionRef.sync_seq);
       } else {
         // Reconnect: catch up missed events since last sync_seq (which is now

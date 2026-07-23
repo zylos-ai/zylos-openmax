@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] — 2026-07-23
+
+First stable of the 2.11 line. Promotes the `2.11.0-beta.1` and `2.11.0-beta.2` prereleases to stable — no code changes beyond those two betas. Highlights: the first-boot inbox-replay fix (#79 / cws-fe #175) from beta.2 — a freshly provisioned agent no longer discards its owner-welcome / onboarding-activation DM, so the onboarding guidance actually arrives — plus beta.1's channel-liveness 404 backoff, the `[COCO …]` → `[OPENMAX …]` inbound-tag rebrand, and the empty-message fix. See the beta entries below for full per-change detail.
+
+## [2.11.0-beta.2] — 2026-07-23
+
+Beta prerelease bundling the first-boot inbox-replay fix (#79 / cws-fe #175). Pre-release — stable `zylos upgrade --check` does not pull `-beta` tags; use `--beta` to test. Promote to `2.11.0` (no suffix) once validated.
+
+### Fixed
+
+- **comm-bridge: first-boot now replays and dispatches the inbox backlog instead of discarding it (`src/comm-bridge.js`, `src/lib/inbox-ledger.js`).** On the first-ever connect (`sync_seq=0`) the bridge used to call `initSyncSeq`, which paged the whole inbox only to seek the cursor to the **end** and `ackSync` past everything — silently dropping the messages a freshly provisioned agent must act on (owner welcome + scheduler/onboarding activation DM). Combined with the runtime briefly starting a comm-bridge during the prepare phase (which connects, then drops right as those DMs arrive), a fresh agent never received its activation and sat idle — the greeting shows but the onboarding guidance never arrives (#79 / cws-fe #175, live-reproduced on INT). Now the first-connect path **replays `/sync` from seq 0 and dispatches each event** (`syncMissedEvents(..., { fromStart: true })`), so the backlog is delivered in order. Also, the first-boot replay clears **both** dedupe layers so a prepare-phase bridge that recorded-but-never-delivered a message cannot suppress it: (a) `inbox-ledger` gains `resetReceived()` (seq-level), called before the replay; (b) the message-id deduper (`runtime/dedup.json`, checked earlier in the handler than the ledger) is `forget()`-ten per replayed backlog entry — the first-boot events now carry a `_firstBoot` marker so the handler drops any stale id mark before its duplicate check. Without (b) the replay would still be swallowed by a tainted `dedup.json` even after (a). Additionally: if the durable ledger `acked_seq` is ahead of a lost/reset session cursor, the session cursor is seeded from it so a warm agent is not mistaken for a first boot and does not replay its whole inbox. `initSyncSeq` (seek-to-inbox-end) is removed. The full unacked window replay is bounded by the existing `SYNC_MAX_EVENTS` per-sweep cap. (closes #79)
+
 ## [2.11.0-beta.1] — 2026-07-21
 
 Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3, never tagged), the inbound-tag rebrand, and the empty-message fix. Pre-release — stable `zylos upgrade --check` does not pull `-beta` tags; use `--beta` to test. Promote to `2.11.0` (no suffix) once validated.

@@ -138,6 +138,22 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
     } catch {}
   }
 
+  /**
+   * Drop the received-but-not-yet-contiguous set without touching the
+   * continuous-ack watermark. Used by the first-boot replay path: a comm-bridge
+   * started transiently during the runtime prepare phase can record inbox seqs
+   * it never delivered to an agent session (no session exists yet), tainting the
+   * dedupe set. On a genuine first boot nothing has been delivered, so those
+   * stale "seen" marks must not suppress the replay-and-dispatch. acked_seq is
+   * left untouched (it is the durable delivered watermark, seeded separately).
+   */
+  function resetReceived() {
+    if (received.size === 0) return;
+    received.clear();
+    oldestGapTs = null;
+    persist();
+  }
+
   function setAckedSeq(seq) {
     if (typeof seq === 'number' && seq > ackedSeq) {
       ackedSeq = seq;
@@ -153,5 +169,5 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
 
   load();
 
-  return { record, start, stop, setAckedSeq, getAckedSeq };
+  return { record, start, stop, setAckedSeq, getAckedSeq, resetReceived };
 }
