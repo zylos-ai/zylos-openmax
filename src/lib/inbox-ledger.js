@@ -6,12 +6,13 @@
  * triggers ackSync, and detects gaps that need /sync backfill.
  *
  * File: runtime/inbox-{orgSlug}.json
- * Schema: { acked_seq: number, received: number[] }
+ * Schema: { acked_seq: number, received: number[], fetch_failures: { [seq]: number } }
  */
 
 import fs from 'fs';
 import path from 'path';
 import { RUNTIME_DIR } from './session.js';
+import { recordFailure, clearFailure, failureCount } from './content-fetch-giveup.js';
 
 const TICK_INTERVAL_MS = 5_000;
 const GAP_TIMEOUT_MS = 10_000;
@@ -24,9 +25,23 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
   let ackedSeq = 0;
   let lastAckedSeq = 0;
   const received = new Set();
+  // Durable per-seq consecutive content-fetch-failure counts ({ [seq]: n }).
+  // Persisted alongside acked_seq so a permanently-unfetchable head keeps
+  // accumulating failures ACROSS process restarts + reconnects (the wedge's
+  // signature is repeated connect→restart→reconnect legs); an in-memory-only
+  // counter would reset each restart and never reach the give-up threshold.
+  let fetchFailures = {};
   let oldestGapTs = null;
   let persistTimer = null;
   let tickTimer = null;
+
+  function pruneFetchFailures() {
+    // A counter is only meaningful for a seq still ahead of the watermark;
+    // once acked/skipped, drop it.
+    for (const k of Object.keys(fetchFailures)) {
+      if (Number(k) <= ackedSeq) delete fetchFailures[k];
+    }
+  }
 
   function load() {
     try {
@@ -40,7 +55,12 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
           if (typeof s === 'number' && s > ackedSeq) received.add(s);
         }
       }
-      log(`inbox-ledger loaded: acked_seq=${ackedSeq} pending=${received.size}`);
+      if (data.fetch_failures && typeof data.fetch_failures === 'object') {
+        for (const [k, v] of Object.entries(data.fetch_failures)) {
+          if (Number.isInteger(v) && v > 0 && Number(k) > ackedSeq) fetchFailures[k] = v;
+        }
+      }
+      log(`inbox-ledger loaded: acked_seq=${ackedSeq} pending=${received.size} fetch_failures=${Object.keys(fetchFailures).length}`);
     } catch {
       // No file or corrupt — start fresh; ackedSeq will be set from sync_seq.
     }
@@ -51,7 +71,7 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
     persistTimer = setTimeout(() => {
       persistTimer = null;
       const sorted = [...received].sort((a, b) => a - b);
-      const data = { acked_seq: ackedSeq, received: sorted };
+      const data = { acked_seq: ackedSeq, received: sorted, fetch_failures: fetchFailures };
       const tmp = `${filePath}.tmp.${process.pid}`;
       try {
         fs.mkdirSync(RUNTIME_DIR, { recursive: true });
@@ -73,6 +93,7 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
     }
     if (advanced) {
       oldestGapTs = null;
+      pruneFetchFailures();
     }
     return advanced;
   }
@@ -131,7 +152,7 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
     if (persistTimer) { clearTimeout(persistTimer); persistTimer = null; }
     // Final synchronous persist
     const sorted = [...received].sort((a, b) => a - b);
-    const data = { acked_seq: ackedSeq, received: sorted };
+    const data = { acked_seq: ackedSeq, received: sorted, fetch_failures: fetchFailures };
     try {
       fs.mkdirSync(RUNTIME_DIR, { recursive: true });
       fs.writeFileSync(filePath, JSON.stringify(data));
@@ -161,13 +182,57 @@ export function createInboxLedger(orgSlug, { onAck, onGapSync, log }) {
       for (const s of received) {
         if (s <= ackedSeq) received.delete(s);
       }
+      pruneFetchFailures();
       persist();
     }
   }
 
   function getAckedSeq() { return ackedSeq; }
 
+  /**
+   * Record one DURABLE, cross-restart content-fetch failure for `seq` and
+   * report whether the caller should give up on it now. The count is persisted
+   * in this ledger's file so it keeps accumulating across process restarts and
+   * reconnects (the catch-up-wedge signature). Returns
+   * { failures, giveUp, max } — see content-fetch-giveup.recordFailure. A no-op
+   * (returns null) for seqs already at/behind the watermark.
+   */
+  function recordContentFetchFailure(seq) {
+    if (typeof seq !== 'number' || seq <= 0 || seq <= ackedSeq) return null;
+    const result = recordFailure(fetchFailures, seq);
+    persist();
+    return result;
+  }
+
+  /** Clear a seq's consecutive content-fetch-failure counter (on success). */
+  function clearContentFetchFailure(seq) {
+    if (clearFailure(fetchFailures, seq)) persist();
+  }
+
+  /** Current durable consecutive content-fetch-failure count for `seq`. */
+  function getContentFetchFailureCount(seq) {
+    return failureCount(fetchFailures, seq);
+  }
+
+  /**
+   * Give-up path: mark `seq` as permanently consumed even though it was never
+   * successfully processed (content unavailable after the give-up threshold).
+   * Adds it to the received set, advances the watermark, and clears its failure
+   * counter — so the gap-detector stops re-triggering /sync on this unfetchable
+   * head forever and the backlog behind it can be delivered.
+   */
+  function skip(seq) {
+    if (typeof seq !== 'number' || seq <= 0 || seq <= ackedSeq) return;
+    received.add(seq);
+    clearFailure(fetchFailures, seq);
+    advanceWatermark();
+    persist();
+  }
+
   load();
 
-  return { record, start, stop, setAckedSeq, getAckedSeq, resetReceived };
+  return {
+    record, start, stop, setAckedSeq, getAckedSeq, resetReceived,
+    recordContentFetchFailure, clearContentFetchFailure, getContentFetchFailureCount, skip,
+  };
 }

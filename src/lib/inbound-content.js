@@ -81,7 +81,15 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  *
  * @returns {Promise<object>} one of:
  *   { status: 'ok', detail, attempts }
- *   { status: 'skip-empty', detail, attempts, via, forceReconnect }
+ *   { status: 'skip-empty', detail, attempts, via, forceReconnect }  // POISON: GET ok, body empty
+ *   { status: 'error', attempts, via, forceReconnect, error }        // TRANSIENT: GET threw
+ *
+ * IMPORTANT: `getDetail` MUST THROW on a fetch/HTTP error (so a transient
+ * failure is classified 'error', halted, and re-pulled in order) and return the
+ * — possibly empty — body on a successful response (an empty body is the only
+ * 'skip-empty' / skip-eligible case). A `getDetail` that swallows errors to a
+ * null return collapses the two and can cause a transient failure to be skipped
+ * and PERMANENTLY dropped.
  */
 export async function resolveInboundContent({
   getDetail,
@@ -93,17 +101,54 @@ export async function resolveInboundContent({
   const maxAttempts = 1 + Math.max(0, Number(retries) || 0);
   let detail = null;
   let attempts = 0;
+  // Discriminate the TWO failure modes, because they must be handled
+  // oppositely (see the status doc above):
+  //   • the fetch THREW (HTTP/network error, 5xx/429/404-replication-lag) —
+  //     TRANSIENT. `getDetail` must throw for this; do NOT skip such a message.
+  //   • the fetch SUCCEEDED but the body is empty/unusable — POISON (e.g. a
+  //     message persisted with an empty body). Only this is skip-eligible.
+  // We classify on the TERMINAL attempt and bias toward "transient" (halt +
+  // re-pull) whenever the last attempt threw, because wrongly skipping drops a
+  // real message permanently, while wrongly halting only delays it.
+  let lastAttemptThrew = false;
+  let lastError = null;
 
   while (attempts < maxAttempts) {
     if (attempts > 0 && delayMs > 0) await sleep(delayMs);
-    detail = await getDetail();
     attempts += 1;
+    try {
+      detail = await getDetail();
+      lastAttemptThrew = false;
+    } catch (err) {
+      detail = null;
+      lastAttemptThrew = true;
+      lastError = err;
+      continue; // transient — retry if attempts remain, else fall through to 'error'
+    }
     if (messageHasUsableContent({ ...notification, ...(detail || {}) })) {
       return { status: 'ok', detail, attempts };
     }
   }
 
   const isSync = notification?._via === 'sync';
+
+  if (lastAttemptThrew) {
+    // TRANSIENT fetch error. The caller must preserve PR#76 ordering: leave the
+    // cursor un-advanced and halt the sweep so this seq is re-pulled in order on
+    // the next reconnect. It must NOT count toward the empty-body give-up budget
+    // and must NOT be skipped — otherwise a brief GET outage would permanently
+    // drop a legitimate message. Realtime still forces a reconnect.
+    return {
+      status: 'error',
+      attempts,
+      via: isSync ? 'sync' : 'realtime',
+      forceReconnect: !isSync,
+      error: lastError?.message,
+    };
+  }
+
+  // POISON: the GET succeeded but yielded no usable body. This is the only
+  // skip-eligible case (bounded give-up in the caller).
   return {
     status: 'skip-empty',
     detail,

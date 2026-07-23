@@ -12,6 +12,7 @@ process.env.HOME = tmpHome;
 const RUNTIME_DIR = path.join(tmpHome, 'zylos/components/openmax/runtime');
 const { createInboxLedger } = await import('./inbox-ledger.js');
 const { createDeduper } = await import('./ws.js');
+const { MAX_CONTENT_FETCH_ATTEMPTS } = await import('./content-fetch-giveup.js');
 
 const noop = () => {};
 function seedLedgerFile(slug, data) {
@@ -78,4 +79,113 @@ test('first-boot recovery clears BOTH persisted taint layers (dedup.json + inbox
   // After recovery: the activation DM re-dispatches through both layers.
   assert.equal(dedupe('msg-activation'), false, 'id-dedupe now admits the activation DM');
   assert.equal(ledger.record(7), true, 'seq-ledger now admits the activation DM');
+});
+
+// ---------------------------------------------------------------------------
+// Bounded content-fetch give-up (catch-up-wedge fix; follow-on to #79)
+// ---------------------------------------------------------------------------
+
+test('recordContentFetchFailure counts up and reports give-up at the cap', () => {
+  const ledger = createInboxLedger('giveup-count', { log: noop });
+  let r;
+  for (let i = 0; i < MAX_CONTENT_FETCH_ATTEMPTS; i++) r = ledger.recordContentFetchFailure(1);
+  assert.equal(r.failures, MAX_CONTENT_FETCH_ATTEMPTS);
+  assert.equal(r.giveUp, true, 'gives up at the cap');
+  // The failure BEFORE the cap must not give up.
+  const ledger2 = createInboxLedger('giveup-count-2', { log: noop });
+  for (let i = 0; i < MAX_CONTENT_FETCH_ATTEMPTS - 1; i++) r = ledger2.recordContentFetchFailure(1);
+  assert.equal(r.giveUp, false, 'does not give up below the cap');
+});
+
+test('recordContentFetchFailure is a no-op at/behind the watermark', () => {
+  seedLedgerFile('giveup-behind', { acked_seq: 5 });
+  const ledger = createInboxLedger('giveup-behind', { log: noop });
+  assert.equal(ledger.recordContentFetchFailure(5), null, 'seq == acked_seq is ignored');
+  assert.equal(ledger.recordContentFetchFailure(3), null, 'seq < acked_seq is ignored');
+  assert.equal(ledger.recordContentFetchFailure(0), null, 'non-positive seq is ignored');
+});
+
+test('the durable failure count SURVIVES a reload (cross-restart persistence)', () => {
+  const slug = 'giveup-persist';
+  const ledgerA = createInboxLedger(slug, { log: noop });
+  // Two failures accumulate, then the process "restarts" (stop flushes to disk).
+  ledgerA.recordContentFetchFailure(1);
+  ledgerA.recordContentFetchFailure(1);
+  assert.equal(ledgerA.getContentFetchFailureCount(1), 2);
+  ledgerA.stop();
+
+  // A fresh ledger loads the persisted file — the count continues, it does not
+  // reset. Without this, an "empty head + repeated reconnect/restart" loop would
+  // never reach the cap and the sweep would wedge forever.
+  const ledgerB = createInboxLedger(slug, { log: noop });
+  assert.equal(ledgerB.getContentFetchFailureCount(1), 2, 'count persisted across reload');
+  // Continue accumulating toward the cap across the reload boundary.
+  let r;
+  for (let i = 2; i < MAX_CONTENT_FETCH_ATTEMPTS; i++) r = ledgerB.recordContentFetchFailure(1);
+  assert.equal(r.failures, MAX_CONTENT_FETCH_ATTEMPTS);
+  assert.equal(r.giveUp, true, 'reaches give-up after reload continues the count');
+});
+
+test('clearContentFetchFailure resets the counter (only consecutive failures count)', () => {
+  const ledger = createInboxLedger('giveup-clear', { log: noop });
+  ledger.recordContentFetchFailure(1);
+  ledger.recordContentFetchFailure(1);
+  assert.equal(ledger.getContentFetchFailureCount(1), 2);
+  ledger.clearContentFetchFailure(1);
+  assert.equal(ledger.getContentFetchFailureCount(1), 0, 'a successful fetch resets the count');
+});
+
+test('skip advances the watermark past an unfetchable head and clears its counter', () => {
+  // received=[3,5,7] with acked_seq=0: the sweep is wedged waiting for seq 1/2.
+  seedLedgerFile('giveup-skip', { acked_seq: 0, received: [3, 5, 7] });
+  const ledger = createInboxLedger('giveup-skip', { log: noop });
+  ledger.recordContentFetchFailure(1);
+  assert.equal(ledger.getAckedSeq(), 0, 'still wedged before skip');
+
+  ledger.skip(1);
+  assert.equal(ledger.getAckedSeq(), 1, 'watermark advanced past the skipped head');
+  assert.equal(ledger.getContentFetchFailureCount(1), 0, 'skipped seq counter cleared');
+
+  // Once the gap behind it fills, the watermark runs on contiguously.
+  ledger.record(2);
+  assert.equal(ledger.getAckedSeq(), 3, 'watermark advances 2→3 once seq 2 arrives');
+});
+
+test('a skipped head is CONSUMED, not a permanent hole: no re-gap / re-retry on it (review nit)', () => {
+  // Reviewer nit-2: after skip(seq), the seq must be treated as consumed so the
+  // gap-detector never re-triggers /sync on it and a late duplicate can't revive
+  // the wedge. received=[2,3] with acked_seq=0 is wedged on the seq-1 head.
+  const gapCalls = [];
+  seedLedgerFile('giveup-skip-consumed', { acked_seq: 0, received: [2, 3] });
+  const ledger = createInboxLedger('giveup-skip-consumed', {
+    log: noop,
+    onGapSync: (sinceSeq) => gapCalls.push(sinceSeq),
+  });
+
+  ledger.skip(1);
+  // skip(1) fills the hole → watermark runs contiguously over the already-received 2,3.
+  assert.equal(ledger.getAckedSeq(), 3, 'watermark advanced past skipped seq 1 and on over 2,3');
+  assert.equal(ledger.getContentFetchFailureCount(1), 0, 'skipped seq counter cleared');
+
+  // A late re-pull of seq 1 (now < watermark) is ignored — not re-dispatched,
+  // not re-counted, no new gap.
+  assert.equal(ledger.record(1), false, 'skipped seq 1 stays consumed (record ignored)');
+  assert.equal(ledger.recordContentFetchFailure(1), null, 'no counter re-armed for a consumed seq');
+  assert.deepEqual(gapCalls, [], 'no gap re-triggered on the skipped head');
+});
+
+test('advancing the watermark prunes stale failure counters', () => {
+  const ledger = createInboxLedger('giveup-prune', { log: noop });
+  ledger.recordContentFetchFailure(1); // counter for seq 1
+  // seq 1 later arrives successfully and the watermark advances over it.
+  ledger.record(1);
+  assert.equal(ledger.getAckedSeq(), 1);
+  assert.equal(ledger.getContentFetchFailureCount(1), 0, 'consumed seq counter pruned');
+});
+
+test('reload drops failure counters for seqs already at/behind the watermark', () => {
+  seedLedgerFile('giveup-load-prune', { acked_seq: 5, fetch_failures: { '3': 2, '7': 1 } });
+  const ledger = createInboxLedger('giveup-load-prune', { log: noop });
+  assert.equal(ledger.getContentFetchFailureCount(3), 0, 'stale (<=acked) counter dropped on load');
+  assert.equal(ledger.getContentFetchFailureCount(7), 1, 'live (>acked) counter kept on load');
 });
