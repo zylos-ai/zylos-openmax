@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] — 2026-07-23
+
+First stable of the 2.11 line. Promotes the `2.11.0-beta.1` and `2.11.0-beta.2` prereleases to stable — no code changes beyond those two betas. Highlights: the first-boot inbox-replay fix (#79 / cws-fe #175) from beta.2 — a freshly provisioned agent no longer discards its owner-welcome / onboarding-activation DM, so the onboarding guidance actually arrives — plus beta.1's channel-liveness 404 backoff, the `[COCO …]` → `[OPENMAX …]` inbound-tag rebrand, and the empty-message fix. See the beta entries below for full per-change detail.
+
 ## [2.11.0-beta.2] — 2026-07-23
 
 Beta prerelease bundling the first-boot inbox-replay fix (#79 / cws-fe #175). Pre-release — stable `zylos upgrade --check` does not pull `-beta` tags; use `--beta` to test. Promote to `2.11.0` (no suffix) once validated.
