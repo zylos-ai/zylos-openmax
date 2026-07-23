@@ -1,6 +1,9 @@
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 import WebSocket from 'ws';
 import { WsClient, createDeduper } from './ws.js';
 
@@ -270,4 +273,24 @@ test('deduper.forget lets a recorded id be re-processed', () => {
 test('deduper.forget on an unknown id is a harmless no-op', () => {
   const dedupe = createDeduper();
   assert.equal(dedupe.forget('never-seen'), false);
+});
+
+// Persisted (cross-process) dedupe taint — the #79 P1 scenario: a comm-bridge
+// started during the runtime prepare phase records a message id to dedup.json
+// but never delivers it (no agent session). A later "real boot" process loads
+// that file and would skip the message as a duplicate; the first-boot replay
+// path forgets the id first so the backlog re-dispatches.
+test('deduper: forget clears a taint loaded from a persisted dedup.json (cross-process)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zom-dedup-'));
+  const persistPath = path.join(dir, 'dedup.json');
+  // A previous (prepare-phase) process persisted the activation DM's id.
+  fs.writeFileSync(persistPath, JSON.stringify({ 'msg-activation': Date.now() }));
+
+  const dedupe = createDeduper({ persistPath });
+  assert.equal(dedupe('msg-activation'), true, 'persisted id is treated as a duplicate on the new process');
+
+  // First-boot replay forgets it before the duplicate check…
+  assert.equal(dedupe.forget('msg-activation'), true);
+  // …so it is now re-processable (dispatched to the agent).
+  assert.equal(dedupe('msg-activation'), false, 'after forget the activation DM re-dispatches');
 });

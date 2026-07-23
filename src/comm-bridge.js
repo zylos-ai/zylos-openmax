@@ -630,6 +630,16 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
     const notifSender = notification?.sender_id;
     log(`[ws] [${orgConfig.slug}] message frame: id=${notifId || '<missing>'} conv=${notifConv || '<missing>'} sender=${notifSender || '?'}`);
     if (!notifId || !notifConv) return;
+    // First-boot replay: a comm-bridge started transiently during the runtime
+    // prepare phase can persist a message id to the deduper (runtime/dedup.json)
+    // and then fail to deliver it to an agent session (none exists yet) — the
+    // C4 forward failure below only warns, it does not forget the id. That
+    // stale mark would make the first-boot /sync replay skip the message as a
+    // "duplicate", so a fresh agent would still never receive its onboarding /
+    // activation DM (#79). On a genuine first boot nothing has been delivered,
+    // so forget any such mark before the duplicate check. This is the id-level
+    // counterpart to inboxLedger.resetReceived() on the same path.
+    if (notification._firstBoot) dedupe.forget?.(notifId);
     if (dedupe(notifId)) {
       log(`[ws] [${orgConfig.slug}] msg=${notifId} duplicate, skipping`);
       return;
@@ -1661,6 +1671,12 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart = 
           conversation_id: ev.conversation_id,
           seq:             ev.seq,
           _via:            'sync',
+          // First-boot replay: tell the handler to clear any stale dedupe mark
+          // for this id before its duplicate check (see the handler). A
+          // prepare-phase bridge may have persisted the id to dedup.json without
+          // ever delivering it; on a genuine first boot nothing was delivered,
+          // so the replay must not be suppressed as a "duplicate".
+          ...(fromStart ? { _firstBoot: true } : {}),
         });
         // Content fetch failed for this event: leave the cursor BEFORE it (do
         // NOT advance sinceSeq) and halt the sweep so the next reconnect
