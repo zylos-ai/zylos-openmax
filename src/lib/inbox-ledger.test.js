@@ -151,6 +151,29 @@ test('skip advances the watermark past an unfetchable head and clears its counte
   assert.equal(ledger.getAckedSeq(), 3, 'watermark advances 2→3 once seq 2 arrives');
 });
 
+test('a skipped head is CONSUMED, not a permanent hole: no re-gap / re-retry on it (review nit)', () => {
+  // Reviewer nit-2: after skip(seq), the seq must be treated as consumed so the
+  // gap-detector never re-triggers /sync on it and a late duplicate can't revive
+  // the wedge. received=[2,3] with acked_seq=0 is wedged on the seq-1 head.
+  const gapCalls = [];
+  seedLedgerFile('giveup-skip-consumed', { acked_seq: 0, received: [2, 3] });
+  const ledger = createInboxLedger('giveup-skip-consumed', {
+    log: noop,
+    onGapSync: (sinceSeq) => gapCalls.push(sinceSeq),
+  });
+
+  ledger.skip(1);
+  // skip(1) fills the hole → watermark runs contiguously over the already-received 2,3.
+  assert.equal(ledger.getAckedSeq(), 3, 'watermark advanced past skipped seq 1 and on over 2,3');
+  assert.equal(ledger.getContentFetchFailureCount(1), 0, 'skipped seq counter cleared');
+
+  // A late re-pull of seq 1 (now < watermark) is ignored — not re-dispatched,
+  // not re-counted, no new gap.
+  assert.equal(ledger.record(1), false, 'skipped seq 1 stays consumed (record ignored)');
+  assert.equal(ledger.recordContentFetchFailure(1), null, 'no counter re-armed for a consumed seq');
+  assert.deepEqual(gapCalls, [], 'no gap re-triggered on the skipped head');
+});
+
 test('advancing the watermark prunes stale failure counters', () => {
   const ledger = createInboxLedger('giveup-prune', { log: noop });
   ledger.recordContentFetchFailure(1); // counter for seq 1

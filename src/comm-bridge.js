@@ -72,6 +72,15 @@ const DEFAULT_CONTENT_FETCH_RETRY_DELAY_MS = 400;
 // content-fetch-giveup.js), so the normal path ends on giveUp, not the cap.
 const DEFAULT_SYNC_HEAD_RETRY_DELAY_MS = 400;
 const SYNC_HEAD_MAX_INSWEEP_ATTEMPTS = 10;
+// Whole-sweep backstop: total in-sweep RE-attempts (attempts beyond each event's
+// first) budgeted across one /sync sweep. One permanently-bad head costs
+// (give-up threshold − 1) = 4 retries before it is skipped; a budget of 20 lets
+// several distinct bad heads be skipped in a single sweep while bounding the
+// worst-case added latency (~budget × backoff). Once exhausted, later transient
+// failures in the same sweep halt (deferred to the next reconnect) instead of
+// retrying in-sweep — so a pathological backlog of many bad heads can't drag one
+// catch-up sweep out indefinitely while holding the _syncInFlight guard.
+const SYNC_SWEEP_MAX_RETRY_BUDGET = 20;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1700,6 +1709,9 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart = 
     let totalSynced = 0;
     let hasMore = true;
     let haltedOnEmpty = false;
+    // Whole-sweep in-sweep-retry budget (see SYNC_SWEEP_MAX_RETRY_BUDGET). Shared
+    // across every event in this sweep so a run of bad heads can't stack unbounded.
+    let retryBudget = SYNC_SWEEP_MAX_RETRY_BUDGET;
 
     while (hasMore && totalSynced < SYNC_MAX_EVENTS) {
       const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
@@ -1725,7 +1737,14 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart = 
         // sweep, so the head is skipped and the backlog flows, independent of
         // reconnects. Bounded by SYNC_HEAD_MAX_INSWEEP_ATTEMPTS as a safety net
         // for the case where the counter cannot advance (see sync-head-retry.js).
-        const { result: res2 } = await deliverWithInSweepRetry(
+        // Cap this event's in-sweep attempts by BOTH the per-head cap and the
+        // remaining whole-sweep retry budget, so a run of bad heads can't stack
+        // unbounded. `budget + 1` because the budget counts RE-attempts (extras
+        // beyond the first); once the budget is spent, maxAttempts collapses to 1
+        // (no in-sweep retry) and a transient failure halts, deferring to the
+        // next reconnect.
+        const perHeadMax = Math.max(1, Math.min(SYNC_HEAD_MAX_INSWEEP_ATTEMPTS, retryBudget + 1));
+        const { result: res2, attempts } = await deliverWithInSweepRetry(
           () => onMessage({
             id:              String(ev.message_id),
             conversation_id: ev.conversation_id,
@@ -1739,11 +1758,12 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage, { fromStart = 
             ...(fromStart ? { _firstBoot: true } : {}),
           }),
           {
-            maxAttempts: SYNC_HEAD_MAX_INSWEEP_ATTEMPTS,
+            maxAttempts: perHeadMax,
             sleep: () => sleep(config.message?.content_fetch_giveup_retry_delay_ms
               ?? DEFAULT_SYNC_HEAD_RETRY_DELAY_MS),
           },
         );
+        retryBudget -= Math.max(0, attempts - 1); // spend the re-attempts made
         // Content fetch failed for this event. Two cases:
         //   • Gave up (durable give-up threshold reached): the handler already
         //     alarm-logged and advanced the inbox-ledger watermark past this
