@@ -29,34 +29,34 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **comm-bridge: retry inbound content fetch; never forward an empty message (`src/lib/inbound-content.js`, `src/comm-bridge.js`).** The WS `message` frame carries only metadata; the body comes from `GET /conversations/{conv}/messages/{id}`. On failure that GET used to return `null` and the handler forwarded a metadata-only **empty** message. Now: retry once (`config.message.content_fetch_retries`, default 1; `content_fetch_retry_delay_ms`, default 400); if still failing, do **not** forward and do **not** advance read-state/cursor — realtime frames `forceReconnect()` so `/sync` replays in order, sync-replay frames just halt cursor advance (no reconnect storm); the incident is warn-logged. (PR #76, closes #13)
-- **channel-liveness reporter no longer floods `error.log` on a persistent 404 (`src/lib/channel-liveness-reporter.js`).** On production, `PUT /api/v1/agents/{member_id}/channel-liveness` returns `404 page not found` on every attempt (the endpoint isn't deployed on that host, while `runtime-metrics`/`reported-policy`/`sync/ack` all 200). The reporter's existing `warnedEndpoint404` guard muted its *own* warn after the first 404, but the PUT was still **issued every ~60s** — so the shared HTTP client (`client.js`) kept logging an `[rpc]` request+response pair per tick, filling `error.log` indefinitely.
+- **comm-bridge: retry inbound content fetch; never forward an empty message (`src/lib/inbound-content.js`, `src/comm-bridge.js`).** The WS `message` frame carries only metadata; the body comes from a follow-up content fetch to the platform backend. On failure that fetch used to return `null` and the handler forwarded a metadata-only **empty** message. Now: retry once (`config.message.content_fetch_retries`, default 1; `content_fetch_retry_delay_ms`, default 400); if still failing, do **not** forward and do **not** advance read-state/cursor — realtime frames `forceReconnect()` so `/sync` replays in order, sync-replay frames just halt cursor advance (no reconnect storm); the incident is warn-logged. (PR #76, closes #13)
+- **channel-liveness reporter no longer floods `error.log` on a persistent 404 (`src/lib/channel-liveness-reporter.js`).** On production, the channel-liveness report endpoint returns `404 page not found` on every attempt (the endpoint isn't deployed on that host, while `runtime-metrics`/`reported-policy`/`sync/ack` all 200). The reporter's existing `warnedEndpoint404` guard muted its *own* warn after the first 404, but the PUT was still **issued every ~60s** — so the shared HTTP client (`client.js`) kept logging an `[rpc]` request+response pair per tick, filling `error.log` indefinitely.
   - **A 404 is not transient**, so after `disable404Threshold` (default **1**) consecutive 404s the reporter now **stops issuing the PUT entirely** — which is what actually stops the log flood — and logs the condition **once** at warn level (no per-tick pair).
   - **Self-healing:** while disabled it re-probes once every `reprobeEveryTicks` ticks (default **180**, ≈ once per 3 hours at the 60s cadence); a successful probe re-enables the reporter (logged as recovered). Set `reprobeEveryTicks: 0` to stay disabled until restart.
   - **200 and other/transient errors (5xx, network) are unchanged** — they keep retrying every tick, and any non-404 outcome resets the consecutive-404 streak so it can't accidentally disable the reporter.
   - **Config.** New optional `channelLiveness.disable404Threshold` and `channelLiveness.reprobeEveryTicks` (wired through `comm-bridge.js`).
-  - Note: the endpoint being absent is **server-side** (cws-core hasn't shipped the route to that environment); this change is the correct client behavior in the meantime. Tests extended in `src/lib/channel-liveness-reporter.test.js`.
+  - Note: the endpoint being absent is **server-side** (the platform backend hasn't shipped the route to that environment); this change is the correct client behavior in the meantime. Tests extended in `src/lib/channel-liveness-reporter.test.js`.
 
 ## [2.10.1] — 2026-07-17
 
 ### Fixed
 
-- **Client-side WS keepalive ping (`src/lib/ws.js`).** The WS client's frame-watchdog terminates the connection when no inbound frame arrives for `heartbeatIntervalMs*2 + 5s` (65s at defaults), and was designed assuming the SERVER pings every 30s to feed it. On prod the client receives **zero** server pings (they don't traverse the prod path), so on quiet orgs the watchdog starved every ~65-90s and the connection churned — close code **1006** every few minutes. On int, server pings arrive every 30s and it stayed stable, masking the issue.
+- **Client-side WS keepalive ping (`src/lib/ws.js`).** The WS client's frame-watchdog terminates the connection when no inbound frame arrives for `heartbeatIntervalMs*2 + 5s` (65s at defaults), and was designed assuming the SERVER pings every 30s to feed it. In production the client receives **zero** server pings (they don't traverse the prod path), so on quiet orgs the watchdog starved every ~65-90s and the connection churned — close code **1006** every few minutes. In a test environment server pings arrive every 30s and it stayed stable, masking the issue.
   - **Fix:** the client now sends its own WS-level ping every `pingIntervalMs` (default **20000**, comfortably below the 65s watchdog window) starting on `open`. An RFC-compliant server — or the nearest terminating proxy — auto-replies with a pong, which the existing `on('pong')` handler uses to advance `lastFrameAt`. This feeds the watchdog without depending on server pings arriving, and keeps the pipe warm through intermediaries (the standard IM keepalive direction).
-  - **Purely additive / client-side.** The server-side ping path, the watchdog, and cws-comm are unchanged. The ping timer is armed on `open` (guarded against double-arming) and cleared in `_clearTimers()` so reconnects/closes don't leak timers.
+  - **Purely additive / client-side.** The server-side ping path and the watchdog are unchanged. The ping timer is armed on `open` (guarded against double-arming) and cleared in `_clearTimers()` so reconnects/closes don't leak timers.
   - **Config.** New `config.server.ws_ping_interval_seconds` (seconds) overrides the 20s default; wired through `comm-bridge.js` alongside the other WS options.
-  - If control-frame ping/pong ever turns out to be stripped end-to-end, an app-level JSON heartbeat (would need a cws-comm handler) is the documented fallback — not in this change.
+  - If control-frame ping/pong ever turns out to be stripped end-to-end, an app-level JSON heartbeat (would need a server-side handler) is the documented fallback — not in this change.
 
 ## [2.10.0] — 2026-07-16
 
 ### Added
 
-- **Channel-liveness reporter (`src/lib/channel-liveness-reporter.js`).** On the same ~60s periodic tick that drives runtime-metrics, openmax now enumerates the 13 IM channel components' pm2 online/offline status and self-reports it to cws-core via `PUT /api/v1/agents/{member_id}/channel-liveness` (HTTP 202). Body is `{ "channels": [{ "channel_type": ..., "online": ... }, ...] }`; identity is derived from the JWT (not the body).
-  - **Reuses existing pm2/channel plumbing.** The channel → pm2-process mapping is the existing `CHANNEL_COMPONENT` table (its keys already are the cws-connect catalog `channel_type` values), and pm2 status is read via a single shared `readPm2Statuses` helper extracted from `channel-connector.js` (one `pm2 jlist`, also now used by `defaultVerify`). No new pm2 logic.
-  - **Mirrors the runtime-metrics self-report path.** Uses the authenticated org-scoped client (`putForOrg`/`apiPath`) and does a single PUT per tick to the PRIMARY org only, resolved via the shared `selectPrimaryOrg` helper (extracted from `metrics-reporter.js` and reused by both reporters) with that org's `self.member_id`. cws-connect keys channel state on identity (cross-org-stable), so one report is sufficient. No new HTTP/auth path.
+- **Channel-liveness reporter (`src/lib/channel-liveness-reporter.js`).** On the same ~60s periodic tick that drives runtime-metrics, openmax now enumerates the 13 IM channel components' pm2 online/offline status and self-reports it to the platform backend (HTTP 202). Body is `{ "channels": [{ "channel_type": ..., "online": ... }, ...] }`; identity is derived from the JWT (not the body).
+  - **Reuses existing pm2/channel plumbing.** The channel → pm2-process mapping is the existing `CHANNEL_COMPONENT` table (its keys already are the platform catalog `channel_type` values), and pm2 status is read via a single shared `readPm2Statuses` helper extracted from `channel-connector.js` (one `pm2 jlist`, also now used by `defaultVerify`). No new pm2 logic.
+  - **Mirrors the runtime-metrics self-report path.** Uses the authenticated org-scoped client (`putForOrg`/`apiPath`) and does a single PUT per tick to the PRIMARY org only, resolved via the shared `selectPrimaryOrg` helper (extracted from `metrics-reporter.js` and reused by both reporters) with that org's `self.member_id`. the platform keys channel state on identity (cross-org-stable), so one report is sufficient. No new HTTP/auth path.
   - **Safety guard.** If `pm2 jlist` fails or returns nothing, the tick is skipped (warned once, re-armed on recovery) — never reports "all 13 offline" on a pm2 error. Best-effort: individual PUTs are guarded (a missing endpoint 404 is warned once then skipped) and the report never throws into the shared metrics loop.
   - **Config gating.** New `channelLiveness` block mirrors `metricsReport`: enabled unless `channelLiveness.enabled: false`; cadence via `channelLiveness.intervalSeconds` (default 60s).
-  - E2E requires cws-core (with the channel-liveness endpoint) deployed to the targeted environment (currently prod openmax.com); code-complete but E2E-pending-deploy.
+  - E2E requires the platform backend (with the channel-liveness endpoint) deployed to the targeted environment; code-complete but E2E-pending-deploy.
 
 ## [2.9.8] — 2026-07-16
 
@@ -68,25 +68,25 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **Knowledge page links now use the `node_id` returned by `kb.page_create`.** The BFF create-page contract now returns the generated tree node ID together with page metadata, so the Skill no longer tells agents to list the parent folder and match on `page_id`. The frontend `node=` parameter still strictly requires the tree node ID; using the page `id` remains invalid.
+- **Knowledge page links now use the `node_id` returned by `kb.page_create`.** The create-page contract now returns the generated tree node ID together with page metadata, so the Skill no longer tells agents to list the parent folder and match on `page_id`. The frontend `node=` parameter still strictly requires the tree node ID; using the page `id` remains invalid.
 
 ## [2.9.6] — 2026-07-15
 
 ### Fixed
 
-- **`issue.accept_delivered` now defaults to the Lead's documented text-card proxy source.** The CLI previously sent `source=explicit` when the Lead omitted `source`, so cws-work treated the Agent as a non-Owner and returned `WORK_ISSUE_ACCEPTANCE_FORBIDDEN`, even after the Owner had explicitly accepted in chat. The default now matches `issue.accept_plan` and the Skill contract: during the text-card simulation period, the Lead sends `source=text_card_proxy` on the Owner's behalf after explicit human acceptance; callers may still override `source`.
+- **`issue.accept_delivered` now defaults to the Lead's documented text-card proxy source.** The CLI previously sent `source=explicit` when the Lead omitted `source`, so the backend treated the Agent as a non-Owner and returned an acceptance-forbidden error, even after the Owner had explicitly accepted in chat. The default now matches `issue.accept_plan` and the Skill contract: during the text-card simulation period, the Lead sends `source=text_card_proxy` on the Owner's behalf after explicit human acceptance; callers may still override `source`.
 
 ## [2.9.5] — 2026-07-15
 
 ### Fixed
 
-- **Runtime-metrics CPU and memory are now container-scoped (cgroup), not node-level.** The reporter previously took CPU/memory from the zylos-dashboard's `/api/state`, which derives them from `os.cpus()` / `os.totalmem()` — not cgroup-aware, so inside a limited container they reported the *host node's* cores/RAM and host-wide utilization instead of the container's quota and actual consumption. New `src/lib/cgroup-resources.js` (a faithful port of `cws-zylos-runtime`'s ops-daemon `resources.go`, `pkg/opsdaemon`) reads the container's real figures: CPU from `cpu.max` / `cpu.stat:usage_usec` (v1 fallback `cpu.cfs_quota_us` / `cpuacct.usage`) with per-tick differential sampling of the cumulative counter; memory from `memory.max` / `memory.current` (v1 `memory.limit_in_bytes` / `memory.usage_in_bytes`) reporting the **working set** (`current − inactive_file`, matching `kubectl top`). cgroup v2 primary with v1 fallback; the `"max"` / `-1` / `PAGE_COUNTER_MAX` unlimited sentinels are all handled. **Disk stays sourced from the dashboard** — its `statfs` on the volume mount is already the correct container-visible scope. The reported payload shape is unchanged; only the source of the CPU/memory numbers moves. When the agent is **not** in a cgroup (external / non-containerized, `cgroup_version` "none") the reporter falls back to the dashboard's node-level CPU/memory (logged once) rather than reporting null. Unit coverage added for the collector (v2/v1, unlimited sentinels, differential sampling, counter reset, no-cgroup) and the reporter's fallback path.
+- **Runtime-metrics CPU and memory are now container-scoped (cgroup), not node-level.** The reporter previously took CPU/memory from the zylos-dashboard's `/api/state`, which derives them from `os.cpus()` / `os.totalmem()` — not cgroup-aware, so inside a limited container they reported the *host node's* cores/RAM and host-wide utilization instead of the container's quota and actual consumption. New `src/lib/cgroup-resources.js` (a faithful port of the runtime service's ops-daemon resource collector) reads the container's real figures: CPU from `cpu.max` / `cpu.stat:usage_usec` (v1 fallback `cpu.cfs_quota_us` / `cpuacct.usage`) with per-tick differential sampling of the cumulative counter; memory from `memory.max` / `memory.current` (v1 `memory.limit_in_bytes` / `memory.usage_in_bytes`) reporting the **working set** (`current − inactive_file`, matching `kubectl top`). cgroup v2 primary with v1 fallback; the `"max"` / `-1` / `PAGE_COUNTER_MAX` unlimited sentinels are all handled. **Disk stays sourced from the dashboard** — its `statfs` on the volume mount is already the correct container-visible scope. The reported payload shape is unchanged; only the source of the CPU/memory numbers moves. When the agent is **not** in a cgroup (external / non-containerized, `cgroup_version` "none") the reporter falls back to the dashboard's node-level CPU/memory (logged once) rather than reporting null. Unit coverage added for the collector (v2/v1, unlimited sentinels, differential sampling, counter reset, no-cgroup) and the reporter's fallback path.
 
 ## [2.9.4] — 2026-07-14
 
 ### Changed
 
-- **onboarding-lead now sends the clickable project link to the user after `project.create` succeeds** (PR #60, closes the guidance gap behind cws-core board #135). The SKILL.md onboarding guide step ③ previously instructed the agent to create the Project + Issue and deliver, but never to send the clickable `/workspace`-prefixed project link — the link-format table existed, the "send it" instruction did not. Docs-only change.
+- **onboarding-lead now sends the clickable project link to the user after `project.create` succeeds** (PR #60, closes a guidance gap). The SKILL.md onboarding guide step ③ previously instructed the agent to create the Project + Issue and deliver, but never to send the clickable `/workspace`-prefixed project link — the link-format table existed, the "send it" instruction did not. Docs-only change.
 
 ## [2.9.3] — 2026-07-13
 
@@ -98,14 +98,14 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **`tm` CLI aligned with the current (post-MR!321) cws-core BFF contracts.** `project.list`, `issue.list`, and `issue.list_in_project` now forward the `query` search parameter; `project.create` forwards `knowledgeBaseId`, `memberIds`, and `isDefault` (project members are explicitly supplied via `memberIds` — the CLI does not inject the caller; Blueprint authors remain derived from the authenticated principal). Added organization-level `issue.list` and Project member add/remove commands. Comment listing now uses cursor pagination (offset pagination retained elsewhere). The shared HTTP client (`src/lib/client.js`) honors the documented `COCO_AUTH_TOKEN` compatibility variable. TM operation docs (`references/tm-operations.md`, `docs/dependency-coverage/cws-tm.md`, `SKILL.md`) refreshed — Task and Attempt transition documentation now lists only valid terminal targets — and CLI wire-contract tests added (`src/cli/tm.test.js`).
-  **Deployment dependency:** the `query` search parameter and `is_default` on project create require cws-core MR!321 to be deployed. Until then, current cws-core silently ignores `query` (list endpoints return unfiltered results) and rejects `project.create` with `isDefault` with a 422 (`unexpected property body.is_default`). These capabilities activate automatically once MR!321 lands; no CLI change needed.
+- **`tm` CLI aligned with the current platform backend contracts.** `project.list`, `issue.list`, and `issue.list_in_project` now forward the `query` search parameter; `project.create` forwards `knowledgeBaseId`, `memberIds`, and `isDefault` (project members are explicitly supplied via `memberIds` — the CLI does not inject the caller; Blueprint authors remain derived from the authenticated principal). Added organization-level `issue.list` and Project member add/remove commands. Comment listing now uses cursor pagination (offset pagination retained elsewhere). The shared HTTP client (`src/lib/client.js`) honors the documented `COCO_AUTH_TOKEN` compatibility variable. TM operation docs (`references/tm-operations.md`, `docs/dependency-coverage/tm.md`, `SKILL.md`) refreshed — Task and Attempt transition documentation now lists only valid terminal targets — and CLI wire-contract tests added (`src/cli/tm.test.js`).
+  **Deployment dependency:** the `query` search parameter and `is_default` on project create require a corresponding platform backend update to be deployed. Until then, the platform backend silently ignores `query` (list endpoints return unfiltered results) and rejects `project.create` with `isDefault` with a 422 (`unexpected property body.is_default`). These capabilities activate automatically once the backend update lands; no CLI change needed.
 
 ## [2.9.1] — 2026-07-13
 
 ### Fixed
 
-- **Group @-mentions of the bot are no longer silently dropped when the hand-configured `self.name` drifts from the agent's real display name — and the authoritative name is now guaranteed ready before any message is processed.** cws-comm-native group messages carry the @ as plain text (no structured `mentions[]`), so mention detection matched only `orgs.<slug>.self.name` — a hand-set value that silently drifts (wrong case / suffix / stale after a rename), causing real @s to be dropped as `group:mention (not @-ed)`. Two-part fix: (a) mention detection now matches against BOTH the authoritative per-org `display_name` from cws-core (read from the existing owner-sync self-member GET, persisted as `self.display_name` via `setSelfDisplayName`, no extra API call) and the configured `self.name` (kept as an alias). (b) A startup/reconnect readiness barrier guarantees the authoritative name is hydrated BEFORE the WS can deliver or replay a single frame: `syncOwnerFromCore` returns an explicit `{ nameReady, reason }` (a skipped or failed self-member read can no longer be mistaken for success), and the new `lib/self-name-hydration.js` hydrator (JWT acquire → member_id write-back backfill → authoritative sync, bounded exponential-backoff retries, per-org sticky success) runs at two structural barrier points — the awaited pre-connect bootstrap, and the `WsClient` `urlProvider`, which is awaited before the socket object exists, covering the initial connect AND every reconnect's catch-up replay. Bounded fail-open so a core outage at boot can't keep an org offline forever: after retries the connection proceeds with the persisted last-known `display_name` when one exists, else with a loud `SELF-NAME NOT HYDRATED` warning and matching degraded to the configured `self.name` until the next reconnect / periodic 5-min sync heals it. Deterministic unit coverage (9 tests) includes the incident regression: drifted `self.name`, no cached `display_name`, and an immediate plain-text `@<core display_name>` replay frame handled correctly on first connect.
+- **Group @-mentions of the bot are no longer silently dropped when the hand-configured `self.name` drifts from the agent's real display name — and the authoritative name is now guaranteed ready before any message is processed.** platform-native group messages carry the @ as plain text (no structured `mentions[]`), so mention detection matched only `orgs.<slug>.self.name` — a hand-set value that silently drifts (wrong case / suffix / stale after a rename), causing real @s to be dropped as `group:mention (not @-ed)`. Two-part fix: (a) mention detection now matches against BOTH the authoritative per-org `display_name` from the platform backend (read from the existing owner-sync self-member lookup, persisted as `self.display_name` via `setSelfDisplayName`, no extra API call) and the configured `self.name` (kept as an alias). (b) A startup/reconnect readiness barrier guarantees the authoritative name is hydrated BEFORE the WS can deliver or replay a single frame: `syncOwnerFromCore` returns an explicit `{ nameReady, reason }` (a skipped or failed self-member read can no longer be mistaken for success), and the new `lib/self-name-hydration.js` hydrator (JWT acquire → member_id write-back backfill → authoritative sync, bounded exponential-backoff retries, per-org sticky success) runs at two structural barrier points — the awaited pre-connect bootstrap, and the `WsClient` `urlProvider`, which is awaited before the socket object exists, covering the initial connect AND every reconnect's catch-up replay. Bounded fail-open so a backend outage at boot can't keep an org offline forever: after retries the connection proceeds with the persisted last-known `display_name` when one exists, else with a loud `SELF-NAME NOT HYDRATED` warning and matching degraded to the configured `self.name` until the next reconnect / periodic 5-min sync heals it. Deterministic unit coverage (9 tests) includes the incident regression: drifted `self.name`, no cached `display_name`, and an immediate plain-text `@<authoritative display_name>` replay frame handled correctly on first connect.
 
 ## [2.9.0] — 2026-07-12
 
@@ -117,13 +117,13 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **Credit-arrears overdue gate now applies only to platform-managed agents — external / self-hosted agents are exempt.** The overdue gate was false-blocking EXTERNAL agents: credit-arrears enforcement is applied via billing → agent-manager → DisableApiKeys → gateway, which only affects platform-managed agents (they have an agent-manager runtime + gateway-managed LLM keys). External agents (self-hosted, bringing their own LLM key) have no agent-manager record, so the org-level `usage_snapshot.enforcement_suspended` flag can read true while their LLM still works — the gate would then drop their messages and send a spurious "out of credits" notice. `isOrgLLMSuspended` now resolves the agent's origin FIRST (via `GET /api/v1/members/{self.member_id}` → `agent_origin`, through the existing per-org authed cws-core client) and only proceeds to the plan-state / `enforcement_suspended` check when the origin is positively `platform_created`; `external_invited` or an unknown/unresolved origin returns "not suspended" immediately and skips the plan-state query entirely (fail-open — never false-blocks external or origin-unknown agents). Origin is immutable (set once at member creation) so it is cached PERMANENTLY per org_id; lookup errors / missing member_id / absent field are not cached and retry on the next message until a definitive value lands. The origin `/members` lookup is itself timeout-bounded (~800ms, raced, no retry, mirroring the plan-state deadline): a timeout is treated exactly like the unknown/error path — origin null, not cached, message allowed through and the plan-state query skipped (fail-open). The 800ms plan-state timeout and 30s plan-state cache for the `platform_created` path are unchanged.
+- **Credit-arrears overdue gate now applies only to platform-managed agents — external / self-hosted agents are exempt.** The overdue gate was false-blocking EXTERNAL agents: credit-arrears enforcement is applied at the gateway and only affects platform-managed agents (they have gateway-managed LLM keys). External agents (self-hosted, bringing their own LLM key) are not gateway-managed, so the org-level enforcement flag can read true while their LLM still works — the gate would then drop their messages and send a spurious "out of credits" notice. `isOrgLLMSuspended` now resolves the agent's origin FIRST (via the platform backend, through the existing per-org authed client) and only proceeds to the plan-state / enforcement check when the origin is positively platform-created; an external or an unknown/unresolved origin returns "not suspended" immediately and skips the plan-state query entirely (fail-open — never false-blocks external or origin-unknown agents). Origin is immutable (set once at member creation) so it is cached PERMANENTLY per org_id; lookup errors / missing member_id / absent field are not cached and retry on the next message until a definitive value lands. The origin lookup is itself timeout-bounded (~800ms, raced, no retry, mirroring the plan-state deadline): a timeout is treated exactly like the unknown/error path — origin null, not cached, message allowed through and the plan-state query skipped (fail-open). The 800ms plan-state timeout and 30s plan-state cache for the platform-created path are unchanged.
 
 ## [2.8.11] — 2026-07-12
 
 ### Added
 
-- **Credit-arrears gate — notify the user instead of waking a suspended LLM.** When an org's LLM is suspended for non-payment (欠费), a user message reaching the openmax bridge is no longer forwarded to the runtime. Credit arrears does not drop the WS (the agent stays online and keeps receiving frames; only the LLM call is blocked at the gateway), so the bridge now intercepts after `shouldHandleMessage` accepts a real user message and BEFORE `forwardToC4`: it consults the authoritative signal — cws-core BFF `GET /api/v1/billing/plan-state` `usage_snapshot.enforcement_suspended` (queried through the existing per-org authed cws-core client, cached 30s per org) — and when suspended sends the sender a short bilingual "out of credits" notice via the same reply path a policy drop uses, then skips the forward. The check is **fail-open**: any billing-query error (network, non-200, missing field) — or the query exceeding an ~800ms hard timeout (raced, no retry) — is treated as "not suspended" so it can never black-hole a user's messages; the gateway remains the hard enforcement boundary. Only successful lookups are cached (30s); timeouts and errors are never cached, so a transient stall self-heals on the next frame. The "out of credits" notice is throttled to at most once per 5 minutes per (org + reply target) — a suspended org always has its message dropped, but a chatty sender isn't spammed. Sync-replay frames and agent senders receive no notice (avoids stale spam / reject-notice ping-pong). User-facing copy is interim pending final FE wording.
+- **Credit-arrears gate — notify the user instead of waking a suspended LLM.** When an org's LLM is suspended for non-payment (欠费), a user message reaching the openmax bridge is no longer forwarded to the runtime. Credit arrears does not drop the WS (the agent stays online and keeps receiving frames; only the LLM call is blocked at the gateway), so the bridge now intercepts after `shouldHandleMessage` accepts a real user message and BEFORE `forwardToC4`: it consults the authoritative signal — the platform backend billing plan-state (queried through the existing per-org authed client, cached 30s per org) — and when suspended sends the sender a short bilingual "out of credits" notice via the same reply path a policy drop uses, then skips the forward. The check is **fail-open**: any billing-query error (network, non-200, missing field) — or the query exceeding an ~800ms hard timeout (raced, no retry) — is treated as "not suspended" so it can never black-hole a user's messages; the gateway remains the hard enforcement boundary. Only successful lookups are cached (30s); timeouts and errors are never cached, so a transient stall self-heals on the next frame. The "out of credits" notice is throttled to at most once per 5 minutes per (org + reply target) — a suspended org always has its message dropped, but a chatty sender isn't spammed. Sync-replay frames and agent senders receive no notice (avoids stale spam / reject-notice ping-pong). User-facing copy is interim pending final FE wording.
 
 ## [2.8.10] — 2026-07-12
 
@@ -135,25 +135,25 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **`core.agent_domain` / `resolveAgentBaseUrl()` — malformed cws-core 200 responses now fail loudly instead of silently falling back to `AGENT_PUBLIC_BASE_URL`.** Two paths violated the documented "only a core 404 reaches the env tier" contract: (a) `resolveAgentIdentityId()` returned `''` when `GET /me` answered 200 without an `identity_id`, silently skipping the core domain tier entirely; (b) `resolveAgentBaseUrl()` treated a 200 from `GET /platform-agents/{identity_id}/domain` without `full_domain` as "no bound domain" and fell through to env. Both masked cws-core protocol corruption as a valid fallback — a stale env URL could keep receiving webhooks. Both cases now throw a descriptive protocol-violation `Error` (CLI: message on stderr, exit 1). **Breaking note:** callers that relied on the malformed-200 → env fallback now see an error; the env fallback remains ONLY for the 404 (no bound domain) case, and non-404 HTTP/network errors still propagate. Docs (`src/cli/core.js` usage/comments, `references/core-operations.md`) updated to the strict semantics; unit tests flipped from pinning the silent fallback to asserting the throw.
+- **`core.agent_domain` / `resolveAgentBaseUrl()` — malformed platform backend 200 responses now fail loudly instead of silently falling back to `AGENT_PUBLIC_BASE_URL`.** Two paths violated the documented "only a backend 404 reaches the env tier" contract: (a) `resolveAgentIdentityId()` returned `''` when the identity lookup answered 200 without an `identity_id`, silently skipping the backend domain tier entirely; (b) `resolveAgentBaseUrl()` treated a 200 from the domain lookup without `full_domain` as "no bound domain" and fell through to env. Both masked backend protocol corruption as a valid fallback — a stale env URL could keep receiving webhooks. Both cases now throw a descriptive protocol-violation `Error` (CLI: message on stderr, exit 1). **Breaking note:** callers that relied on the malformed-200 → env fallback now see an error; the env fallback remains ONLY for the 404 (no bound domain) case, and non-404 HTTP/network errors still propagate. Docs (`src/cli/core.js` usage/comments, `references/core-operations.md`) updated to the strict semantics; unit tests flipped from pinning the silent fallback to asserting the throw.
 
 ## [2.8.8] — 2026-07-11
 
 ### Added
 
-- **`core.agent_domain` — self public base-URL resolution (TM 79ad2910, step 2).** New `src/cli/core.js` command (thin wrapper over the reusable `resolveAgentBaseUrl()` in `src/lib/agent-domain.js`) that resolves the agent's OWN publicly-reachable base URL for webhook-channel URL construction (WhatsApp Business / LINE / Teams). Two-tier resolution order: **(1)** call cws-core `GET /api/v1/platform-agents/{identity_id}/domain` (identity_id from config `agent.identity_id`, falling back to `GET /me`) → `{ok:true, source:"core", full_domain, label, root_suffix, base_url}` where `base_url = "https://" + full_domain`; **(2)** on 404 (no bound domain) fall back to the `AGENT_PUBLIC_BASE_URL` env var → `{ok:true, source:"env", base_url}` (trailing slash stripped); if neither yields a URL → `{ok:false, error:"no bound domain and AGENT_PUBLIC_BASE_URL unset"}` with exit code 1. Non-404 core errors propagate. The resolver takes injectable deps so step-3 channel code can import the same logic.
+- **`core.agent_domain` — self public base-URL resolution (step 2).** New `src/cli/core.js` command (thin wrapper over the reusable `resolveAgentBaseUrl()` in `src/lib/agent-domain.js`) that resolves the agent's OWN publicly-reachable base URL for webhook-channel URL construction (WhatsApp Business / LINE / Teams). Two-tier resolution order: **(1)** ask the platform backend for the agent's bound domain (identity_id from config `agent.identity_id`, falling back to a `/me` lookup) → `{ok:true, source:"core", full_domain, label, root_suffix, base_url}` where `base_url = "https://" + full_domain`; **(2)** on 404 (no bound domain) fall back to the `AGENT_PUBLIC_BASE_URL` env var → `{ok:true, source:"env", base_url}` (trailing slash stripped); if neither yields a URL → `{ok:false, error:"no bound domain and AGENT_PUBLIC_BASE_URL unset"}` with exit code 1. Non-404 backend errors propagate. The resolver takes injectable deps so step-3 channel code can import the same logic.
 
 ## [2.8.7] — 2026-07-10
 
 ### Removed
 
-- **Reverted the component-reported connection-state consumption (#34 / v2.8.5)** per the 2026-07-10 architecture decision: existing channel components must not be modified for platform features, so no component will write `runtime/connection-state.json`. Connect verification returns to the bounded pm2 process-health poll. Definitive credential validation now happens server-side in cws-connect (MR !30) before any command reaches the agent.
+- **Reverted the component-reported connection-state consumption (#34 / v2.8.5)** per the 2026-07-10 architecture decision: existing channel components must not be modified for platform features, so no component will write `runtime/connection-state.json`. Connect verification returns to the bounded pm2 process-health poll. Definitive credential validation now happens server-side before any command reaches the agent.
 
 ## [2.8.6] — 2026-07-10
 
 ### Fixed
 
-- **whatsapp QR relay never fired**: `whatsappQrLogin` read `.status` from the component's `status.json`, but zylos-whatsapp writes `.state` — the flow was blind to `qr_waiting`, relayed zero QR codes, and every connect timed out ("whatsapp login timed out waiting for scan"). Now reads `state` with `status` fallback. Found live on int (binding 80b45491, 2026-07-10).
+- **whatsapp QR relay never fired**: `whatsappQrLogin` read `.status` from the component's `status.json`, but zylos-whatsapp writes `.state` — the flow was blind to `qr_waiting`, relayed zero QR codes, and every connect timed out ("whatsapp login timed out waiting for scan"). Now reads `state` with `status` fallback. Found live in a test environment.
 
 ## [2.8.5] — 2026-07-10
 
@@ -166,7 +166,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **Channel connect no longer reports a false failure when the service start races `zylos add`'s own startup** (int E2E 2026-07-10: telegram binding went `error` while the component came up fine). A thrown pm2 start/restart now defers to the connect verification (process-health poll / QR flow) instead of failing the connect immediately; the receipt only reports `starting service failed: …` when the service truly never comes online.
+- **Channel connect no longer reports a false failure when the service start races `zylos add`'s own startup** (found in a test environment: a telegram binding went `error` while the component came up fine). A thrown pm2 start/restart now defers to the connect verification (process-health poll / QR flow) instead of failing the connect immediately; the receipt only reports `starting service failed: …` when the service truly never comes online.
 - **wechat QR login waits for the just-started component to become ready** (bounded 45s window) instead of crashing with `fetch failed` when the admin token file / HTTP listener hasn't appeared yet — this made the frontend show no QR at all on first connect.
 
 ### Changed
@@ -187,13 +187,13 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Added
 
-- **QR-login channels: wechat / whatsapp.** All 13 catalog channels are now connectable. QR channels skip the credential pull entirely: connect installs/starts the component, then drives the login — wechat via the local admin API (`/v1/login/start` → poll session → relay each `qr_ready` code → `finalize` on confirm; a 409 "account already exists" resolves as already-connected), whatsapp via the component's `status.json`/`qr.png` files (`qr_waiting` → relay, `open` → connected; a persisted session reconnects with no scan). Each fresh/rotated QR is relayed through the new `reportQR` callback → `POST /connect/channel-bindings/{binding_id}/qr` (cws-core passthrough) so the frontend renders it on the connecting card (D-3). Login window is 270s (inside the FE's 5-min cap); QR payloads are never logged.
+- **QR-login channels: wechat / whatsapp.** All 13 catalog channels are now connectable. QR channels skip the credential pull entirely: connect installs/starts the component, then drives the login — wechat via the local admin API (`/v1/login/start` → poll session → relay each `qr_ready` code → `finalize` on confirm; a 409 "account already exists" resolves as already-connected), whatsapp via the component's `status.json`/`qr.png` files (`qr_waiting` → relay, `open` → connected; a persisted session reconnects with no scan). Each fresh/rotated QR is relayed through the new `reportQR` callback to the platform backend so the frontend renders it on the connecting card. Login window is 270s (inside the FE's 5-min cap); QR payloads are never logged.
 
 ## [2.8.1] — 2026-07-10
 
 ### Added
 
-- **Channel connector: 10 more credential channels.** `CHANNEL_COMPONENT` now covers all non-QR channels — lark, telegram, dingtalk, wecom, slack, discord, zalo (Tier A outbound) and line, whatsapp_business, ms_teams (webhook-inbound; public ingress is user-managed). Each entry maps the cws-connect catalog form fields to the component's env contract (verified against every component's config loader) plus its `enabled`/mode config.json flags. Underscore channel_types (`ms_teams`, `whatsapp_business`) translate to the hyphenated component names here — no backend rename.
+- **Channel connector: 10 more credential channels.** `CHANNEL_COMPONENT` now covers all non-QR channels — lark, telegram, dingtalk, wecom, slack, discord, zalo (Tier A outbound) and line, whatsapp_business, ms_teams (webhook-inbound; public ingress is user-managed). Each entry maps the platform catalog form fields to the component's env contract (verified against every component's config loader) plus its `enabled`/mode config.json flags. Underscore channel_types (`ms_teams`, `whatsapp_business`) translate to the hyphenated component names here — no backend rename.
 - **One-shot credential probes (deep-verify).** Before any install/restart side effects, `connect` validates the submitted credentials directly against the IM platform (telegram/zalo `getMe`, feishu/lark `tenant_access_token`, dingtalk v1.0 `accessToken`, slack `auth.test` + `apps.connections.open`, discord `/users/@me`, line `/v2/bot/info`, WhatsApp Business Graph lookup, ms_teams AAD client-credentials grant). A definitive rejection reports `error` (`credential check failed: …`, secret-free detail) without touching the installed component; an unreachable API is treated as inconclusive (components may use their own proxy) and connect proceeds with the process-health fallback. wecom has no public check endpoint and skips the probe.
 
 ### Notes
@@ -205,8 +205,8 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Added
 
-- **Channel connect/disconnect lifecycle connector (feishu).** cws-connect dispatches a `channel.connect` / `channel.disconnect` command over cws-comm to this openmax runtime — the single channel path for all agents (platform + external). `connect` is idempotent: pull bind credentials from the cws-core BFF with a one-shot token → probe the component → `zylos add` if missing / `zylos upgrade` if present → write creds + config → restart → verify → report the result. `disconnect` soft-disables (pm2 stop + `enabled:false`), keeping the component and credentials installed so reconnect is the same idempotent connect.
-- **Connect-result callback wired to cws-core.** The connector now reports each terminal connect/disconnect outcome to `POST /connect/channel-bindings/{binding_id}/result` (via the cws-core BFF), echoing `request_id` so cws-connect can match it against the in-flight command (its authorization + idempotency check). This drives the binding `pending → connected/error` (and soft-delete on disconnect), replacing installed_channels polling. Best-effort: a report failure warns and never throws out of the WS dispatcher.
+- **Channel connect/disconnect lifecycle connector (feishu).** The platform dispatches a `channel.connect` / `channel.disconnect` command over the messaging service to this openmax runtime — the single channel path for all agents (platform + external). `connect` is idempotent: pull bind credentials from the platform backend with a one-shot token → probe the component → `zylos add` if missing / `zylos upgrade` if present → write creds + config → restart → verify → report the result. `disconnect` soft-disables (pm2 stop + `enabled:false`), keeping the component and credentials installed so reconnect is the same idempotent connect.
+- **Connect-result callback wired to the platform backend.** The connector now reports each terminal connect/disconnect outcome to the platform backend, echoing `request_id` so the platform can match it against the in-flight command (its authorization + idempotency check). This drives the binding `pending → connected/error` (and soft-delete on disconnect), replacing installed_channels polling. Best-effort: a report failure warns and never throws out of the WS dispatcher.
 
 ### Changed
 
@@ -214,13 +214,13 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Notes
 
-- Connect verification is currently a bounded pm2-`online` poll (process health only); a real IM-readiness signal (feishu websocket handshake marker) is tracked in zylos-openmax#34.
+- Connect verification is currently a bounded pm2-`online` poll (process health only); a real IM-readiness signal (feishu websocket handshake marker) is tracked in #34.
 
 ## [2.7.5] — 2026-07-09
 
 ### Changed
 
-- **Runtime-metrics reporter now sends a single report to the primary (first-enabled) org instead of one per org.** The 60s reporter previously PUT the same payload once per active org; it now takes the first entry of the insertion-ordered active-org map (the primary org) and issues a single `PUT /agents/{member_id}/runtime-metrics`. If no org is configured, or the primary org has no `self.member_id`, it warns and skips gracefully without crashing the tick.
+- **Runtime-metrics reporter now sends a single report to the primary (first-enabled) org instead of one per org.** The 60s reporter previously PUT the same payload once per active org; it now takes the first entry of the insertion-ordered active-org map (the primary org) and issues a single runtime-metrics report to the platform backend. If no org is configured, or the primary org has no `self.member_id`, it warns and skips gracefully without crashing the tick.
 
 ### Added
 
@@ -236,11 +236,11 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Added
 
-- **Install IM channel components from cws-connect commands (external-agent channel dispatch, Phase 1: feishu).** openmax now handles `channel.*` commands relayed over cws-comm: it pulls the bind credentials from cws-core (BFF `GET /api/v1/connect/channel-bindings/{binding_id}/credential`) with a one-time `X-Channel-Bind-Token`, then installs / configures / starts the mapped zylos IM component (`zylos add` → write `.env` secrets + `config.json` → pm2 restart). Fire-and-forget off the WS dispatcher (never throws), bounded timeouts so a hung `zylos`/`pm2` can't stall heartbeats, and secret values are never logged (keys only). Phase 1 wires **feishu** only; other `channel_type`s are skipped with a warning. `metrics-reporter` additionally reports `installed_channels` (from `zylos list` + `pm2 jlist`) so cws-connect can reconcile channel-binding status. New `getForOrgWithHeaders` client helper attaches the one-shot bind token alongside the org JWT. (#27)
+- **Install IM channel components from platform channel-connect commands (external-agent channel dispatch, Phase 1: feishu).** openmax now handles `channel.*` commands relayed over the messaging service: it pulls the bind credentials from the platform backend with a one-time `X-Channel-Bind-Token`, then installs / configures / starts the mapped zylos IM component (`zylos add` → write `.env` secrets + `config.json` → pm2 restart). Fire-and-forget off the WS dispatcher (never throws), bounded timeouts so a hung `zylos`/`pm2` can't stall heartbeats, and secret values are never logged (keys only). Phase 1 wires **feishu** only; other `channel_type`s are skipped with a warning. `metrics-reporter` additionally reports `installed_channels` (from `zylos list` + `pm2 jlist`) so the platform can reconcile channel connection status. New `getForOrgWithHeaders` client helper attaches the one-shot bind token alongside the org JWT. (#27)
 
 ### Changed
 
-- **Onboarding Lead 步③ — materialize artifacts + advance platform state (doc/behavior).** The Lead now proactively `project.create` + `issue.create` the user's first real Project/Issue once the user has stated a goal and agreed to a direction, instead of waiting for the user to explicitly say "create project" (surfaced in a live int onboarding test: the project was only created after the user manually asked). Added an explicit exception to the "never implicitly create a Project" guardrail for the onboarding first-task, and clarified that the *direction* (not the act of materializing it) is what stays the user's call. Also made explicit that when the 3-step blueprint completes the Lead must `issue.deliver` the **core onboarding Issue** itself (not just say "delivered" in the DM) and then request owner acceptance — otherwise the core Issue stays `in_progress` and the first-delivery datapoint never fires. Acceptance stays a genuine owner action (no self-accept). Docs only (SKILL.md); no runtime code change.
+- **Onboarding Lead 步③ — materialize artifacts + advance platform state (doc/behavior).** The Lead now proactively `project.create` + `issue.create` the user's first real Project/Issue once the user has stated a goal and agreed to a direction, instead of waiting for the user to explicitly say "create project" (surfaced in a live onboarding test: the project was only created after the user manually asked). Added an explicit exception to the "never implicitly create a Project" guardrail for the onboarding first-task, and clarified that the *direction* (not the act of materializing it) is what stays the user's call. Also made explicit that when the 3-step blueprint completes the Lead must `issue.deliver` the **onboarding Issue** itself (not just say "delivered" in the DM) and then request owner acceptance — otherwise the onboarding Issue stays `in_progress` and the first-delivery datapoint never fires. Acceptance stays a genuine owner action (no self-accept). Docs only (SKILL.md); no runtime code change.
 
 ## [2.7.2] — 2026-07-08
 
@@ -250,7 +250,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   repeat the built-in welcome greeting (go straight into the interview);
   the three interview questions are asked one at a time (wait for each answer)
   and without numbering ("第 N 个问题"). Decided by the product owner after a
-  live end-to-end onboarding test on cws-int (2026-07-08).
+  live end-to-end onboarding test (2026-07-08).
 
 ## [2.7.1] — 2026-07-08
 
@@ -263,14 +263,14 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Added
 
-- **feat(onboarding): boot-time online report for onboarding trigger**. On WebSocket open, the comm bridge now reports each org's agent member to cws-core via `POST /agents/{member_id}/online-report`, allowing cws-core to seed or resume the org-first-agent onboarding flow. The report is idempotent, isolated from messaging, and retries from reconnects and periodic sync until it succeeds.
-- **feat(core-cli): onboarding session and funnel event commands**. Added `core.onboarding_session` for discovering an org's onboarding lifecycle record and `core.onboarding_event` for reporting self-reportable funnel milestones such as `d1_activation` and `d3_im_connected`.
+- **feat(onboarding): boot-time online report for onboarding trigger**. On WebSocket open, the comm bridge now reports each org's agent member online to the platform backend, allowing the backend to seed or resume the org-first-agent onboarding flow. The report is idempotent, isolated from messaging, and retries from reconnects and periodic sync until it succeeds.
+- **feat(core-cli): onboarding session and funnel event commands**. Added `core.onboarding_session` for discovering an org's onboarding lifecycle record and `core.onboarding_event` for reporting self-reportable onboarding milestones.
 - **docs(skill): Onboarding Lead flow**. Documented how an agent leading a new org's onboarding should recognize welcome DMs, resume from existing session structure, guide the first three onboarding steps, and avoid peripheral-task upsells.
 
 ### Fixed
 
 - **fix(onboarding): fresh-install member_id re-resolution**. The online reporter now re-reads `self.member_id` from live config when the boot-captured org config is stale, so the first token exchange write-back can trigger online-report without requiring a service restart.
-- **fix(onboarding): bounded retries and older-core compatibility**. The reporter skips with a warn-once path when cws-core lacks the online-report endpoint, retries transient failures from periodic sync, and deduplicates concurrent reporting attempts.
+- **fix(onboarding): bounded retries and older-core compatibility**. The reporter skips with a warn-once path when the backend lacks the online-report endpoint, retries transient failures from periodic sync, and deduplicates concurrent reporting attempts.
 
 ## [2.6.0] — 2026-07-08
 
@@ -298,9 +298,9 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **fix: frontend_base_path default `/cws` → `/workspace`**. The code default in `config.js` and the fallback in `client.js` `frontendUrl()` still used the legacy `/cws` path. New installs without a config.json override would generate wrong browser links. Updated both to `/workspace` to match the current cws-fe basePath.
+- **fix: frontend_base_path default `/cws` → `/workspace`**. The code default in `config.js` and the fallback in `client.js` `frontendUrl()` still used the legacy `/cws` path. New installs without a config.json override would generate wrong browser links. Updated both to `/workspace` to match the current frontend basePath.
 - **fix: post-upgrade migration for existing `/cws` configs**. Added a migration step in `post-upgrade.js` that auto-corrects `frontend_base_path: "/cws"` to `"/workspace"` during `zylos upgrade openmax`. Existing installs are fixed automatically on upgrade.
-- **fix: hardcoded domain in `frontendUrl()` comment**. Replaced `cws-int.coco.xyz` with `{bff_url}` placeholder — the domain is resolved from config, not hardcoded.
+- **fix: hardcoded domain in `frontendUrl()` comment**. Replaced a hardcoded environment domain with a `{bff_url}` placeholder — the domain is resolved from config, not hardcoded.
 
 ## [2.5.0] — 2026-07-06
 
@@ -324,44 +324,44 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **fix(skill): frontend URL basePath /cws → /workspace**. cws-fe migrated `DEFAULT_BASE_PATH` to `/workspace` (`apps/web/src/lib/base-path.ts`). Updated all frontend URL templates in SKILL.md and removed hardcoded test environment domain.
+- **fix(skill): frontend URL basePath /cws → /workspace**. The frontend migrated its default base path to `/workspace`. Updated all frontend URL templates in SKILL.md and removed a hardcoded test environment domain.
 
 ## [2.4.1] — 2026-07-03
 
 ### Fixed
 
-- **fix(auto-upgrade): owner DM notification** — `notifyOwners` read `res?.data?.id` but POST /conversations/dm returns `{ conversation: { id } }`; fixed to `res?.conversation?.id`.
+- **fix(auto-upgrade): owner DM notification** — `notifyOwners` read `res?.data?.id` but the create-DM endpoint returns `{ conversation: { id } }`; fixed to `res?.conversation?.id`.
 - **fix(auto-upgrade): runUpgrade flags** — added `--yes` (skip interactive confirmation in non-TTY) and `--mode overwrite` to the `zylos upgrade` invocation.
 
 ## [2.4.0] — 2026-07-02
 
 ### Added
 
-- **feat(comm-bridge): cws-connect WS event handling**. Handles `connection.authorized`, `connection.revoked`, `connection.disconnected`, `connection.credential_updated`, and `connection.reauth_needed` system events. On authorization, acquires credentials from cws-core BFF and caches them locally at `runtime/credentials/{id}.json`. Revoke/disconnect clears the cache; credential_updated re-acquires. Events are filtered by agent member_id.
+- **feat(comm-bridge): channel-connect WS event handling**. Handles `connection.authorized`, `connection.revoked`, `connection.disconnected`, `connection.credential_updated`, and `connection.reauth_needed` system events. On authorization, acquires credentials from the platform backend and caches them locally at `runtime/credentials/{id}.json`. Revoke/disconnect clears the cache; credential_updated re-acquires. Events are filtered by agent member_id.
 - **feat(cli): conn.js — Connection management CLI**. New CLI module (`src/cli/conn.js`) with 6 commands: `conn.list` (available connections), `conn.acquire` (credential acquisition), `conn.proxy` (proxy-mode request forwarding), `conn.status` (connection details), `conn.cached` (local credential cache), `conn.clear_cache` (cache cleanup).
-- **docs: conn-operations.md** — Operation reference for the connection CLI, including credential modes (direct/proxy), WS event flow, and BFF endpoint mapping.
+- **docs: conn-operations.md** — Operation reference for the connection CLI, including credential modes (direct/proxy), WS event flow, and backend endpoint mapping.
 
 ## [2.3.1] — 2026-07-02
 
 ### Fixed
 
 - **fix(auto-upgrade): ZYLOS_BIN path resolution**. Hardcoded `~/zylos/zylos` path fails when zylos is installed via npm (nvm PATH). Now uses `process.env.ZYLOS_BIN || 'zylos'` for PATH-based lookup.
-- **fix(metrics-reporter): field name mismatch with cws-core schema**. Renamed `mem_total` → `mem_total_bytes`, `mem_used` → `mem_used_bytes`, `disk_free` → `disk_free_bytes` to match cws-core's `reportRuntimeMetricsRequest` struct. Removed `reported_at` from PUT body (server-side field).
+- **fix(metrics-reporter): field name mismatch with the backend schema**. Renamed `mem_total` → `mem_total_bytes`, `mem_used` → `mem_used_bytes`, `disk_free` → `disk_free_bytes` to match the backend's runtime-metrics schema. Removed `reported_at` from the request body (server-side field).
 
 ## [2.3.0] — 2026-07-02
 
 ### Added
 
-- **feat(comm-bridge): runtime metrics reporting to cws-core**. Periodically reads agent runtime metrics (CPU, memory, disk, context, cost, state, model) from zylos-dashboard's `/api/state` and reports them to cws-core via `PUT /agents/{id}/runtime-metrics`. Registered as a 60s periodic task, configurable via `config.metricsReport`. Dashboard 404 is silently skipped (endpoint not yet deployed on cws-core).
+- **feat(comm-bridge): runtime metrics reporting to the platform backend**. Periodically reads agent runtime metrics (CPU, memory, disk, context, cost, state, model) from zylos-dashboard's `/api/state` and reports them to the platform backend. Registered as a 60s periodic task, configurable via `config.metricsReport`. A 404 is silently skipped (endpoint not yet deployed on the backend).
 
 ## [2.2.0] — 2026-07-01
 
 ### Added
 
 - **feat(tm): Issue 执行计划确认与交付反馈循环命令**。
-  - 新增 `issue.submit_plan` / `issue.accept_plan` / `issue.resume`，对接 cws-core BFF 的 cws-work 内部计划确认流程。
+  - 新增 `issue.submit_plan` / `issue.accept_plan` / `issue.resume`，对接平台后端的计划确认流程。
   - SKILL 和 TM 参考文档改为文本卡片模拟路径：Lead 发计划/交付消息，人类回复接受后 Lead 用 `source:"text_card_proxy"` 代点；人类不接受时先对话澄清，再 `issue.resume` 回到执行中并重新计划。
-- **Skill 强制：`dependsOn` 必须使用上游 Task 的 `task.id`**。实例化 Sub-task 时，下游 Task 的 `dependsOn` 要用先建出来的上游 Task 返回的 `task.id`（先建上游、拿到 id、再设下游）。调度中心的「依赖就绪」开工通知与 `task.start` 开工闸都按 task.id 匹配；用错 id 会让依赖边失效——下游 Task 永不被通知、过不了开工闸、无报错地永久卡在 assigned。动机：concurrent-roles 探针实测复现，并已在 cws-work 侧加 `CreateTask` 校验兜底（!87）。
+- **Skill 强制：`dependsOn` 必须使用上游 Task 的 `task.id`**。实例化 Sub-task 时，下游 Task 的 `dependsOn` 要用先建出来的上游 Task 返回的 `task.id`（先建上游、拿到 id、再设下游）。调度中心的「依赖就绪」开工通知与 `task.start` 开工闸都按 task.id 匹配；用错 id 会让依赖边失效——下游 Task 永不被通知、过不了开工闸、无报错地永久卡在 assigned。动机：并发角色探针实测复现，平台后端侧已加 `CreateTask` 校验兜底。
 - **Skill 行为护栏：绝不隐式创建 Project**。项目归属只能"选已有"或"用户明确要求时新建"——即便用户提到某个项目名而 bot 查不到同名项目，也禁止擅自建一个兜底，必须回过头问用户（指哪个已有项目，还是要新建）。`project.create` 仅在人类明确指示新建时才调。
 - **Skill 行为护栏 #11/#12：激活即开工 + backlog 创建即澄清**。收到 `issue.activated`（owner 经 `issue.activate` 激活 backlog Issue）后，Lead **直接 `issue.start_execution` 开工**，不再回头问 owner「要不要开始 / 保持 backlog」。
 
@@ -369,7 +369,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 - **所有 Issue 计划统一落 Blueprint**：简单任务也先创建单 step Blueprint，`issue.submit_plan` 新流程要求传 `blueprintId`；Issue comment 记录人类看到的计划说明，Blueprint 作为计划事实源和未来 workflow 固化来源。
 - `core.project_list` 默认按 `status=active` 过滤。按名称解析归属项目时不再匹配到已归档项目。
-- **前端链接规则同步 cws-fe 融合页**：项目/Issue URL 从嵌套路径（`/projects/{id}`, `/projects/{id}/issues/{iid}`）改为 query 参数（`/projects?project={id}&issue={iid}`）。删除已移除的 `/tasks` 页面。旧路径自动重定向。
+- **前端链接规则同步前端融合页**：项目/Issue URL 从嵌套路径改为 query 参数（`/projects?project={id}&issue={iid}`）。删除已移除的 `/tasks` 页面。旧路径自动重定向。
 
 ## [2.1.0] — 2026-07-01
 
@@ -378,7 +378,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 - **feat(comm-bridge): auto-upgrade with owner notification** (`src/lib/auto-upgrade.js`)。comm-bridge.js 启动后定期（默认每 24 小时）通过 GitHub Releases API 检查 zylos-openmax 最新版本。发现新版本时自动执行 `zylos upgrade openmax`，升级完成 PM2 重启后通过 DM 通知 owner（包含版本号和 release notes 摘要）。
   - 首次检查延迟 60 秒（避免启动竞争）
   - 升级标记文件 `runtime/upgrade-marker.json` 跨重启传递版本信息
-  - 通知通过 `POST /conversations/dm` 获取 owner DM 会话 + `scripts/send.js` 发送
+  - 通知通过平台后端的 DM 接口获取 owner DM 会话 + `scripts/send.js` 发送
   - 可通过 `config.json` 配置：`autoUpgrade.enabled`（默认 true）、`autoUpgrade.intervalHours`（默认 24）
 
 ### Changed
@@ -400,13 +400,13 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Added
 
-- **feat(tm): comment CLI 命令 + agent 间接力交付走 Task 评论**（落地 cws-work 设计 001 §3/§4）。
-  - 新增 `comment.create {workType, workId, bodyMarkdown}` / `comment.get {id}` / `comment.list {workType, workId}`，对接 cws-core BFF `/comments`。
+- **feat(tm): comment CLI 命令 + agent 间接力交付走 Task 评论**（对齐任务管理后端设计 §3/§4）。
+  - 新增 `comment.create {workType, workId, bodyMarkdown}` / `comment.get {id}` / `comment.list {workType, workId}`，对接平台后端的评论接口。
   - SKILL 硬规则：worker 把 task 流转到 done 前**必须**先 `comment.create` 写完成评论（自然语言写产出物地址）；下一棒收到「依赖已就绪」DM（正文点名上游 Task、payload 带 `upstreamTaskIds`）后**先** `task.get` + `comment.list` 读上游产出再 `task.start`。
 
 ### Changed
 
-- **去掉已删除的结构化字段参数**（cws-work 已删字段）：`task.create` 移除 `skillTags` / `contextPageIds`；`issue.create` / `issue.update` 移除 `dueDate` / `contextPageIds` / `inputArtifactIds`；priority 改为可选（默认 medium）。上下文改由自然语言 description + task 评论承载。
+- **去掉已删除的结构化字段参数**（the task-management backend 已删字段）：`task.create` 移除 `skillTags` / `contextPageIds`；`issue.create` / `issue.update` 移除 `dueDate` / `contextPageIds` / `inputArtifactIds`；priority 改为可选（默认 medium）。上下文改由自然语言 description + task 评论承载。
 - 移除幽灵参数 `descriptionFormat`：平台所有文本默认 markdown，不再记格式。
 
 > 注：`references/tm-operations.md` 等共享参考文档由各服务团队维护，其中对已删参数的描述需相应服务团队同步更新。
@@ -415,7 +415,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Changed
 
-- **fix(hooks): post-install 和 post-upgrade 从 API 拉真实 org_name**。安装和升级时自动调 `GET /api/v1/organizations/{org_id}` 获取组织真实名称，写回 `org_name`，无需依赖 `COCO_ORG_NAME` 环境变量。Best-effort：API 不通时跳过，不影响流程。
+- **fix(hooks): post-install 和 post-upgrade 从 API 拉真实 org_name**。安装和升级时自动向平台后端查询组织真实名称，写回 `org_name`，无需依赖 `COCO_ORG_NAME` 环境变量。Best-effort：API 不通时跳过，不影响流程。
 
 ## [1.0.64] — 2026-06-24
 
@@ -423,7 +423,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 - **refactor(config): orgs key 使用完整 org_id，org_name 使用真实组织名**。
   - `post-install` 新建 org 时 key 从 `org-${id.slice(0,8)}` 改为完整 org_id UUID
-  - `post-upgrade` 自动迁移旧 key（如 `org-019ea63a`、`coco-test2`）到完整 org_id
+  - `post-upgrade` 自动迁移旧 key（如 `org-019ea63a`、`legacy-test`）到完整 org_id
   - 消息头 `(org: X)` 已使用 `org_name` 原值，无拼接，不受影响
   - 完全向后兼容：旧 config 中的任何 key 格式在 runtime 中正常工作
 
@@ -431,16 +431,16 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 
-- **fix(comm-bridge): handleConfigUpdate 即时同步 + 错误日志修正**。收到 system 事件（group_mode_changed 等）更新本地 config 后，立即调 `syncConfigToComm()` 回报 cws-comm，不再只依赖 5 分钟定时兜底。同时将 `syncConfigToComm` 的 404 响应和 `makeOrgFrameDispatcher` 的 unknown frame type 从 `log()` 改为 `warn()`，确保异常写入 error.log。
+- **fix(comm-bridge): handleConfigUpdate 即时同步 + 错误日志修正**。收到 system 事件（group_mode_changed 等）更新本地 config 后，立即调 `syncConfigToComm()` 回报消息服务，不再只依赖 5 分钟定时兜底。同时将 `syncConfigToComm` 的 404 响应和 `makeOrgFrameDispatcher` 的 unknown frame type 从 `log()` 改为 `warn()`，确保异常写入 error.log。
 
 ## [1.0.62] — 2026-06-24
 
 ### Fixed
 
-- **fix(comm-bridge): sync 游标修正 + dedup 加固 — 根治消息重放** (Issue #8ffdac40)。cws-comm 有两套独立 seq：per-conversation 消息 seq 和 per-user org-wide inbox seq。sync API 期望 inbox seq 但 openmax 一直存 per-conversation 的消息 seq 作为 `last_seq`，导致重启后游标指向错误位置，拉回大量已处理消息。改动：
+- **fix(comm-bridge): sync 游标修正 + dedup 加固 — 根治消息重放**。消息服务有两套独立 seq：per-conversation 消息 seq 和 per-user org-wide inbox seq。sync API 期望 inbox seq 但 openmax 一直存 per-conversation 的消息 seq 作为 `last_seq`，导致重启后游标指向错误位置，拉回大量已处理消息。改动：
   - **P0**: 新增 `sync_seq` 字段（inbox seq）替代 `last_seq`；`syncMissedEvents` 只从 sync response 的 `ev.seq` 更新游标，不再被实时 WS 消息的 per-conversation seq 污染；首次连接通过 `initSyncSeq` 初始化游标位置
   - **P1**: dedup 窗口 500→3000（覆盖 SYNC_MAX_EVENTS 的 1.5×）
-  - **P2**: 新增 `ackSync` — sync 完成后向 cws-comm 确认已处理的最高 seq
+  - **P2**: 新增 `ackSync` — sync 完成后向消息服务确认已处理的最高 seq
   - **P3**: 移除 `createDeduper` 的 `ttlMs` 死参数；清理 `last_seq` 相关注释
   - 向后兼容：首次升级自动从 `last_seq` 迁移到 `sync_seq`
 
@@ -448,7 +448,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Added
 - **Issue owner support in TM CLI**: `issue.create` now forwards optional
-  `ownerMemberId` as `owner_member_id`, aligning with cws-work issue owner /
+  `ownerMemberId` as `owner_member_id`, aligning with the task-management backend issue owner /
   owner-only acceptance semantics.
 
 ### Changed
@@ -495,12 +495,12 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 ## [1.0.31] - 2026-06-16
 
 ### Added
-- **`task.start`** (`src/cli/tm.js` → `POST /tasks/{id}/start`): v0.7 cws-work
+- **`task.start`** (`src/cli/tm.js`): v0.7 the task-management backend
   split claim/start. Claim now ONLY assigns a task (pending → assigned);
   `task.start` is the new step that actually begins work (assigned → running),
   opens the attempt, and enforces the `dependsOn` gate. Worker 接活两步:
   `task.claim` → `task.start`.
-- **`issue.terminate`** (`POST /issues/{id}/terminate`, body `{reason?, source?}`):
+- **`issue.terminate`** (body `{reason?, source?}`):
   提前终止一个未结论 Issue → `terminated`. The server cascades cancellation to
   non-terminal Tasks and emits `issue.terminated` for the Lead to run cleanup.
 
@@ -520,25 +520,24 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 ## [1.0.21] - 2026-06-12
 
 ### Added
-- **Agent owner is now synced from cws-core, the authoritative source**
+- **Agent owner is now synced from the platform backend, the authoritative source**
   (`src/comm-bridge.js`, `src/lib/config.js`, `src/cli/comm.js`). An agent's
-  owner can be reassigned server-side via cws-core
-  (`POST /api/v1/platform-agents/{member_id}/transfer-owner`). On every WS
-  (re)connect the bridge pulls its own member record and, when core reports a
-  different `owner_member_id`, updates both the live in-memory org config and
+  owner can be reassigned server-side via the platform backend. On every WS
+  (re)connect the bridge pulls its own member record and, when the backend
+  reports a different `owner_member_id`, updates both the live in-memory org config and
   `config.json` — no restart needed. Pull-based by design: ownership is never
   mutated from a pushed WS payload (a forged frame must not be able to hand the
   bot to an attacker); the authoritative read is an authenticated GET.
 - **`comm.get_owner` / `comm.set_owner` / `comm.sync_owner` CLI commands**
   (`src/cli/comm.js`) for inspecting and reconciling the local owner cache
-  against core (manual / trigger path; the running service auto-syncs on each
+  against the backend (manual / trigger path; the running service auto-syncs on each
   reconnect). Plus `setOwner()` in `src/lib/config.js` — an authoritative
   overwrite (vs `bindOwner`'s first-DM no-op-if-bound).
 
 ### Changed
 - **First-DM owner auto-bind is now an explicit fallback** — it only takes
-  effect when cws-core has no owner recorded for the agent. When core reports
-  an owner it always wins. (`src/comm-bridge.js`)
+  effect when the platform backend has no owner recorded for the agent. When the
+  backend reports an owner it always wins. (`src/comm-bridge.js`)
 - **Owner edits to `config.json` now apply live** via the config watcher (in
   place, no restart) — same treatment as access-policy edits. `org_id` /
   `api_key` / `self` remain structural (restart required). (`src/comm-bridge.js`)
@@ -548,14 +547,14 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 ### Fixed
 - **Media messages (image/file) rendered as a blank bubble; captions are now
   carried with the file** (`scripts/send.js`, `src/lib/message.js`).
-  `sendMediaMessage` posted `content.body = {}`, while cws-fe's own web client
+  `sendMediaMessage` posted `content.body = {}`, while the frontend's own web client
   sends `body = { file_name, text }`; the empty body left the file/image card
   blank and dropped any caption (forcing a separate follow-up text message).
   `sendMediaMessage` now sends `body: { file_name, text? }` matching the web
   client, and `parseMediaPrefix` supports an optional newline-separated caption
   after the path (`[MEDIA:file]/path\n<caption>`) instead of merging it into the
   path (which previously caused an ENOENT send failure). Verified live against
-  cws-int. (GitHub #31)
+  a test environment. (GitHub #31)
 
 ### Changed
 - **Message-dedup retention `maxEntries` is now configurable (default raised
@@ -581,7 +580,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   manually present in `dmAllowFrom`. The group branch already had an owner
   exemption (`senderIsOwner && mentioned`); the DM branch did not. Added a
   `dm:owner-exempt` short-circuit at the top of the DM branch to mirror it.
-  Matches KB "CWS Issue 汇总 — 2026-06-09" #34 (GitLab openmax #81).
+  Matches the tracked incident for this behavior.
   The auto-bind path (first-ever DM under `owner` policy with no bound owner)
   is unchanged.
 
@@ -606,10 +605,9 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 - **Promoted "always use the coco CLI, never hand-roll BFF REST" from a 常见错误
   table row to a top-level iron rule in SKILL.md body** ("服务调用铁律"), placed
   just before the task-classification flow so it's seen whenever the skill is
-  loaded. Motivation: an agent (with the skill installed) hand-rolled BFF REST
-  and guessed the wrong nested path for issue-update (`PATCH
-  /projects/{id}/issues/{id}`) instead of the flat `PATCH /issues/{id}` the CLI
-  uses. The rule now states all TM/KB/AS/Comm/Core ops go through
+  loaded. Motivation: an agent (with the skill installed) hand-rolled backend REST
+  and guessed a wrong nested path for issue-update instead of the flat
+  path the CLI uses. The rule now states all TM/KB/AS/Comm/Core ops go through
   `src/cli/{tm,kb,as,comm,core}.js` and directs agents to run the CLI / read the
   ops doc rather than guess REST paths. Kept the rule general — the exact
   endpoint/field details (flat-vs-nested write paths, accepted PATCH fields)
@@ -620,7 +618,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 - **Corrected the complex-task dependency model to bot-driven self-claim
   (status must reflect reality).** v1.0.14 described dependent steps as
   "auto-advancing" to running when their predecessor completes — but the
-  cws-work backend has no such auto-advance, and more importantly auto-flipping
+  the task-management backend has no such auto-advance, and more importantly auto-flipping
   a task to RUNNING without a bot actually executing it makes the status lie.
   Revised the flow (复杂任务流程 step 5/6) and guardrail #9:
   - On instantiation, **dependent steps are created WITHOUT `assigneeId`** so
@@ -631,7 +629,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
     (bot-DM), which then `task.claim`s its own task (claim validates
     `dependsOn`) → becomes assignee → 进行中 → executes. RUNNING only ever flips
     when a real bot picks the task up — no phantom "in progress".
-  - Rationale: creating a dependent task WITH `assigneeId` triggers cws-work's
+  - Rationale: creating a dependent task WITH `assigneeId` triggers the task-management backend's
     create-time auto-claim (which does NOT check `dependsOn`), forcing it
     straight to running and leaving 待办 empty.
   - Added matching 常见错误 rows (don't pass assigneeId for dependent steps;
@@ -759,7 +757,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   upgrading openmax on any bot auto-applies it, no per-bot instruction
   edits. Toggle off via `config.message.enforceSkillFlow = false`. Note: still
   strong guidance, not a hard gate — a true 100% gate needs server-side
-  enforcement at task intake (cws-core). Revives the approach from PR #18
+  enforcement at task intake (the platform backend). Revives the approach from PR #18
   (previously closed in favor of the description-only route).
 
 ## [1.0.8] - 2026-06-10
@@ -799,7 +797,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   acceptance before completion/archive). Cost: the full skill loads at most once
   per session, then is cached. Chosen over per-message envelope injection
   (cheaper, portable). Honest limit: still strong guidance, not a hard runtime
-  gate — a 100% gate needs server-side enforcement at task intake (cws-core).
+  gate — a 100% gate needs server-side enforcement at task intake (the platform backend).
 
 ## [1.0.6] - 2026-06-09
 
@@ -815,7 +813,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 ### Docs
 - **Human-acceptance loop + project/KB-first ordering encoded in `SKILL.md`.**
   Two follow-ups requested after v1.0.4:
-  - **Acceptance loop (issue 789741f8)**: the API already supports it
+  - **Acceptance loop**: the API already supports it
     (`issue.set_acceptance {accepted, source:im|explicit, rejectionReason}` →
     accepted→archived / rejected→rework), but the behavior wasn't encoded. SKILL
     now mandates: after delivery the bot **must request acceptance from the human
@@ -828,7 +826,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
     simple/complex flows + three common-errors rows. "任务做完≠结束，发起人验收通过才
     归档." Stale `pending_acceptance` wording corrected to the real
     delivered→accepted→archived states.
-  - **Project/KB-first ordering (issue cbc24d82) — BOTH simple AND complex
+  - **Project/KB-first ordering — BOTH simple AND complex
     tasks**: simple-task flow gets an explicit step 4 「登记 Issue→Task」 and the
     complex-task flow's step 2 now requires confirming **project + KB** with the
     user before orchestration/execution — both enforcing *confirm project/KB →
@@ -868,7 +866,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   (default Inbox only for internal bug-filing), (3) notify the user at the
   moment of every issue/task status transition, (4) notify on every task
   completion, (5) auto-continue to the next task by priority after finishing
-  one. Closes the agent-conformance issues (e9291b91, 15cd9249).
+  one. Closes the agent-conformance issues.
 - **Hardened the project/KB-selection + Issue→Task trigger rules** after a
   smoke test showed a simple research task (gold-price analysis / connector
   list) skipping project/KB selection. Changes: the 触发 section now lists two
@@ -877,7 +875,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   steps 2/3 make project/KB a mandatory question (禁止默默用默认); guardrail rule 1
   names skipping Issue→Task registration as the #1 root cause of "task flow not
   triggered"; guardrail rule 2 states simple research/analysis reports are NOT
-  exempt. Closes cbc24d82.
+  exempt. Closes the project/KB-selection gap.
 
 ## [1.0.3] - 2026-06-09
 
@@ -892,24 +890,24 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   `src/lib/client.js` (REST traffic) and `src/lib/token.js` (auth handshake).
   Best-effort: disk errors are swallowed silently so RPCs never fail because
   the log file is unwritable.
-- **Outbound @-mention canonicalization** (`src/lib/mention.js`). cws-fe
+- **Outbound @-mention canonicalization** (`src/lib/mention.js`). the frontend
   highlights a mention by matching `@<participant display_name>` in the message
   text (no member_id/token in the body — purely client-side name matching). The
   bridge now records the display names it sees per conversation
   (`recordParticipants`, from inbound sender + group context), and `send.js`
   runs `resolveMentions` to canonicalize any `@name` token in outbound text to
   the exact recorded display_name (case/spacing-tolerant, longest-name-first),
-  so the agent's mentions land on cws-fe's matcher. Render-side highlighting for
-  agent (`AGENT_TEXT`) messages is tracked in cws-fe issue #6; once that lands,
+  so the agent's mentions land on the frontend's matcher. Render-side highlighting for
+  agent (`AGENT_TEXT`) messages is tracked in the frontend issue #6; once that lands,
   these canonicalized mentions light up with no further change here.
 
 ### Fixed
 - **Quoted/reply messages now reach the agent.** When an inbound message is a
-  reply (cws-comm `parent_id`), the bridge fetches the quoted message and
+  reply (the messaging service `parent_id`), the bridge fetches the quoted message and
   surfaces it as a `<replying-to>` block. Previously `comm-bridge.js` never
   built `quotedContent`, so replies were invisible to the agent even though
   `formatInboundForC4` already supported the block (`src/comm-bridge.js`).
-- **`<group-context>` is now chronological (oldest→newest).** cws-comm
+- **`<group-context>` is now chronological (oldest→newest).** the messaging service
   `list-messages` with `before_seq` returns DESC (newest→oldest); the bridge
   passed that order straight through, so group history read backwards. It now
   sorts the fetched context ascending by `seq` before formatting
@@ -919,14 +917,13 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 - **Access-control section added to `SKILL.md`** documenting per-org
   `dmPolicy` (`open`/`allowlist`/`owner`), `groupPolicy`
   (`open`/`allowlist`/`disabled`), per-group `mode`/`allowFrom`, and
-  `dmAllowFrom` — all keyed by cws-core `member_id`, with a config example and
+  `dmAllowFrom` — all keyed by the platform backend `member_id`, with a config example and
   the DM/group independence note (closes #10).
 
 ## [1.0.2] - 2026-06-09
 
 ### Changed
-- **Invitation CLI aligned with the create-time display-name contract**
-  (cws-core #86). The invitee display name is now set when the invitation is
+- **Invitation CLI aligned with the create-time display-name contract.** The invitee display name is now set when the invitation is
   created (stored on the invitation, becomes `members.display_name` on accept)
   rather than supplied at accept time:
   - `core.invitation_create` now sends a **required** `display_name`
@@ -935,10 +932,10 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
     just `{token}` (sending `display_name` would be schema-invalid post-#86).
   - Usage text and `references/core-operations.md` (command rows + flow
     examples) updated to match.
-- **Improved the COCO inbound message envelope** delivered to the agent, for
+- **Improved the inbound message envelope** delivered to the agent, for
   parity with other C4 channels:
   - Resolve the sender's display name (and group-context senders) via a cached
-    `GET /api/v1/members/{id}`, falling back to the raw member id only when no
+    member lookup, falling back to the raw member id only when no
     name is available.
   - Minimal `reply via` target: `<conversationId>[|reply:..][|thread:..]
     [|parent:..]` — the `[COCO TYPE]/` prefix (never used for routing) is
@@ -951,8 +948,8 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 - **Outbound `scripts/send.js` was POSTing the old `MessageContent[]` array
-  body, which cws-core now rejects with HTTP 422.** cws-core's current
-  `sendMessageRequest` (see `internal/transport/http/message.go`) takes a
+  body, which the platform backend now rejects with HTTP 422.** The backend's current
+  send-message contract takes a
   single `content` object plus a top-level `type` enum:
 
   ```
@@ -970,10 +967,10 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
     `content: { content_type: 'text'|'markdown', body: { text }, attachments: [] }`
   - image and file → `type: 'IMAGE'|'FILE'`, `content.attachments` array
     with `{artifact_id, file_name, content_type, size_bytes}` (mediaId
-    from cws-as upload IS the artifact_id; mediaId stays as the
+    from the artifact-store upload IS the artifact_id; mediaId stays as the
     short-name in the bridge but maps onto attachments)
   - reply target field renamed `reply_to` → `parent_id` to match
-    cws-core's `ParentID *string` field
+    the backend's parent-id field
 
 - **Inbound message content arrived empty in the C4 envelope** because
   the bridge read `msg.content.text`, but after spreading the
@@ -1022,9 +1019,9 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Fixed
 - **DMs were misrouted into the group/thread branch of `shouldHandleMessage`
-  because of a case mismatch.** cws-core's HTTP API returns conversation
+  because of a case mismatch.** the platform backend's HTTP API returns conversation
   type as an uppercase enum (`DM` / `GROUP` / `STRAT` / `BROADCAST` /
-  `BRIDGE`, per `internal/transport/http/cwscomm_models.go`), but
+  `BRIDGE`), but
   `src/comm-bridge.js` and `src/lib/message.js` compared against the
   lowercase wire values `'dm'` / `'group'` / `'thread'`. As a result a real
   DM with `conv.type === "DM"` fell through to the group branch and was
@@ -1041,7 +1038,7 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 ### Added
 - **Log every inbound WS message frame** at the entry of
   `handleIncomingMessage`, before dedupe / fetch. Previously only the
-  REST `GET /messages/{id}` follow-up call left a trace, which made it
+  REST follow-up content fetch left a trace, which made it
   hard to see whether a WS push had actually arrived. New format:
   ```
   [ws] [<org-slug>] message frame: id=<id> conv=<conv_id> sender=<sender_id>
@@ -1059,11 +1056,11 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   (possibly new) `bff_url` when the existing `config.server.ws_url` was
   empty. A previous install's `DEFAULT_CONFIG` seed
   (`ws://127.0.0.1:8080/ws`) therefore survived after the operator
-  pointed `bff_url` at a real cws-core, and the runtime kept trying to
+  pointed `bff_url` at a real the platform backend, and the runtime kept trying to
   connect to localhost.
   - `configure.js` now re-derives `ws_url` from `bff_url` unconditionally
     when the operator did not supply `COCO_WS_URL`. Explicit
-    `COCO_WS_URL` is still honored verbatim for the case where cws-comm
+    `COCO_WS_URL` is still honored verbatim for the case where the messaging service
     is on a different host.
   - `post-install.js` Step 1 default now comes from the freshly entered
     `bff_url`, not from the stale `config.server.ws_url`. Operators can
@@ -1074,9 +1071,8 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 ### Fixed
 - **Frame watchdog killed healthy WebSocket connections at ~90s.**
   `src/lib/ws.js` only refreshed `lastFrameAt` inside the `'message'`
-  event handler, which fires for data frames only. cws-comm sends
-  WebSocket protocol-level **Ping** control frames every 30s
-  (`internal/transport/ws/conn.go` `RunPingLoop`), and the npm `ws`
+  event handler, which fires for data frames only. the messaging service sends
+  WebSocket protocol-level **Ping** control frames every 30s, and the npm `ws`
   library auto-replies with Pong frames — but those control frames fire
   the `'ping'` / `'pong'` events, NOT `'message'`. So even on a perfectly
   healthy connection the watchdog saw "no frames received within the
@@ -1085,16 +1081,16 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   - Subscribed `ws.on('ping')` and `ws.on('pong')` to also refresh
     `lastFrameAt`.
   - Added a single-line `[ws] ping received` debug trace so server-side
-    Ping cadence is visible in `pm2 logs` (cheap — cws-comm default
-    `PingInterval` is 30 s).
+    Ping cadence is visible in `pm2 logs` (cheap — the server's default
+    ping interval is 30 s).
 
 ## [0.3.4] - 2026-06-02
 
 ### Breaking
 - **`COCO_ORG_IDS` (plural, comma-separated) replaced by `COCO_ORG_ID`
   (singular).** The non-interactive install path now binds exactly one
-  (agent, org) pair per prepare run, matching cws-agent-manager-sdk-go's
-  `AgentInitialization.CoCoWorkspaceChannelAuth` proto field shape 1:1.
+  (agent, org) pair per prepare run, matching the agent-manager SDK's
+  channel-auth initialization payload shape 1:1.
   Operators that need a single runtime to serve multiple orgs run the
   prepare hook once per org_id; the hook is idempotent (existing
   `config.agent.api_key` and existing `org_id` blocks short-circuit), so
@@ -1103,12 +1099,12 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 
 ### Added
 - **Channel-auth-aligned org metadata env vars** in the non-interactive
-  install path. An operator with a `CoCoWorkspaceChannelAuth` payload can
+  install path. An operator with a channel-auth payload can
   map every field to env vars 1:1:
-  - `COCO_ORG_NAME`        → proto `org_name`        → `orgs.<slug>.org_name`
-  - `COCO_OWNER_MEMBER_ID` → proto `owner.member_id` → `orgs.<slug>.owner.member_id`
-  - `COCO_OWNER_NAME`      → proto `owner.name`      → `orgs.<slug>.owner.name`
-  - `COCO_SELF_NAME`       → proto `self.name`       → `orgs.<slug>.self.name`
+  - `COCO_ORG_NAME`        → payload `org_name`        → `orgs.<slug>.org_name`
+  - `COCO_OWNER_MEMBER_ID` → payload `owner.member_id` → `orgs.<slug>.owner.member_id`
+  - `COCO_OWNER_NAME`      → payload `owner.name`      → `orgs.<slug>.owner.name`
+  - `COCO_SELF_NAME`       → payload `self.name`       → `orgs.<slug>.self.name`
   All four are optional; absent fields fall through to existing runtime
   defaults (`owner` auto-binds on first DM under `dmPolicy=owner`,
   `self.member_id` auto-fills from JWT claims on first WS connect,
@@ -1117,9 +1113,9 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
   positional `memberId` arg so the five org-shape fields stay named.
 
 ### Mapping reference
-`proto AgentInitialization.CoCoWorkspaceChannelAuth → env var`:
+`channel-auth initialization payload → env var`:
 
-| proto                       | env var                |
+| payload                     | env var                |
 |---|---|
 | `server.bff_url`            | `COCO_BFF_URL`         |
 | `server.ws_url`             | `COCO_WS_URL`          |
@@ -1131,8 +1127,8 @@ Beta bundling the unreleased channel-liveness 404 backoff (was staged as 2.10.3,
 | `self.member_id`            | `COCO_MEMBER_ID`       |
 | `self.name`                 | `COCO_SELF_NAME`       |
 
-`identity_id` is **not** in the proto; the hook continues to require
-`COCO_IDENTITY_ID` for the BYO path until the proto contract decides
+`identity_id` is **not** in the payload; the hook continues to require
+`COCO_IDENTITY_ID` for the BYO path until the payload contract decides
 whether to add it.
 
 ## [0.3.3] - 2026-06-02
@@ -1169,10 +1165,10 @@ whether to add it.
 - **Bring-your-own (BYO) agent identity at install.** Step 2 of the install
   flow now asks three fields up front — `identity_id`, `api_key`,
   `member_id`. If all three are non-empty the install uses them verbatim
-  and skips `POST /auth/register/agent` entirely. Any blank field falls
+  and skips agent auto-registration entirely. Any blank field falls
   back to the existing auto-register flow.
   - **Why:** when an agent was pre-provisioned elsewhere (e.g. via
-    `POST /api/v1/platform-agents` from an admin UI), the operator already
+    an admin API), the operator already
     has these three IDs. Forcing a re-register would burn a second identity.
   - The provided `member_id` is applied to the **first** org_id entered in
     the loop (`orgs[first].self.member_id`), since a BYO member_id is by
@@ -1226,16 +1222,16 @@ whether to add it.
 ## [0.3.0] - 2026-06-02
 
 ### Breaking
-- **register-agent contract aligned with current cws-core.** Previously the
-  install hook sent `{ username, display_name }` to
-  `POST /auth/register/agent`; cws-core now rejects those fields (HTTP 422)
+- **register-agent contract aligned with the current platform backend.** Previously the
+  install hook sent `{ username, display_name }` to the agent-register
+  endpoint; the platform backend now rejects those fields (HTTP 422)
   and the body must be empty `{}`. Old install transcripts have been failing
-  since the cws-core auth refactor; this MR fixes the call.
+  since the the platform backend auth refactor; this MR fixes the call.
 - **Install prompt surface trimmed to the bare minimum.** Interactive install
   now asks only for `bff_url`, `ws_url`, then one or more `org_id`s in a
   loop. `username`, `display_name`, `member_id`, and per-org access policy
   are no longer asked at install time. `member_id` is auto-filled from JWT
-  claims on first `/auth/agent/token` exchange; access policy defaults to
+  claims on the first agent-token exchange; access policy defaults to
   `dmPolicy=owner` + `groupPolicy=allowlist` and can be edited in
   config.json afterwards.
 - **`config.required` schema for `zylos add`** trimmed from five fields to
@@ -1248,7 +1244,7 @@ whether to add it.
 - **Multi-org JWT routing across the entire REST surface.** Previously
   `client.js` resolved the bearer token via `getAccessToken()` with no
   `orgId`, so multi-org agents fell back to the single-enabled-org or
-  `COCO_ORG_ID` env var heuristic and could end up calling cws-core with the
+  `COCO_ORG_ID` env var heuristic and could end up calling the platform backend with the
   wrong org's JWT. New `getForOrg / postForOrg / patchForOrg / putForOrg /
   delForOrg` variants thread `orgId` straight through `doRequest` into
   `getAccessToken(orgId)`. `kbClient(orgId)` and `asClient(orgId)` also pass
@@ -1261,10 +1257,10 @@ whether to add it.
   `@mentions` from the very first message after their JWT is minted.
 - **Inflight Promise dedup** in `token.js` (per cache key: exchange / refresh
   / per-org). Concurrent boot of N orgs no longer fans out N parallel
-  `/auth/agent/token` calls; the second-through-Nth caller awaits the
+  token-exchange calls; the second-through-Nth caller awaits the
   first's Promise.
-- **Identity-only JWT support** (`/auth/agent/token` body `{}`) — needed
-  before an agent is in any org, e.g. to call `POST /api/v1/organizations`.
+- **Identity-only JWT support** (token exchange with an empty body) — needed
+  before an agent is in any org, e.g. to create an organization.
   `exchange('')` and `getAccessToken('')` mint and cache an identity-only
   JWT at `runtime/tokens/_identity.json`.
 - **Bootstrap pre-mint.** `comm-bridge.js` now eagerly calls
@@ -1284,8 +1280,8 @@ whether to add it.
   org" (explicit org id, `''` for identity-only).
 
 ### Temporary — remove before production
-- **`src/lib/cf-access.js`** hard-codes the `CF-Access-Client-Id` /
-  `CF-Access-Client-Secret` service-token pair for `cws-int.coco.xyz`. Every
+- **`src/lib/cf-access.js`** hard-codes a `CF-Access-Client-Id` /
+  `CF-Access-Client-Secret` service-token pair for a test environment. Every
   outbound REST call (`client.js`, `token.js`, install hook fetch) and the
   WebSocket handshake (`ws.js`) spread `cfAccessHeaders()`. Production
   release MUST delete `cf-access.js` and the four import/spread sites it's
@@ -1306,9 +1302,8 @@ whether to add it.
   - `lifecycle.preserve: [config.json, logs/, runtime/]` → upgrade-safe
     fields
   - `lifecycle.data_dir` → declares the data root path explicitly
-  - `upgrade.{repo, branch}` → `gitlab:openmax/zylos-openmax`
-    on `main` (works with the existing zylos-core local patch that maps
-    `gitlab:` repos to git.coco.xyz tarballs)
+  - `upgrade.{repo, branch}` → the source repo
+    on `main`
   - `config.required` → five fields (`COCO_BFF_URL`, `COCO_AGENT_TICKET`
     sensitive, `COCO_AGENT_NAME`, `COCO_ORG_ID`, `COCO_SELF_MEMBER_ID`)
     that `zylos add` will prompt the operator for.
@@ -1324,7 +1319,7 @@ whether to add it.
 
 ```
 zylos add openmax --branch main
-  → download from gitlab
+  → download from the source repo
   → npm install --omit=dev
   → prompt operator for 5 config fields
   → run hooks/configure.js (writes config.json via post-install)
@@ -1379,7 +1374,7 @@ zylos add openmax --branch main
 ## [0.2.2] - 2026-06-02
 
 ### Added
-- **Reconnect catch-up**: `comm-bridge.js` now invokes `POST /api/v1/sync`
+- **Reconnect catch-up**: `comm-bridge.js` now invokes the platform sync endpoint
   after every successful WS open, pulling any conversation events
   (`{conversation_id, message_id, seq}`) with `seq > sessionRef.last_seq`
   and dispatching them through the normal message handler. Each event
