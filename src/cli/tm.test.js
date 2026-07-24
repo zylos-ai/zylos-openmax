@@ -106,12 +106,14 @@ test('project and organization issue searches forward query', async () => {
   assert.equal(issueRequest.url, '/api/v1/issues?query=beta');
 });
 
-test('issue.create preserves backlog presence and requires owner and lead', async () => {
+test('issue.create preserves backlog presence and requires ownership plus message origin', async () => {
   const backlogRequest = await captureRequest('issue.create', {
     projectId: 'project-1',
     title: 'Record discovered issue',
     leadAgentId: 'agent-1',
     ownerMemberId: 'human-1',
+    originConversationId: 'conversation-1',
+    originMessageId: 'message-1',
   });
   assert.equal(Object.hasOwn(backlogRequest.body, 'backlog'), false);
 
@@ -120,6 +122,8 @@ test('issue.create preserves backlog presence and requires owner and lead', asyn
     title: 'Start immediately',
     leadAgentId: 'agent-1',
     ownerMemberId: 'human-1',
+    originConversationId: 'conversation-1',
+    originMessageId: 'message-2',
     backlog: false,
   });
   assert.equal(immediateRequest.body.backlog, false);
@@ -128,7 +132,7 @@ test('issue.create preserves backlog presence and requires owner and lead', asyn
     projectId: 'project-1',
     title: 'Missing ownership',
   });
-  assert.match(failure.error, /leadAgentId, ownerMemberId/);
+  assert.match(failure.error, /leadAgentId, ownerMemberId, originConversationId, originMessageId/);
 });
 
 test('issue.accept_delivered defaults to the Lead text-card proxy source', async () => {

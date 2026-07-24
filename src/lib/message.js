@@ -127,6 +127,15 @@ function escapeXml(s) {
     .replace(/>/g, '&gt;');
 }
 
+function escapeXmlAttribute(s) {
+  if (s === undefined || s === null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 /**
  * Format a single context-line entry: `[name]: text`. Both fields go through
  * escapeXml. Accepts the shape returned by fetchRecentMessages
@@ -162,13 +171,25 @@ function formatContextLine(m) {
  *                              mediaLocalPath?:string }
  * @param {Array}  [recent] - recent group messages used for `<group-context>`
  * @param {object} [opts]   - { groupName, quotedContent, threadContext,
- *                              threadRootId, smartHint }
+ *                              threadRootId, smartHint, projectContext,
+ *                              originConversationId, originMessageId }
  * @returns {string}
  */
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
   const rawType = (conv?.type || '').toLowerCase();
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
-  const { groupName, quotedContent, threadContext, threadRootId, smartHint, orgId, orgName } = opts;
+  const {
+    groupName,
+    quotedContent,
+    threadContext,
+    threadRootId,
+    smartHint,
+    orgId,
+    orgName,
+    projectContext,
+    originConversationId,
+    originMessageId,
+  } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
   const safeName = escapeXml(name);
@@ -217,6 +238,16 @@ just casual chat, or doesn't need your input. Only reply when:
 3) someone clearly needs assistance.
 When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
 </smart-mode>\n\n`,
+    );
+  }
+
+  if (projectContext?.projectId) {
+    const safeProjectId = escapeXmlAttribute(projectContext.projectId);
+    const safeProjectName = escapeXmlAttribute(projectContext.projectName || '');
+    const safeOriginConversationId = escapeXmlAttribute(originConversationId || conv?.id || '');
+    const safeOriginMessageId = escapeXmlAttribute(originMessageId || '');
+    parts.push(
+`<project-context schema-version="1" id="${safeProjectId}" name="${safeProjectName}" origin-conversation-id="${safeOriginConversationId}" origin-message-id="${safeOriginMessageId}" />\n\n`,
     );
   }
 
