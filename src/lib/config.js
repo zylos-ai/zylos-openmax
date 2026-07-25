@@ -153,6 +153,13 @@ export const DEFAULT_CONFIG = {
   // `channelLiveness.intervalSeconds` to change the cadence.
   channelLiveness: {},
 
+  // Deterministic Workspace troubleshooting commands delivered over the real
+  // Agent WebSocket. Disabled by default and intended only for dedicated test
+  // agents in non-production environments.
+  diagnostics: {
+    enabled: false,
+  },
+
   // `message.context_messages` / `message.dedup_ttl` / `message.dedup_max_entries`
   // are NOT in DEFAULT_CONFIG. Defaults are hardcoded in src/comm-bridge.js
   // (DEFAULT_CONTEXT_MESSAGES, DEFAULT_DEDUP_TTL_MS, DEFAULT_DEDUP_MAX_ENTRIES) —
