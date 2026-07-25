@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0] — 2026-07-26
+
+### Added
+
+- **Restricted Workspace Agent Diagnostics probe handler — default-off, closed-interpreter (`src/lib/diagnostics.js`, `src/comm-bridge.js`, `src/lib/config.js`).** Handles the `agent.diagnostics.command` system frame *before* LLM processing and supports exactly one action, `diagnostics.message.send_probe`, which posts a fixed-format probe message (`[workspace-diagnostics:<token>]`) to a conversation via the existing production message endpoint using the Agent runtime's own credentials — the LLM is bypassed entirely.
+  - **Not a generic remote-control facility.** Every action has an explicit implementation and the send-probe body is constructed locally; the control frame cannot carry arbitrary message text, receivers, URLs, HTTP paths, headers, credentials, local paths, or commands. `command_id`, `probe_token` (`^[A-Za-z0-9_-]{8,128}$`) and `conversation_id` (`^[A-Za-z0-9_-]{1,128}$`) are all charset-validated before use, so a crafted frame cannot inject path-traversal or query-string segments into the request URL. TTL (`expires_at`) and action are validated; command IDs are deduplicated with a bounded FIFO cache; a transport failure forgets the command ID so a control-plane retry can complete (cws-comm still dedups `client_msg_id`).
+  - **Disabled by default** (`diagnostics.enabled: false`) and intended only for dedicated test agents in non-production environments; both the Workspace and OpenMax diagnostics switches must be enabled for a probe to run.
+  - Related Workspace changes: cws-comm MR!468, cws-core MR!397. Covered by unit tests (`src/lib/diagnostics.test.js`). (#86)
+
 ## [2.11.1] — 2026-07-23
 
 ### Fixed
