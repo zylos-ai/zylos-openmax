@@ -47,6 +47,7 @@ import { createMetricsReporter } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
+import { AGENT_DIAGNOSTICS_EVENT, createDiagnosticsHandler } from './lib/diagnostics.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'openmax';
@@ -95,6 +96,14 @@ const DEFAULT_WS_HEARTBEAT_MS     = 30 * 1000;    // 30_000
 const DEFAULT_WS_PING_INTERVAL_MS = 20 * 1000;    // 20_000
 
 const tasks = new TaskRegistry();
+
+const handleAgentDiagnostics = createDiagnosticsHandler({
+  isEnabled: () => config.diagnostics?.enabled === true,
+  postForOrg,
+  apiPath,
+  log,
+  warn,
+});
 
 const C4_RECEIVE = path.join(
   process.env.HOME || '',
@@ -1422,6 +1431,7 @@ function classifySystemEvent(eventName) {
   if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
   if (e === 'message.updated') return 'edit';
   if (e.startsWith('agent.config.')) return 'config_update';
+  if (e === AGENT_DIAGNOSTICS_EVENT) return 'diagnostics';
   if (e.startsWith('connection.')) return 'connection';
   if (isChannelEvent(e)) return 'channel';
   // Defensive fallback for naming drift — does not match reaction/read/etc.
@@ -1440,6 +1450,11 @@ async function handleSystemEvent(orgConfig, frame) {
 
   if (kind === 'config_update') {
     handleConfigUpdate(orgConfig, frame);
+    return;
+  }
+
+  if (kind === 'diagnostics') {
+    await handleAgentDiagnostics(orgConfig, frame);
     return;
   }
 
