@@ -12,6 +12,7 @@ export const DIAGNOSTICS_SEND_PROBE = 'diagnostics.message.send_probe';
 
 const PROBE_TOKEN_RE = /^[A-Za-z0-9_-]{8,128}$/;
 const COMMAND_ID_RE = /^[A-Za-z0-9_-]{8,128}$/;
+const CONVERSATION_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_SEEN_COMMANDS = 1000;
 
 export function probeMessageText(probeToken) {
@@ -50,7 +51,7 @@ export function createDiagnosticsHandler({
 
     if (!COMMAND_ID_RE.test(commandId)) return { accepted: false, reason: 'invalid_command_id' };
     if (action !== DIAGNOSTICS_SEND_PROBE) return { accepted: false, reason: 'unsupported_action' };
-    if (!conversationId || conversationId.length > 128) return { accepted: false, reason: 'invalid_conversation_id' };
+    if (!CONVERSATION_ID_RE.test(conversationId)) return { accepted: false, reason: 'invalid_conversation_id' };
     if (!PROBE_TOKEN_RE.test(probeToken)) return { accepted: false, reason: 'invalid_probe_token' };
     if (!Number.isFinite(expiresAt) || expiresAt <= now()) return { accepted: false, reason: 'expired' };
     if (seen.has(commandId)) return { accepted: true, duplicate: true };

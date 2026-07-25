@@ -55,6 +55,8 @@ test('diagnostics is disabled by default and cannot carry arbitrary actions or t
   assert.equal((await make(false)({ slug: 'test', org_id: 'org-1' }, commandFrame())).reason, 'disabled');
   assert.equal((await make(true)({ slug: 'test', org_id: 'org-1' }, commandFrame({ action: 'diagnostics.http.request' }))).reason, 'unsupported_action');
   assert.equal((await make(true)({ slug: 'test', org_id: 'org-1' }, commandFrame({ probe_token: 'hello world' }))).reason, 'invalid_probe_token');
+  assert.equal((await make(true)({ slug: 'test', org_id: 'org-1' }, commandFrame({ conversation_id: 'conv/../../admin' }))).reason, 'invalid_conversation_id');
+  assert.equal((await make(true)({ slug: 'test', org_id: 'org-1' }, commandFrame({ conversation_id: 'conv?member=other' }))).reason, 'invalid_conversation_id');
   assert.equal((await make(true)({ slug: 'test', org_id: 'org-1' }, commandFrame({ expires_at: '2026-07-25T11:59:59Z' }))).reason, 'expired');
   assert.equal(calls, 0);
 });

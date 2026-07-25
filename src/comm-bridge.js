@@ -47,7 +47,7 @@ import { createMetricsReporter } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
-import { createDiagnosticsHandler } from './lib/diagnostics.js';
+import { AGENT_DIAGNOSTICS_EVENT, createDiagnosticsHandler } from './lib/diagnostics.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'openmax';
@@ -1431,7 +1431,7 @@ function classifySystemEvent(eventName) {
   if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
   if (e === 'message.updated') return 'edit';
   if (e.startsWith('agent.config.')) return 'config_update';
-  if (e === 'agent.diagnostics.command') return 'diagnostics';
+  if (e === AGENT_DIAGNOSTICS_EVENT) return 'diagnostics';
   if (e.startsWith('connection.')) return 'connection';
   if (isChannelEvent(e)) return 'channel';
   // Defensive fallback for naming drift — does not match reaction/read/etc.
