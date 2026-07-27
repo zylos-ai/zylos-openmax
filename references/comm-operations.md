@@ -62,7 +62,7 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 | Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.member_list` | List members of a conversation (paginated) | `{conversationId, cursor?, limit?, org?}` | `GET /api/v1/conversations/{id}/members` |
+| ✅ | `comm.member_list` | List all members of a conversation (returns the full list — cws-core `ListMembers` is **not** paginated) | `{conversationId, org?}` | `GET /api/v1/conversations/{id}/members` |
 | ✅ | `comm.member_add` | Add one (`memberId`) or many (`memberIds[]`) members | `{conversationId, memberId \| memberIds[], role?, org?}` | `POST .../members` (single) / `POST .../members:batch-add` (many) |
 | ✅ | `comm.member_remove` | Remove a single member | `{conversationId, memberId, org?}` | `DELETE .../members/{member_id}` |
 | ✅ | `comm.member_remove_batch` | Remove several members (partial-success envelope) | `{conversationId, memberIds[], org?}` | `POST .../members:batch-remove` |

@@ -181,9 +181,11 @@ const COMMANDS = {
   // add/remove; non-self targets must be org members). Pass {org} for multi-org.
 
   // ✅ GET /api/v1/conversations/{id}/members
+  //   cws-core's ListMembers takes only conversation_id and returns the full
+  //   member list — it is NOT paginated, so do not send cursor/limit (they'd be
+  //   silently ignored and mislead callers into fake pagination loops).
   'comm.member_list': () => convClient(params).get(
     apiPath(`/conversations/${params.conversationId}/members`),
-    { cursor: params.cursor ?? params.pageToken, limit: params.limit ?? params.pageSize },
   ),
 
   // ✅ POST /api/v1/conversations/{id}/members            body {member_id, role?}   (single)
@@ -361,7 +363,7 @@ Conversations
   comm.get_conversation     {conversationId, org?}
 
 Conversation members (owner/admin only; pass {org} for multi-org installs)
-  comm.member_list          {conversationId, cursor?, limit?, org?}                 # GET  .../members
+  comm.member_list          {conversationId, org?}                                  # GET  .../members (full list; not paginated)
   comm.member_add           {conversationId, memberId | memberIds[], role?, org?}   # POST .../members (or :batch-add)
   comm.member_remove        {conversationId, memberId, org?}                        # DELETE .../members/{id}
   comm.member_remove_batch  {conversationId, memberIds[], org?}                     # POST .../members:batch-remove

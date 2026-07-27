@@ -71,10 +71,12 @@ async function captureFailure(command, params) {
   });
 }
 
-test('member_list → GET .../members with pagination + documented auth', async () => {
+test('member_list → GET .../members (full list, no pagination params) + documented auth', async () => {
+  // cws-core ListMembers takes only conversation_id; the CLI must not send
+  // cursor/limit (they would be silently ignored — fake pagination).
   const request = await captureRequest('comm.member_list', { conversationId: 'cv-1', limit: 50 });
   assert.equal(request.method, 'GET');
-  assert.equal(request.url, '/api/v1/conversations/cv-1/members?limit=50');
+  assert.equal(request.url, '/api/v1/conversations/cv-1/members');
   assert.equal(request.authorization, 'Bearer cli-contract-token');
 });
 
