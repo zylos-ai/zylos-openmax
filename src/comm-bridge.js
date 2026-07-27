@@ -48,6 +48,7 @@ import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.j
 import TaskRegistry from './lib/task-registry.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
 import { AGENT_DIAGNOSTICS_EVENT, createDiagnosticsHandler } from './lib/diagnostics.js';
+import { isSelfNameMentionedInText } from './lib/self-mention.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'openmax';
@@ -446,23 +447,8 @@ function extractMentions(msg) {
   ).filter(Boolean);
 }
 
-// Detect @<selfName> in the message text body. cws-core's get-message returns
-// raw text with literal "@Name" rather than a structured mentions[] array, so
-// without this fallback the mode=mention gate and the owner-mention bypass
-// would never trigger in practice.
-function isSelfNameMentionedInText(msg, selfName) {
-  if (!selfName) return false;
-  const text =
-       msg.content?.body?.text
-    || (typeof msg.content === 'string' ? msg.content : '')
-    || (typeof msg.message?.content === 'string' ? msg.message.content : '')
-    || msg.content_text
-    || '';
-  if (!text) return false;
-  const escaped = selfName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // `(?![\w-])` keeps "@Zylos" from matching "@Zylos-GavinBox" or "@ZylosX".
-  return new RegExp('@' + escaped + '(?![\\w-])', 'i').test(text);
-}
+// Detect @<selfName> in the message text body. See src/lib/self-mention.js —
+// extracted so the @-boundary logic is unit-testable (issue #85).
 
 // User-facing notice strings shown when a message is rejected. Mirrors the
 // English copy in zylos-feishu/src/index.js — group rejections only fire when
