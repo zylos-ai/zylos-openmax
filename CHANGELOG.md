@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.1-beta.1] — 2026-07-27
+
+### Fixed
+
+- **@-mention detection is now by stable member ID only — fixes `@luna.coco` waking a bare `luna` agent (#85; root of cws-comm #329) (`src/lib/self-mention.js`, `src/comm-bridge.js`).** `shouldHandleMessage` previously OR'd an ID match with a fragile text/name match (`@<selfName>` regex), so `@luna.coco` matched the prefix `luna` and woke the wrong agent — fleet-wide, and it also mis-fired the `senderIsOwner && mentioned` owner-mention allowlist bypass. Detection is now decided purely from the message's structured `mentions[]` array (member UUIDs, `mentioned_id` per entry) against the agent's own `member_id`; cws-comm/cws-core treat that array as the only mention source and never parse @names from text. Text/name matching (`isSelfNameMentionedInText`) is removed entirely, so the whole name/substring/dot/hyphen collision class is gone.
+  - **@all / @all_agents handled for free.** cws-comm expands `@all`/`@all_agents` into one row per targeted member carrying the real `mentioned_id`, so `@所有Agent` includes the agent's own id (matched) and `@所有人` targets human members only (not matched). The `is_mention_all` flag is intentionally not a match signal — keying off it would add no real coverage while making agents answer human-only `@所有人` broadcasts in multi-human groups.
+  - Covered by `src/lib/self-mention.test.js`; verified against live int frames.
+
 ## [2.12.0] — 2026-07-26
 
 ### Added
