@@ -52,9 +52,25 @@ Real-time event push (`message.created`, etc.) goes over WebSocket, handled by `
 | ✅ | `comm.list_conversations` | List all conversations I participate in (paginated) | `{pageSize?, pageToken?}` | `GET /api/v1/conversations` |
 | ✅ | `comm.create_dm` | Open a DM with a single person (returns directly if it already exists, idempotent) | `{participantId}` | `POST /api/v1/conversations/dm` |
 | ✅ | `comm.create_group` | Create a group; self + participantIds form the member list | `{title, participantIds[]}` | `POST /api/v1/conversations/groups` |
-| ✅ | `comm.get_conversation` | Get details of a single conversation | `{conversationId}` | `GET /api/v1/conversations/{id}` |
+| ✅ | `comm.get_conversation` | Get details of a single conversation | `{conversationId, org?}` | `GET /api/v1/conversations/{id}` |
 
 `participantIds` must be a UUID array. DM uses a single `participantId` (no `title`); group uses multiple + `title`.
+
+### Conversation members
+
+Manage group membership **after** creation. cws-core derives the caller from the JWT and enforces permissions server-side (only the conversation owner/admins may add/remove; non-self targets must be org members). These are the sanctioned CLI path for group-admin actions — never hand-roll the `/members` REST calls.
+
+| Status | Command | Description | Input | Real Endpoint |
+| --- | --- | --- | --- | --- |
+| ✅ | `comm.member_list` | List members of a conversation (paginated) | `{conversationId, cursor?, limit?, org?}` | `GET /api/v1/conversations/{id}/members` |
+| ✅ | `comm.member_add` | Add one (`memberId`) or many (`memberIds[]`) members | `{conversationId, memberId \| memberIds[], role?, org?}` | `POST .../members` (single) / `POST .../members:batch-add` (many) |
+| ✅ | `comm.member_remove` | Remove a single member | `{conversationId, memberId, org?}` | `DELETE .../members/{member_id}` |
+| ✅ | `comm.member_remove_batch` | Remove several members (partial-success envelope) | `{conversationId, memberIds[], org?}` | `POST .../members:batch-remove` |
+| ✅ | `comm.leave` | Leave the group yourself (self-removal path) | `{conversationId, newOwnerId?, org?}` | `POST .../leave` |
+
+- `role` ∈ `MEMBER \| ADMIN \| OWNER \| PUBLISHER \| SUBSCRIBER` (defaults to `MEMBER` server-side).
+- **Owner can't just leave / remove self.** Removing yourself via `member_remove` / `member_remove_batch` is rejected (**400**) — use `comm.leave`. If the leaver is the group **owner**, cws-core requires a human successor: pass `{newOwnerId}` (a human member), or omit it to let cws-core pick a remaining human — self-removal by the owner is otherwise rejected with **409** while other human members remain (ownership must be transferred first). Remaining *agent* members do not block it; with only agents/nobody left the group is deleted.
+- **Multi-org installs:** conversation-scoped commands resolve the org from the ambient (single-org) JWT by default; when more than one org is enabled, pass `{org}` (config key / org UUID / org_name) so the call routes through that org's token instead of yielding an identity-only-token **401**.
 
 ### Messages
 
