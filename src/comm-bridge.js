@@ -572,16 +572,13 @@ async function shouldHandleMessage(msg, conv, orgConfig) {
   // Mention detection has two paths: structured mentions[] from cws-comm, and
   // a text-based "@<selfName>" fallback for messages where the server returns
   // the raw text without a structured mentions array.
-  // Mention detection: structured mention IDs (member UUIDs) are authoritative;
-  // text matching is only a fallback for payloads that carry no structured
-  // mentions at all. See src/lib/self-mention.js — this is what stops
-  // "@luna.coco" from waking a bare "luna" (issue #85 / cws-comm #329).
-  // selfNames matches BOTH the authoritative cws-core display_name
-  // (self.display_name, auto-synced in syncOwnerFromCore) and any hand-configured
-  // self.name alias, so a mismatched/empty self.name can't silently drop a real @.
+  // Mention detection is by stable member ID only — the message's structured
+  // mentions[] (member UUIDs) is the authoritative and only mention source
+  // (cws-comm does not parse @names from text). See src/lib/self-mention.js.
+  // This is what stops "@luna.coco" from waking a bare "luna" (issue #85 /
+  // cws-comm #329); @all/@all_agents are handled for free via id expansion.
   const mentions = extractMentions(msg).map(String);
-  const selfNames = [orgConfig.self?.display_name, orgConfig.self?.name].filter(Boolean);
-  const mentioned = isSelfMentioned({ mentionIds: mentions, selfMemberId, selfNames, msg });
+  const mentioned = isSelfMentioned({ mentionIds: mentions, selfMemberId });
   const ownerMemberId = orgConfig.owner?.member_id;
   const senderIsOwner = !!ownerMemberId && String(senderId) === String(ownerMemberId);
 
