@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { get, post, del, getForOrg, apiPath } from '../lib/client.js';
+import { get, post, del, getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
 import { loadConfig, updateConfig, enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
 
@@ -61,6 +61,26 @@ function resolveOrgConfig(p) {
   if (enabled.length === 0) throw new Error('no enabled orgs in config.orgs');
   const names = enabled.map((o) => o.org_name || o.slug).join(', ');
   throw new Error(`multiple enabled orgs — pass {"org":"<name>"} (one of: ${names})`);
+}
+
+/**
+ * HTTP helpers for a conversation-scoped op. cws-core derives org + caller
+ * member from the JWT, so by default we use the ambient (single-org) token —
+ * exactly like comm.send / comm.get_messages. For multi-org installs pass
+ * `{org}` (config key / org UUID / org_name) and we route through that org's
+ * cached JWT via the *ForOrg helpers, avoiding the identity-only-token 401 that
+ * `resolveDefaultOrgId()` yields when more than one org is enabled.
+ */
+function convClient(p) {
+  if (p.org || p.orgSlug || p.orgId || p.org_id) {
+    const org = resolveOrgConfig(p);
+    return {
+      get:  (path, query) => getForOrg(org.org_id, path, query),
+      post: (path, body)  => postForOrg(org.org_id, path, body),
+      del:  (path)        => delForOrg(org.org_id, path),
+    };
+  }
+  return { get, post, del };
 }
 
 // Read this agent's own member record from cws-core for the given org; the
@@ -153,7 +173,71 @@ const COMMANDS = {
   }),
 
   // ✅ GET /api/v1/conversations/{id}
-  'comm.get_conversation': () => get(apiPath(`/conversations/${params.conversationId}`)),
+  'comm.get_conversation': () => convClient(params).get(apiPath(`/conversations/${params.conversationId}`)),
+
+  // ---- Conversation members ---------------------------------------------------
+  // Group membership after creation. cws-core derives the caller from the JWT
+  // and enforces permissions server-side (only conversation owner/admins may
+  // add/remove; non-self targets must be org members). Pass {org} for multi-org.
+
+  // ✅ GET /api/v1/conversations/{id}/members
+  //   cws-core's ListMembers takes only conversation_id and returns the full
+  //   member list — it is NOT paginated, so do not send cursor/limit (they'd be
+  //   silently ignored and mislead callers into fake pagination loops).
+  'comm.member_list': () => convClient(params).get(
+    apiPath(`/conversations/${params.conversationId}/members`),
+  ),
+
+  // ✅ POST /api/v1/conversations/{id}/members            body {member_id, role?}   (single)
+  // ✅ POST /api/v1/conversations/{id}/members:batch-add  body {member_ids, role?}  (many)
+  //   Pass {memberId} for one, or {memberIds:[...]} for a batch (partial-success
+  //   envelope). role ∈ MEMBER|ADMIN|OWNER|PUBLISHER|SUBSCRIBER (default MEMBER).
+  'comm.member_add': () => {
+    const cid = params.conversationId;
+    const c = convClient(params);
+    const many = params.memberIds != null;
+    const ids = many ? [].concat(params.memberIds) : [];
+    if (many) {
+      if (!ids.length) throw new Error('memberIds must be a non-empty array');
+      return c.post(apiPath(`/conversations/${cid}/members:batch-add`), {
+        member_ids: ids, ...(params.role ? { role: params.role } : {}),
+      });
+    }
+    if (!params.memberId) throw new Error('memberId (or memberIds) required');
+    return c.post(apiPath(`/conversations/${cid}/members`), {
+      member_id: params.memberId, ...(params.role ? { role: params.role } : {}),
+    });
+  },
+
+  // ✅ DELETE /api/v1/conversations/{id}/members/{member_id}
+  //   Removing yourself is rejected (400) — use comm.leave instead.
+  'comm.member_remove': async () => {
+    if (!params.memberId) throw new Error('memberId required');
+    const r = await convClient(params).del(
+      apiPath(`/conversations/${params.conversationId}/members/${params.memberId}`),
+    );
+    return r ?? { removed: params.memberId, conversationId: params.conversationId };
+  },
+
+  // ✅ POST /api/v1/conversations/{id}/members:batch-remove  body {member_ids}
+  //   Rejects self-removal (400) — use comm.leave. Returns a partial-success envelope.
+  'comm.member_remove_batch': () => {
+    const ids = params.memberIds != null ? [].concat(params.memberIds) : [];
+    if (!ids.length) throw new Error('memberIds must be a non-empty array');
+    return convClient(params).post(
+      apiPath(`/conversations/${params.conversationId}/members:batch-remove`),
+      { member_ids: ids },
+    );
+  },
+
+  // ✅ POST /api/v1/conversations/{id}/leave   body {new_owner_id?}
+  //   Self-removal path. If the leaver is the group owner, cws-core requires a
+  //   human successor: pass {newOwnerId}, or omit to let it pick a remaining
+  //   human (or delete the group when only agents/nobody remain).
+  'comm.leave': () => convClient(params).post(
+    apiPath(`/conversations/${params.conversationId}/leave`),
+    { ...(params.newOwnerId ? { new_owner_id: params.newOwnerId } : {}) },
+  ),
 
   // ---- Messages ---------------------------------------------------------------
   // ✅ GET /api/v1/conversations/{id}/messages?after_seq=&before_seq=&limit=
@@ -276,7 +360,14 @@ Conversations
   comm.list_conversations   {cursor?, limit?, includeArchived?}
   comm.create_dm            {peerMemberId}                           # POST /conversations/dm
   comm.create_group         {name, memberIds, description?}          # POST /conversations/groups
-  comm.get_conversation     {conversationId}
+  comm.get_conversation     {conversationId, org?}
+
+Conversation members (owner/admin only; pass {org} for multi-org installs)
+  comm.member_list          {conversationId, org?}                                  # GET  .../members (full list; not paginated)
+  comm.member_add           {conversationId, memberId | memberIds[], role?, org?}   # POST .../members (or :batch-add)
+  comm.member_remove        {conversationId, memberId, org?}                        # DELETE .../members/{id}
+  comm.member_remove_batch  {conversationId, memberIds[], org?}                     # POST .../members:batch-remove
+  comm.leave                {conversationId, newOwnerId?, org?}                     # POST .../leave
 
 Messages
   comm.send                 {conversationId, content, replyTo?, clientMsgId?}
