@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.1-beta.3] — 2026-07-27
+
+### Fixed
+
+- **comm-bridge no longer log-spams on `delivery_state_update` frames (`src/comm-bridge.js`, #78).** cws-comm pushes a delivery-watermark frame (`{conversation_id, ack_until_seq}`) per message; in busy conversations the dispatcher's `default` branch logged `unknown frame type: delivery_state_update` at warn on every one, drowning useful bridge logs (no functional impact). The frame is now recognized and ignored like the other non-surfaced state frames (`typing`/`presence`/`read_receipt`/`read_state_update`) — it stays discoverable via the periodic frame-type metric (`recordFrameType`), so no per-frame log is emitted. The `default` branch still `warn`s on a genuinely-unknown/new frame type. (closes #78)
+
 ## [2.12.1-beta.2] — 2026-07-27
 
 ### Added
