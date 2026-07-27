@@ -63,6 +63,23 @@ const COMMANDS = {
     });
   },
 
+  // Execute a registered named action through a connection (proxy mode:
+  // cws-connect resolves the action, injects the token server-side, and calls
+  // the provider — the agent needs neither the token nor the provider URL).
+  // action format: "toolkit-slug/action-name" (e.g. "github-repos/list").
+  'conn.execute': () => {
+    const connId = params.connectionId || params.connection_id;
+    if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
+    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId();
+    if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+    if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
+    return post(apiPath(`/connect/connections/${connId}/actions/execute`), {
+      agent_member_id: agentId,
+      action: params.action,
+      params: params.params || {},
+    });
+  },
+
   // Get connection details (status, owner, scopes, etc.).
   'conn.status': () => {
     const connId = params.connectionId || params.connection_id;
@@ -122,6 +139,8 @@ Connections
   conn.acquire        {connectionId, agentMemberId?}            # acquire credential (returns access_token or proxy_ref)
   conn.proxy          {connectionId, method, url,               # proxy a request through a connection
                        headers?, body?, agentMemberId?}
+  conn.execute        {connectionId, action, params?,           # run a named action (toolkit-slug/action-name)
+                       agentMemberId?}                          #   via cws-connect (server injects the token)
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)
 
 Local cache
