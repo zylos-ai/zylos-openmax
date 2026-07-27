@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.1-beta.2] — 2026-07-27
+
+### Added
+
+- **Conversation member-management commands in the `comm` CLI (`src/cli/comm.js`, `references/comm-operations.md`).** Adds the sanctioned CLI path for group-admin actions that previously had none (membership could only be set at group creation): `comm.member_list`, `comm.member_add` (single or `memberIds[]` batch), `comm.member_remove`, `comm.member_remove_batch`, and `comm.leave` — mapping onto endpoints cws-core already exposes. Conversation-scoped commands (incl. `get_conversation`) accept an optional `{org}` that routes through that org's JWT via the `*ForOrg` helpers, so multi-org installs avoid the identity-only-token 401 from `resolveDefaultOrgId()`; default single-org behavior is unchanged. `member_list` returns the full list (cws-core `ListMembers` is not paginated). Documented the owner-must-transfer 409, self-removal→`leave`, and batch partial-success semantics. Covered by contract tests in `src/cli/comm.test.js`. (#84 / #90)
+
 ## [2.12.1-beta.1] — 2026-07-27
 
 ### Fixed
