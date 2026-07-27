@@ -48,7 +48,7 @@ import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.j
 import TaskRegistry from './lib/task-registry.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
 import { AGENT_DIAGNOSTICS_EVENT, createDiagnosticsHandler } from './lib/diagnostics.js';
-import { isSelfNameMentionedInText } from './lib/self-mention.js';
+import { isSelfMentioned } from './lib/self-mention.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'openmax';
@@ -572,16 +572,16 @@ async function shouldHandleMessage(msg, conv, orgConfig) {
   // Mention detection has two paths: structured mentions[] from cws-comm, and
   // a text-based "@<selfName>" fallback for messages where the server returns
   // the raw text without a structured mentions array.
+  // Mention detection: structured mention IDs (member UUIDs) are authoritative;
+  // text matching is only a fallback for payloads that carry no structured
+  // mentions at all. See src/lib/self-mention.js — this is what stops
+  // "@luna.coco" from waking a bare "luna" (issue #85 / cws-comm #329).
+  // selfNames matches BOTH the authoritative cws-core display_name
+  // (self.display_name, auto-synced in syncOwnerFromCore) and any hand-configured
+  // self.name alias, so a mismatched/empty self.name can't silently drop a real @.
   const mentions = extractMentions(msg).map(String);
-  const mentionedById = !!selfMemberId && mentions.includes(String(selfMemberId));
-  // Match against BOTH the authoritative cws-core display_name (self.display_name,
-  // auto-synced in syncOwnerFromCore) and any hand-configured self.name (kept as
-  // an alias). This is the only viable path for cws-comm-native messages, whose
-  // @ is plain text with no structured mentions[] — so a mismatched/empty
-  // self.name must not be able to silently drop a real @.
   const selfNames = [orgConfig.self?.display_name, orgConfig.self?.name].filter(Boolean);
-  const mentionedByText = selfNames.some((n) => isSelfNameMentionedInText(msg, n));
-  const mentioned = mentionedById || mentionedByText;
+  const mentioned = isSelfMentioned({ mentionIds: mentions, selfMemberId, selfNames, msg });
   const ownerMemberId = orgConfig.owner?.member_id;
   const senderIsOwner = !!ownerMemberId && String(senderId) === String(ownerMemberId);
 

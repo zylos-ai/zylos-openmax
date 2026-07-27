@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { isSelfNameMentionedInText } from './self-mention.js';
+import { isSelfNameMentionedInText, isSelfMentioned } from './self-mention.js';
 
 const msg = (text) => ({ content: { body: { text } } });
 
@@ -56,4 +56,43 @@ test('alternate message shapes are supported', () => {
   assert.equal(isSelfNameMentionedInText({ message: { content: '@luna hi' } }, 'luna'), true);
   // dot-boundary fix applies across shapes too
   assert.equal(isSelfNameMentionedInText({ content: '@luna.coco hi' }, 'luna'), false);
+});
+
+// ── isSelfMentioned: structured mention IDs are authoritative ────────────────
+
+const SELF = '019fa13e-5542-73cd-abd0-0bd4a0f65a67';
+const OTHER = '019f8d18-e558-7ce4-84d0-b2ec4e776d27';
+
+test('structured mention matching our member_id → mentioned', () => {
+  assert.equal(isSelfMentioned({
+    mentionIds: [SELF], selfMemberId: SELF, selfNames: ['gavin222'], msg: msg('@luna.coco hi'),
+  }), true);
+});
+
+test('#85: structured mentions present but NOT us → NOT mentioned (no text fallback)', () => {
+  // The incident: "@luna.coco" carries luna.coco's member_id; a bare "luna"
+  // agent must not be woken, and the text "@luna.coco" must NOT rescue it.
+  assert.equal(isSelfMentioned({
+    mentionIds: [OTHER], selfMemberId: SELF, selfNames: ['luna'], msg: msg('@luna.coco 请把 felix 移出群聊'),
+  }), false);
+});
+
+test('no structured mentions at all → text fallback decides', () => {
+  // legacy/edge payload with no mentions[]: fall back to text (dot-safe).
+  assert.equal(isSelfMentioned({
+    mentionIds: [], selfMemberId: SELF, selfNames: ['luna'], msg: msg('@luna 你好'),
+  }), true);
+  assert.equal(isSelfMentioned({
+    mentionIds: [], selfMemberId: SELF, selfNames: ['luna'], msg: msg('@luna.coco 你好'),
+  }), false);
+});
+
+test('missing selfMemberId falls through to text when no structured mentions', () => {
+  assert.equal(isSelfMentioned({
+    mentionIds: [], selfMemberId: undefined, selfNames: ['luna'], msg: msg('@luna hi'),
+  }), true);
+  // but structured mentions present and no id to match → not mentioned
+  assert.equal(isSelfMentioned({
+    mentionIds: [OTHER], selfMemberId: undefined, selfNames: ['luna'], msg: msg('@luna hi'),
+  }), false);
 });
