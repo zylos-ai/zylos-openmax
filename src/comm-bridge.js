@@ -1696,9 +1696,16 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
       case 'presence':
       case 'read_receipt':
       case 'read_state_update':
+      // cws-comm pushes delivery/read-state frames on every message in busy
+      // conversations. We don't act on them (delivery state isn't surfaced),
+      // so recognize and ignore them rather than logging "unknown frame type"
+      // on each one — pure log noise otherwise (#78).
+      case 'delivery_state_update':
         break;
       default:
-        warn(`[${orgConfig.slug}] unknown frame type:`, type);
+        // Genuinely unrecognized frame — keep at debug so a new server frame
+        // type is discoverable without flooding the bridge log.
+        log(`[${orgConfig.slug}] ignoring unrecognized frame type:`, type);
     }
   };
 }
