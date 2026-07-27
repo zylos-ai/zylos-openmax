@@ -46,6 +46,28 @@ node src/cli/conn.js conn.proxy '{
 
 Returns `{ status_code, headers, body }`.
 
+### conn.actions
+Discover the named actions available for a connection's provider. Pair with `conn.execute` to invoke one by name. Scoped to the agent's authorization on the connection (same boundary as `conn.execute`/`conn.proxy`).
+
+```bash
+node src/cli/conn.js conn.actions '{"connectionId":"2b0e4f41-..."}'
+```
+
+Returns an array of `{ toolkit, action, method, description, params[] }`.
+
+### conn.execute
+Run a registered named action through a connection. cws-connect resolves the action, injects the token server-side, and calls the provider — the agent needs neither the token nor the provider URL. Action format: `toolkit-slug/action-name`.
+
+```bash
+node src/cli/conn.js conn.execute '{
+  "connectionId": "2b0e4f41-...",
+  "action": "github-repos/list",
+  "params": {"visibility": "public"}
+}'
+```
+
+Returns `{ status_code, body }`.
+
 ### conn.status
 Get connection details: status, owner, application, scopes, expiry.
 
@@ -99,4 +121,5 @@ Cache location: `components/openmax/runtime/credentials/`
 | POST | `/connect/connections/{id}/credential?agent_member_id=` | conn.acquire |
 | POST | `/connect/connections/{id}/proxy` | conn.proxy |
 | GET | `/connect/connections/{id}` | conn.status |
-| POST | `/connect/connections/{id}/actions/execute` | (not yet exposed) |
+| GET | `/connect/connections/{id}/actions?agent_member_id=` | conn.actions |
+| POST | `/connect/connections/{id}/actions/execute` | conn.execute |

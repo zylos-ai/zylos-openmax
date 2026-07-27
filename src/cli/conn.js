@@ -63,6 +63,19 @@ const COMMANDS = {
     });
   },
 
+  // Discover the named actions available for a connection (action discovery).
+  // Returns [{toolkit, action, method, description, params}]; pair with
+  // conn.execute to invoke one by "toolkit-slug/action-name". Carries the
+  // agent's member_id so cws-connect scopes discovery to the same
+  // connection-agent authorization boundary as conn.execute/conn.proxy.
+  'conn.actions': () => {
+    const connId = params.connectionId || params.connection_id;
+    if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
+    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId();
+    if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+    return get(apiPath(`/connect/connections/${connId}/actions?agent_member_id=${encodeURIComponent(agentId)}`));
+  },
+
   // Execute a registered named action through a connection (proxy mode:
   // cws-connect resolves the action, injects the token server-side, and calls
   // the provider — the agent needs neither the token nor the provider URL).
@@ -139,6 +152,7 @@ Connections
   conn.acquire        {connectionId, agentMemberId?}            # acquire credential (returns access_token or proxy_ref)
   conn.proxy          {connectionId, method, url,               # proxy a request through a connection
                        headers?, body?, agentMemberId?}
+  conn.actions        {connectionId, agentMemberId?}            # discover named actions for a connection
   conn.execute        {connectionId, action, params?,           # run a named action (toolkit-slug/action-name)
                        agentMemberId?}                          #   via cws-connect (server injects the token)
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)
