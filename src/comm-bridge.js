@@ -1696,17 +1696,14 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
       case 'presence':
       case 'read_receipt':
       case 'read_state_update':
+      // Delivery-watermark frame ({conversation_id, ack_until_seq}). cws-comm
+      // pushes one per message in busy conversations; we don't surface delivery
+      // state, so ignore it like the other non-surfaced state frames rather
+      // than logging per-frame (which would just trade the old "unknown frame
+      // type" warn-flood for a normal-log-flood). It stays discoverable via the
+      // periodic frame-type metric (recordFrameType, above). (#78)
+      case 'delivery_state_update':
         break;
-      // cws-comm pushes a delivery-watermark frame per message in busy
-      // conversations ({conversation_id, ack_until_seq}). We don't surface
-      // delivery state, but now that the frame is understood, recognize it and
-      // log it at normal level — not the alarming "unknown frame type" warn it
-      // used to hit on every occurrence (#78).
-      case 'delivery_state_update': {
-        const p = frame.payload || {};
-        log(`[${orgConfig.slug}] delivery_state_update conv=${p.conversation_id} ack_until_seq=${p.ack_until_seq}`);
-        break;
-      }
       default:
         warn(`[${orgConfig.slug}] unknown frame type:`, type);
     }
