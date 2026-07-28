@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`conn.app_actions {applicationId}` — app-keyed action catalog (`src/cli/conn.js`, `references/conn-operations.md`).** New CLI verb hitting `GET /api/v1/connect/applications/{id}/actions` to list every action an application exposes, each with its `input_schema`, **without needing an existing connection**. Complements `conn.actions` (connection-scoped, agent-authorization-gated): this is capability metadata readable by any org member, useful for seeing what an app can do before connecting and for building a per-application capability cache. Resolved strictly by `applicationId` (no slug override, so URL identity always matches the result). Consumes the cws-connect `ListApplicationActions` RPC added in cws-connect-sdk-go v0.1.0-alpha.17; `conn.actions`/`conn.list` also now surface the new `input_schema` and `application_slug`/`application_name` fields automatically (pure passthrough, no code change needed).
+
 ## [2.12.1-beta.5] — 2026-07-28
 
 ### Changed

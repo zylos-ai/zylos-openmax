@@ -53,7 +53,7 @@ Discover the named actions available for a connection's provider. Pair with `con
 node src/cli/conn.js conn.actions '{"connectionId":"2b0e4f41-..."}'
 ```
 
-Returns an array of `{ toolkit, action, method, description, params[] }`.
+Returns an array of `{ toolkit, action, method, description, params[], input_schema }`. `input_schema` is a JSON Schema (draft-07 style) describing the raw provider request body forwarded for that action; an empty string means the schema is not published / unknown (do NOT assume an empty body), while an explicit empty-object schema (`{"type":"object","properties":{},"additionalProperties":false}`) means the action takes no request body. `params[]` still lists URL path/query placeholders separately.
 
 ### conn.execute
 Run a registered named action through a connection. cws-connect resolves the action, injects the token server-side, and calls the provider — the agent needs neither the token nor the provider URL. Action format: `toolkit-slug/action-name`.
@@ -74,6 +74,15 @@ Get connection details: status, owner, application, scopes, expiry.
 ```bash
 node src/cli/conn.js conn.status '{"connectionId":"2b0e4f41-..."}'
 ```
+
+### conn.app_actions
+Discover the **app-keyed action catalog** for an application — every action the app exposes (each with its `input_schema`), **without needing an existing connection**. Unlike `conn.actions` (connection-scoped and gated on the connection-agent authorization boundary), this is capability metadata readable by any org member: use it to see what an app can do before a connection exists, or to build a per-application capability cache shared across that app's connections.
+
+```bash
+node src/cli/conn.js conn.app_actions '{"applicationId":"cb4e4f15-..."}'
+```
+
+Returns an array of `{ toolkit, action, method, description, params[], input_schema }` (same shape as `conn.actions`). Resolved strictly by `applicationId` — the BFF route keys on the path id and does not accept a slug override, so the requested resource identity always matches the returned catalog.
 
 ### conn.cached
 List locally cached credentials (from WS event auto-acquire).
@@ -123,3 +132,4 @@ Cache location: `components/openmax/runtime/credentials/`
 | GET | `/connect/connections/{id}` | conn.status |
 | GET | `/connect/connections/{id}/actions?agent_member_id=` | conn.actions |
 | POST | `/connect/connections/{id}/actions/execute` | conn.execute |
+| GET | `/connect/applications/{id}/actions` | conn.app_actions |
