@@ -9,16 +9,12 @@
  *   node src/cli/conn.js conn.acquire  '{"connectionId":"..."}'
  */
 
-import fs from 'fs';
-import path from 'path';
 import { get, post, del, patch, apiPath } from '../lib/client.js';
 import { loadConfig, enabledOrgs, resolveDefaultOrgId } from '../lib/config.js';
-import { RUNTIME_DIR } from '../lib/session.js';
+import { listCachedCredentials, clearCachedCredentials } from '../lib/credential-cache.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
-
-const CREDENTIALS_DIR = path.join(RUNTIME_DIR, 'credentials');
 
 function resolveSelfMemberId() {
   const cfg = loadConfig();
@@ -100,45 +96,16 @@ const COMMANDS = {
     return get(apiPath(`/connect/connections/${connId}`));
   },
 
-  // List locally cached credentials.
+  // List locally cached credentials (metadata only; shared cache module).
   'conn.cached': () => {
-    try {
-      const files = fs.readdirSync(CREDENTIALS_DIR).filter(f => f.endsWith('.json'));
-      const entries = files.map(f => {
-        const connId = f.replace('.json', '');
-        try {
-          const data = JSON.parse(fs.readFileSync(path.join(CREDENTIALS_DIR, f), 'utf8'));
-          return {
-            connection_id: connId,
-            credential_mode: data.credential_mode || '?',
-            has_access_token: !!data.access_token,
-            has_proxy_ref: !!data.proxy_ref,
-          };
-        } catch {
-          return { connection_id: connId, error: 'parse_failed' };
-        }
-      });
-      return { count: entries.length, credentials: entries };
-    } catch {
-      return { count: 0, credentials: [] };
-    }
+    const entries = listCachedCredentials();
+    return { count: entries.length, credentials: entries };
   },
 
   // Clear cached credentials (all or specific connection).
   'conn.clear_cache': () => {
     const connId = params.connectionId || params.connection_id;
-    if (connId) {
-      const fp = path.join(CREDENTIALS_DIR, `${connId}.json`);
-      try { fs.unlinkSync(fp); } catch {}
-      return { cleared: [connId] };
-    }
-    try {
-      const files = fs.readdirSync(CREDENTIALS_DIR).filter(f => f.endsWith('.json'));
-      for (const f of files) fs.unlinkSync(path.join(CREDENTIALS_DIR, f));
-      return { cleared: files.map(f => f.replace('.json', '')) };
-    } catch {
-      return { cleared: [] };
-    }
+    return { cleared: clearCachedCredentials(connId) };
   },
 };
 

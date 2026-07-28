@@ -39,6 +39,7 @@ import { createOnlineReporter } from './lib/online-report.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
+import { saveCredentialCache, deleteCredentialCache } from './lib/credential-cache.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
@@ -1541,25 +1542,6 @@ async function handleSystemEvent(orgConfig, frame) {
 // Connection events — cws-connect credential lifecycle
 // =============================================================================
 
-const CREDENTIALS_DIR = path.join(RUNTIME_DIR, 'credentials');
-
-function ensureCredentialsDir() {
-  fs.mkdirSync(CREDENTIALS_DIR, { recursive: true });
-}
-
-function credentialPath(connectionId) {
-  return path.join(CREDENTIALS_DIR, `${connectionId}.json`);
-}
-
-function saveCredentialCache(connectionId, data) {
-  ensureCredentialsDir();
-  fs.writeFileSync(credentialPath(connectionId), JSON.stringify(data, null, 2));
-}
-
-function deleteCredentialCache(connectionId) {
-  try { fs.unlinkSync(credentialPath(connectionId)); } catch {}
-}
-
 async function acquireCredential(orgId, connectionId, agentMemberId) {
   return postForOrg(
     orgId,
@@ -1598,8 +1580,8 @@ async function handleConnectionEvent(orgConfig, frame) {
       log(`[${slug}] connection.authorized conn=${connectionId} mode=${data.credential_mode || '?'}`);
       try {
         const cred = await acquireCredential(orgId, connectionId, selfId);
-        saveCredentialCache(connectionId, cred);
-        log(`[${slug}] credential acquired + cached conn=${connectionId} mode=${cred.credential_mode}`);
+        saveCredentialCache(connectionId, cred, data.provider);
+        log(`[${slug}] credential acquired + cached conn=${connectionId} provider=${data.provider || '?'} mode=${cred.credential_mode}`);
       } catch (e) {
         warn(`[${slug}] credential acquire failed conn=${connectionId}: ${e.message}`);
       }
@@ -1618,8 +1600,8 @@ async function handleConnectionEvent(orgConfig, frame) {
       log(`[${slug}] credential_updated conn=${connectionId}`);
       try {
         const cred = await acquireCredential(orgId, connectionId, selfId);
-        saveCredentialCache(connectionId, cred);
-        log(`[${slug}] credential re-acquired conn=${connectionId} mode=${cred.credential_mode}`);
+        saveCredentialCache(connectionId, cred, data.provider);
+        log(`[${slug}] credential re-acquired conn=${connectionId} provider=${data.provider || '?'} mode=${cred.credential_mode}`);
       } catch (e) {
         warn(`[${slug}] credential re-acquire failed conn=${connectionId}: ${e.message}`);
       }
