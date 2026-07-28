@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.1-beta.5] — 2026-07-28
+
+### Changed
+
+- **Hardened the local connector credential cache (`src/lib/credential-cache.js`, `src/comm-bridge.js`, `src/cli/conn.js`).** Cached credentials are now written with restrictive permissions — files `0600`, the cache directory `0700` — so acquired access tokens / proxy refs are not world-/group-readable on the host. Each cached record is enriched with its `provider` (application slug) — the acquire response carries no provider id and the file is keyed only by the connection UUID — and the read/write/clear paths are consolidated into a single `credential-cache` module reused by the comm-bridge auto-acquire flow and the `conn.cached`/`conn.clear_cache` CLI verbs. Covered by `src/lib/credential-cache.test.js`.
+
 ## [2.12.1-beta.4] — 2026-07-28
 
 ### Added
