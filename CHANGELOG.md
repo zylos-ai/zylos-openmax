@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.1-beta.4] — 2026-07-28
+
+### Added
+
+- **Connector action discovery + execution in the `conn` CLI (`src/cli/conn.js`, `references/conn-operations.md`).** Completes the agent-facing connector-action path end-to-end (cws-connect `ListActions`/`ExecuteAction` → cws-core BFF → agent):
+  - `conn.actions {connectionId, agentMemberId?}` → `GET /connect/connections/{id}/actions?agent_member_id=` — discovers the connection provider's invokable actions (`[{toolkit, action, method, description, params}]`).
+  - `conn.execute {connectionId, action, params?, agentMemberId?}` → `POST /connect/connections/{id}/actions/execute` — invokes a named action (`toolkit-slug/action-name`); cws-connect resolves the action and injects the token server-side, so the agent needs neither the token nor the provider URL.
+  - Both carry `agent_member_id` (defaulting to the agent's own resolved member_id) so cws-connect enforces the same connection-agent authorization boundary as `conn.proxy`. Reference doc backfilled for both verbs (incl. `conn.execute`, previously undocumented) and the BFF endpoint table. (depends on cws-connect MR!40 + SDK alpha.16 + cws-core MR!401)
+
 ## [2.12.1-beta.3] — 2026-07-27
 
 ### Fixed
