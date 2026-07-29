@@ -40,7 +40,7 @@ import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './li
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 import { saveCredentialCache, deleteCredentialCache, hasCredentialCache } from './lib/credential-cache.js';
-import { upsertConnection, removeConnection, indexPathForOrg } from './lib/connect-store.js';
+import { upsertConnection, removeConnection, indexPathForOrg, readIndex, replaceIndexFromList, writeCatalog } from './lib/connect-store.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
@@ -1608,6 +1608,27 @@ async function handleConnectionEvent(orgConfig, frame) {
         }
       } else {
         log(`[${slug}] proxy connection indexed (no local credential) conn=${connectionId} provider=${data.provider || '?'}`);
+      }
+      // The connection.authorized event carries only connection_id + provider
+      // (slug) — not the application_id or display name — so the thin upsert
+      // above leaves application_id/name null in the index (a nameless card in
+      // the UI until the next conn.list). Resolve the full identity from the
+      // authoritative agent-connections list now, and warm the app's
+      // action-catalog cache so the app is invokable immediately after authorize
+      // instead of paying a lazy fetch on first use. Best-effort: any failure
+      // here never breaks the credential/index path above.
+      try {
+        const list = await getForOrg(orgId, apiPath(`/connect/agents/${selfId}/connections`));
+        replaceIndexFromList(Array.isArray(list) ? list : (list?.connections || []), idxPath);
+        const applicationId = readIndex(idxPath)?.connections?.[connectionId]?.applicationId;
+        if (applicationId) {
+          const res = await getForOrg(orgId, apiPath(`/connect/applications/${applicationId}/actions`));
+          const actions = Array.isArray(res) ? res : (res?.actions || []);
+          writeCatalog(applicationId, actions);
+          log(`[${slug}] identity resolved + action-catalog warmed conn=${connectionId} app=${applicationId} actions=${actions.length}`);
+        }
+      } catch (e) {
+        warn(`[${slug}] identity/catalog warm failed conn=${connectionId}: ${e.message}`);
       }
       break;
     }
