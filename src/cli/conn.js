@@ -60,9 +60,9 @@ const COMMANDS = {
   },
 
   // Discover the named actions available for a connection (action discovery).
-  // Returns [{toolkit, action, method, description, params}]; pair with
-  // conn.execute to invoke one by "toolkit-slug/action-name". Carries the
-  // agent's member_id so cws-connect scopes discovery to the same
+  // Returns [{toolkit, action, method, description, params, input_schema}];
+  // pair with conn.execute to invoke one by "toolkit-slug/action-name". Carries
+  // the agent's member_id so cws-connect scopes discovery to the same
   // connection-agent authorization boundary as conn.execute/conn.proxy.
   'conn.actions': () => {
     const connId = params.connectionId || params.connection_id;
@@ -96,6 +96,21 @@ const COMMANDS = {
     return get(apiPath(`/connect/connections/${connId}`));
   },
 
+  // Discover the app-keyed action catalog for an application — the full set of
+  // actions the app exposes, each with its input_schema, WITHOUT needing an
+  // existing connection. Returns [{toolkit, action, method, description,
+  // params, input_schema}]. Unlike conn.actions (connection-scoped and gated
+  // on the connection-agent authorization boundary), this is capability
+  // metadata readable by any org member — use it to see what an app can do
+  // before a connection exists, or to build a per-application capability cache.
+  // Resolved strictly by applicationId (the BFF route keys on the path id; it
+  // does not accept a slug override, so URL identity always matches the result).
+  'conn.app_actions': () => {
+    const appId = params.applicationId || params.application_id;
+    if (!appId) throw Object.assign(new Error('applicationId is required'), { status: 400 });
+    return get(apiPath(`/connect/applications/${appId}/actions`));
+  },
+
   // List locally cached credentials (metadata only; shared cache module).
   'conn.cached': () => {
     const entries = listCachedCredentials();
@@ -123,6 +138,9 @@ Connections
   conn.execute        {connectionId, action, params?,           # run a named action (toolkit-slug/action-name)
                        agentMemberId?}                          #   via cws-connect (server injects the token)
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)
+
+Applications
+  conn.app_actions    {applicationId}                           # app-keyed action catalog (incl. input_schema; no connection needed)
 
 Local cache
   conn.cached         {}                                        # list locally cached credentials
