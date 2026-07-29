@@ -84,6 +84,16 @@ export function deleteCredentialCache(connectionId, dir = CREDENTIALS_DIR) {
   try { fs.unlinkSync(credentialPath(connectionId, dir)); } catch {}
 }
 
+/**
+ * Whether a local credential file exists for a connection. Only direct/token-mode
+ * connections have one, so this doubles as "is this a direct connection we track?"
+ * — used by the `credential_updated` handler, whose upstream event does not carry
+ * credential_mode.
+ */
+export function hasCredentialCache(connectionId, dir = CREDENTIALS_DIR) {
+  return fs.existsSync(credentialPath(connectionId, dir));
+}
+
 /** List locally cached credentials (metadata only; never returns the token). */
 export function listCachedCredentials(dir = CREDENTIALS_DIR) {
   migrateLegacyCredentials(dir);

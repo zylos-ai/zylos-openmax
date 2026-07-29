@@ -29,6 +29,18 @@ export const CONNECT_DIR = path.join(RUNTIME_DIR, 'connect');
 export const INDEX_PATH = path.join(CONNECT_DIR, 'connections-index.json');
 export const CATALOG_DIR = path.join(CONNECT_DIR, 'action-catalog');
 
+/**
+ * Per-org connections index path. The comm-bridge runs a WS per enabled org and
+ * connections belong to a specific org, so the index MUST be org-scoped —
+ * otherwise a multi-org agent connected to the same app (e.g. notion) in two orgs
+ * could resolve the wrong org's connection. The action catalog stays global
+ * (keyed by applicationId) because an application's capabilities are the same
+ * across orgs.
+ */
+export function indexPathForOrg(orgId, dir = CONNECT_DIR) {
+  return path.join(dir, `connections-index.${orgId}.json`);
+}
+
 /** Default catalog freshness window: 24h. */
 export const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 

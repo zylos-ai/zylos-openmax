@@ -115,10 +115,18 @@ All connect-side local state lives under one subtree, split by its natural key �
 
 ```
 runtime/connect/
-├── connections-index.json          # connection → application  (BOTH modes)
+├── connections-index.<orgId>.json   # connection → application, per org (BOTH modes)
 ├── action-catalog/<applicationId>.json   # application → capability  (BOTH modes)
 └── credentials/<connectionId>.json  # real access_token — DIRECT mode only
 ```
+
+The connections index is **per-org** (`connections-index.<orgId>.json`): the
+comm-bridge runs a WS per enabled org and a connection belongs to one org, so a
+multi-org agent connected to the same app in two orgs must not resolve the wrong
+org's connection. The `conn.*` capability verbs take an optional `{org}` (default:
+the single/default enabled org) and run the lookup **and** the execute call
+against that org's index, JWT, and member. The action catalog stays global
+(keyed by applicationId) since an app's capabilities are the same across orgs.
 
 - **connections-index** and **action-catalog** are the mode-agnostic *discovery*
   layer, used by proxy and direct alike. The index resolves an application →
@@ -165,7 +173,7 @@ The comm-bridge automatically maintains the index and (direct-mode) credentials:
 | `connection.authorized` | Upsert into `connections-index.json`; **direct only** → acquire credential → cache to `runtime/connect/credentials/{id}.json`. Proxy → indexed only, no credential stored. |
 | `connection.revoked` | Remove from index + delete cached credential |
 | `connection.disconnected` | Remove from index + delete cached credential |
-| `connection.credential_updated` | Upsert index; **direct only** → re-acquire + update credential |
+| `connection.credential_updated` | Upsert index; re-acquire + refresh the credential **iff a local credential file already exists** (the direct-mode marker — this event carries no `credential_mode`). Drops the file if the connection is no longer direct. Proxy connections (no file) are skipped. |
 | `connection.reauth_needed` | Log warning (owner must re-authorize) |
 
 Cache location: `components/openmax/runtime/connect/`

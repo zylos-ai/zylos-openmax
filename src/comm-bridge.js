@@ -39,8 +39,8 @@ import { createOnlineReporter } from './lib/online-report.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
-import { saveCredentialCache, deleteCredentialCache } from './lib/credential-cache.js';
-import { upsertConnection, removeConnection } from './lib/connect-store.js';
+import { saveCredentialCache, deleteCredentialCache, hasCredentialCache } from './lib/credential-cache.js';
+import { upsertConnection, removeConnection, indexPathForOrg } from './lib/connect-store.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
@@ -1576,9 +1576,12 @@ async function handleConnectionEvent(orgConfig, frame) {
 
   const orgId = orgConfig.org_id;
 
-  // Record the connection in the local index (connection → application) for both
-  // modes. `data.provider` is the application slug; application_id may be absent
-  // on the event and gets filled by a later conn.list refresh.
+  // Record the connection in this org's local index (connection → application)
+  // for both modes. The index is org-scoped — the comm-bridge runs a WS per org,
+  // and a multi-org agent must not resolve one org's connection under another.
+  // `data.provider` is the application slug; application_id may be absent on the
+  // event and gets filled by a later conn.list refresh.
+  const idxPath = indexPathForOrg(orgId);
   const indexConn = {
     connection_id: connectionId,
     application_id: data.application_id,
@@ -1590,7 +1593,7 @@ async function handleConnectionEvent(orgConfig, frame) {
     case 'connection.authorized': {
       const mode = data.credential_mode || '?';
       log(`[${slug}] connection.authorized conn=${connectionId} mode=${mode}`);
-      upsertConnection(indexConn);
+      upsertConnection(indexConn, idxPath);
       // Only direct/token-mode connections cache a real access_token locally.
       // Proxy-mode connections need no local credential (token is injected
       // server-side by cws-connect at call time), so we skip the acquire+store
@@ -1612,7 +1615,7 @@ async function handleConnectionEvent(orgConfig, frame) {
     case 'connection.revoked':
     case 'connection.disconnected': {
       log(`[${slug}] ${event} conn=${connectionId}`);
-      removeConnection(connectionId);
+      removeConnection(connectionId, idxPath);
       deleteCredentialCache(connectionId);
       log(`[${slug}] connection unindexed + credential cache cleared conn=${connectionId}`);
       break;
@@ -1620,14 +1623,23 @@ async function handleConnectionEvent(orgConfig, frame) {
 
     case 'connection.credential_updated': {
       log(`[${slug}] credential_updated conn=${connectionId}`);
-      upsertConnection(indexConn);
-      // Only direct-mode connections hold a local token to refresh; proxy-mode
-      // has nothing cached to update.
-      if (data.credential_mode === 'direct') {
+      upsertConnection(indexConn, idxPath);
+      // The upstream credential_updated event does NOT carry credential_mode, so
+      // we cannot gate on it. Only direct/token-mode connections keep a local
+      // credential file, so "a cache file exists" is our direct-detector: refresh
+      // it. Proxy-mode connections have no file and are correctly skipped (no
+      // wasted acquire). If the connection has flipped to proxy, drop the now-stale
+      // file rather than leave an old token behind.
+      if (hasCredentialCache(connectionId)) {
         try {
           const cred = await acquireCredential(orgId, connectionId, selfId);
-          saveCredentialCache(connectionId, cred, data.provider);
-          log(`[${slug}] direct credential re-acquired conn=${connectionId} provider=${data.provider || '?'}`);
+          if (cred?.credential_mode === 'direct') {
+            saveCredentialCache(connectionId, cred, data.provider);
+            log(`[${slug}] direct credential re-acquired conn=${connectionId} provider=${data.provider || '?'}`);
+          } else {
+            deleteCredentialCache(connectionId);
+            log(`[${slug}] connection no longer direct; dropped stale credential conn=${connectionId}`);
+          }
         } catch (e) {
           warn(`[${slug}] credential re-acquire failed conn=${connectionId}: ${e.message}`);
         }

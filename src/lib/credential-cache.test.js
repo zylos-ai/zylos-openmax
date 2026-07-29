@@ -10,6 +10,7 @@ import {
   listCachedCredentials,
   clearCachedCredentials,
   credentialPath,
+  hasCredentialCache,
 } from './credential-cache.js';
 
 function tmpDir() {
@@ -72,4 +73,13 @@ test('对不存在的目录 list/clear 优雅降级为空', () => {
   const dir = path.join(os.tmpdir(), 'cred-cache-does-not-exist-xyz');
   assert.deepEqual(listCachedCredentials(dir), []);
   assert.deepEqual(clearCachedCredentials(undefined, dir), []);
+});
+
+test('hasCredentialCache 反映凭证文件是否存在（credential_updated 的 direct 探测器）', () => {
+  const dir = tmpDir();
+  assert.equal(hasCredentialCache('conn-8', dir), false);
+  saveCredentialCache('conn-8', { credential_mode: 'direct', access_token: 't' }, 'notion', dir);
+  assert.equal(hasCredentialCache('conn-8', dir), true);
+  deleteCredentialCache('conn-8', dir);
+  assert.equal(hasCredentialCache('conn-8', dir), false);
 });

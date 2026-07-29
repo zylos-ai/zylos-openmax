@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import {
   readIndex, upsertConnection, removeConnection, replaceIndexFromList, findConnectionByApp,
-  readCatalog, writeCatalog, invalidateCatalog, catalogPath,
+  readCatalog, writeCatalog, invalidateCatalog, catalogPath, indexPathForOrg,
 } from './connect-store.js';
 
 function tmpIndex() {
@@ -73,6 +73,19 @@ test('replaceIndexFromList 整体重建（conn.list 权威刷新）', () => {
   assert.equal(Object.keys(index.connections).length, 2);
   assert.equal(findConnectionByApp('gone', idx), null); // 旧的被清掉
   assert.equal(findConnectionByApp('notion', idx)?.id, 'c1');
+});
+
+test('index 按 org 隔离：不同 org 的同 slug 连接互不串（多 org 防串关键）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'connect-org-'));
+  const orgA = indexPathForOrg('org-a', dir);
+  const orgB = indexPathForOrg('org-b', dir);
+  upsertConnection({ connection_id: 'cA', application_slug: 'notion', status: 'active' }, orgA);
+  upsertConnection({ connection_id: 'cB', application_slug: 'notion', status: 'active' }, orgB);
+  // 各自查各自的文件，拿到本 org 的连接，不会串到另一个 org
+  assert.equal(findConnectionByApp('notion', orgA)?.id, 'cA');
+  assert.equal(findConnectionByApp('notion', orgB)?.id, 'cB');
+  // 两个不同的物理文件
+  assert.notEqual(orgA, orgB);
 });
 
 // --- action catalog ---------------------------------------------------------
