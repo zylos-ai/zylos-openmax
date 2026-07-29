@@ -178,6 +178,28 @@ The comm-bridge automatically maintains the index and (direct-mode) credentials:
 
 Cache location: `components/openmax/runtime/connect/`
 
+### Per-mode agent behavior (direct vs proxy)
+
+What the agent actually does and stores locally, split by credential mode. The
+authorization/token boundary is enforced server-side by cws-connect either way;
+this table is only the **agent-side** effect.
+
+| Trigger (endpoint) → event | proxy mode — agent does / stores | direct mode — agent does / stores |
+|---|---|---|
+| **Authorize to agent** → `connection.authorized` | Upsert the org index (`connections-index.<orgId>.json`): `connection → {applicationId, slug, name, status:active}`. **No `acquire`, no credential stored** — the token is injected server-side at call time. | Upsert the org index (same), **and** `acquire` the credential and write the real `access_token` to `connect/credentials/<connectionId>.json` (file `0600`, dir `0700`). |
+| **Revoke this agent** (`DELETE /connections/{id}/agents/{memberId}`) → `connection.revoked` | Remove the connection from the org index. No credential file exists, so nothing to delete. | Remove from the org index **and** delete `connect/credentials/<connectionId>.json` (the cached token). |
+| **Disconnect the connection** (`POST /connections/{id}/disconnect`) → `connection.disconnected` | Same as revoke: remove from the org index; no credential file. | Same as revoke: remove from the org index **and** delete the cached token file. |
+| Token refreshed → `connection.credential_updated` | Nothing (no local file to refresh). | Re-`acquire` and rewrite the cached token **iff** a local credential file already exists; if the connection is no longer direct, drop the stale file. |
+
+Notes:
+- **revoke vs disconnect** differ in *meaning* — revoke removes only *this agent's*
+  authorization (`connection_agents` binding) while the connection lives on for
+  others; disconnect tears down the whole connection for everyone — but the
+  agent's **local cleanup is identical** (unindex + delete any cached credential).
+- Proxy mode never persists a credential locally, so revoke/disconnect only touch
+  the index for it. Direct mode is the only case where a real token file is
+  written and later deleted.
+
 ## BFF Endpoints (via cws-core)
 
 | Method | Path | CLI |
