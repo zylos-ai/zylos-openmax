@@ -166,11 +166,11 @@ change-detected refresh yet.
 
 ## WS Event Flow
 
-The comm-bridge automatically maintains the index and (direct-mode) credentials:
+The comm-bridge automatically maintains the index, the action-catalog cache, and (direct-mode) credentials:
 
 | Event | Action |
 |-------|--------|
-| `connection.authorized` | Upsert into `connections-index.json`; **direct only** → acquire credential → cache to `runtime/connect/credentials/{id}.json`. Proxy → indexed only, no credential stored. |
+| `connection.authorized` | Upsert into `connections-index.<orgId>.json`, then **refresh that org's index from the authoritative agent-connections list** so `applicationId`/`slug`/`name` are correct immediately — the event payload carries only `connection_id` + `provider` (slug), so a bare upsert alone would leave `applicationId`/`name` null until the next `conn.list`. Also **warm the action-catalog cache** (`action-catalog/{applicationId}.json`, from `/connect/applications/{id}/actions`) for **both proxy and direct** so the app is invokable right after authorize. **direct only** additionally → acquire credential → cache to `runtime/connect/credentials/{id}.json`. Proxy → indexed + catalog warmed, no credential stored. The identity refresh + catalog warm are **best-effort** (a failure never blocks the credential/index path). |
 | `connection.revoked` | Remove from index + delete cached credential |
 | `connection.disconnected` | Remove from index + delete cached credential |
 | `connection.credential_updated` | Upsert index; re-acquire + refresh the credential **iff a local credential file already exists** (the direct-mode marker — this event carries no `credential_mode`). Drops the file if the connection is no longer direct. Proxy connections (no file) are skipped. |
@@ -186,7 +186,7 @@ this table is only the **agent-side** effect.
 
 | Trigger (endpoint) → event | proxy mode — agent does / stores | direct mode — agent does / stores |
 |---|---|---|
-| **Authorize to agent** → `connection.authorized` | Upsert the org index (`connections-index.<orgId>.json`): `connection → {applicationId, slug, name, status:active}`. **No `acquire`, no credential stored** — the token is injected server-side at call time. | Upsert the org index (same), **and** `acquire` the credential and write the real `access_token` to `connect/credentials/<connectionId>.json` (file `0600`, dir `0700`). |
+| **Authorize to agent** → `connection.authorized` | Upsert the org index (`connections-index.<orgId>.json`), then **refresh it from the agent-connections list** so `{applicationId, slug, name, status:active}` is correct despite the sparse event payload, and **warm the action-catalog cache** (`action-catalog/<applicationId>.json`). **No `acquire`, no credential stored** — the token is injected server-side at call time. | Upsert + refresh the org index and **warm the action-catalog cache** (same as proxy), **and** `acquire` the credential and write the real `access_token` to `connect/credentials/<connectionId>.json` (file `0600`, dir `0700`). |
 | **Revoke this agent** (`DELETE /connections/{id}/agents/{memberId}`) → `connection.revoked` | Remove the connection from the org index. No credential file exists, so nothing to delete. | Remove from the org index **and** delete `connect/credentials/<connectionId>.json` (the cached token). |
 | **Disconnect the connection** (`POST /connections/{id}/disconnect`) → `connection.disconnected` | Same as revoke: remove from the org index; no credential file. | Same as revoke: remove from the org index **and** delete the cached token file. |
 | Token refreshed → `connection.credential_updated` | Nothing (no local file to refresh). | Re-`acquire` and rewrite the cached token **iff** a local credential file already exists; if the connection is no longer direct, drop the stale file. |
