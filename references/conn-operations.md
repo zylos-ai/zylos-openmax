@@ -108,28 +108,85 @@ node src/cli/conn.js conn.clear_cache '{}'
 | **direct** | Real access_token | Agent calls external API directly with token |
 | **proxy** | proxy_ref token | Agent calls cws-connect proxy; real credentials never leave server |
 
+## Capability Cache & Call Chain (runtime/connect/)
+
+All connect-side local state lives under one subtree, split by its natural key —
+**not** by credential mode:
+
+```
+runtime/connect/
+├── connections-index.json          # connection → application  (BOTH modes)
+├── action-catalog/<applicationId>.json   # application → capability  (BOTH modes)
+└── credentials/<connectionId>.json  # real access_token — DIRECT mode only
+```
+
+- **connections-index** and **action-catalog** are the mode-agnostic *discovery*
+  layer, used by proxy and direct alike. The index resolves an application →
+  its `connectionId` + `status` (the agent's entry point is an app, not a
+  connection); the catalog caches the per-application action metadata
+  (`input_schema` etc.).
+- **credentials/** only exists for **direct/token-mode** connections (they cache
+  a real `access_token`, so files are `0600`). **Proxy-mode connections store
+  nothing** — the token is injected server-side by cws-connect at call time, so
+  the old per-connection credential blob is not written.
+
+### Recommended agent flow (identify → call)
+
+Any bot with this skill gets the flow for free by calling the cache-aware verbs —
+it does not need to "know" the sequence:
+
+1. **`conn.invoke {app, action, params}`** — resolves the connection for `app`
+   from `connections-index.json` (refreshing from `conn.list` on a miss), then
+   runs the action via the execute endpoint. Authorization + token injection stay
+   fully server-side (`connection_agents` is re-checked every call). On an
+   action/schema-shaped error it invalidates the cached catalog once so the next
+   `conn.catalog` refetches.
+2. **`conn.catalog {app|applicationId}`** — returns the cached action catalog for
+   discovery, filling from `conn.app_actions` on a miss / TTL-expiry (24h) /
+   `{refresh:true}`. Read this to pick an `action` + build `params` from its
+   `input_schema` before calling `conn.invoke`.
+3. **`conn.index {refresh?}`** — inspect the local index (observability).
+
+Invalidation is **TTL + error-triggered** — the app-actions response carries no
+version/etag today (see "cws-connect follow-up" below), so there is no
+change-detected refresh yet.
+
+> **direct mode caveat:** the catalog is *sufficient* for proxy/execute (server
+> resolves the action → provider URL and injects the token). For direct mode the
+> catalog is *reference only* — neither it nor the direct acquire response carries
+> the provider base URL, so a direct call also needs provider-endpoint knowledge.
+
 ## WS Event Flow
 
-The comm-bridge automatically handles connection lifecycle events:
+The comm-bridge automatically maintains the index and (direct-mode) credentials:
 
 | Event | Action |
 |-------|--------|
-| `connection.authorized` | Acquire credential → cache to `runtime/credentials/{id}.json` |
-| `connection.revoked` | Delete cached credential |
-| `connection.disconnected` | Delete cached credential |
-| `connection.credential_updated` | Re-acquire credential → update cache |
+| `connection.authorized` | Upsert into `connections-index.json`; **direct only** → acquire credential → cache to `runtime/connect/credentials/{id}.json`. Proxy → indexed only, no credential stored. |
+| `connection.revoked` | Remove from index + delete cached credential |
+| `connection.disconnected` | Remove from index + delete cached credential |
+| `connection.credential_updated` | Upsert index; **direct only** → re-acquire + update credential |
 | `connection.reauth_needed` | Log warning (owner must re-authorize) |
 
-Cache location: `components/openmax/runtime/credentials/`
+Cache location: `components/openmax/runtime/connect/`
 
 ## BFF Endpoints (via cws-core)
 
 | Method | Path | CLI |
 |--------|------|-----|
-| GET | `/connect/agents/{id}/connections` | conn.list |
+| GET | `/connect/agents/{id}/connections` | conn.list / conn.index --refresh |
 | POST | `/connect/connections/{id}/credential?agent_member_id=` | conn.acquire |
 | POST | `/connect/connections/{id}/proxy` | conn.proxy |
 | GET | `/connect/connections/{id}` | conn.status |
 | GET | `/connect/connections/{id}/actions?agent_member_id=` | conn.actions |
-| POST | `/connect/connections/{id}/actions/execute` | conn.execute |
-| GET | `/connect/applications/{id}/actions` | conn.app_actions |
+| POST | `/connect/connections/{id}/actions/execute` | conn.execute / conn.invoke |
+| GET | `/connect/applications/{id}/actions` | conn.app_actions / conn.catalog |
+
+## cws-connect follow-up (optional, non-blocking)
+
+`ListApplicationActionsResponse` returns only `ActionInfo` (`toolkit, action,
+method, description, params, input_schema`) — **no version/etag**. `Toolkit.version`
+exists in the model but is not surfaced on this endpoint. To enable *precise*
+catalog invalidation (refresh only when the catalog actually changed), add a
+catalog-level version/etag (and ideally `If-None-Match → 304`). Until then the
+agent-side cache relies on TTL + error-triggered refresh.

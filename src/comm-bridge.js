@@ -40,6 +40,7 @@ import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './li
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 import { saveCredentialCache, deleteCredentialCache } from './lib/credential-cache.js';
+import { upsertConnection, removeConnection } from './lib/connect-store.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
@@ -1575,15 +1576,35 @@ async function handleConnectionEvent(orgConfig, frame) {
 
   const orgId = orgConfig.org_id;
 
+  // Record the connection in the local index (connection → application) for both
+  // modes. `data.provider` is the application slug; application_id may be absent
+  // on the event and gets filled by a later conn.list refresh.
+  const indexConn = {
+    connection_id: connectionId,
+    application_id: data.application_id,
+    application_slug: data.provider,
+    status: 'active',
+  };
+
   switch (event) {
     case 'connection.authorized': {
-      log(`[${slug}] connection.authorized conn=${connectionId} mode=${data.credential_mode || '?'}`);
-      try {
-        const cred = await acquireCredential(orgId, connectionId, selfId);
-        saveCredentialCache(connectionId, cred, data.provider);
-        log(`[${slug}] credential acquired + cached conn=${connectionId} provider=${data.provider || '?'} mode=${cred.credential_mode}`);
-      } catch (e) {
-        warn(`[${slug}] credential acquire failed conn=${connectionId}: ${e.message}`);
+      const mode = data.credential_mode || '?';
+      log(`[${slug}] connection.authorized conn=${connectionId} mode=${mode}`);
+      upsertConnection(indexConn);
+      // Only direct/token-mode connections cache a real access_token locally.
+      // Proxy-mode connections need no local credential (token is injected
+      // server-side by cws-connect at call time), so we skip the acquire+store
+      // entirely and just record the connection in the index.
+      if (data.credential_mode === 'direct') {
+        try {
+          const cred = await acquireCredential(orgId, connectionId, selfId);
+          saveCredentialCache(connectionId, cred, data.provider);
+          log(`[${slug}] direct credential acquired + cached conn=${connectionId} provider=${data.provider || '?'}`);
+        } catch (e) {
+          warn(`[${slug}] credential acquire failed conn=${connectionId}: ${e.message}`);
+        }
+      } else {
+        log(`[${slug}] proxy connection indexed (no local credential) conn=${connectionId} provider=${data.provider || '?'}`);
       }
       break;
     }
@@ -1591,19 +1612,25 @@ async function handleConnectionEvent(orgConfig, frame) {
     case 'connection.revoked':
     case 'connection.disconnected': {
       log(`[${slug}] ${event} conn=${connectionId}`);
+      removeConnection(connectionId);
       deleteCredentialCache(connectionId);
-      log(`[${slug}] credential cache cleared conn=${connectionId}`);
+      log(`[${slug}] connection unindexed + credential cache cleared conn=${connectionId}`);
       break;
     }
 
     case 'connection.credential_updated': {
       log(`[${slug}] credential_updated conn=${connectionId}`);
-      try {
-        const cred = await acquireCredential(orgId, connectionId, selfId);
-        saveCredentialCache(connectionId, cred, data.provider);
-        log(`[${slug}] credential re-acquired conn=${connectionId} provider=${data.provider || '?'} mode=${cred.credential_mode}`);
-      } catch (e) {
-        warn(`[${slug}] credential re-acquire failed conn=${connectionId}: ${e.message}`);
+      upsertConnection(indexConn);
+      // Only direct-mode connections hold a local token to refresh; proxy-mode
+      // has nothing cached to update.
+      if (data.credential_mode === 'direct') {
+        try {
+          const cred = await acquireCredential(orgId, connectionId, selfId);
+          saveCredentialCache(connectionId, cred, data.provider);
+          log(`[${slug}] direct credential re-acquired conn=${connectionId} provider=${data.provider || '?'}`);
+        } catch (e) {
+          warn(`[${slug}] credential re-acquire failed conn=${connectionId}: ${e.message}`);
+        }
       }
       break;
     }

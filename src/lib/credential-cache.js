@@ -15,10 +15,46 @@ import fs from 'fs';
 import path from 'path';
 import { RUNTIME_DIR } from './session.js';
 
-export const CREDENTIALS_DIR = path.join(RUNTIME_DIR, 'credentials');
+// Lives under the consolidated runtime/connect/ subtree alongside the index and
+// action-catalog caches (see connect-store.js). Only direct/token-mode
+// connections cache a real access_token here; proxy-mode connections store
+// nothing (the token is injected server-side and never leaves cws-connect).
+export const CREDENTIALS_DIR = path.join(RUNTIME_DIR, 'connect', 'credentials');
+
+// Pre-consolidation location — credentials used to live directly under runtime/.
+// Files are migrated into CREDENTIALS_DIR once, best-effort, on first ensure.
+const LEGACY_CREDENTIALS_DIR = path.join(RUNTIME_DIR, 'credentials');
 
 export function credentialPath(connectionId, dir = CREDENTIALS_DIR) {
   return path.join(dir, `${connectionId}.json`);
+}
+
+/**
+ * One-time move of any pre-consolidation credential files from runtime/credentials
+ * into the new runtime/connect/credentials. Idempotent and best-effort: only runs
+ * for the default dir, never overwrites a newer file, and removes the empty legacy
+ * dir when done. Silent on any error (a failed migration must not break acquire).
+ */
+export function migrateLegacyCredentials(dir = CREDENTIALS_DIR) {
+  if (dir !== CREDENTIALS_DIR || LEGACY_CREDENTIALS_DIR === CREDENTIALS_DIR) return;
+  let legacyFiles;
+  try {
+    legacyFiles = fs.readdirSync(LEGACY_CREDENTIALS_DIR).filter((f) => f.endsWith('.json'));
+  } catch {
+    return; // legacy dir absent — nothing to migrate
+  }
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    for (const f of legacyFiles) {
+      const src = path.join(LEGACY_CREDENTIALS_DIR, f);
+      const dst = path.join(dir, f);
+      try {
+        if (fs.existsSync(dst)) fs.unlinkSync(src); // new location wins
+        else fs.renameSync(src, dst);
+      } catch {}
+    }
+    try { fs.rmdirSync(LEGACY_CREDENTIALS_DIR); } catch {} // only succeeds when empty
+  } catch {}
 }
 
 export function ensureCredentialsDir(dir = CREDENTIALS_DIR) {
@@ -26,6 +62,7 @@ export function ensureCredentialsDir(dir = CREDENTIALS_DIR) {
   // pre-existing looser-perm dir gets tightened (best-effort).
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   try { fs.chmodSync(dir, 0o700); } catch {}
+  migrateLegacyCredentials(dir);
 }
 
 /**
@@ -49,6 +86,7 @@ export function deleteCredentialCache(connectionId, dir = CREDENTIALS_DIR) {
 
 /** List locally cached credentials (metadata only; never returns the token). */
 export function listCachedCredentials(dir = CREDENTIALS_DIR) {
+  migrateLegacyCredentials(dir);
   let files;
   try {
     files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
