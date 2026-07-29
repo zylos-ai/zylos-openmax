@@ -290,3 +290,31 @@ if (legacyKeysSeen.length > 0) {
 } else {
   console.log('[post-upgrade] config.json already on multi-org schema — nothing to migrate.');
 }
+
+// ── security remediation: lock down sensitive files on every upgrade ───────
+// Runs unconditionally (not just when the schema migration above rewrites
+// config.json) so already-deployed bots get fixed permissions the moment
+// they upgrade, without waiting on a config edit or a token refresh cycle.
+// config.json (agent.api_key), runtime/tokens/*.json (access/refresh_token),
+// and runtime/group-logs/*.log were all found world-readable (0644) at
+// default umask — see 2026-07-30 token-log-leak finding.
+{
+  const RUNTIME_DIR = path.join(HOME, 'zylos/components/openmax/runtime');
+  const TOKEN_DIR = path.join(RUNTIME_DIR, 'tokens');
+  const GROUP_LOGS_DIR = path.join(RUNTIME_DIR, 'group-logs');
+
+  function hardenFile(p) {
+    try { fs.chmodSync(p, 0o600); } catch {}
+  }
+  function hardenDir(dir) {
+    try {
+      fs.chmodSync(dir, 0o700);
+      for (const name of fs.readdirSync(dir)) hardenFile(path.join(dir, name));
+    } catch { /* dir may not exist yet — nothing to harden */ }
+  }
+
+  hardenFile(CONFIG_PATH);
+  hardenDir(TOKEN_DIR);
+  hardenDir(GROUP_LOGS_DIR);
+  console.log('[post-upgrade] permissions hardened: config.json (0600), runtime/tokens/ + runtime/group-logs/ (0700 dir / 0600 files).');
+}

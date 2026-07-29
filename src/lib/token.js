@@ -40,6 +40,7 @@ import fs from 'fs';
 import path from 'path';
 import { loadConfig, resolveDefaultOrgId, updateConfig } from './config.js';
 import { cfAccessHeaders } from './cf-access.js';
+import { redactSecrets } from './redact.js';
 
 const HOME = process.env.HOME || '/tmp';
 const TOKEN_DIR = path.join(HOME, 'zylos/components/openmax/runtime/tokens');
@@ -88,7 +89,9 @@ function tokenFile(orgIdOrEmpty) {
 // ── raw HTTP helper (no auth dependency) ─────────────────────────────────────
 // RPC logging mirrors client.js: stdout controlled by COCO_RPC_LOG (default ON,
 // '0' = off), file sink controlled by COCO_RPC_LOG_FILE (independent of
-// stdout).
+// stdout). Logged bodies are passed through redactSecrets() first — these are
+// the token-exchange endpoints, so the body itself IS the access/refresh
+// token; logging the raw body defeats the point of a log toggle.
 
 function rpcLogStdoutEnabled() {
   return process.env.COCO_RPC_LOG !== '0';
@@ -121,7 +124,7 @@ async function corePost(endpoint, body, bearerToken) {
   if (bearerToken) headers.Authorization = `Bearer ${bearerToken}`;
 
   {
-    const line = `[rpc] → POST ${url} req: ${JSON.stringify(body)}`;
+    const line = `[rpc] → POST ${url} req: ${JSON.stringify(redactSecrets(body))}`;
     if (rpcLogStdoutEnabled()) console.log(line);
     appendRpcLine(line);
   }
@@ -136,7 +139,8 @@ async function corePost(endpoint, body, bearerToken) {
   try { data = JSON.parse(text); } catch { data = text; }
 
   {
-    const bodyStr = typeof data === 'string' ? data : JSON.stringify(data);
+    const redacted = typeof data === 'string' ? data : redactSecrets(data);
+    const bodyStr = typeof redacted === 'string' ? redacted : JSON.stringify(redacted);
     const line = `[rpc] ← POST ${url} resp ${res.status}: ${bodyStr}`;
     if (rpcLogStdoutEnabled()) {
       const level = res.status >= 400 ? 'warn' : 'log';
@@ -206,10 +210,16 @@ function readDisk(orgIdOrEmpty) {
 
 function writeDisk(orgIdOrEmpty, state) {
   try {
-    fs.mkdirSync(TOKEN_DIR, { recursive: true });
-    const tmp = `${tokenFile(orgIdOrEmpty)}.tmp.${process.pid}.${Date.now()}`;
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
-    fs.renameSync(tmp, tokenFile(orgIdOrEmpty));
+    // mkdir/writeFileSync mode only applies on creation; chmod an
+    // already-existing dir/file too so perms get fixed even if the file
+    // predates this hardening (e.g. an existing 0644 file from before).
+    fs.mkdirSync(TOKEN_DIR, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(TOKEN_DIR, 0o700); } catch {}
+    const file = tokenFile(orgIdOrEmpty);
+    const tmp = `${file}.tmp.${process.pid}.${Date.now()}`;
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+    try { fs.chmodSync(file, 0o600); } catch {}
   } catch (e) {
     console.warn(`${LOG} writeDisk(${orgIdOrEmpty || '_identity'}) failed:`, e.message);
   }

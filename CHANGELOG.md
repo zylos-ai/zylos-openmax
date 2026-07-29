@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0-security.1] — 2026-07-30
+
+### Security
+
+- **Token/secret values no longer appear in plaintext in RPC logs; sensitive files hardened to 0600/0700.** Branched directly off `v2.12.0` (not the in-flight 2.12.1-beta line) so this can ship independently and fast.
+  - **`src/lib/token.js`, `src/lib/client.js`:** the RPC-logging path (`COCO_RPC_LOG`, default ON) logged full request/response bodies verbatim — on the `/auth/agent/token`, `/auth/refresh`, `/auth/ws-ticket` endpoints this meant `access_token`/`refresh_token` values were written straight to the PM2 log file. Both files now run logged bodies through a new `src/lib/redact.js` (`redactSecrets()`) that replaces known-sensitive fields (`access_token`, `refresh_token`, `id_token`, `api_key`, `client_secret`, `password`, `secret`, `ticket`) with `[REDACTED]` before serializing — log *structure* (method/URL/status/non-sensitive fields, incl. `*_expires_at` timestamps) is preserved for debugging; the logging toggle itself is unchanged. New `src/lib/redact.test.js` (7 cases, incl. false-positive checks for fields that merely contain "token"/"secret" as a substring).
+  - **`src/lib/token.js` `writeDisk()`:** the per-org JWT cache (`runtime/tokens/<org_id>.json`, holds a live current access_token+refresh_token) was written with default umask (0644 file / dir), world-readable. Now 0600 file / 0700 dir, with a defensive `chmodSync` on every write so a pre-existing 0644 file from before this fix also gets corrected.
+  - **`src/lib/config.js` `updateConfig()`, `hooks/post-install.js`:** `config.json` (holds `agent.api_key`, the long-lived credential that mints all JWTs) was written at default umask (0644), also world-readable. Now 0600 with defensive `chmodSync`.
+  - **`src/lib/group-history.js`:** full plaintext group-chat transcripts (`runtime/group-logs/*.log`) were world-readable (0644 file / 0755 dir). Now 0600/0700.
+  - **`hooks/post-upgrade.js`:** added an unconditional permission-remediation step that runs on every upgrade regardless of whether the schema-migration branch fires — chmods `config.json`, `runtime/tokens/`, and `runtime/group-logs/` (dir + existing files) to 0600/0700. This is what makes the fix apply automatically to already-deployed bots on their next upgrade, not just to fresh installs or the next token/config write.
+  - Found via a live audit prompted by another team reporting the same `corePost()` logging pattern in their own fork; independently verified on this host (582 log lines with token strings, 11MB `out.log`, was 0644) before this fix, plus two additional not-yet-reported issues (the token-cache file and `config.json`'s `api_key`, both also 0644 and worse than the log leak since they're live/current rather than historical).
+
 ## [2.12.0] — 2026-07-26
 
 ### Added

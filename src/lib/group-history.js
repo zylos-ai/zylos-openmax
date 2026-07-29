@@ -16,7 +16,9 @@ import path from 'path';
 import { RUNTIME_DIR } from './session.js';
 
 const LOGS_DIR = path.join(RUNTIME_DIR, 'group-logs');
-fs.mkdirSync(LOGS_DIR, { recursive: true });
+// Full plaintext group chat transcripts live here — 0700, not the default umask.
+fs.mkdirSync(LOGS_DIR, { recursive: true, mode: 0o700 });
+try { fs.chmodSync(LOGS_DIR, 0o700); } catch {}
 
 const LOG_PREFIX = '[group-history]';
 
@@ -73,12 +75,21 @@ function recordHistoryEntry(conversationId, entry) {
  * Append a log entry to file AND record in memory.
  * Called for every group message regardless of policy outcome.
  */
+// Tracks which log files this process has already chmod'd, so a pre-existing
+// 0644 file (from before this hardening) gets fixed once without paying a
+// chmodSync syscall on every single message append.
+const _hardenedLogFiles = new Set();
+
 export function logAndRecord(conversationId, entry) {
   conversationId = String(conversationId);
 
   const logFile = path.join(LOGS_DIR, conversationId + '.log');
   try {
-    fs.appendFileSync(logFile, JSON.stringify(entry) + '\n');
+    fs.appendFileSync(logFile, JSON.stringify(entry) + '\n', { mode: 0o600 });
+    if (!_hardenedLogFiles.has(logFile)) {
+      _hardenedLogFiles.add(logFile);
+      try { fs.chmodSync(logFile, 0o600); } catch {}
+    }
   } catch (err) {
     console.error(LOG_PREFIX, `log write failed for ${conversationId}: ${err.message}`);
   }
