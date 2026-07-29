@@ -26,6 +26,16 @@ test('redacts api_key, client_secret, password, ticket variants', () => {
   assert.equal(out.ticket, '[REDACTED]');
 });
 
+test('redacts generic "token" plus business-CLI-specific token/secret fields (core.invitation_accept, as.js upload_token, WAB verify_token/app_secret)', () => {
+  const out = redactSecrets({
+    token: 'invite-secret', upload_token: 'u1', verify_token: 'v1', app_secret: 'a1',
+  });
+  assert.equal(out.token, '[REDACTED]');
+  assert.equal(out.upload_token, '[REDACTED]');
+  assert.equal(out.verify_token, '[REDACTED]');
+  assert.equal(out.app_secret, '[REDACTED]');
+});
+
 test('does not false-positive on field names that merely contain "secret" or "token" as a substring', () => {
   const out = redactSecrets({ not_a_secret: 'v1', token_type: 'Bearer', device_id: 'd1' });
   assert.equal(out.not_a_secret, 'v1');
