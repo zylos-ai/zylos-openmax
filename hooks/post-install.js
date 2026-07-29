@@ -439,8 +439,11 @@ if (config.agent?.api_key && config.server?.bff_url) {
   }
 }
 
-fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
-console.log('[install] config.json written');
+// config.json holds agent.api_key (long-lived root credential) — lock it
+// down from the first write, not just on later updateConfig() calls.
+fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+try { fs.chmodSync(CONFIG_PATH, 0o600); } catch {}
+console.log('[install] config.json written (0600)');
 
 console.log('[install] complete');
 if (isInteractive) {

@@ -34,6 +34,7 @@
 import { loadConfig, resolveDefaultOrgId } from './config.js';
 import { getAccessToken, invalidate as invalidateToken } from './token.js';
 import { cfAccessHeaders } from './cf-access.js';
+import { redactSecrets } from './redact.js';
 
 // 401 → refresh-and-retry throttle. Keyed by effective orgId (default-org
 // resolved when orgId is omitted). Records the timestamp of the last
@@ -180,7 +181,7 @@ function appendRpcLine(line) {
 
 function logRpcRequest(method, url, body, orgId) {
   const tag = orgId ? `org=${orgId}` : '';
-  const bodyStr = body === undefined ? '(no body)' : JSON.stringify(body);
+  const bodyStr = body === undefined ? '(no body)' : JSON.stringify(redactSecrets(body));
   const line = `[rpc] → ${method} ${url} ${tag} req: ${bodyStr}`;
   if (rpcLogStdoutEnabled()) console.log(line);
   appendRpcLine(line);
@@ -188,7 +189,7 @@ function logRpcRequest(method, url, body, orgId) {
 
 function logRpcResponse(method, url, status, data) {
   let bodyStr;
-  try { bodyStr = typeof data === 'string' ? data : JSON.stringify(data); }
+  try { bodyStr = typeof data === 'string' ? data : JSON.stringify(redactSecrets(data)); }
   catch { bodyStr = String(data); }
   const line = `[rpc] ← ${method} ${url} resp ${status}: ${bodyStr}`;
   if (rpcLogStdoutEnabled()) {
