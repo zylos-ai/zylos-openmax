@@ -9,21 +9,93 @@
  *   node src/cli/conn.js conn.acquire  '{"connectionId":"..."}'
  */
 
-import { get, post, del, patch, apiPath } from '../lib/client.js';
+import { get, post, del, patch, apiPath, getForOrg, postForOrg } from '../lib/client.js';
 import { loadConfig, enabledOrgs, resolveDefaultOrgId } from '../lib/config.js';
 import { listCachedCredentials, clearCachedCredentials } from '../lib/credential-cache.js';
+import {
+  readIndex, replaceIndexFromList, findConnectionByApp, indexPathForOrg,
+  readCatalog, writeCatalog, invalidateCatalog, CATALOG_TTL_MS,
+} from '../lib/connect-store.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
-function resolveSelfMemberId() {
+// Operating org for the capability-cache verbs: explicit {org} wins, else the
+// default/single enabled org. The index is org-scoped, so every lookup + the
+// execute call must run against the same org's file, token, and member.
+function resolveOrgId() {
+  return params.org || params.orgId || params.org_id || resolveDefaultOrgId();
+}
+
+function resolveSelfMemberId(orgId = resolveDefaultOrgId()) {
   const cfg = loadConfig();
-  const orgId = resolveDefaultOrgId();
   for (const [, org] of Object.entries(cfg.orgs || {})) {
     if (org.org_id === orgId && org.self?.member_id) return org.self.member_id;
   }
   const first = Object.values(cfg.orgs || {})[0];
   return first?.self?.member_id || '';
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(s) { return typeof s === 'string' && UUID_RE.test(s); }
+
+// The app_actions / actions endpoints return the catalog either as a bare array
+// or wrapped as { actions: [...] } depending on the BFF envelope — normalize.
+function actionsOf(result) {
+  if (Array.isArray(result)) return result;
+  if (result && Array.isArray(result.actions)) return result.actions;
+  return [];
+}
+
+// Fetch this agent's connections for an org from cws-core and rewrite that org's
+// index file (org-scoped: uses the org's JWT and its own index path).
+async function refreshIndex(orgId, agentId) {
+  const idxPath = indexPathForOrg(orgId);
+  const list = await getForOrg(orgId, apiPath(`/connect/agents/${agentId}/connections`));
+  replaceIndexFromList(Array.isArray(list) ? list : (list?.connections || []), idxPath);
+  return readIndex(idxPath);
+}
+
+// Resolve an application (slug or applicationId) → its connection entry within an
+// org, reading that org's index first. Refreshes from conn.list once when the
+// app is missing OR the cached entry lacks an applicationId — the latter happens
+// in the window after a connection.authorized event (which may carry only a slug)
+// before any conn.list has filled the applicationId. Without that refresh,
+// conn.catalog {app} would 400 on a slug-only entry.
+async function resolveConnectionForApp(app, orgId, agentId) {
+  const idxPath = indexPathForOrg(orgId);
+  let entry = findConnectionByApp(app, idxPath);
+  if (!entry || !entry.applicationId) {
+    await refreshIndex(orgId, agentId);
+    entry = findConnectionByApp(app, idxPath);
+  }
+  return entry;
+}
+
+// Return an application's action catalog, reading the cache first and filling it
+// via conn.app_actions (org-scoped token) on a miss / TTL-expiry / explicit
+// refresh. The catalog file is global (keyed by applicationId) since an app's
+// capabilities are the same across orgs.
+async function getCatalog(orgId, applicationId, { refresh = false, ttlMs = CATALOG_TTL_MS } = {}) {
+  if (!refresh) {
+    const cached = readCatalog(applicationId, { ttlMs });
+    if (cached) return { ...cached, source: 'cache' };
+  }
+  const actions = actionsOf(await getForOrg(orgId, apiPath(`/connect/applications/${applicationId}/actions`)));
+  const rec = writeCatalog(applicationId, actions);
+  return { ...rec, source: 'fetch' };
+}
+
+// Heuristic: does an execute error look like a stale/unknown-action or
+// input-schema mismatch (vs. an auth/network failure)? Used to decide whether a
+// one-shot catalog refresh could help.
+function looksLikeActionOrSchemaError(err) {
+  if (!err) return false;
+  if (err.status === 404) return true;
+  if (err.status === 400) {
+    return /action|schema|param|unknown|not found|invalid|required/i.test(err.message || '');
+  }
+  return false;
 }
 
 const COMMANDS = {
@@ -111,6 +183,72 @@ const COMMANDS = {
     return get(apiPath(`/connect/applications/${appId}/actions`));
   },
 
+  // Cache-aware, app-keyed action catalog. Reads runtime/connect/action-catalog/
+  // first and fills it from conn.app_actions on a miss / TTL-expiry / {refresh}.
+  // Accepts either {applicationId} directly, or {app} (slug or id) resolved via
+  // the local connections index. Returns { applicationId, actions, fetchedAt,
+  // source }.
+  'conn.catalog': async () => {
+    const orgId = resolveOrgId();
+    let appId = params.applicationId || params.application_id;
+    if (!appId && params.app) {
+      const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId(orgId);
+      const entry = await resolveConnectionForApp(params.app, orgId, agentId);
+      appId = entry?.applicationId || (isUuid(params.app) ? params.app : null);
+    }
+    if (!appId) throw Object.assign(new Error('applicationId (or a resolvable app) is required'), { status: 400 });
+    return getCatalog(orgId, appId, { refresh: !!params.refresh });
+  },
+
+  // One-call app-keyed execute: resolve the connection for an application from
+  // the local index (refreshing from conn.list on a miss), then run the named
+  // action via conn.execute. This is the cache-aware entry meant for agents —
+  // it removes the per-call discovery round-trip while keeping authorization +
+  // token injection fully server-side (conn.execute re-checks connection_agents).
+  // On an action/schema-shaped failure it invalidates the cached catalog once so
+  // the next conn.catalog is fresh, then resurfaces the error.
+  'conn.invoke': async () => {
+    const app = params.app || params.applicationId || params.application_id || params.slug;
+    if (!app) throw Object.assign(new Error('app (slug or applicationId) is required'), { status: 400 });
+    if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
+    const orgId = resolveOrgId();
+    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId(orgId);
+    if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+
+    const entry = await resolveConnectionForApp(app, orgId, agentId);
+    if (!entry) throw Object.assign(new Error(`no connection found for app "${app}" (org ${orgId}, agent ${agentId})`), { status: 404 });
+
+    try {
+      // Execute against the resolved connection using the SAME org's JWT — a
+      // multi-org agent must not run one org's connection with another's token.
+      return await postForOrg(orgId, apiPath(`/connect/connections/${entry.id}/actions/execute`), {
+        agent_member_id: agentId,
+        action: params.action,
+        params: params.params || {},
+      });
+    } catch (err) {
+      // Stale catalog is a plausible cause of an unknown-action/schema error —
+      // drop it so the agent's next conn.catalog refetches. Does not auto-retry
+      // (a wrong action name won't fix itself); the error is re-thrown as-is.
+      if (looksLikeActionOrSchemaError(err) && entry.applicationId) invalidateCatalog(entry.applicationId);
+      throw err;
+    }
+  },
+
+  // Show the local connections index for an org (observability). {refresh}
+  // rebuilds it from conn.list first; {org} selects the org (default otherwise).
+  'conn.index': async () => {
+    const orgId = resolveOrgId();
+    if (params.refresh) {
+      const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId(orgId);
+      if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+      await refreshIndex(orgId, agentId);
+    }
+    const index = readIndex(indexPathForOrg(orgId));
+    const connections = Object.values(index.connections);
+    return { org_id: orgId, count: connections.length, connections };
+  },
+
   // List locally cached credentials (metadata only; shared cache module).
   'conn.cached': () => {
     const entries = listCachedCredentials();
@@ -142,8 +280,13 @@ Connections
 Applications
   conn.app_actions    {applicationId}                           # app-keyed action catalog (incl. input_schema; no connection needed)
 
+Capability cache (runtime/connect/)
+  conn.invoke         {app, action, params?, agentMemberId?}    # app-keyed execute: resolve connection via local index → execute
+  conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
+  conn.index          {refresh?}                                # show the local connections index (connection → application)
+
 Local cache
-  conn.cached         {}                                        # list locally cached credentials
+  conn.cached         {}                                        # list locally cached credentials (direct-mode tokens)
   conn.clear_cache    {connectionId?}                           # clear cached credentials (all if no connectionId)
 
 Environment:

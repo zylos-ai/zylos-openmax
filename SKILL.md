@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.12.1-beta.6
+version: 2.12.1-beta.7
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -542,5 +542,6 @@ You can generate it in one step with the CLI: `node src/cli/core.js core.fronten
 | **AS** | File upload (IM/KB dual mode) + download URL resolution + local download | send conversation attachments, archive files to KB, download remote artifacts for vision/analysis | `references/as-operations.md` |
 | **Comm** | IM that the Agent **proactively initiates**: conversation/message/unread/WS sync/KB page search | proactively DM a colleague, create a group, search a page in a targeted way, WS reconnect to fill gaps | `references/comm-operations.md` |
 | **Core** | Identity + member/project/role/invitation directory queries + org switching + platform agent lifecycle | `core.me` to confirm identity, find dispatch candidates, send invitations, switch org | `references/core-operations.md` |
+| **Connect** | Third-party app connections (OAuth/API): list/status, action discovery + execute, and the app-keyed capability cache under `runtime/connect/` | call a connected app (Notion/X/…): prefer `conn.invoke {app, action, params}` (resolves the connection from the local index → executes; auth stays server-side) after picking an action via `conn.catalog {app}` | `references/conn-operations.md` |
 
 The top of each Layer 3 doc has its own four-part summary of `Purpose` / `When to load this document` / `Out of scope for this document` / `Prerequisites`; after loading it into memory, first scan this section to confirm it is the one you want, then read on to the command list.
