@@ -250,10 +250,13 @@ export function resolveDefaultOrgId() {
 export function updateConfig(mutate) {
   const next = JSON.parse(JSON.stringify(loadConfig()));
   mutate(next);
+  // config.json holds agent.api_key (long-lived root credential) — 0600,
+  // with a defensive chmod so an existing 0644 file gets fixed too.
   const tmp = `${CONFIG_PATH}.tmp.${process.pid}.${Date.now()}`;
   fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, CONFIG_PATH);
+  try { fs.chmodSync(CONFIG_PATH, 0o600); } catch {}
   currentConfig = next;
   return next;
 }
