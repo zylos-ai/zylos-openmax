@@ -90,3 +90,69 @@ test('recordParticipants ignores blank/empty names and is a no-op without a conv
   // no throw, and previously-recorded participants are unaffected
   assert.deepEqual(buildMentions('@luna.coco', CONV), [{ type: 'member', member_id: LUNA_ID }]);
 });
+
+// Regression: a shorter registered name must not fire on a longer name that
+// merely starts with it — otherwise "@luna.coco" would wake a bare "luna".
+test('a bare registered "luna" does NOT fire on "@luna.coco" text (prefix collision)', () => {
+  const conv = 'conv-prefix-1';
+  recordParticipants(conv, { name: 'luna', memberId: LUNA_ID });
+  // "luna.coco" itself isn't registered here, so nothing should mention at all —
+  // in particular NOT luna's member_id via a partial "@luna" prefix match.
+  assert.equal(buildMentions('@luna.coco please check', conv), undefined);
+  assert.equal(resolveMentions('@luna.coco please check', conv), '@luna.coco please check');
+});
+
+test('when BOTH "luna" and "luna.coco" are registered to different members, "@luna.coco" mentions only luna.coco', () => {
+  const conv = 'conv-prefix-2';
+  const LUNA_BARE_ID = '019f0000-0000-0000-0000-000000000001';
+  recordParticipants(conv, [
+    { name: 'luna', memberId: LUNA_BARE_ID },
+    { name: 'luna.coco', memberId: LUNA_ID },
+  ]);
+  assert.deepEqual(buildMentions('@luna.coco please check', conv), [
+    { type: 'member', member_id: LUNA_ID },
+  ]);
+  assert.equal(resolveMentions('@luna.coco please check', conv), '@luna.coco please check');
+});
+
+test('when BOTH "luna" and "luna.coco" are registered, a properly bounded "@luna " mentions only bare luna', () => {
+  const conv = 'conv-prefix-3';
+  const LUNA_BARE_ID = '019f0000-0000-0000-0000-000000000001';
+  recordParticipants(conv, [
+    { name: 'luna', memberId: LUNA_BARE_ID },
+    { name: 'luna.coco', memberId: LUNA_ID },
+  ]);
+  assert.deepEqual(buildMentions('@luna please check', conv), [
+    { type: 'member', member_id: LUNA_BARE_ID },
+  ]);
+});
+
+test('a name match at the very end of the string (no trailing character at all) still counts as bounded', () => {
+  recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
+  assert.deepEqual(buildMentions('ping @luna.coco', CONV), [{ type: 'member', member_id: LUNA_ID }]);
+});
+
+test('buildMentions recognizes the @所有人/@Everyone broadcast sentinel (type: all)', () => {
+  assert.deepEqual(buildMentions('@所有人 请查收', CONV), [{ type: 'all' }]);
+  assert.deepEqual(buildMentions('@Everyone please check', CONV), [{ type: 'all' }]);
+});
+
+test('buildMentions recognizes the @所有Agent/@All agents broadcast sentinel (type: all_agents)', () => {
+  assert.deepEqual(buildMentions('@所有agent 请查收', CONV), [{ type: 'all_agents' }]);
+  assert.deepEqual(buildMentions('@所有Agent 请查收', CONV), [{ type: 'all_agents' }]);
+  assert.deepEqual(buildMentions('@All agents please check', CONV), [{ type: 'all_agents' }]);
+});
+
+test('both broadcast sentinels can coexist on one message, and combine with a real member mention', () => {
+  recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
+  const result = buildMentions('@所有人 @所有agent also @luna.coco', CONV);
+  assert.deepEqual(result, [
+    { type: 'all' },
+    { type: 'all_agents' },
+    { type: 'member', member_id: LUNA_ID },
+  ]);
+});
+
+test('ordinary text containing the plain English word "all" does not spuriously trigger a broadcast', () => {
+  assert.equal(buildMentions('thanks all, that covers all the cases', CONV), undefined);
+});

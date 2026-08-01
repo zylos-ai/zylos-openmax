@@ -99,6 +99,20 @@ export function recordParticipants(conversationId, participants) {
   save(reg);
 }
 
+// A name match only counts as a real mention token if it isn't itself a
+// prefix of a longer identifier — otherwise a registry containing only
+// "luna" would spuriously fire on "@luna.coco please check" (the ".coco"
+// continuation makes it a different, longer name, not "luna" plus trailing
+// punctuation). Require whatever follows the match to NOT be a
+// letter/digit/./_/- (i.e. not something that could still be part of the
+// same identifier); anything else (whitespace, most punctuation, end of
+// string) is a valid boundary. \p{L}/\p{N} (Unicode letter/number, `u`
+// flag) so this holds for CJK display names too, not just ASCII ones.
+function nameMatches(name, text) {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp('@' + esc + '(?![\\p{L}\\p{N}._-])', 'iu').test(text);
+}
+
 // Shared "match known registered names, longest-first, against `@name`
 // tokens in text" walk — used by both resolveMentions (rewrite) and
 // buildMentions (structured extraction).
@@ -110,10 +124,7 @@ function matchedEntries(text, conversationId) {
     .map(entryOf)
     .filter((e) => e.name)
     .sort((a, b) => b.name.length - a.name.length)
-    .filter((e) => {
-      const esc = e.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      return new RegExp('@' + esc, 'i').test(text);
-    });
+    .filter((e) => nameMatches(e.name, text));
 }
 
 /**
@@ -131,15 +142,30 @@ export function resolveMentions(text, conversationId) {
   let out = String(text ?? '');
   for (const { name } of matches) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp('@' + esc, 'gi'), '@' + name);
+    // Same post-name boundary as nameMatches()/matchedEntries — without it a
+    // canonicalized "luna.coco" would also rewrite the "@luna.coco" prefix
+    // embedded inside an unrelated longer word (e.g. "@luna.cocoa").
+    out = out.replace(new RegExp('@' + esc + '(?![\\p{L}\\p{N}._-])', 'giu'), '@' + name);
   }
   return out;
 }
 
+// Broadcast @所有人 / @所有Agent sentinels (cws-core MentionInput type="all" /
+// "all_agents" — "all" sweeps every HUMAN member, "all_agents" every AGENT
+// member; both may coexist on one message). Matched against the exact same
+// literal labels cws-fe's own composer recognizes (see cws-fe
+// chat-area/mentions.ts BROADCAST_MENTION_DISPLAY_NAMES) — deliberately NOT
+// a bare "@all"/"@all_agents" ASCII shorthand, which would false-positive on
+// any ordinary text containing the common word "all".
+const ALL_AGENTS_RE = /@(?:所有agent|all agents)/i;
+const ALL_RE = /@(?:所有人|everyone)/i;
+
 /**
  * Build the structured `mentions` array (cws-core MentionInput[] shape:
- * `{type:'member', member_id}`) for any `@name` token in the outbound text
- * that matches a known participant with a recorded member_id. Mirrors
+ * `{type:'member', member_id}` for an individual, or `{type:'all'}` /
+ * `{type:'all_agents'}` for a broadcast) for the outbound text: any `@name`
+ * token that matches a known participant with a recorded member_id, plus
+ * either broadcast sentinel if its exact literal label appears. Mirrors
  * cws-fe's `collectMentionInputs` contract: returns `undefined` — not an
  * empty array — when there's nothing to mention, so a no-mention send omits
  * the field entirely.
@@ -149,8 +175,12 @@ export function resolveMentions(text, conversationId) {
  * @returns {Array<{type:string, member_id?:string}>|undefined}
  */
 export function buildMentions(text, conversationId) {
-  const seen = new Set();
   const out = [];
+  const s = String(text ?? '');
+  if (ALL_RE.test(s)) out.push({ type: 'all' });
+  if (ALL_AGENTS_RE.test(s)) out.push({ type: 'all_agents' });
+
+  const seen = new Set();
   for (const { name, memberId } of matchedEntries(text, conversationId)) {
     if (!memberId || seen.has(memberId)) continue;
     seen.add(memberId);

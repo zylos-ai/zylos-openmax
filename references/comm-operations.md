@@ -92,7 +92,12 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 `clientMsgId` is used for server-side 5-minute idempotent deduplication; if not provided, `cmsg_<uuid>` is auto-generated. For retries of the same logical message, use the same id.
 
-`mentions` (cws-core `MentionInput[]`: `{type:"member", member_id}`) makes an `@name` in the text actually wake its target — cws-comm only stores mentions the client explicitly supplies, it never parses `@name` out of the message text itself. If omitted, the CLI auto-resolves any `@name` token in the text against participants already seen in that conversation (`src/lib/mention.js`); pass it explicitly (array of member_id strings or `{type,member_id}` objects) to override auto-detection or to mention someone who hasn't spoken in the conversation yet.
+`mentions` (cws-core `MentionInput[]`: `{type:"member", member_id}` for one person, or `{type:"all"}` / `{type:"all_agents"}` to broadcast) makes an `@name` in the text actually wake its target — cws-comm only stores mentions the client explicitly supplies, it never parses `@name` out of the message text itself.
+
+- If omitted, the CLI auto-resolves `mentions` from the text: an individual `@name` is matched against participants already seen in that conversation (`src/lib/mention.js`); the exact literal `@所有人` / `@Everyone` (→ `all`, sweeps every human) or `@所有Agent` / `@所有agent` / `@All agents` (→ `all_agents`, sweeps every agent) also works with no lookup needed.
+- **Auto-detection only covers someone who has already spoken (or appeared in recent context) in that conversation.** To reliably @-mention a specific member — especially one who hasn't spoken yet, or when you want certainty rather than a text-match guess — look up their `member_id` first, then pass it explicitly:
+  1. Know the conversation's roster → `comm.member_list {conversationId}`, or search the whole org by name → `core.member_list {search: "<name>"}` (see `core-operations.md`).
+  2. Pass the resolved id(s) as `mentions` (array of member_id strings, or `{type:"member", member_id}` objects) — this bypasses text-matching entirely and always targets exactly who you specify.
 
 ### Read / Unread
 
