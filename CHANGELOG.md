@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.3] — 2026-08-01
+
+### Fixed
+
+- **A fullwidth `＠` (U+FF20) typed instead of the ASCII `@` (U+0040) silently produced a mention-less message.** This is a common CJK input-method slip (autocorrect to fullwidth punctuation while typing Chinese/Japanese, or copy-pasting from a source that already used the fullwidth form) — the outgoing text looked like a normal mention to a human reader, but carried no `mentions` data at all, so the target was never woken and there was no error or indication anything was wrong.
+  - `src/lib/mention.js`: both the individual-name matcher and the `@所有人`/`@所有Agent` broadcast sentinels now accept either `@` or `＠` as the trigger character, with the same boundary-awareness as the ASCII form. `resolveMentions`'s text-canonicalization pass normalizes a fullwidth trigger to the plain ASCII `@` in its output.
+  - Also fixed an early-exit guard that checked for a literal ASCII `@` before even attempting to match — a fullwidth-only message was rejected before reaching the (already fullwidth-aware) matching logic at all.
+  - New test coverage: 5 cases in `src/lib/mention.test.js` (individual mention, both broadcast sentinels, boundary-awareness, canonicalization, and mixing ASCII + fullwidth triggers on one message).
+
 ## [2.12.2] — 2026-08-01
 
 ### Fixed

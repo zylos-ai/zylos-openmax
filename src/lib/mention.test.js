@@ -176,3 +176,38 @@ test('the broadcast sentinels still fire correctly right before end-of-string / 
   assert.deepEqual(buildMentions('cc @Everyone!', CONV), [{ type: 'all' }]);
   assert.deepEqual(buildMentions('cc @所有Agent,谢谢', CONV), [{ type: 'all_agents' }]);
 });
+
+// Regression: a fullwidth "＠" (U+FF20) is a common CJK-input-method typo
+// for the ASCII "@" (U+0040) — treat it as an equally valid trigger rather
+// than silently producing a mention-less message.
+test('a fullwidth "＠" mentions an individual just like the ASCII "@"', () => {
+  recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
+  assert.deepEqual(buildMentions('＠luna.coco ping', CONV), [{ type: 'member', member_id: LUNA_ID }]);
+});
+
+test('a fullwidth "＠" triggers the broadcast sentinels just like the ASCII "@"', () => {
+  assert.deepEqual(buildMentions('＠所有人 请查收', CONV), [{ type: 'all' }]);
+  assert.deepEqual(buildMentions('＠所有Agent 请查收', CONV), [{ type: 'all_agents' }]);
+  assert.deepEqual(buildMentions('＠Everyone please check', CONV), [{ type: 'all' }]);
+});
+
+test('the fullwidth trigger keeps the same boundary-awareness as the ASCII one', () => {
+  recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
+  assert.equal(buildMentions('＠luna.cocoa is not luna.coco', CONV), undefined);
+  assert.equal(buildMentions('＠EveryoneElse should not broadcast', CONV), undefined);
+});
+
+test('resolveMentions canonicalizes a fullwidth "＠" trigger to the plain ASCII "@" in the output text', () => {
+  recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
+  assert.equal(resolveMentions('＠luna.coco hi', CONV), '@luna.coco hi');
+});
+
+test('individual and broadcast mentions can mix ASCII and fullwidth triggers on the same message', () => {
+  recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
+  const result = buildMentions('＠所有人 @luna.coco ＠所有Agent', CONV);
+  assert.deepEqual(result, [
+    { type: 'all' },
+    { type: 'all_agents' },
+    { type: 'member', member_id: LUNA_ID },
+  ]);
+});

@@ -96,6 +96,7 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 - **Standard move before sending anything that @-mentions someone:** query that conversation's roster first — `comm.member_list {conversationId}` (or `core.member_list {search: "<name>"}` to search the whole org when you don't have a conversationId yet — see `core-operations.md`) — match your intended recipient's name against the returned list to get their `member_id`, then pass it explicitly as `mentions` (array of member_id strings, or `{type:"member", member_id}` objects).
 - The exact literal broadcast labels `@所有人` / `@Everyone` (→ `all`, sweeps every human) or `@所有Agent` / `@所有agent` / `@All agents` (→ `all_agents`, sweeps every agent) need no lookup at all.
+- The fullwidth `＠` (U+FF20) is accepted anywhere the ASCII `@` is, both for an individual name and the broadcast labels — a common CJK-input-method slip that would otherwise silently produce a mention-less message with no error.
 - If `mentions` is omitted entirely, the CLI falls back to auto-resolving an individual `@name` against participants already seen in that conversation (`src/lib/mention.js`) — this is a best-effort convenience for the plain `c4-send.js` reply path (which has no parameter slot to carry an explicit id through), not the recommended way to compose an intentional mention, and it can't find someone who hasn't spoken in the conversation yet.
 
 ### Read / Unread
