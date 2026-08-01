@@ -76,7 +76,7 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 | Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.send` | Send a message; `content` supports string / markdown / array structure | `{conversationId, content, replyTo?, clientMsgId?}` | `POST /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.send` | Send a message; `content` supports string / markdown / array structure | `{conversationId, content, replyTo?, clientMsgId?, mentions?}` | `POST /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_messages` | Pull the historical message list (seq-based range) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_message` | Get details of a single message (expands content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
@@ -91,6 +91,8 @@ Manage group membership **after** creation. cws-core derives the caller from the
 ```
 
 `clientMsgId` is used for server-side 5-minute idempotent deduplication; if not provided, `cmsg_<uuid>` is auto-generated. For retries of the same logical message, use the same id.
+
+`mentions` (cws-core `MentionInput[]`: `{type:"member", member_id}`) makes an `@name` in the text actually wake its target — cws-comm only stores mentions the client explicitly supplies, it never parses `@name` out of the message text itself. If omitted, the CLI auto-resolves any `@name` token in the text against participants already seen in that conversation (`src/lib/mention.js`); pass it explicitly (array of member_id strings or `{type,member_id}` objects) to override auto-detection or to mention someone who hasn't spoken in the conversation yet.
 
 ### Read / Unread
 

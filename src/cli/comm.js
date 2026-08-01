@@ -26,6 +26,7 @@
 import { randomUUID } from 'crypto';
 import { get, post, del, getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
+import { buildMentions } from '../lib/mention.js';
 import { loadConfig, updateConfig, enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
 
 const [command, ...rest] = process.argv.slice(2);
@@ -102,8 +103,16 @@ async function fetchSelfMember(org) {
  *       content_type: "text" | "markdown" | "image" | "file" | ...,
  *       body: { text, ... } | {},
  *       attachments: [{artifact_id, file_name, content_type, size_bytes}, ...]
- *     }
+ *     },
+ *     mentions?: [{type: "member", member_id}, ...]
  *   }
+ *
+ * mentions is resolved automatically from `@name` tokens in the text body
+ * against the conversation's known participants (src/lib/mention.js) —
+ * required for a mention to actually wake its target; cws-comm does not
+ * parse @-mentions out of text itself. Pass `params.mentions` explicitly
+ * (array of `{type, member_id}`, or plain member_id strings) to override
+ * auto-detection.
  *
  * Caller can pass:
  *   - string                                            → text/markdown auto-detect
@@ -140,11 +149,23 @@ function buildSendBody(params) {
     attachments = [];
     if (!msgType) msgType = 'AGENT_TEXT';
   }
+  // Resolve `@name` tokens in the text body to a structured mentions[]
+  // entry (cws-core MentionInput[]) against known conversation
+  // participants, unless the caller already supplied one explicitly.
+  // cws-comm never derives mentions from text itself — only the sending
+  // client does (see src/lib/mention.js) — so without this an agent's
+  // outbound @-mention never wakes its target.
+  const explicitMentions = Array.isArray(params.mentions)
+    ? params.mentions.map((m) => (typeof m === 'string' ? { type: 'member', member_id: m } : m))
+    : undefined;
+  const mentions = explicitMentions
+    || (typeof body?.text === 'string' ? buildMentions(body.text, params.conversationId) : undefined);
   return {
     client_msg_id: ensureClientMsgId(params.clientMsgId || params.clientMessageId),
     type:          msgType,
     content:       { content_type: contentType, body, attachments },
     ...(params.replyTo ? { parent_id: params.replyTo } : {}),
+    ...(mentions ? { mentions } : {}),
   };
 }
 
@@ -370,8 +391,9 @@ Conversation members (owner/admin only; pass {org} for multi-org installs)
   comm.leave                {conversationId, newOwnerId?, org?}                     # POST .../leave
 
 Messages
-  comm.send                 {conversationId, content, replyTo?, clientMsgId?}
+  comm.send                 {conversationId, content, replyTo?, clientMsgId?, mentions?}
                             # content: string | {text|body, markdown?} | {type,body} | [{type,body}]
+                            # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
   comm.get_messages         {conversationId, afterSeq?, beforeSeq?, limit?}
   comm.get_message          {conversationId, messageId}
 

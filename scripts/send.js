@@ -33,6 +33,13 @@
  *     AGENT_STRUCTURED|AGENT_CARD|AGENT_STREAM
  *   MessageContentItem: { content_type, body: object, attachments: [] }
  *
+ * mentions (optional top-level field on the request, MentionInput[]:
+ * {type:"member", member_id}) is resolved per chunk from `@name` tokens
+ * against known conversation participants (src/lib/mention.js) — cws-comm
+ * only stores mentions the client explicitly supplies, it never parses
+ * them out of the text itself, so this step is required for an outbound
+ * @-mention to actually wake its target.
+ *
  * Auth: Bearer api_key (canonical store: config.agent.api_key) plus
  *       X-Workspace-Id header (handled by client.js).
  */
@@ -49,7 +56,7 @@ import {
   splitMessage,
 } from '../src/lib/message.js';
 import { uploadMedia } from '../src/cli/as.js';
-import { resolveMentions } from '../src/lib/mention.js';
+import { resolveMentions, buildMentions } from '../src/lib/mention.js';
 import { lookupConvOrg, registerConvOrg } from '../src/lib/conv-org.js';
 import { RUNTIME_DIR } from '../src/lib/session.js';
 
@@ -98,8 +105,14 @@ async function sendText(ep, text) {
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     const contentType = looksLikeMarkdown(chunk) ? 'markdown' : 'text';
+    // Resolve this chunk's own `@name` tokens to a structured mentions[]
+    // entry (cws-core MentionInput[]) against known conversation
+    // participants. Without this, agent-sent @-mentions never wake their
+    // target: cws-comm only stores mentions it's explicitly given, it does
+    // not parse them out of the text itself (see src/lib/mention.js).
+    const mentions = buildMentions(chunk, convId);
     // cws-core SendMessageRequest body (current schema):
-    //   { client_msg_id, type, content: {content_type, body, attachments}, parent_id? }
+    //   { client_msg_id, type, content: {content_type, body, attachments}, parent_id?, mentions? }
     // type is the message-level enum (AGENT_TEXT for agent outbound text /
     // markdown); content.content_type is the body serialization
     // ('text' | 'markdown' | ...). attachments is required (may be empty).
@@ -113,6 +126,7 @@ async function sendText(ep, text) {
       },
       // parent_id only on the first chunk to avoid duplicate threading
       ...(i === 0 && ep.replyTo ? { parent_id: ep.replyTo } : {}),
+      ...(mentions ? { mentions } : {}),
     };
     // eslint-disable-next-line no-await-in-loop
     const res = await post(apiPath(`/conversations/${convId}/messages`), body);

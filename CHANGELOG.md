@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.2] — 2026-08-01
+
+### Fixed
+
+- **An agent's own outbound `@name` mention never woke its target, even though a human's `@name` mention (typed in the web app) worked fine.** The messaging backend only registers a mention when the sending client explicitly attaches the mentioned member's id alongside the message — it does not parse `@name` out of the message text itself. The web app's compose box already does this attachment step when a human selects someone from its @-mention picker; this repo's own send paths (`src/cli/comm.js` `comm.send`, `scripts/send.js`) never did, so an outbound `@name` from an agent was stored as plain text with no mention data at all, regardless of any group/DM permission settings.
+  - **`src/lib/mention.js`:** the per-conversation participant registry now also records each participant's member id (previously display-name-only, used only for text canonicalization); a new `buildMentions(text, conversationId)` resolves `@name` tokens in outgoing text to the required mention entries, matching known participants case/spacing-tolerantly (longest name first) and deduping by member id. Returns `undefined` — not an empty array — when nothing matches, so a plain send stays identical to before. Fully backward compatible with a registry file written by an older version.
+  - **`src/cli/comm.js` `comm.send`:** now auto-attaches resolved mentions unless the caller passes its own `mentions` (array of member ids or `{type, member_id}`).
+  - **`scripts/send.js`** (the standard outbound interface): resolves mentions per chunk before each send, so a long message split across multiple posts still mentions correctly wherever the `@name` actually appears.
+  - Only mentions someone who has already been seen in that conversation (sender of an inbound message, or recent context) — there's no directory lookup for a participant who hasn't spoken yet.
+  - New test coverage: `src/lib/mention.test.js` (10 cases, incl. dedup, multi-mention, case/spacing tolerance, and backward compatibility with a pre-existing display-name-only registry file).
+
 ## [2.12.1] — 2026-07-30
 
 First stable of the 2.12.1 line. Promotes the `2.12.1-beta.1` through `2.12.1-beta.8` prereleases to stable (the application-connections/connect capability-cache work — see the beta entries below for full per-change detail), plus one new security fix on top that did not go through a beta.
