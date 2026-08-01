@@ -945,7 +945,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
           if (!name || name === e.sender_id) {
             name = (await fetchMemberName(orgConfig.org_id, e.sender_id)) || e.sender_id;
           }
-          return { senderName: name, content: e.text };
+          return { senderName: name, senderId: e.sender_id, content: e.text };
         }));
       } else {
         // API path: ctx is an array of API message objects
@@ -1003,7 +1003,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
           } else if (mIsImage) {
             content = '[image]' + (text ? ' ' + text : '');
           }
-          return { senderName, content };
+          return { senderName, senderId: m.sender_id, content };
         }));
       }
       log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${source} count=${recent.length}`);
@@ -1070,10 +1070,15 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
     const smartHint = decision.mode === 'smart' && !decision.mentioned;
     const groupName = decision.groupCfg?.name || conv?.name;
 
-    // Record the display names seen in this conversation (sender + group
-    // context) so outbound @mentions can be canonicalized to the exact name
-    // cws-fe matches on. Best-effort; never blocks message handling.
-    recordParticipants(msg.conversation_id, [senderName, ...recent.map((m) => m.senderName)]);
+    // Record the display name + member_id seen in this conversation (sender +
+    // group context) so an outbound `@name` can both be canonicalized to the
+    // exact name cws-fe matches on AND resolved to a real `mentions` entry
+    // (see src/lib/mention.js — cws-comm never derives mentions from text,
+    // only the sending client does). Best-effort; never blocks message handling.
+    recordParticipants(msg.conversation_id, [
+      { name: senderName, memberId: msg.sender_id },
+      ...recent.map((m) => ({ name: m.senderName, memberId: m.senderId })),
+    ]);
 
     // Quoted/reply: cws-comm marks a reply with parent_id (the WS notification
     // frame omits it, so it comes from the get-message detail merged into msg).

@@ -76,7 +76,7 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 | Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.send` | Send a message; `content` supports string / markdown / array structure | `{conversationId, content, replyTo?, clientMsgId?}` | `POST /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.send` | Send a message; `content` supports string / markdown / array structure | `{conversationId, content, replyTo?, clientMsgId?, mentions?}` | `POST /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_messages` | Pull the historical message list (seq-based range) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_message` | Get details of a single message (expands content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
@@ -91,6 +91,12 @@ Manage group membership **after** creation. cws-core derives the caller from the
 ```
 
 `clientMsgId` is used for server-side 5-minute idempotent deduplication; if not provided, `cmsg_<uuid>` is auto-generated. For retries of the same logical message, use the same id.
+
+`mentions` (cws-core `MentionInput[]`, the send-request shape: `{type:"member", member_id}` for one person, or `{type:"all"}` / `{type:"all_agents"}` to broadcast) makes an `@name` in the text actually wake its target — cws-comm only stores mentions the client explicitly supplies, it never parses `@name` out of the message text itself. (Don't confuse this with the read-path `MentionDisplay` shape a *received* message's own `mentions` field uses — `{mentioned_id, username?, is_mention_all}` — that's what a GET-message response returns after the server has already expanded a broadcast into one row per recipient; it is not what you send.)
+
+- **Standard move before sending anything that @-mentions someone:** query that conversation's roster first — `comm.member_list {conversationId}` (or `core.member_list {search: "<name>"}` to search the whole org when you don't have a conversationId yet — see `core-operations.md`) — match your intended recipient's name against the returned list to get their `member_id`, then pass it explicitly as `mentions` (array of member_id strings, or `{type:"member", member_id}` objects).
+- The exact literal broadcast labels `@所有人` / `@Everyone` (→ `all`, sweeps every human) or `@所有Agent` / `@所有agent` / `@All agents` (→ `all_agents`, sweeps every agent) need no lookup at all.
+- If `mentions` is omitted entirely, the CLI falls back to auto-resolving an individual `@name` against participants already seen in that conversation (`src/lib/mention.js`) — this is a best-effort convenience for the plain `c4-send.js` reply path (which has no parameter slot to carry an explicit id through), not the recommended way to compose an intentional mention, and it can't find someone who hasn't spoken in the conversation yet.
 
 ### Read / Unread
 

@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.12.1
+version: 2.12.2
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -507,6 +507,8 @@ Each org has an **independent** access policy under `orgs.<slug>` in `config.jso
 - Platform events (Task completion, Issue termination/acceptance, approval results, etc.) are delivered as DMs by the **System Member** (`sender_type=SYSTEM`, such as the "Scheduler"). Such senders are **not subject to dmPolicy/owner-binding constraints**; comm-bridge lets them through directly and injects them into the session.
 - The System Member is a **write-only identity**, with no "receive/consume" semantics. After receiving a system broadcast such as one from the scheduler, **go back to the corresponding Issue/Task context to act** (claim, advance, clean up, etc.; e.g. `issue.activated` → `issue.submit_plan` after requirement clarification, see behavioral guardrail #11), **do not reply to this system DM** — no one will consume your reply, and writing back only pollutes the conversation.
 - The message body is already natural language and can be acted on directly; if you need exact fields (issueId/taskId, etc.) you can parse `metadata.systemEvent.payload`.
+
+**Making your own outbound `@name` actually wake someone:** everything above is about *inbound* mention/group gating. On the way out, writing `@name` in the text is not enough by itself — the platform only wakes the mentioned party when the message carries the mentioned member's `member_id` alongside it; typing their name is not sufficient on its own. **The standard move, before sending any message that @-mentions someone: query that conversation's member roster first** — `comm.member_list({conversationId})` (same idea as step 1 of the Cross-agent Communication Pattern above, `core.member_list({search:"<name>"})`, when you don't yet have a conversationId) — match your intended recipient's name against the returned roster to get their `member_id`, then pass it explicitly via `mentions`. Don't rely on `comm.send`'s auto-resolution (it only knows participants already seen speaking in that conversation, and is a best-effort fallback for the plain `c4-send.js` reply path, not the recommended way to compose an intentional mention). See `comm-operations.md` for the exact mechanics, including the `@所有人`/`@所有Agent` broadcast sentinels.
 
 ## Frontend Links (Frontend URL Patterns)
 
