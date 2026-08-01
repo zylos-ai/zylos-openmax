@@ -99,6 +99,14 @@ export function recordParticipants(conversationId, participants) {
   save(reg);
 }
 
+// The mention-trigger character: ASCII '@' (U+0040), or the fullwidth '＠'
+// (U+FF20) many CJK input methods substitute for it (autocorrect while
+// typing Chinese/Japanese punctuation-width, or copy/paste from a source
+// that already used the fullwidth form) — a common enough real-world typo
+// that treating it as equivalent avoids a silently-dead mention. Both
+// forms canonicalize to the plain ASCII '@' wherever we rewrite text.
+const AT = '[@＠]';
+
 // A name match only counts as a real mention token if it isn't itself a
 // prefix of a longer identifier — otherwise a registry containing only
 // "luna" would spuriously fire on "@luna.coco please check" (the ".coco"
@@ -110,14 +118,14 @@ export function recordParticipants(conversationId, participants) {
 // flag) so this holds for CJK display names too, not just ASCII ones.
 function nameMatches(name, text) {
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp('@' + esc + '(?![\\p{L}\\p{N}._-])', 'iu').test(text);
+  return new RegExp(AT + esc + '(?![\\p{L}\\p{N}._-])', 'iu').test(text);
 }
 
 // Shared "match known registered names, longest-first, against `@name`
 // tokens in text" walk — used by both resolveMentions (rewrite) and
 // buildMentions (structured extraction).
 function matchedEntries(text, conversationId) {
-  if (!text || !conversationId || !String(text).includes('@')) return [];
+  if (!text || !conversationId || !/[@＠]/.test(text)) return [];
   const conv = load()[conversationId];
   if (!conv) return [];
   return Object.values(conv)
@@ -144,8 +152,9 @@ export function resolveMentions(text, conversationId) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     // Same post-name boundary as nameMatches()/matchedEntries — without it a
     // canonicalized "luna.coco" would also rewrite the "@luna.coco" prefix
-    // embedded inside an unrelated longer word (e.g. "@luna.cocoa").
-    out = out.replace(new RegExp('@' + esc + '(?![\\p{L}\\p{N}._-])', 'giu'), '@' + name);
+    // embedded inside an unrelated longer word (e.g. "@luna.cocoa"). Also
+    // normalizes a fullwidth "＠" trigger to the plain ASCII "@" here.
+    out = out.replace(new RegExp(AT + esc + '(?![\\p{L}\\p{N}._-])', 'giu'), '@' + name);
   }
   return out;
 }
@@ -159,9 +168,10 @@ export function resolveMentions(text, conversationId) {
 // any ordinary text containing the common word "all". Same post-label
 // boundary as nameMatches() (not just a substring test) — otherwise
 // "@EveryoneElse", "@All agentship", "@所有agent123", "@所有人类" would all
-// wrongly upgrade to a real broadcast wake.
-const ALL_AGENTS_RE = /@(?:所有agent|all agents)(?![\p{L}\p{N}._-])/iu;
-const ALL_RE = /@(?:所有人|everyone)(?![\p{L}\p{N}._-])/iu;
+// wrongly upgrade to a real broadcast wake. Also accepts the fullwidth "＠"
+// trigger (see AT above) alongside the ASCII "@".
+const ALL_AGENTS_RE = new RegExp(AT + '(?:所有agent|all agents)(?![\\p{L}\\p{N}._-])', 'iu');
+const ALL_RE = new RegExp(AT + '(?:所有人|everyone)(?![\\p{L}\\p{N}._-])', 'iu');
 
 /**
  * Build the structured `mentions` array (cws-core MentionInput[] shape:
