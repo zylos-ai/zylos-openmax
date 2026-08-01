@@ -156,3 +156,23 @@ test('both broadcast sentinels can coexist on one message, and combine with a re
 test('ordinary text containing the plain English word "all" does not spuriously trigger a broadcast', () => {
   assert.equal(buildMentions('thanks all, that covers all the cases', CONV), undefined);
 });
+
+// Regression (P2, re-review): the broadcast sentinels need the same
+// post-label boundary as individual name matching — a longer word or an
+// ordinary suffix that merely starts with the sentinel label must not
+// upgrade to a real all/all_agents wake.
+test('a longer word starting with the sentinel label does not trigger a broadcast (ASCII)', () => {
+  assert.equal(buildMentions('@EveryoneElse should ignore this', CONV), undefined);
+  assert.equal(buildMentions('@All agentship is a real word apparently', CONV), undefined);
+});
+
+test('a longer word starting with the sentinel label does not trigger a broadcast (CJK)', () => {
+  assert.equal(buildMentions('@所有agent123 is not a real broadcast', CONV), undefined);
+  assert.equal(buildMentions('@所有人类的智慧', CONV), undefined); // "所有人" + "类" (a CJK letter char) continues the word
+});
+
+test('the broadcast sentinels still fire correctly right before end-of-string / punctuation, not just before a space', () => {
+  assert.deepEqual(buildMentions('cc @所有人', CONV), [{ type: 'all' }]);
+  assert.deepEqual(buildMentions('cc @Everyone!', CONV), [{ type: 'all' }]);
+  assert.deepEqual(buildMentions('cc @所有Agent,谢谢', CONV), [{ type: 'all_agents' }]);
+});

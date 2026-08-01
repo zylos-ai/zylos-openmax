@@ -156,9 +156,12 @@ export function resolveMentions(text, conversationId) {
 // literal labels cws-fe's own composer recognizes (see cws-fe
 // chat-area/mentions.ts BROADCAST_MENTION_DISPLAY_NAMES) — deliberately NOT
 // a bare "@all"/"@all_agents" ASCII shorthand, which would false-positive on
-// any ordinary text containing the common word "all".
-const ALL_AGENTS_RE = /@(?:所有agent|all agents)/i;
-const ALL_RE = /@(?:所有人|everyone)/i;
+// any ordinary text containing the common word "all". Same post-label
+// boundary as nameMatches() (not just a substring test) — otherwise
+// "@EveryoneElse", "@All agentship", "@所有agent123", "@所有人类" would all
+// wrongly upgrade to a real broadcast wake.
+const ALL_AGENTS_RE = /@(?:所有agent|all agents)(?![\p{L}\p{N}._-])/iu;
+const ALL_RE = /@(?:所有人|everyone)(?![\p{L}\p{N}._-])/iu;
 
 /**
  * Build the structured `mentions` array (cws-core MentionInput[] shape:
