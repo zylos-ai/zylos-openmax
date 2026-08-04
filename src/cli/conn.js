@@ -55,10 +55,13 @@ function actionsOf(result) {
 }
 
 // Fetch this agent's connections for an org from cws-core and rewrite that org's
-// index file (org-scoped: uses the org's JWT and its own index path).
+// index file (org-scoped: uses the org's JWT and its own index path). The
+// endpoint is always "your own" connections now (cws-core derives the caller
+// from the authenticated principal, no id in the path) — agentId is accepted
+// for call-site compatibility but no longer used to build the URL.
 async function refreshIndex(orgId, agentId) {
   const idxPath = indexPathForOrg(orgId);
-  const list = await getForOrg(orgId, apiPath(`/connect/agents/${agentId}/connections`));
+  const list = await getForOrg(orgId, apiPath('/connect/agents/me/connections'));
   replaceIndexFromList(Array.isArray(list) ? list : (list?.connections || []), idxPath);
   return readIndex(idxPath);
 }
@@ -112,7 +115,7 @@ const COMMANDS = {
   'conn.list': () => {
     const agentId = resolveSelfMemberId();
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
-    return get(apiPath(`/connect/agents/${agentId}/connections`));
+    return get(apiPath('/connect/agents/me/connections'));
   },
 
   // Acquire credential for a connection.
