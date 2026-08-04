@@ -27,6 +27,13 @@ function resolveOrgId() {
   return params.org || params.orgId || params.org_id || resolveDefaultOrgId();
 }
 
+// Security note: this agent's own member_id for an org — the ONLY identity
+// the conn.* commands below use for the cws-connect agent_member_id calls.
+// There is deliberately no client-supplied override (e.g. params.agentMemberId)
+// here: accepting one would let a caller impersonate a different agent's
+// identity against cws-connect (a confused-deputy/IDOR risk). cws-core is
+// moving to derive this server-side from the authenticated principal too, so
+// even if a caller sent an override it would be ignored there as well.
 function resolveSelfMemberId(orgId = resolveDefaultOrgId()) {
   const cfg = loadConfig();
   for (const [, org] of Object.entries(cfg.orgs || {})) {
@@ -100,9 +107,10 @@ function looksLikeActionOrSchemaError(err) {
 
 const COMMANDS = {
   // List connections available to this agent.
-  // Uses the agent's own member_id by default.
+  // Always uses the agent's own member_id (resolveSelfMemberId) — no
+  // client-supplied override; see the security note above resolveSelfMemberId.
   'conn.list': () => {
-    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId();
+    const agentId = resolveSelfMemberId();
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
     return get(apiPath(`/connect/agents/${agentId}/connections`));
   },
@@ -112,7 +120,7 @@ const COMMANDS = {
   'conn.acquire': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId();
+    const agentId = resolveSelfMemberId();
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
     return post(apiPath(`/connect/connections/${connId}/credential?agent_member_id=${encodeURIComponent(agentId)}`));
   },
@@ -121,7 +129,7 @@ const COMMANDS = {
   'conn.proxy': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId();
+    const agentId = resolveSelfMemberId();
     return post(apiPath(`/connect/connections/${connId}/proxy`), {
       agent_member_id: agentId,
       method: params.method || 'GET',
@@ -139,7 +147,7 @@ const COMMANDS = {
   'conn.actions': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId();
+    const agentId = resolveSelfMemberId();
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
     return get(apiPath(`/connect/connections/${connId}/actions?agent_member_id=${encodeURIComponent(agentId)}`));
   },
@@ -151,7 +159,7 @@ const COMMANDS = {
   'conn.execute': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId();
+    const agentId = resolveSelfMemberId();
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
     if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
     return post(apiPath(`/connect/connections/${connId}/actions/execute`), {
@@ -192,7 +200,7 @@ const COMMANDS = {
     const orgId = resolveOrgId();
     let appId = params.applicationId || params.application_id;
     if (!appId && params.app) {
-      const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId(orgId);
+      const agentId = resolveSelfMemberId(orgId);
       const entry = await resolveConnectionForApp(params.app, orgId, agentId);
       appId = entry?.applicationId || (isUuid(params.app) ? params.app : null);
     }
@@ -212,7 +220,7 @@ const COMMANDS = {
     if (!app) throw Object.assign(new Error('app (slug or applicationId) is required'), { status: 400 });
     if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
     const orgId = resolveOrgId();
-    const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId(orgId);
+    const agentId = resolveSelfMemberId(orgId);
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
 
     const entry = await resolveConnectionForApp(app, orgId, agentId);
@@ -240,7 +248,7 @@ const COMMANDS = {
   'conn.index': async () => {
     const orgId = resolveOrgId();
     if (params.refresh) {
-      const agentId = params.agentMemberId || params.agent_member_id || resolveSelfMemberId(orgId);
+      const agentId = resolveSelfMemberId(orgId);
       if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
       await refreshIndex(orgId, agentId);
     }
@@ -268,20 +276,20 @@ function printUsage() {
 Usage: node src/cli/conn.js <command> '<json-params>'
 
 Connections
-  conn.list           {agentMemberId?}                          # list connections available to this agent (default: self)
-  conn.acquire        {connectionId, agentMemberId?}            # acquire credential (returns access_token or proxy_ref)
+  conn.list           {}                                        # list connections available to this agent (self only)
+  conn.acquire        {connectionId}                            # acquire credential (returns access_token or proxy_ref)
   conn.proxy          {connectionId, method, url,               # proxy a request through a connection
-                       headers?, body?, agentMemberId?}
-  conn.actions        {connectionId, agentMemberId?}            # discover named actions for a connection
-  conn.execute        {connectionId, action, params?,           # run a named action (toolkit-slug/action-name)
-                       agentMemberId?}                          #   via cws-connect (server injects the token)
+                       headers?, body?}
+  conn.actions        {connectionId}                            # discover named actions for a connection
+  conn.execute        {connectionId, action, params?}           # run a named action (toolkit-slug/action-name)
+                                                                  #   via cws-connect (server injects the token)
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)
 
 Applications
   conn.app_actions    {applicationId}                           # app-keyed action catalog (incl. input_schema; no connection needed)
 
 Capability cache (runtime/connect/)
-  conn.invoke         {app, action, params?, agentMemberId?}    # app-keyed execute: resolve connection via local index → execute
+  conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
   conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
   conn.index          {refresh?}                                # show the local connections index (connection → application)
 

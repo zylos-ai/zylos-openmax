@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.4] — 2026-08-04
+
+### Security
+
+- **Removed the client-controllable `agentMemberId`/`agent_member_id` identity-override parameter from `conn.js`'s cws-connect commands, ahead of a corresponding backend fix in cws-core.** An audit found that `conn.list`, `conn.acquire`, `conn.actions`, `conn.execute`, and `conn.proxy` defaulted to the caller's own identity via `resolveSelfMemberId()`, but also accepted a client-supplied override that let a caller specify a *different* agent's `member_id` — since cws-core forwarded this value to cws-connect without verifying it matched the authenticated principal, this was a confused-deputy/IDOR-shaped gap (a caller who obtained another agent's `member_id` could acquire its credentials, proxy through its connections, or execute actions as it). A parallel fix landing in cws-core will derive `agent_member_id` from the authenticated principal server-side instead of trusting client input, making the override meaningless to send — leaving it in this CLI would misleadingly suggest it still does something.
+  - **`src/cli/conn.js`:** `conn.list`, `conn.acquire`, `conn.actions`, `conn.execute`, and `conn.proxy` now call `resolveSelfMemberId()` unconditionally; the `params.agentMemberId || params.agent_member_id ||` fallback is gone. `resolveSelfMemberId()` itself is unchanged — it was always the correct default path.
+  - Also found and fixed the same pattern in two capability-cache commands that route through the same underlying cws-connect endpoints: **`conn.catalog`** (resolves an app via `resolveConnectionForApp`, which hits the same `list-connect-available-connections` endpoint as `conn.list`) and **`conn.invoke`** (resolves a connection the same way, then executes via the same endpoint as `conn.execute`) — both had an identical client-overridable `agentId` that fed into those calls. Also fixed **`conn.index`**'s `{refresh}` path, which calls the same agent-connections endpoint directly. None of these three were in the original 5-endpoint list but exhibit the exact same anti-pattern against the exact same endpoints, so leaving them unfixed would have left an equivalent bypass.
+  - `printUsage()` no longer documents `agentMemberId?` as an accepted param on any of these commands.
+  - No compatibility break expected: no known legitimate caller (human or agent) supplied this override. This is one part of a larger, coordinated fix; the cws-core and cws-connect backend changes are tracked and landing separately in their own repos.
+
 ## [2.12.3] — 2026-08-01
 
 ### Fixed
