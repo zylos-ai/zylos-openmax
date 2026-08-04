@@ -9,10 +9,11 @@ List connections available to this agent.
 
 ```bash
 node src/cli/conn.js conn.list '{}'
-node src/cli/conn.js conn.list '{"agentMemberId":"019ea70d-..."}'
 ```
 
-Returns array of connections with status, application, owner, scopes.
+Self only — cws-core derives the caller's identity from the authenticated
+principal, not from any client-supplied parameter (no `agentMemberId` override
+exists). Returns array of connections with status, application, owner, scopes.
 
 ### conn.acquire
 Acquire credential for a connection. Returns `credential_mode` plus:
@@ -204,13 +205,18 @@ Notes:
 
 | Method | Path | CLI |
 |--------|------|-----|
-| GET | `/connect/agents/{id}/connections` | conn.list / conn.index --refresh |
-| POST | `/connect/connections/{id}/credential?agent_member_id=` | conn.acquire |
+| GET | `/connect/agents/me/connections` | conn.list / conn.index --refresh |
+| POST | `/connect/connections/{id}/credential` | conn.acquire |
 | POST | `/connect/connections/{id}/proxy` | conn.proxy |
 | GET | `/connect/connections/{id}` | conn.status |
-| GET | `/connect/connections/{id}/actions?agent_member_id=` | conn.actions |
+| GET | `/connect/connections/{id}/actions` | conn.actions |
 | POST | `/connect/connections/{id}/actions/execute` | conn.execute / conn.invoke |
 | GET | `/connect/applications/{id}/actions` | conn.app_actions / conn.catalog |
+
+None of these endpoints accept a client-supplied `agent_member_id` — cws-core
+derives the caller's identity from the authenticated principal on every one of
+them (security fix, 2026-08-04). The CLI never had a way to target a
+connection/action that doesn't belong to the calling agent.
 
 ## cws-connect follow-up (optional, non-blocking)
 
