@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.4-beta.2] — 2026-08-04
+
+### Fixed
+
+- **Disconnecting a WhatsApp channel never actually logged it out, so reconnecting silently resumed the same stale session instead of prompting a fresh QR pairing.** `disconnectChannel`'s soft-disable (`pm2 stop` + `enabled: false`, keep credentials) is correct for API-key channels but wrong for WhatsApp: its "credential" is a live device-link session, not a reusable static key, and `pm2 stop` never tells WhatsApp's servers to unlink the device. The whatsapp channel spec now carries a `qrLoginAuthDir` (`zylos/components/whatsapp/auth_info`); `disconnectChannel` clears it (via a newly-injectable `removeAuthDir` dependency) in addition to the existing soft-disable steps, so the component's next connect always starts a genuine fresh QR pairing instead of resuming a session that was never actually unlinked. Other channels (no `qrLoginAuthDir`) are unaffected — confirmed via regression test that feishu's disconnect still keeps credentials untouched.
+
 ## [2.12.4-beta.1] — 2026-08-04
 
 ### Security
