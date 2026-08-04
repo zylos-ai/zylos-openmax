@@ -579,6 +579,13 @@ export const CHANNEL_COMPONENT = {
       return { env: {}, configJson: { enabled: true } };
     },
     qrLogin: { run: whatsappQrLogin },
+    // disconnectChannel's normal "keep credentials" soft-disable is correct
+    // for API-key channels but wrong here: this "credential" is a live
+    // WhatsApp device-link session, not a reusable static key. Left in
+    // place, the next connect just resumes the same (never actually logged
+    // out) session instead of prompting a fresh QR pairing. Cleared
+    // relative to `home` on disconnect so reconnect always starts clean.
+    qrLoginAuthDir: 'zylos/components/whatsapp/auth_info',
   },
 };
 
@@ -698,6 +705,8 @@ async function defaultVerify(spec, { execFile, timeoutMs = VERIFY_TIMEOUT_MS, po
  * @param {function} [deps.execFile]  promisified (file, args, opts) => {stdout}
  * @param {function} [deps.writeEnv]  (vars) => void
  * @param {function} [deps.writeConfig] (component, patch) => void
+ * @param {function} [deps.removeAuthDir] (relDirFromHome) => void — clears a
+ *   qrLoginAuthDir-bearing channel's session on disconnect (see whatsapp spec)
  * @param {(spec) => Promise<boolean>} [deps.verifyConnected]  connect verification
  * @param {(result) => Promise<void>} [deps.reportResult]  connect-result callback
  * @param {function} [deps.fetchDep]  fetch used by credential probes
@@ -712,6 +721,7 @@ export function createChannelInstaller({
   execFile = realExecFile,
   writeEnv,
   writeConfig,
+  removeAuthDir,
   verifyConnected,
   reportResult,
   reportQR,
@@ -728,6 +738,7 @@ export function createChannelInstaller({
 } = {}) {
   const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
   const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
+  const doRemoveAuthDir = removeAuthDir || ((relDir) => fs.rmSync(path.join(home, relDir), { recursive: true, force: true }));
   const doVerify = verifyConnected || ((spec) => defaultVerify(spec, { execFile, timeoutMs: verifyTimeoutMs }));
   // Default connect-result callback: log-only fallback used by tests / when no
   // reporter is injected. In production comm-bridge.js injects the real
@@ -914,6 +925,13 @@ export function createChannelInstaller({
   // Soft-disable (mirrors coco-dashboard): stop the service + set enabled:false.
   // Keep the component installed and its credentials, so reconnect is the same
   // idempotent connect (upgrade branch). NOT an uninstall.
+  //
+  // Exception: qrLoginAuthDir-bearing channels (whatsapp). Their "credential"
+  // is a live device-link session, not a reusable static key — pm2 stop never
+  // tells WhatsApp's servers to unlink it, so leaving auth_info in place means
+  // the next connect silently resumes the same never-actually-logged-out
+  // session instead of prompting a fresh QR pairing. Clearing it here is the
+  // one part of "keep credentials" that must NOT apply to this channel type.
   async function disconnectChannel(slug, spec, meta) {
     try {
       await execFile('pm2', ['stop', spec.pm2Service], { timeout: queryTimeoutMs });
@@ -926,8 +944,19 @@ export function createChannelInstaller({
     } catch (e) {
       warn(`[${slug}] disabling ${spec.component} config failed: ${e.message}`);
     }
+    let clearedAuthDir = false;
+    if (spec.qrLoginAuthDir) {
+      try {
+        doRemoveAuthDir(spec.qrLoginAuthDir);
+        clearedAuthDir = true;
+        log(`[${slug}] cleared ${spec.component} auth dir (${spec.qrLoginAuthDir})`);
+      } catch (e) {
+        warn(`[${slug}] clearing ${spec.component} auth dir failed: ${e.message}`);
+      }
+    }
     await report(meta, 'disconnected', '');
-    log(`[${slug}] disconnect ${spec.component} binding=${meta.bindingId} → soft-disabled (kept installed + creds)`);
+    log(`[${slug}] disconnect ${spec.component} binding=${meta.bindingId} → soft-disabled`
+      + (clearedAuthDir ? ' (kept installed, cleared auth for fresh QR)' : ' (kept installed + creds)'));
   }
 
   return async function handleChannelCommand(orgConfig, frame) {

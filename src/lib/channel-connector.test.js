@@ -68,6 +68,7 @@ function makeConnector({
   const execCalls = [];
   const envWrites = [];
   const configWrites = [];
+  const authDirRemovals = [];
   const reports = [];
   const warns = [];
   const logs = [];
@@ -98,6 +99,7 @@ function makeConnector({
     execFile,
     writeEnv: (vars) => envWrites.push(vars),
     writeConfig: (component, patch) => configWrites.push({ component, patch }),
+    removeAuthDir: (relDir) => authDirRemovals.push(relDir),
     verifyConnected: async () => verify,
     reportResult: async (r) => reports.push(r),
     fetchDep: async (url, opts) => { fetches.push({ url, opts }); return fetchDep(url, opts); },
@@ -105,7 +107,7 @@ function makeConnector({
     warn: (m) => warns.push(m),
   });
 
-  return { handle, pulls, execCalls, envWrites, configWrites, reports, warns, logs, fetches };
+  return { handle, pulls, execCalls, envWrites, configWrites, authDirRemovals, reports, warns, logs, fetches };
 }
 
 function frame(data) {
@@ -224,7 +226,19 @@ test('disconnect: soft-disable (pm2 stop + enabled:false), keeps creds, NO unins
   assert.ok(h.execCalls.some((c) => c[0] === 'pm2' && c[1] === 'stop' && c[2] === 'zylos-feishu'));
   assert.deepEqual(h.configWrites, [{ component: 'feishu', patch: { enabled: false } }]);
   assert.equal(h.envWrites.length, 0);                               // creds kept (no .env change)
+  assert.equal(h.authDirRemovals.length, 0);                         // no qrLoginAuthDir on feishu — untouched
   assert.ok(!h.execCalls.some((c) => c[0] === 'zylos' && (c[1] === 'uninstall' || c[1] === 'remove')));
+  assert.equal(h.reports[0].status, 'disconnected');
+});
+
+test('disconnect whatsapp: soft-disable AND clears auth_info (live device-link session, not a reusable key)', async () => {
+  const h = makeConnector();
+  await h.handle(ORG, frame({
+    channel_type: 'whatsapp', action: 'disconnect', binding_id: 'bind-wa', request_id: 'req-wa',
+  }));
+  assert.ok(h.execCalls.some((c) => c[0] === 'pm2' && c[1] === 'stop' && c[2] === 'zylos-whatsapp'));
+  assert.deepEqual(h.configWrites, [{ component: 'whatsapp', patch: { enabled: false } }]);
+  assert.deepEqual(h.authDirRemovals, ['zylos/components/whatsapp/auth_info']);
   assert.equal(h.reports[0].status, 'disconnected');
 });
 
