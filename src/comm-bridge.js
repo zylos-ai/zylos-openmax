@@ -39,8 +39,7 @@ import { createOnlineReporter } from './lib/online-report.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
-import { saveCredentialCache, deleteCredentialCache, hasCredentialCache } from './lib/credential-cache.js';
-import { upsertConnection, removeConnection, indexPathForOrg, readIndex, replaceIndexFromList, writeCatalog } from './lib/connect-store.js';
+import { handleConnectionEvent } from './lib/connection-events.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
@@ -1449,7 +1448,7 @@ async function handleSystemEvent(orgConfig, frame) {
   }
 
   if (kind === 'connection') {
-    handleConnectionEvent(orgConfig, frame).catch(e =>
+    handleConnectionEventForOrg(orgConfig, frame).catch(e =>
       warn(`[${orgConfig.slug}] handleConnectionEvent: ${e.message}`));
     return;
   }
@@ -1547,140 +1546,13 @@ async function handleSystemEvent(orgConfig, frame) {
 // =============================================================================
 // Connection events — cws-connect credential lifecycle
 // =============================================================================
+// Logic lives in ./lib/connection-events.js (this file has side-effecting
+// top-level startup code that makes it unsafe to import in a test); wire this
+// module's log/warn in as the only override, production HTTP/storage defaults
+// otherwise.
 
-// cws-core derives the caller's identity from the authenticated principal for
-// this endpoint (security fix, 2026-08-04) — agent_member_id is no longer a
-// client-supplied query param, so this never sends one.
-async function acquireCredential(orgId, connectionId) {
-  return postForOrg(orgId, apiPath(`/connect/connections/${connectionId}/credential`));
-}
-
-function isEventForMe(data, selfMemberId) {
-  if (data.agent_member_id) return data.agent_member_id === selfMemberId;
-  if (Array.isArray(data.agent_member_ids)) return data.agent_member_ids.includes(selfMemberId);
-  return true;
-}
-
-async function handleConnectionEvent(orgConfig, frame) {
-  const { event, data } = frame.payload || {};
-  if (!event || !data) return;
-
-  const slug = orgConfig.slug;
-  const selfId = orgConfig.self?.member_id;
-  const connectionId = data.connection_id;
-
-  if (!connectionId) {
-    warn(`[${slug}] connection event ${event}: missing connection_id`);
-    return;
-  }
-
-  if (!isEventForMe(data, selfId)) {
-    log(`[${slug}] connection event ${event} not for us (conn=${connectionId}), skip`);
-    return;
-  }
-
-  const orgId = orgConfig.org_id;
-
-  // Record the connection in this org's local index (connection → application)
-  // for both modes. The index is org-scoped — the comm-bridge runs a WS per org,
-  // and a multi-org agent must not resolve one org's connection under another.
-  // `data.provider` is the application slug; application_id may be absent on the
-  // event and gets filled by a later conn.list refresh.
-  const idxPath = indexPathForOrg(orgId);
-  const indexConn = {
-    connection_id: connectionId,
-    application_id: data.application_id,
-    application_slug: data.provider,
-    status: 'active',
-  };
-
-  switch (event) {
-    case 'connection.authorized': {
-      const mode = data.credential_mode || '?';
-      log(`[${slug}] connection.authorized conn=${connectionId} mode=${mode}`);
-      upsertConnection(indexConn, idxPath);
-      // Only direct/token-mode connections cache a real access_token locally.
-      // Proxy-mode connections need no local credential (token is injected
-      // server-side by cws-connect at call time), so we skip the acquire+store
-      // entirely and just record the connection in the index.
-      if (data.credential_mode === 'direct') {
-        try {
-          const cred = await acquireCredential(orgId, connectionId);
-          saveCredentialCache(connectionId, cred, data.provider);
-          log(`[${slug}] direct credential acquired + cached conn=${connectionId} provider=${data.provider || '?'}`);
-        } catch (e) {
-          warn(`[${slug}] credential acquire failed conn=${connectionId}: ${e.message}`);
-        }
-      } else {
-        log(`[${slug}] proxy connection indexed (no local credential) conn=${connectionId} provider=${data.provider || '?'}`);
-      }
-      // The connection.authorized event carries only connection_id + provider
-      // (slug) — not the application_id or display name — so the thin upsert
-      // above leaves application_id/name null in the index (a nameless card in
-      // the UI until the next conn.list). Resolve the full identity from the
-      // authoritative agent-connections list now, and warm the app's
-      // action-catalog cache so the app is invokable immediately after authorize
-      // instead of paying a lazy fetch on first use. Best-effort: any failure
-      // here never breaks the credential/index path above.
-      try {
-        const list = await getForOrg(orgId, apiPath('/connect/agents/me/connections'));
-        replaceIndexFromList(Array.isArray(list) ? list : (list?.connections || []), idxPath);
-        const applicationId = readIndex(idxPath)?.connections?.[connectionId]?.applicationId;
-        if (applicationId) {
-          const res = await getForOrg(orgId, apiPath(`/connect/applications/${applicationId}/actions`));
-          const actions = Array.isArray(res) ? res : (res?.actions || []);
-          writeCatalog(applicationId, actions);
-          log(`[${slug}] identity resolved + action-catalog warmed conn=${connectionId} app=${applicationId} actions=${actions.length}`);
-        }
-      } catch (e) {
-        warn(`[${slug}] identity/catalog warm failed conn=${connectionId}: ${e.message}`);
-      }
-      break;
-    }
-
-    case 'connection.revoked':
-    case 'connection.disconnected': {
-      log(`[${slug}] ${event} conn=${connectionId}`);
-      removeConnection(connectionId, idxPath);
-      deleteCredentialCache(connectionId);
-      log(`[${slug}] connection unindexed + credential cache cleared conn=${connectionId}`);
-      break;
-    }
-
-    case 'connection.credential_updated': {
-      log(`[${slug}] credential_updated conn=${connectionId}`);
-      upsertConnection(indexConn, idxPath);
-      // The upstream credential_updated event does NOT carry credential_mode, so
-      // we cannot gate on it. Only direct/token-mode connections keep a local
-      // credential file, so "a cache file exists" is our direct-detector: refresh
-      // it. Proxy-mode connections have no file and are correctly skipped (no
-      // wasted acquire). If the connection has flipped to proxy, drop the now-stale
-      // file rather than leave an old token behind.
-      if (hasCredentialCache(connectionId)) {
-        try {
-          const cred = await acquireCredential(orgId, connectionId);
-          if (cred?.credential_mode === 'direct') {
-            saveCredentialCache(connectionId, cred, data.provider);
-            log(`[${slug}] direct credential re-acquired conn=${connectionId} provider=${data.provider || '?'}`);
-          } else {
-            deleteCredentialCache(connectionId);
-            log(`[${slug}] connection no longer direct; dropped stale credential conn=${connectionId}`);
-          }
-        } catch (e) {
-          warn(`[${slug}] credential re-acquire failed conn=${connectionId}: ${e.message}`);
-        }
-      }
-      break;
-    }
-
-    case 'connection.reauth_needed': {
-      warn(`[${slug}] reauth_needed conn=${connectionId} app=${data.application_id || '?'} trigger=${data.trigger || '?'}`);
-      break;
-    }
-
-    default:
-      warn(`[${slug}] unknown connection event: ${event}`);
-  }
+function handleConnectionEventForOrg(orgConfig, frame) {
+  return handleConnectionEvent(orgConfig, frame, { log, warn });
 }
 
 // =============================================================================
