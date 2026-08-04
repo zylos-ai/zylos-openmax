@@ -1548,11 +1548,11 @@ async function handleSystemEvent(orgConfig, frame) {
 // Connection events — cws-connect credential lifecycle
 // =============================================================================
 
-async function acquireCredential(orgId, connectionId, agentMemberId) {
-  return postForOrg(
-    orgId,
-    apiPath(`/connect/connections/${connectionId}/credential?agent_member_id=${encodeURIComponent(agentMemberId)}`),
-  );
+// cws-core derives the caller's identity from the authenticated principal for
+// this endpoint (security fix, 2026-08-04) — agent_member_id is no longer a
+// client-supplied query param, so this never sends one.
+async function acquireCredential(orgId, connectionId) {
+  return postForOrg(orgId, apiPath(`/connect/connections/${connectionId}/credential`));
 }
 
 function isEventForMe(data, selfMemberId) {
@@ -1605,7 +1605,7 @@ async function handleConnectionEvent(orgConfig, frame) {
       // entirely and just record the connection in the index.
       if (data.credential_mode === 'direct') {
         try {
-          const cred = await acquireCredential(orgId, connectionId, selfId);
+          const cred = await acquireCredential(orgId, connectionId);
           saveCredentialCache(connectionId, cred, data.provider);
           log(`[${slug}] direct credential acquired + cached conn=${connectionId} provider=${data.provider || '?'}`);
         } catch (e) {
@@ -1623,7 +1623,7 @@ async function handleConnectionEvent(orgConfig, frame) {
       // instead of paying a lazy fetch on first use. Best-effort: any failure
       // here never breaks the credential/index path above.
       try {
-        const list = await getForOrg(orgId, apiPath(`/connect/agents/${selfId}/connections`));
+        const list = await getForOrg(orgId, apiPath('/connect/agents/me/connections'));
         replaceIndexFromList(Array.isArray(list) ? list : (list?.connections || []), idxPath);
         const applicationId = readIndex(idxPath)?.connections?.[connectionId]?.applicationId;
         if (applicationId) {
@@ -1658,7 +1658,7 @@ async function handleConnectionEvent(orgConfig, frame) {
       // file rather than leave an old token behind.
       if (hasCredentialCache(connectionId)) {
         try {
-          const cred = await acquireCredential(orgId, connectionId, selfId);
+          const cred = await acquireCredential(orgId, connectionId);
           if (cred?.credential_mode === 'direct') {
             saveCredentialCache(connectionId, cred, data.provider);
             log(`[${slug}] direct credential re-acquired conn=${connectionId} provider=${data.provider || '?'}`);
