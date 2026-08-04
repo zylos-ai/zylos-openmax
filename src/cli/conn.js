@@ -123,18 +123,15 @@ const COMMANDS = {
   'conn.acquire': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const agentId = resolveSelfMemberId();
-    if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
-    return post(apiPath(`/connect/connections/${connId}/credential?agent_member_id=${encodeURIComponent(agentId)}`));
+    if (!resolveSelfMemberId()) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+    return post(apiPath(`/connect/connections/${connId}/credential`));
   },
 
   // Proxy a request through a connection (proxy mode).
   'conn.proxy': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const agentId = resolveSelfMemberId();
     return post(apiPath(`/connect/connections/${connId}/proxy`), {
-      agent_member_id: agentId,
       method: params.method || 'GET',
       url: params.url,
       headers: params.headers,
@@ -144,15 +141,14 @@ const COMMANDS = {
 
   // Discover the named actions available for a connection (action discovery).
   // Returns [{toolkit, action, method, description, params, input_schema}];
-  // pair with conn.execute to invoke one by "toolkit-slug/action-name". Carries
-  // the agent's member_id so cws-connect scopes discovery to the same
-  // connection-agent authorization boundary as conn.execute/conn.proxy.
+  // pair with conn.execute to invoke one by "toolkit-slug/action-name". cws-core
+  // scopes discovery to the caller's own connection-agent authorization
+  // boundary (derived server-side), same as conn.execute/conn.proxy.
   'conn.actions': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const agentId = resolveSelfMemberId();
-    if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
-    return get(apiPath(`/connect/connections/${connId}/actions?agent_member_id=${encodeURIComponent(agentId)}`));
+    if (!resolveSelfMemberId()) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+    return get(apiPath(`/connect/connections/${connId}/actions`));
   },
 
   // Execute a registered named action through a connection (proxy mode:
@@ -162,11 +158,9 @@ const COMMANDS = {
   'conn.execute': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const agentId = resolveSelfMemberId();
-    if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+    if (!resolveSelfMemberId()) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
     if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
     return post(apiPath(`/connect/connections/${connId}/actions/execute`), {
-      agent_member_id: agentId,
       action: params.action,
       params: params.params || {},
     });
@@ -233,7 +227,6 @@ const COMMANDS = {
       // Execute against the resolved connection using the SAME org's JWT — a
       // multi-org agent must not run one org's connection with another's token.
       return await postForOrg(orgId, apiPath(`/connect/connections/${entry.id}/actions/execute`), {
-        agent_member_id: agentId,
         action: params.action,
         params: params.params || {},
       });
