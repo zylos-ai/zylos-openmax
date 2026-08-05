@@ -35,6 +35,7 @@ import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
 import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
+import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
@@ -1569,27 +1570,32 @@ function handleConnectionEventForOrg(orgConfig, frame) {
 // system frame over cws-comm; we pull the bind credentials from cws-core and
 // install/start the mapped zylos IM component. Best-effort; never throws.
 // (Full flow, deps, and DEFERRED follow-ups documented in channel-connector.js.)
+// Report the terminal connect/disconnect outcome back to cws-connect through
+// the cws-core BFF passthrough. request_id is echoed so cws-connect can match it
+// against the in-flight command (its authorization + idempotency check);
+// binding_id addresses the row. Shared by the live report and the resend task so
+// a queued result is delivered on exactly the same path it originally took.
+const postConnectResult = (r) => postForOrg(
+  r.orgId,
+  apiPath(`/connect/channel-bindings/${r.bindingId}/result`),
+  { status: r.status, detail: r.detail || '', request_id: r.requestId || '' },
+);
+
+// Results the connector could not deliver even after its own retries. The
+// binding stays 'pending' until one lands, so the queue is on disk: a crash or
+// restart must not turn a connected channel into a permanent spinner.
+const connectResultQueue = createConnectResultQueue({
+  sendResult: postConnectResult,
+  log,
+  warn,
+});
+
 const handleChannelCommand = createChannelInstaller({
   getForOrgWithHeaders,
   apiPath,
   dedupe,
-  // Report the terminal connect/disconnect outcome back to cws-connect through
-  // the cws-core BFF passthrough. request_id is echoed so cws-connect can match
-  // it against the in-flight command (its authorization + idempotency check);
-  // binding_id addresses the row. Best-effort — the connector wraps this and
-  // only warns on failure, never throws.
-  // Queue a result the connector could not deliver after its own retries. The
-  // binding stays 'pending' until it lands, so this must survive a restart.
-  persistUndeliveredResult: async (r) => {
-    queueUndeliveredConnectResult(r);
-  },
-  reportResult: async (r) => {
-    await postForOrg(
-      r.orgId,
-      apiPath(`/connect/channel-bindings/${r.bindingId}/result`),
-      { status: r.status, detail: r.detail || '', request_id: r.requestId || '' },
-    );
-  },
+  persistUndeliveredResult: async (r) => { connectResultQueue.queue(r); },
+  reportResult: postConnectResult,
   // Relay a QR-login code (wechat/whatsapp) to the binding so the frontend can
   // render it while the card is in the connecting state. Same auth model as
   // /result (agent principal at cws-core + request_id one-shot at cws-connect).
@@ -2304,68 +2310,6 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // fails. Deliberately narrow — it asks the client to ensure an attempt is in
 // flight and lets the client's own backoff decide timing, so a persistently
 // broken environment cannot be turned into a connect storm from here.
-// ---------------------------------------------------------------------------
-// Undelivered connect-results. A binding stays 'pending' until its result is
-// recorded, and a pending binding is exactly what leaves the UI spinning with
-// no way to retry — so a result that could not be POSTed is kept on disk and
-// re-sent until it lands, including across restarts.
-// ---------------------------------------------------------------------------
-const CONNECT_RESULT_QUEUE_FILE = path.join(DATA_DIR, 'pending-connect-results.json');
-const CONNECT_RESULT_RESEND_INTERVAL_MS = 60 * 1000;
-const CONNECT_RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;  // stop trying after a day
-const CONNECT_RESULT_QUEUE_MAX = 200;
-
-function readConnectResultQueue() {
-  try {
-    const raw = fs.readFileSync(CONNECT_RESULT_QUEUE_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch { return []; }
-}
-
-function writeConnectResultQueue(items) {
-  try {
-    fs.writeFileSync(CONNECT_RESULT_QUEUE_FILE, JSON.stringify(items, null, 2), { mode: 0o600 });
-  } catch (e) {
-    warn(`could not persist connect-result queue: ${e.message}`);
-  }
-}
-
-function queueUndeliveredConnectResult(r) {
-  const items = readConnectResultQueue();
-  // One entry per binding+request: re-reporting the same command is pointless,
-  // and a newer result for the same binding supersedes an older one.
-  const key = (x) => `${x.bindingId}:${x.requestId || ''}`;
-  const next = items.filter((x) => key(x) !== key(r));
-  next.push({ ...r, queuedAt: Date.now() });
-  writeConnectResultQueue(next.slice(-CONNECT_RESULT_QUEUE_MAX));
-  warn(`connect-result queued for resend binding=${r.bindingId} status=${r.status}`);
-}
-
-async function resendUndeliveredConnectResults() {
-  const items = readConnectResultQueue();
-  if (!items.length) return;
-  const keep = [];
-  for (const item of items) {
-    if (Date.now() - (item.queuedAt || 0) > CONNECT_RESULT_MAX_AGE_MS) {
-      warn(`dropping connect-result older than 24h binding=${item.bindingId} status=${item.status}`);
-      continue;
-    }
-    try {
-      await postForOrg(
-        item.orgId,
-        apiPath(`/connect/channel-bindings/${item.bindingId}/result`),
-        { status: item.status, detail: item.detail || '', request_id: item.requestId || '' },
-      );
-      log(`connect-result resend succeeded binding=${item.bindingId} status=${item.status}`);
-    } catch (e) {
-      warn(`connect-result resend failed binding=${item.bindingId}: ${e.message}`);
-      keep.push(item);
-    }
-  }
-  writeConnectResultQueue(keep);
-}
-
 function superviseWsStalls() {
   for (const { slug, ws } of wsClients) {
     if (!ws || ws.state === 'open') continue;
@@ -2387,7 +2331,7 @@ tasks.register('ws-stall-watchdog', superviseWsStalls, WS_STALL_CHECK_INTERVAL_M
 });
 // runOnStart so a result stranded by a crash/restart is delivered promptly
 // rather than waiting out the first interval.
-tasks.register('connect-result-resend', resendUndeliveredConnectResults,
+tasks.register('connect-result-resend', () => connectResultQueue.resend(),
   CONNECT_RESULT_RESEND_INTERVAL_MS, { runOnStart: true });
 tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
 tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
