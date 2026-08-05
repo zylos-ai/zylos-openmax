@@ -96,6 +96,12 @@ const DEFAULT_WS_HEARTBEAT_MS     = 30 * 1000;    // 30_000
 // watchdog never starves when server pings don't reach us. Overridable via
 // `config.server.ws_ping_interval_seconds` (seconds).
 const DEFAULT_WS_PING_INTERVAL_MS = 20 * 1000;    // 20_000
+// Stall supervisor. A dial stuck in CONNECTING is not "disconnected" — no close
+// arrives, so the reconnect path is never entered — hence a phase-based check
+// rather than a liveness one. The threshold must sit above ws.js's own dial
+// deadline so this only ever catches what that missed.
+const WS_STALL_CHECK_INTERVAL_MS = 30 * 1000;
+const WS_STALL_THRESHOLD_MS      = 90 * 1000;
 
 const tasks = new TaskRegistry();
 
@@ -2107,6 +2113,8 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     deviceId:            config.agent?.device_id,
     clientVersion:       config.agent?.app_version,
     reconnectMaxMs:      config.server?.reconnect_max_delay ?? DEFAULT_WS_RECONNECT_MAX_MS,
+    handshakeTimeoutMs:  config.server?.ws_handshake_timeout_ms ?? undefined,
+    dialTimeoutMs:       config.server?.ws_dial_timeout_ms ?? undefined,
     heartbeatIntervalMs: config.server?.heartbeat_interval  ?? DEFAULT_WS_HEARTBEAT_MS,
     pingIntervalMs:      config.server?.ws_ping_interval_seconds != null
       ? config.server.ws_ping_interval_seconds * 1000
@@ -2285,6 +2293,31 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+// Backstop for a connection phase that stops advancing. ws.js already retries
+// every close and every ticket failure with unbounded backoff, so this exists
+// only for the case none of that covers: an attempt that neither opens nor
+// fails. Deliberately narrow — it asks the client to ensure an attempt is in
+// flight and lets the client's own backoff decide timing, so a persistently
+// broken environment cannot be turned into a connect storm from here.
+function superviseWsStalls() {
+  for (const { slug, ws } of wsClients) {
+    if (!ws || ws.state === 'open') continue;
+    // Respect a deliberate stop: a client that gave up must not be revived by
+    // a timer, or we hot-loop against a server that already refused us.
+    if (ws.stopped) continue;
+    // Only orgs still enabled in the live config — a disabled or removed org
+    // should stay down.
+    if (!activeOrgConfigs.has(slug)) continue;
+    const stalled = ws.stalledMs();
+    if (stalled < WS_STALL_THRESHOLD_MS) continue;
+    warn(`[${slug}] ws stuck in "${ws.state}" for ${Math.round(stalled / 1000)}s — asking for a fresh attempt`);
+    ws.ensureConnecting('stall-watchdog');
+  }
+}
+
+tasks.register('ws-stall-watchdog', superviseWsStalls, WS_STALL_CHECK_INTERVAL_MS, {
+  delay: WS_STALL_CHECK_INTERVAL_MS,
+});
 tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
 tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
 if (config.metricsReport?.enabled !== false) {
@@ -2310,6 +2343,7 @@ if (config.channelLiveness?.enabled !== false) {
     delay: CHANNEL_LIVENESS_INITIAL_DELAY_MS,
   });
 }
+tasks.start('ws-stall-watchdog');
 tasks.start('frame-metrics');
 tasks.start('owner-config-sync');
 if (config.metricsReport?.enabled !== false) tasks.start('metrics-report');

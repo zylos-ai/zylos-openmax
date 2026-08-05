@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.4-beta.2] — 2026-08-05
+
+### Fixed
+
+- **A WebSocket dial that was accepted but never answered left the agent offline permanently.** `WsClient._connect()` created the socket and attached handlers, but armed no timer for the pre-open phase — the frame watchdog only starts *inside* the `open` handler. So a dial that produced no `open`, no `error` and no `close` (black-holed hop, silent proxy, upgrade never answered) parked the client in `CONNECTING` with no timer left running: no reconnect was ever scheduled, nothing further was logged, and since presence is leased off this WebSocket the agent stayed offline until someone restarted the process. This matches an observed incident where a runtime generation logged `connecting…`, never reached `[ws] open`, was never seen by cws-comm, and sat that way until it was paused ~5 minutes later.
+  - The `ws` library's `handshakeTimeout` is now passed through (default 15s, `server.ws_handshake_timeout_ms`), so a hung upgrade surfaces as an `error` and enters the existing backoff-retry path.
+  - An absolute dial deadline (default 25s, `server.ws_dial_timeout_ms`) backs it up for hangs the library does not surface: the socket is terminated and a retry scheduled. It is only armed while the socket is genuinely still `CONNECTING`, and never keeps the process alive on its own.
+  - `_scheduleReconnect()` is now idempotent. The dial deadline and a late `close` for the same dead socket could otherwise each queue an attempt, and two concurrent dials on one credential set is precisely what causes duplicate-session trouble.
+  - Reconnect logging now records how long the ws-ticket sat between being minted and being dialed, so a failed connect no longer needs a live reproduction to explain.
+
+### Added
+
+- **A stall supervisor (`ws-stall-watchdog`, every 30s).** Judged on connection *phase*, not liveness: a stuck dial is `CONNECTING`, not disconnected, so no liveness check can see it. If a client has been out of `open` for more than 90s it is asked to ensure an attempt is in flight. Deliberately narrow — it skips clients that were stopped on purpose and orgs no longer enabled in the live config, and it delegates timing to the client's own backoff so a broken environment cannot be amplified into a connect storm.
+- `WsClient.ensureConnecting()` for that supervisor, plus `state`/`stalledMs()` phase tracking. `forceReconnect()` keeps its documented no-op-without-a-socket contract, which `ensureConnecting()` handles instead.
+- Six regression tests, including a socket that stays `CONNECTING` and emits nothing — the exact shape that used to wedge permanently.
+
 ## [2.12.4-beta.1] — 2026-08-04
 
 ### Security
