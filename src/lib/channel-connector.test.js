@@ -63,12 +63,20 @@ function makeConnector({
   fetchDep = fakeFetch(), // probe passes by default
   pm2Fails = false,       // every pm2 invocation throws (restart AND start)
   installFails = false,   // zylos add/upgrade throws
+  // connect-result delivery: fail the first N report attempts (0 = reporter
+  // always succeeds, which is what every pre-existing test assumes)
+  reportFailTimes = 0,
+  reportAttempts,         // undefined → the installer's own default (3)
+  persistFails = false,   // the queue-for-resend hook itself throws
 } = {}) {
   const pulls = [];
   const execCalls = [];
   const envWrites = [];
   const configWrites = [];
   const reports = [];
+  const reportAttemptsMade = [];
+  const queued = [];
+  const sleeps = [];
   const warns = [];
   const logs = [];
   const fetches = [];
@@ -99,13 +107,26 @@ function makeConnector({
     writeEnv: (vars) => envWrites.push(vars),
     writeConfig: (component, patch) => configWrites.push({ component, patch }),
     verifyConnected: async () => verify,
-    reportResult: async (r) => reports.push(r),
+    reportResult: async (r) => {
+      reportAttemptsMade.push(r);
+      if (reportAttemptsMade.length <= reportFailTimes) throw new Error('503 upstream unavailable');
+      reports.push(r);
+    },
+    ...(reportAttempts === undefined ? {} : { reportAttempts }),
+    persistUndeliveredResult: async (r) => {
+      if (persistFails) throw new Error('EROFS: read-only file system');
+      queued.push(r);
+    },
+    reportSleep: async (ms) => { sleeps.push(ms); },   // no real waiting in tests
     fetchDep: async (url, opts) => { fetches.push({ url, opts }); return fetchDep(url, opts); },
     log: (m) => logs.push(m),
     warn: (m) => warns.push(m),
   });
 
-  return { handle, pulls, execCalls, envWrites, configWrites, reports, warns, logs, fetches };
+  return {
+    handle, pulls, execCalls, envWrites, configWrites, reports,
+    reportAttemptsMade, queued, sleeps, warns, logs, fetches,
+  };
 }
 
 function frame(data) {
@@ -295,6 +316,87 @@ test('missing binding_id: warns, no work', async () => {
   await h.handle(ORG, frame({ channel_type: 'feishu', action: 'connect', request_id: 'r' }));
   assert.equal(h.pulls.length, 0);
   assert.match(h.warns[0], /missing binding_id/);
+});
+
+// ── connect-result delivery: retry + queue-for-resend ────────────────────────
+// Regression cover for the live incident: a `connected` report came back 503
+// while the channel was actually open, the connector gave up after one POST, and
+// the binding stayed `pending` — which the UI renders as a permanent spinner.
+
+const connectFrame = (over = {}) => frame({
+  channel_type: 'feishu', action: 'connect', binding_id: 'bind-r1',
+  request_id: 'req-r1', credential_pull_token: 'tok-r1', agent_member_id: 'm-self',
+  ...over,
+});
+
+test('connect-result: transient failure then success → delivered, nothing queued', async () => {
+  const h = makeConnector({ reportFailTimes: 1 });
+  await h.handle(ORG, connectFrame());
+
+  assert.equal(h.reportAttemptsMade.length, 2, 'retried once after the 5xx');
+  assert.equal(h.reports.length, 1, 'exactly one result recorded upstream');
+  assert.equal(h.reports[0].status, 'connected');
+  assert.equal(h.queued.length, 0, 'a delivered result must not be queued');
+  assert.ok(h.logs.some((m) => /connect-result delivered on attempt 2/.test(m)));
+  assert.match(h.warns[0], /connect-result report failed .*\(attempt 1\/3\)/);
+  assert.ok(!/queuing for resend/.test(h.warns[0]), 'not the last attempt yet');
+});
+
+test('connect-result: every attempt fails → payload queued for resend, flow never throws', async () => {
+  const h = makeConnector({ reportFailTimes: 99 });
+  await assert.doesNotReject(h.handle(ORG, connectFrame()));
+
+  assert.equal(h.reportAttemptsMade.length, 3, 'default is 3 attempts');
+  assert.equal(h.reports.length, 0);
+  assert.equal(h.queued.length, 1, 'undelivered result handed to the queue');
+  // The queued payload must carry everything the resend needs to re-POST.
+  assert.deepEqual(h.queued[0], {
+    slug: ORG.slug, orgId: ORG.org_id, bindingId: 'bind-r1',
+    channelType: 'feishu', requestId: 'req-r1', status: 'connected', detail: '',
+  });
+  assert.match(h.warns.at(-1), /\(attempt 3\/3\).*queuing for resend/);
+});
+
+test('connect-result: retry backoff grows and does not sleep after the last attempt', async () => {
+  const h = makeConnector({ reportFailTimes: 99 });
+  await h.handle(ORG, connectFrame());
+  assert.deepEqual(h.sleeps, [2000, 4000], 'one sleep between attempts, none after the last');
+});
+
+test('connect-result: reportAttempts is honoured (single attempt → straight to the queue)', async () => {
+  const h = makeConnector({ reportFailTimes: 99, reportAttempts: 1 });
+  await h.handle(ORG, connectFrame());
+  assert.equal(h.reportAttemptsMade.length, 1);
+  assert.deepEqual(h.sleeps, [], 'nothing to back off from');
+  assert.equal(h.queued.length, 1);
+});
+
+test('connect-result: a failing queue hook is warned about, not thrown out of the flow', async () => {
+  const h = makeConnector({ reportFailTimes: 99, persistFails: true });
+  await assert.doesNotReject(h.handle(ORG, connectFrame()));
+  assert.equal(h.queued.length, 0);
+  assert.ok(h.warns.some((m) => /could not queue connect-result for resend: EROFS/.test(m)));
+});
+
+test('connect-result: an error receipt is retried and queued too (a stranded failure also spins the UI)', async () => {
+  const h = makeConnector({ reportFailTimes: 99, verify: false });
+  await h.handle(ORG, connectFrame({ binding_id: 'bind-r2', request_id: 'req-r2' }));
+
+  assert.equal(h.reportAttemptsMade.length, 3);
+  assert.equal(h.queued.length, 1);
+  assert.equal(h.queued[0].status, 'error');
+  assert.equal(h.queued[0].bindingId, 'bind-r2');
+  assert.ok(h.queued[0].detail, 'verification failure detail preserved for the resend');
+});
+
+test('connect-result: disconnect receipts get the same retry + queue treatment', async () => {
+  const h = makeConnector({ reportFailTimes: 99 });
+  await h.handle(ORG, frame({
+    channel_type: 'feishu', action: 'disconnect', binding_id: 'bind-r3', request_id: 'req-r3',
+  }));
+  assert.equal(h.reportAttemptsMade.length, 3);
+  assert.equal(h.queued.length, 1);
+  assert.equal(h.queued[0].status, 'disconnected');
 });
 
 // ── batch 1: 10-channel expansion ────────────────────────────────────────────

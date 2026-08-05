@@ -714,6 +714,11 @@ export function createChannelInstaller({
   writeConfig,
   verifyConnected,
   reportResult,
+  // Retry/queue policy for connect-result delivery (overridable for tests).
+  reportAttempts = 3,
+  reportRetryDelayMs = 2000,
+  persistUndeliveredResult,
+  reportSleep = sleep,
   reportQR,
   fetchDep = fetch,
   log = () => {},
@@ -738,9 +743,31 @@ export function createChannelInstaller({
       + (r.detail ? ` detail=${r.detail}` : ''));
   });
 
+  // Delivering the result is not optional: the binding stays 'pending' until it
+  // arrives, and a pending binding is what makes the UI spin with no way to
+  // retry. A single best-effort POST meant one transient 5xx wedged the channel
+  // permanently, so retry with backoff, and hand anything still undelivered to
+  // the caller to persist and re-send later (see comm-bridge's resend task).
   const report = async (meta, status, detail = '') => {
-    try { await doReport({ ...meta, status, detail }); }
-    catch (e) { warn(`[${meta.slug}] connect-result report failed binding=${meta.bindingId}: ${e.message}`); }
+    const payload = { ...meta, status, detail };
+    for (let attempt = 1; attempt <= reportAttempts; attempt++) {
+      try {
+        await doReport(payload);
+        if (attempt > 1) log(`[${meta.slug}] connect-result delivered on attempt ${attempt} binding=${meta.bindingId}`);
+        return true;
+      } catch (e) {
+        const last = attempt === reportAttempts;
+        warn(`[${meta.slug}] connect-result report failed binding=${meta.bindingId}`
+          + ` (attempt ${attempt}/${reportAttempts}): ${e.message}`
+          + (last ? ' — queuing for resend' : ''));
+        if (!last) await reportSleep(reportRetryDelayMs * attempt);
+      }
+    }
+    // Exhausted: persist so a later sweep (or the next process start) delivers
+    // it. Without this the channel is connected but recorded as pending.
+    try { await persistUndeliveredResult?.(payload); }
+    catch (e) { warn(`[${meta.slug}] could not queue connect-result for resend: ${e.message}`); }
+    return false;
   };
 
   // QR relay: production (comm-bridge.js) injects a reporter that POSTs to

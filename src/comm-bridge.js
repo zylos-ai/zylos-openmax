@@ -35,6 +35,7 @@ import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
 import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
+import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
@@ -96,6 +97,12 @@ const DEFAULT_WS_HEARTBEAT_MS     = 30 * 1000;    // 30_000
 // watchdog never starves when server pings don't reach us. Overridable via
 // `config.server.ws_ping_interval_seconds` (seconds).
 const DEFAULT_WS_PING_INTERVAL_MS = 20 * 1000;    // 20_000
+// Stall supervisor. A dial stuck in CONNECTING is not "disconnected" — no close
+// arrives, so the reconnect path is never entered — hence a phase-based check
+// rather than a liveness one. The threshold must sit above ws.js's own dial
+// deadline so this only ever catches what that missed.
+const WS_STALL_CHECK_INTERVAL_MS = 30 * 1000;
+const WS_STALL_THRESHOLD_MS      = 90 * 1000;
 
 const tasks = new TaskRegistry();
 
@@ -1563,22 +1570,40 @@ function handleConnectionEventForOrg(orgConfig, frame) {
 // system frame over cws-comm; we pull the bind credentials from cws-core and
 // install/start the mapped zylos IM component. Best-effort; never throws.
 // (Full flow, deps, and DEFERRED follow-ups documented in channel-connector.js.)
+// Report the terminal connect/disconnect outcome back to cws-connect through
+// the cws-core BFF passthrough. request_id is echoed so cws-connect can match it
+// against the in-flight command (its authorization + idempotency check);
+// binding_id addresses the row. Shared by the live report and the resend task so
+// a queued result is delivered on exactly the same path it originally took.
+// Bounded: native fetch has no deadline, and this call sits both inside the
+// connector's retry loop and inside the interval-driven resend, so a connection
+// that is accepted and never answered would stall the one and pile up runs of
+// the other. 20s is well beyond a healthy round-trip; exceeding it is a failure
+// worth retrying, which both callers already know how to do.
+const CONNECT_RESULT_POST_TIMEOUT_MS = 20_000;
+
+const postConnectResult = (r) => postForOrg(
+  r.orgId,
+  apiPath(`/connect/channel-bindings/${r.bindingId}/result`),
+  { status: r.status, detail: r.detail || '', request_id: r.requestId || '' },
+  { timeoutMs: CONNECT_RESULT_POST_TIMEOUT_MS },
+);
+
+// Results the connector could not deliver even after its own retries. The
+// binding stays 'pending' until one lands, so the queue is on disk: a crash or
+// restart must not turn a connected channel into a permanent spinner.
+const connectResultQueue = createConnectResultQueue({
+  sendResult: postConnectResult,
+  log,
+  warn,
+});
+
 const handleChannelCommand = createChannelInstaller({
   getForOrgWithHeaders,
   apiPath,
   dedupe,
-  // Report the terminal connect/disconnect outcome back to cws-connect through
-  // the cws-core BFF passthrough. request_id is echoed so cws-connect can match
-  // it against the in-flight command (its authorization + idempotency check);
-  // binding_id addresses the row. Best-effort — the connector wraps this and
-  // only warns on failure, never throws.
-  reportResult: async (r) => {
-    await postForOrg(
-      r.orgId,
-      apiPath(`/connect/channel-bindings/${r.bindingId}/result`),
-      { status: r.status, detail: r.detail || '', request_id: r.requestId || '' },
-    );
-  },
+  persistUndeliveredResult: async (r) => { connectResultQueue.queue(r); },
+  reportResult: postConnectResult,
   // Relay a QR-login code (wechat/whatsapp) to the binding so the frontend can
   // render it while the card is in the connecting state. Same auth model as
   // /result (agent principal at cws-core + request_id one-shot at cws-connect).
@@ -2107,6 +2132,8 @@ function startOrgWs(orgConfig, wsBaseUrl) {
     deviceId:            config.agent?.device_id,
     clientVersion:       config.agent?.app_version,
     reconnectMaxMs:      config.server?.reconnect_max_delay ?? DEFAULT_WS_RECONNECT_MAX_MS,
+    handshakeTimeoutMs:  config.server?.ws_handshake_timeout_ms ?? undefined,
+    dialTimeoutMs:       config.server?.ws_dial_timeout_ms ?? undefined,
     heartbeatIntervalMs: config.server?.heartbeat_interval  ?? DEFAULT_WS_HEARTBEAT_MS,
     pingIntervalMs:      config.server?.ws_ping_interval_seconds != null
       ? config.server.ws_ping_interval_seconds * 1000
@@ -2285,6 +2312,35 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
+// Backstop for a connection phase that stops advancing. ws.js already retries
+// every close and every ticket failure with unbounded backoff, so this exists
+// only for the case none of that covers: an attempt that neither opens nor
+// fails. Deliberately narrow — it asks the client to ensure an attempt is in
+// flight and lets the client's own backoff decide timing, so a persistently
+// broken environment cannot be turned into a connect storm from here.
+function superviseWsStalls() {
+  for (const { slug, ws } of wsClients) {
+    if (!ws || ws.state === 'open') continue;
+    // Respect a deliberate stop: a client that gave up must not be revived by
+    // a timer, or we hot-loop against a server that already refused us.
+    if (ws.stopped) continue;
+    // Only orgs still enabled in the live config — a disabled or removed org
+    // should stay down.
+    if (!activeOrgConfigs.has(slug)) continue;
+    const stalled = ws.stalledMs();
+    if (stalled < WS_STALL_THRESHOLD_MS) continue;
+    warn(`[${slug}] ws stuck in "${ws.state}" for ${Math.round(stalled / 1000)}s — asking for a fresh attempt`);
+    ws.ensureConnecting('stall-watchdog');
+  }
+}
+
+tasks.register('ws-stall-watchdog', superviseWsStalls, WS_STALL_CHECK_INTERVAL_MS, {
+  delay: WS_STALL_CHECK_INTERVAL_MS,
+});
+// runOnStart so a result stranded by a crash/restart is delivered promptly
+// rather than waiting out the first interval.
+tasks.register('connect-result-resend', () => connectResultQueue.resend(),
+  CONNECT_RESULT_RESEND_INTERVAL_MS, { runOnStart: true });
 tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
 tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
 if (config.metricsReport?.enabled !== false) {
@@ -2310,6 +2366,8 @@ if (config.channelLiveness?.enabled !== false) {
     delay: CHANNEL_LIVENESS_INITIAL_DELAY_MS,
   });
 }
+tasks.start('ws-stall-watchdog');
+tasks.start('connect-result-resend');
 tasks.start('frame-metrics');
 tasks.start('owner-config-sync');
 if (config.metricsReport?.enabled !== false) tasks.start('metrics-report');

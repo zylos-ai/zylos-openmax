@@ -63,6 +63,16 @@ export class WsClient {
     // Must stay comfortably below the watchdog window
     // (heartbeatIntervalMs * 2 + FRAME_GRACE_MS = 65s at defaults).
     pingIntervalMs = 20000,
+    // Upgrade/handshake budget handed to the `ws` lib. Without it the lib waits
+    // indefinitely, so a dial that is accepted at TCP level but never answered
+    // (black-holed hop, silent proxy) leaves the client in CONNECTING forever —
+    // no open, no error, no close, therefore no reconnect and no log line. That
+    // is the permanent-offline wedge this exists to prevent.
+    handshakeTimeoutMs = 15000,
+    // Belt to the handshakeTimeout brace: an absolute deadline for reaching
+    // `open`, covering hangs the lib's own timeout does not surface. Must stay
+    // above handshakeTimeoutMs so the lib reports first when it can.
+    dialTimeoutMs = 25000,
     onOpen,
     onMessage,
     onClose,
@@ -80,6 +90,8 @@ export class WsClient {
     this.reconnectMaxMs = reconnectMaxMs;
     this.heartbeatIntervalMs = heartbeatIntervalMs;
     this.pingIntervalMs = pingIntervalMs;
+    this.handshakeTimeoutMs = handshakeTimeoutMs;
+    this.dialTimeoutMs = dialTimeoutMs;
     this.onOpen    = onOpen    || (() => {});
     this.onMessage = onMessage || (() => {});
     this.onClose   = onClose   || (() => {});
@@ -92,8 +104,30 @@ export class WsClient {
     this.frameWatchdog = null;
     this.reconnectTimer = null;
     this.pingTimer = null;
+    this.dialTimer = null;
     this.lastFrameAt = 0;
+    // Connection phase, for the supervisor: 'idle' | 'connecting' | 'open' |
+    // 'closed'. `stateSince` lets a watchdog detect a phase that has not
+    // advanced — the only way to notice a stalled dial, since a stuck socket is
+    // CONNECTING (not CLOSED) and so looks nothing like "disconnected".
+    this.state = 'idle';
+    this.stateSince = Date.now();
+    // True from the moment _connect() is entered until a socket exists (or the
+    // attempt has bailed). The socket-based single-flight guard cannot cover the
+    // pre-socket phase: urlProvider() does hydration + a ws-ticket fetch, and
+    // while that promise is pending there is no socket and the state is not yet
+    // 'connecting', so nothing else can tell an attempt is already under way.
+    this.dialing = false;
   }
+
+  _setState(next) {
+    if (this.state === next) return;
+    this.state = next;
+    this.stateSince = Date.now();
+  }
+
+  /** ms spent in the current connection phase. */
+  stalledMs() { return Date.now() - this.stateSince; }
 
   start() {
     this.stopped = false;
@@ -144,34 +178,121 @@ export class WsClient {
   }
 
   async _connect() {
-    let url = this.url;
-    if (this.urlProvider) {
-      try {
-        url = await this.urlProvider();
-      } catch (err) {
-        console.error('[ws] urlProvider failed:', err.message);
-        // Respect Retry-After hints from cws-core when fetching ws-ticket
-        const retryHint = Number(err.retryAfterMs) || 0;
-        if (!this.stopped) this._scheduleReconnect(false, retryHint);
-        return;
-      }
-    }
-    if (!url) {
-      console.error('[ws] no URL to connect to');
-      if (!this.stopped) this._scheduleReconnect(false);
+    if (this.stopped) return;
+    // Single-flight, phase 1 — BEFORE the ws-ticket is fetched. urlProvider()
+    // awaits hydration + a ticket fetch, and during that await there is no
+    // socket and the state is not yet 'connecting', so the socket-based guard
+    // below is blind to the attempt: the stall watchdog's ensureConnecting()
+    // would schedule a second _connect(), burning a second single-use ticket
+    // and — once both providers resolve — terminating the socket that was about
+    // to succeed. That is the very duplicate-dial the guard exists to prevent,
+    // just moved one step earlier in the sequence.
+    if (this.dialing) {
+      console.warn('[ws] connect requested while a dial is already in flight (pre-socket) — ignoring');
       return;
     }
+    // Single-flight, phase 2 — socket created but not yet open. The server
+    // treats a second registration as the device being replaced and terminates
+    // the first, so a stray parallel dial does not just waste a socket — it can
+    // kill the connection that was about to succeed.
+    if (this.state === 'connecting' && this.ws) {
+      console.warn('[ws] connect requested while a dial is already in flight — ignoring');
+      return;
+    }
+    // Marked in flight for the whole of _connect, and cleared in the finally at
+    // the end: by then either a socket exists (the phase-2 guard takes over) or
+    // the attempt has bailed. Deliberately inlined rather than delegating to a
+    // helper — `await someHelper()` would defer socket creation by a microtask,
+    // and callers (start(), the tests) rely on a dial with no urlProvider
+    // creating its socket synchronously.
+    this.dialing = true;
+    try {
+      // Replacing a socket from a previous attempt: kill it first so an orphan
+      // cannot complete its handshake later and become that second session.
+      if (this.ws) {
+        try { this.ws.terminate(); } catch { /* already gone */ }
+        this.ws = null;
+      }
+      let url = this.url;
+      let urlMintedAt = null;
+      if (this.urlProvider) {
+        try {
+          url = await this.urlProvider();
+          urlMintedAt = Date.now();
+        } catch (err) {
+          console.error('[ws] urlProvider failed:', err.message);
+          // Respect Retry-After hints from cws-core when fetching ws-ticket
+          const retryHint = Number(err.retryAfterMs) || 0;
+          if (!this.stopped) this._scheduleReconnect(false, retryHint);
+          return;
+        }
+      }
+      // Re-check after the await: a stop() / disable that landed while the ticket
+      // fetch was pending must not be carried on into creating a socket — that
+      // would revive a client the caller deliberately shut down.
+      if (this.stopped) {
+        console.warn('[ws] stopped while resolving the connect URL — abandoning this dial');
+        return;
+      }
+      if (!url) {
+        console.error('[ws] no URL to connect to');
+        if (!this.stopped) this._scheduleReconnect(false);
+        return;
+      }
 
-    const headers = { ...cfAccessHeaders() };
-    if (this.token)         headers.Authorization      = `Bearer ${this.token}`;
-    if (this.workspaceId)   headers['X-Workspace-Id']  = this.workspaceId;
-    if (this.deviceId)      headers['X-Device-Id']     = this.deviceId;
-    if (this.clientVersion) headers['X-Client-Version'] = this.clientVersion;
+      const headers = { ...cfAccessHeaders() };
+      if (this.token)         headers.Authorization      = `Bearer ${this.token}`;
+      if (this.workspaceId)   headers['X-Workspace-Id']  = this.workspaceId;
+      if (this.deviceId)      headers['X-Device-Id']     = this.deviceId;
+      if (this.clientVersion) headers['X-Client-Version'] = this.clientVersion;
 
-    this.ws = this.wsFactory(url, { headers });
-    this.lastFrameAt = Date.now();
+      // A ws-ticket is single-use and short-lived, so how long the URL sat between
+      // being minted and being dialed is diagnostic when a connect fails.
+      const urlAgeMs = urlMintedAt === null ? null : Date.now() - urlMintedAt;
+      console.log(`[ws] connecting${urlAgeMs === null ? '' : ` (url age ${urlAgeMs}ms)`}`);
 
+      this._setState('connecting');
+      this.ws = this.wsFactory(url, { headers, handshakeTimeout: this.handshakeTimeoutMs });
+      this.lastFrameAt = Date.now();
+
+      // Absolute deadline for reaching `open`. Without this, a dial that never
+      // answers and never errors parks the client in CONNECTING with no timer
+      // left running — the exact "log stops at connecting…, agent stays offline
+      // until someone restarts it" wedge.
+      // Handlers first — an event must never be able to fire before they exist.
+      this._attachHandlers();
+
+      // Then the deadline, and only while the socket is actually still
+      // handshaking: an implementation that reports OPEN synchronously has
+      // nothing left to wait for, and a deadline would fight a connection that
+      // already succeeded.
+      if (this.ws?.readyState === WebSocket.CONNECTING) this._armDialDeadline();
+    } finally {
+      this.dialing = false;
+    }
+  }
+
+  _armDialDeadline() {
+    this.dialTimer = setTimeout(() => {
+      this.dialTimer = null;
+      if (this.stopped || this.state === 'open') return;
+      console.warn(`[ws] dial did not reach open within ${this.dialTimeoutMs}ms — terminating and retrying`);
+      try { this.ws?.terminate(); } catch { /* already gone */ }
+      // We just killed it ourselves: drop the reference and leave 'connecting'
+      // so the retry below is not mistaken for a concurrent dial.
+      this.ws = null;
+      this._setState('closed');
+      // Schedule directly: a socket this stuck may never emit 'close'.
+      // _scheduleReconnect is idempotent, so a later 'close' is a no-op.
+      this._scheduleReconnect(false);
+    }, this.dialTimeoutMs);
+    this.dialTimer.unref?.();
+  }
+
+  _attachHandlers() {
     this.ws.on('open', () => {
+      this._clearDialTimer();
+      this._setState('open');
       this.reconnectAttempt = 0;
       this._startFrameWatchdog();
       this._startKeepalivePing();
@@ -209,6 +330,8 @@ export class WsClient {
 
     this.ws.on('close', (code, reasonBuf) => {
       this._clearTimers();
+      this._clearDialTimer();
+      this._setState('closed');
       const reason = reasonBuf?.toString?.() || '';
       const terminal = TERMINAL_CLOSE_CODES.has(code);
       const rateLimited = RATE_LIMITED_CLOSE_CODES.has(code);
@@ -229,12 +352,48 @@ export class WsClient {
     });
   }
 
+  /**
+   * Supervisor entry point: make sure a connection attempt is in flight.
+   *
+   * Distinct from forceReconnect(), which by contract only kicks a socket that
+   * exists (and is a deliberate no-op otherwise). A stalled dial is not
+   * "disconnected" — the socket sits in CONNECTING — so a watchdog cannot
+   * detect it by liveness and must ask by phase instead.
+   *
+   * Returns true if it started or scheduled an attempt, false if nothing was
+   * needed (already open, already scheduled, or deliberately stopped).
+   */
+  ensureConnecting(reason = 'supervisor') {
+    if (this.stopped) return false;
+    if (this.state === 'open') return false;
+    // A dial whose ws-ticket fetch is still pending has no socket and no queued
+    // timer, so without this check the supervisor reads it as "nothing in
+    // flight" and starts a competing attempt — which is exactly what it must
+    // never do on one credential set.
+    if (this.dialing) return false;
+    if (this.reconnectTimer) return false;   // an attempt is already queued
+    if (this.ws) return this.forceReconnect(reason);
+    console.warn(`[ws] ${reason}: no socket and no pending attempt — scheduling connect`);
+    this._scheduleReconnect(false);
+    return true;
+  }
+
+  _clearDialTimer() {
+    if (this.dialTimer) { clearTimeout(this.dialTimer); this.dialTimer = null; }
+  }
+
   _scheduleReconnect(rateLimited) {
+    // Idempotent: the dial deadline and a late 'close' can both ask for a retry
+    // for the same dead socket, and two pending timers would double the
+    // in-flight connects — a second socket on the same credentials is exactly
+    // what causes duplicate-session trouble.
+    if (this.reconnectTimer) return;
     const base = rateLimited ? Math.max(RECONNECT_BASE_MS * 8, 5000) : RECONNECT_BASE_MS;
     const delay = Math.min(base * (2 ** this.reconnectAttempt), this.reconnectMaxMs);
     this.reconnectAttempt += 1;
     console.log(`[ws] reconnecting in ${delay}ms (attempt #${this.reconnectAttempt})`);
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (!this.stopped) this._connect();
     }, delay);
   }
@@ -280,6 +439,7 @@ export class WsClient {
     if (this.frameWatchdog) { clearInterval(this.frameWatchdog); this.frameWatchdog = null; }
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+    this._clearDialTimer();
   }
 }
 

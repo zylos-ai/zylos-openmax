@@ -199,7 +199,7 @@ function logRpcResponse(method, url, status, data) {
   appendRpcLine(line);
 }
 
-async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId } = {}) {
+async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId, timeoutMs } = {}) {
   const url = buildUrl(baseUrl, path, query);
 
   // Single attempt: resolve token, send, parse response. Returned shape lets
@@ -220,6 +220,11 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      // Opt-in deadline. Native fetch has none, so a connection that is accepted
+      // and then never answered hangs this promise for as long as the socket
+      // stays up — which for a caller driven by an interval timer means its runs
+      // pile up behind the hung one. Per-attempt (the 401 retry gets its own).
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
 
     const text = await res.text();
@@ -327,7 +332,8 @@ export const del   = (path)        => request('DELETE', path);
 // They resolve the JWT against that specific org's cache, so a multi-org
 // agent never accidentally calls cws-core with the wrong org's token.
 export const getForOrg   = (orgId, path, query) => request('GET',    path, { query, orgId });
-export const postForOrg  = (orgId, path, body)  => request('POST',   path, { body,  orgId });
+export const postForOrg  = (orgId, path, body, { timeoutMs } = {}) =>
+  request('POST', path, { body, orgId, timeoutMs });
 
 // Org-scoped GET that also attaches caller-supplied request headers — used when
 // a route needs a one-shot bearer that is NOT the org JWT (e.g. cws-connect's
