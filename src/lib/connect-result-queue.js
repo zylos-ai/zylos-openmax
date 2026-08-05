@@ -31,6 +31,15 @@ export const CONNECT_RESULT_QUEUE_MAX = 200;
 const entryKey = (x) => `${x.bindingId}:${x.requestId || ''}`;
 
 /**
+ * Identity of one queued attempt: key plus the stamp it was queued with. A
+ * re-queue of the same binding+request refreshes queuedAt, so this distinguishes
+ * "the entry I just processed" from "a newer entry for the same command that
+ * arrived while I was working" — the difference between removing what is done
+ * and deleting a result that has not been delivered yet.
+ */
+const entryIdentity = (x) => `${entryKey(x)}@${x.queuedAt || 0}`;
+
+/**
  * @param {object}   [deps]
  * @param {string}   [deps.file]        queue file path
  * @param {(item) => Promise<void>} deps.sendResult  delivers one queued result
@@ -103,29 +112,45 @@ export function createConnectResultQueue({
   const runResend = async () => {
     const items = read();
     if (!items.length) return { sent: 0, kept: 0, dropped: 0 };
-    const keep = [];
-    let sent = 0, dropped = 0;
+    // Entries this run finished with — delivered or aged out. Collected as
+    // identities (see entryIdentity) because the rewrite below must remove
+    // exactly these and nothing else.
+    const processed = [];
+    let sent = 0, dropped = 0, kept = 0;
     for (const item of items) {
       if (now() - (item.queuedAt || 0) > maxAgeMs) {
         // Past this age the binding has almost certainly been re-driven by the
         // user; re-reporting a day-old result would be worse than dropping it.
         warn(`dropping connect-result older than 24h binding=${item.bindingId} status=${item.status}`);
+        processed.push(item);
         dropped++;
         continue;
       }
       try {
         await sendResult(item);
         log(`connect-result resend succeeded binding=${item.bindingId} status=${item.status}`);
+        processed.push(item);
         sent++;
       } catch (e) {
         warn(`connect-result resend failed binding=${item.bindingId}: ${e.message}`);
-        keep.push(item);
+        kept++;   // left on disk for the next tick, with its original stamp
       }
     }
-    // Only rewrite when the contents actually changed, so a run where every
-    // resend fails leaves the file (and its queuedAt stamps) untouched.
-    if (sent || dropped) write(keep);
-    return { sent, kept: keep.length, dropped };
+    // Remove what this run finished with FROM THE CURRENT FILE, rather than
+    // overwriting the file with the snapshot read at the top. Sending is async,
+    // and queue() is a synchronous read-modify-write that can land in between:
+    // rewriting from the stale snapshot silently discards any result queued
+    // during the run — the connector's live failure path queues exactly while
+    // the resend task is running, and losing that result leaves the binding
+    // pending, i.e. the spinner this queue exists to prevent.
+    //
+    // Nothing is written when this run finished with nothing, so a round where
+    // every send failed leaves the file (and its queuedAt stamps) untouched.
+    if (processed.length) {
+      const done = new Set(processed.map(entryIdentity));
+      write(read().filter((x) => !done.has(entryIdentity(x))));
+    }
+    return { sent, kept, dropped };
   };
 
   return { queue, resend, read, file };

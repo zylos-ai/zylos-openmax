@@ -246,6 +246,71 @@ test('resend: a run that throws internally still releases the single-flight slot
     'the slot must be free again for the next tick');
 });
 
+// queue() is a synchronous read-modify-write; resend() spans awaits. Rewriting
+// the file from the snapshot read at the top of the run therefore discarded any
+// result queued while it was in flight — and in production those two are exactly
+// concurrent: the connector's live failure path queues while the resend task
+// runs. A lost result leaves its binding pending, i.e. the spinner this queue
+// exists to prevent.
+test('resend: a result queued during a slow run survives the final rewrite', async () => {
+  let releaseSend;
+  const sendGate = new Promise((resolve) => { releaseSend = resolve; });
+  const q = makeQueue({ sendResult: async () => { await sendGate; } });
+  q.queue(result({ bindingId: 'old', requestId: 'r-old' }));
+
+  const run = q.resend();                 // snapshot: [old]
+  await Promise.resolve();
+  q.queue(result({ bindingId: 'new', requestId: 'r-new' }));   // lands mid-run
+  assert.deepEqual(q.onDisk().map((x) => x.bindingId), ['old', 'new']);
+
+  releaseSend();
+  const stats = await run;
+  assert.deepEqual(stats, { sent: 1, kept: 0, dropped: 0 });
+  assert.deepEqual(q.onDisk().map((x) => x.bindingId), ['new'],
+    'the delivered entry is removed and the newly queued one is kept');
+});
+
+test('resend: a re-queue of the same command during the run is not deleted as "done"', async () => {
+  let releaseSend;
+  const sendGate = new Promise((resolve) => { releaseSend = resolve; });
+  const q = makeQueue({ sendResult: async () => { await sendGate; } });
+  q.queue(result({ status: 'connected' }));
+
+  const run = q.resend();
+  await Promise.resolve();
+  // Same binding+request, newer payload: queue() supersedes the entry in place,
+  // so it carries a fresher queuedAt than the one being sent.
+  q.advance(1_000);
+  q.queue(result({ status: 'error', detail: 'later outcome' }));
+
+  releaseSend();
+  await run;
+  const left = q.onDisk();
+  assert.equal(left.length, 1, 'the newer entry must not be mistaken for the one just sent');
+  assert.equal(left[0].status, 'error');
+  assert.equal(left[0].detail, 'later outcome');
+});
+
+test('resend: an entry that failed mid-run is left with its stamp while a new one is added', async () => {
+  let releaseSend;
+  const sendGate = new Promise((resolve) => { releaseSend = resolve; });
+  const q = makeQueue({
+    sendResult: async () => { await sendGate; throw new Error('503 upstream unavailable'); },
+  });
+  q.queue(result({ bindingId: 'stuck', requestId: 'r-stuck' }));
+  const stuckAt = q.onDisk()[0].queuedAt;
+
+  const run = q.resend();
+  await Promise.resolve();
+  q.queue(result({ bindingId: 'fresh', requestId: 'r-fresh' }));
+
+  releaseSend();
+  assert.deepEqual(await run, { sent: 0, kept: 1, dropped: 0 });
+  const left = q.onDisk();
+  assert.deepEqual(left.map((x) => x.bindingId), ['stuck', 'fresh']);
+  assert.equal(left[0].queuedAt, stuckAt, 'the failed entry keeps accruing age');
+});
+
 test('resend: nothing is rewritten when every attempt fails (file left byte-identical)', async () => {
   const q = makeQueue({ failSend: true });
   q.queue(result());
