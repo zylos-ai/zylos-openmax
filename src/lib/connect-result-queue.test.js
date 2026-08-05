@@ -184,6 +184,68 @@ test('resend: a legacy entry with no queuedAt is dropped rather than retried for
   assert.equal(q.sent.length, 0);
 });
 
+// The resend is driven by a bare setInterval, which awaits nothing: a run
+// slower than the interval used to overlap the next tick, and since every run
+// read-modify-writes one file, the two would re-send each other's entries and
+// clobber each other's rewrite.
+test('resend: a second call during a slow run joins it instead of starting another', async () => {
+  const delivered = [];
+  let inFlightSends = 0;
+  let maxConcurrentSends = 0;
+  let releaseSend;
+  const sendGate = new Promise((resolve) => { releaseSend = resolve; });
+  const q = makeQueue({
+    sendResult: async (item) => {
+      inFlightSends++;
+      maxConcurrentSends = Math.max(maxConcurrentSends, inFlightSends);
+      await sendGate;
+      inFlightSends--;
+      delivered.push(item.bindingId);
+    },
+  });
+  q.queue(result());
+  q.queue(result({ bindingId: 'bind-2', requestId: 'req-2' }));
+
+  const first = q.resend();
+  await Promise.resolve();
+  const second = q.resend();          // the next 60s tick, while the first is stuck
+
+  releaseSend();
+  const [a, b] = await Promise.all([first, second]);
+  // Both callers observe the same run's outcome, and that run happened once:
+  // overlapping runs would have re-sent both entries (4 sends) and each would
+  // have rewritten the file from its own stale read.
+  assert.deepEqual(a, { sent: 2, kept: 0, dropped: 0 });
+  assert.deepEqual(b, a, 'the overlapping tick reports the joined run, not a second one');
+  assert.deepEqual(delivered, ['bind-1', 'bind-2'], 'each queued result delivered exactly once');
+  assert.equal(maxConcurrentSends, 1, 'no two sends may be in flight at once');
+  assert.deepEqual(q.onDisk(), []);
+});
+
+test('resend: a later call after the run finished starts a fresh run', async () => {
+  const q = makeQueue();
+  q.queue(result());
+  await q.resend();
+  q.queue(result({ bindingId: 'bind-2', requestId: 'req-2' }));
+  await q.resend();
+  assert.deepEqual(q.sent.map((x) => x.bindingId), ['bind-1', 'bind-2'],
+    'single-flight must not latch after the first run completes');
+});
+
+test('resend: a run that throws internally still releases the single-flight slot', async () => {
+  let calls = 0;
+  const q = makeQueue({
+    fsDep: {
+      readFileSync: () => { calls++; if (calls === 1) throw Object.assign(new Error('boom'), { code: 'EIO' }); return '[]'; },
+      writeFileSync: () => {},
+      mkdirSync: () => {},
+    },
+  });
+  await q.resend();                    // read throws → treated as empty
+  assert.deepEqual(await q.resend(), { sent: 0, kept: 0, dropped: 0 },
+    'the slot must be free again for the next tick');
+});
+
 test('resend: nothing is rewritten when every attempt fails (file left byte-identical)', async () => {
   const q = makeQueue({ failSend: true });
   q.queue(result());

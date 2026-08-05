@@ -470,6 +470,67 @@ test('a second dial is refused while one is already in flight', () => {
   }
 });
 
+// A dial spends its first phase inside urlProvider() — hydration plus a
+// single-use ws-ticket fetch — with no socket and state still not 'connecting'.
+// The socket-based single-flight guard is blind there, so before this was fixed
+// the stall watchdog could start a competing attempt: two tickets burned, and
+// once both resolved the second socket replaced the one about to succeed.
+test('a dial whose ws-ticket fetch is still pending already counts as in flight', async () => {
+  let providerCalls = 0;
+  let releaseTicket;
+  const ticketFetch = new Promise((resolve) => { releaseTicket = resolve; });
+  const { client, sockets } = makeClient({
+    urlProvider: async () => {
+      providerCalls += 1;
+      await ticketFetch;
+      return 'wss://example.test/ws?ticket=t1';
+    },
+  });
+
+  client.start();
+  await Promise.resolve();                 // let _connect reach the await
+  assert.equal(providerCalls, 1);
+  assert.equal(sockets.length, 0, 'no socket exists during the ticket fetch');
+  assert.equal(client.dialing, true, 'the attempt must be visible as in flight');
+
+  // Both re-entry paths must refuse: the supervisor's kick and a direct call.
+  assert.equal(client.ensureConnecting('watchdog'), false,
+    'the supervisor must not start a competing dial during the ticket fetch');
+  assert.equal(client.reconnectTimer, null, 'and must not queue one either');
+  client.start();
+  await client._connect();
+  assert.equal(providerCalls, 1, 'the single-use ticket must not be fetched twice');
+  assert.equal(sockets.length, 0);
+
+  releaseTicket();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sockets.length, 1, 'the original dial still completes');
+  assert.equal(client.dialing, false, 'and is no longer marked in flight');
+  client.stop();
+});
+
+// stop() during that same pending phase: the client was deliberately shut down,
+// so resolving the ticket afterwards must not revive it into a live socket.
+test('stopping while the ws-ticket fetch is pending abandons the dial', async () => {
+  let releaseTicket;
+  const ticketFetch = new Promise((resolve) => { releaseTicket = resolve; });
+  const { client, sockets } = makeClient({
+    urlProvider: async () => {
+      await ticketFetch;
+      return 'wss://example.test/ws?ticket=t1';
+    },
+  });
+
+  client.start();
+  await Promise.resolve();
+  client.stop();
+  releaseTicket();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sockets.length, 0, 'a stopped client must not be revived by a late ticket');
+  assert.equal(client.dialing, false);
+});
+
 test('replacing a socket from a previous attempt terminates the old one', () => {
   mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
   try {

@@ -1575,10 +1575,18 @@ function handleConnectionEventForOrg(orgConfig, frame) {
 // against the in-flight command (its authorization + idempotency check);
 // binding_id addresses the row. Shared by the live report and the resend task so
 // a queued result is delivered on exactly the same path it originally took.
+// Bounded: native fetch has no deadline, and this call sits both inside the
+// connector's retry loop and inside the interval-driven resend, so a connection
+// that is accepted and never answered would stall the one and pile up runs of
+// the other. 20s is well beyond a healthy round-trip; exceeding it is a failure
+// worth retrying, which both callers already know how to do.
+const CONNECT_RESULT_POST_TIMEOUT_MS = 20_000;
+
 const postConnectResult = (r) => postForOrg(
   r.orgId,
   apiPath(`/connect/channel-bindings/${r.bindingId}/result`),
   { status: r.status, detail: r.detail || '', request_id: r.requestId || '' },
+  { timeoutMs: CONNECT_RESULT_POST_TIMEOUT_MS },
 );
 
 // Results the connector could not deliver even after its own retries. The

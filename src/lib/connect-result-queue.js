@@ -80,12 +80,27 @@ export function createConnectResultQueue({
     warn(`connect-result queued for resend binding=${r.bindingId} status=${r.status}`);
   };
 
+  // Single-flight for resend. Every run does read-modify-write on one file, so
+  // two overlapping runs would each re-send the entries the other is still
+  // working through and then clobber each other's rewrite — losing results this
+  // queue exists to guarantee. The timer that drives it does not await anything,
+  // so a run slower than the interval is not hypothetical.
+  let inFlight = null;
+
   /**
    * Try every queued result once; keep the ones that still fail. Never throws —
    * it runs from a timer, and a resend failure is expected, not exceptional.
+   * A call made while a previous run is still going joins that run rather than
+   * starting a second one.
    * @returns {Promise<{sent: number, kept: number, dropped: number}>}
    */
   const resend = async () => {
+    if (inFlight) return inFlight;
+    inFlight = runResend().finally(() => { inFlight = null; });
+    return inFlight;
+  };
+
+  const runResend = async () => {
     const items = read();
     if (!items.length) return { sent: 0, kept: 0, dropped: 0 };
     const keep = [];
