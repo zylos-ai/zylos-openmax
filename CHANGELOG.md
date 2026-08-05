@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `_scheduleReconnect()` is now idempotent. The dial deadline and a late `close` for the same dead socket could otherwise each queue an attempt, and two concurrent dials on one credential set is precisely what causes duplicate-session trouble.
   - Reconnect logging now records how long the ws-ticket sat between being minted and being dialed, so a failed connect no longer needs a live reproduction to explain.
 
+- **A connect-result that failed to POST was dropped, leaving the channel connected but recorded as `pending` forever.** The connector reported the outcome of a connect/disconnect once, best-effort: on failure it logged `connect-result report failed` and gave up. A single transient 5xx from cws-core therefore left the binding stuck in `pending`, which the UI renders as a permanent "connecting" spinner with no way to retry — observed live when a `connected` report came back 503 while the WhatsApp channel was in fact up and serving.
+  - Delivery is now retried with backoff (3 attempts by default).
+  - Anything still undelivered is persisted to `pending-connect-results.json` (owner-only) and re-sent by a new `connect-result-resend` task every 60s, which also runs at startup so a result stranded by a crash is delivered on the next boot. Entries are deduped per binding+request, capped, and dropped after 24h.
+  - NOTE: unit tests for this path are still outstanding — see the PR description.
+
 ### Added
 
 - **A stall supervisor (`ws-stall-watchdog`, every 30s).** Judged on connection *phase*, not liveness: a stuck dial is `CONNECTING`, not disconnected, so no liveness check can see it. If a client has been out of `open` for more than 90s it is asked to ensure an attempt is in flight. Deliberately narrow — it skips clients that were stopped on purpose and orgs no longer enabled in the live config, and it delegates timing to the client's own backoff so a broken environment cannot be amplified into a connect storm.

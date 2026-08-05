@@ -1578,6 +1578,11 @@ const handleChannelCommand = createChannelInstaller({
   // it against the in-flight command (its authorization + idempotency check);
   // binding_id addresses the row. Best-effort — the connector wraps this and
   // only warns on failure, never throws.
+  // Queue a result the connector could not deliver after its own retries. The
+  // binding stays 'pending' until it lands, so this must survive a restart.
+  persistUndeliveredResult: async (r) => {
+    queueUndeliveredConnectResult(r);
+  },
   reportResult: async (r) => {
     await postForOrg(
       r.orgId,
@@ -2299,6 +2304,68 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 // fails. Deliberately narrow — it asks the client to ensure an attempt is in
 // flight and lets the client's own backoff decide timing, so a persistently
 // broken environment cannot be turned into a connect storm from here.
+// ---------------------------------------------------------------------------
+// Undelivered connect-results. A binding stays 'pending' until its result is
+// recorded, and a pending binding is exactly what leaves the UI spinning with
+// no way to retry — so a result that could not be POSTed is kept on disk and
+// re-sent until it lands, including across restarts.
+// ---------------------------------------------------------------------------
+const CONNECT_RESULT_QUEUE_FILE = path.join(DATA_DIR, 'pending-connect-results.json');
+const CONNECT_RESULT_RESEND_INTERVAL_MS = 60 * 1000;
+const CONNECT_RESULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;  // stop trying after a day
+const CONNECT_RESULT_QUEUE_MAX = 200;
+
+function readConnectResultQueue() {
+  try {
+    const raw = fs.readFileSync(CONNECT_RESULT_QUEUE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+function writeConnectResultQueue(items) {
+  try {
+    fs.writeFileSync(CONNECT_RESULT_QUEUE_FILE, JSON.stringify(items, null, 2), { mode: 0o600 });
+  } catch (e) {
+    warn(`could not persist connect-result queue: ${e.message}`);
+  }
+}
+
+function queueUndeliveredConnectResult(r) {
+  const items = readConnectResultQueue();
+  // One entry per binding+request: re-reporting the same command is pointless,
+  // and a newer result for the same binding supersedes an older one.
+  const key = (x) => `${x.bindingId}:${x.requestId || ''}`;
+  const next = items.filter((x) => key(x) !== key(r));
+  next.push({ ...r, queuedAt: Date.now() });
+  writeConnectResultQueue(next.slice(-CONNECT_RESULT_QUEUE_MAX));
+  warn(`connect-result queued for resend binding=${r.bindingId} status=${r.status}`);
+}
+
+async function resendUndeliveredConnectResults() {
+  const items = readConnectResultQueue();
+  if (!items.length) return;
+  const keep = [];
+  for (const item of items) {
+    if (Date.now() - (item.queuedAt || 0) > CONNECT_RESULT_MAX_AGE_MS) {
+      warn(`dropping connect-result older than 24h binding=${item.bindingId} status=${item.status}`);
+      continue;
+    }
+    try {
+      await postForOrg(
+        item.orgId,
+        apiPath(`/connect/channel-bindings/${item.bindingId}/result`),
+        { status: item.status, detail: item.detail || '', request_id: item.requestId || '' },
+      );
+      log(`connect-result resend succeeded binding=${item.bindingId} status=${item.status}`);
+    } catch (e) {
+      warn(`connect-result resend failed binding=${item.bindingId}: ${e.message}`);
+      keep.push(item);
+    }
+  }
+  writeConnectResultQueue(keep);
+}
+
 function superviseWsStalls() {
   for (const { slug, ws } of wsClients) {
     if (!ws || ws.state === 'open') continue;
@@ -2318,6 +2385,10 @@ function superviseWsStalls() {
 tasks.register('ws-stall-watchdog', superviseWsStalls, WS_STALL_CHECK_INTERVAL_MS, {
   delay: WS_STALL_CHECK_INTERVAL_MS,
 });
+// runOnStart so a result stranded by a crash/restart is delivered promptly
+// rather than waiting out the first interval.
+tasks.register('connect-result-resend', resendUndeliveredConnectResults,
+  CONNECT_RESULT_RESEND_INTERVAL_MS, { runOnStart: true });
 tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
 tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
 if (config.metricsReport?.enabled !== false) {
@@ -2344,6 +2415,7 @@ if (config.channelLiveness?.enabled !== false) {
   });
 }
 tasks.start('ws-stall-watchdog');
+tasks.start('connect-result-resend');
 tasks.start('frame-metrics');
 tasks.start('owner-config-sync');
 if (config.metricsReport?.enabled !== false) tasks.start('metrics-report');
