@@ -442,3 +442,49 @@ test('stalledMs tracks time in the current connection phase', () => {
     mock.timers.reset();
   }
 });
+
+test('a second dial is refused while one is already in flight', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  try {
+    const { client, sockets } = makeHangingClient({ dialTimeoutMs: 60000 });
+    client.start();
+    assert.equal(sockets.length, 1);
+    assert.equal(client.state, 'connecting');
+
+    // Anything that re-enters _connect while the first dial is unresolved must
+    // not open a second socket: two registrations on one credential set make the
+    // server treat the device as replaced and kill the first.
+    client.start();
+    client._connect();
+    assert.equal(sockets.length, 1, 'no parallel dial may be started');
+
+    // The supervisor is different: kicking a dial that has been stuck is its
+    // whole job (the "how long is too long" gate lives in the watchdog, not
+    // here), so it acts — but it still must not end up with two live sockets.
+    assert.equal(client.ensureConnecting('test'), true);
+    assert.equal(sockets.length, 1, 'kicking a stalled dial must not add a parallel socket');
+    assert.equal(sockets[0].terminateCount, 1, 'it replaces the stuck dial rather than racing it');
+    client.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test('replacing a socket from a previous attempt terminates the old one', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
+  try {
+    const { client, sockets } = makeHangingClient({ dialTimeoutMs: 1000 });
+    client.start();
+    const first = sockets[0];
+
+    mock.timers.tick(1001);                        // deadline: terminates + queues retry
+    assert.equal(first.terminateCount, 1);
+    mock.timers.tick(client.reconnectMaxMs);       // retry dials again
+    assert.equal(sockets.length, 2);
+    // The orphan must not be left able to complete its handshake later.
+    assert.equal(first.terminateCount, 1, 'old socket stays terminated, not revived');
+    client.stop();
+  } finally {
+    mock.timers.reset();
+  }
+});

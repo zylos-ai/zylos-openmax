@@ -172,6 +172,21 @@ export class WsClient {
   }
 
   async _connect() {
+    if (this.stopped) return;
+    // Single-flight: never two dials in flight on one credential set. The server
+    // treats a second registration as the device being replaced and terminates
+    // the first, so a stray parallel dial does not just waste a socket — it can
+    // kill the connection that was about to succeed.
+    if (this.state === 'connecting' && this.ws) {
+      console.warn('[ws] connect requested while a dial is already in flight — ignoring');
+      return;
+    }
+    // Replacing a socket from a previous attempt: kill it first so an orphan
+    // cannot complete its handshake later and become that second session.
+    if (this.ws) {
+      try { this.ws.terminate(); } catch { /* already gone */ }
+      this.ws = null;
+    }
     let url = this.url;
     let urlMintedAt = null;
     if (this.urlProvider) {
@@ -227,6 +242,10 @@ export class WsClient {
       if (this.stopped || this.state === 'open') return;
       console.warn(`[ws] dial did not reach open within ${this.dialTimeoutMs}ms — terminating and retrying`);
       try { this.ws?.terminate(); } catch { /* already gone */ }
+      // We just killed it ourselves: drop the reference and leave 'connecting'
+      // so the retry below is not mistaken for a concurrent dial.
+      this.ws = null;
+      this._setState('closed');
       // Schedule directly: a socket this stuck may never emit 'close'.
       // _scheduleReconnect is idempotent, so a later 'close' is a no-op.
       this._scheduleReconnect(false);
