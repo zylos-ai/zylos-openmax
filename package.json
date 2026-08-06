@@ -6,7 +6,9 @@
   "main": "src/comm-bridge.js",
   "scripts": {
     "start": "node src/comm-bridge.js",
-    "test": "node --test"
+    "test": "node --test \"src/**/*.test.js\"",
+    "test:smoke": "node --test \"docs/**/*.test.js\"",
+    "test:all": "node --test"
   },
   "repository": {
     "type": "git",
