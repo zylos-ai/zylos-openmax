@@ -12,6 +12,22 @@
 
 > 后续若加 cross-runtime / harness 之类场景,可再开 sibling 子目录。
 
+## 怎么跑
+
+这些是**打真实环境**的端到端冒烟测试，需要环境变量和凭据，**不会**被 `npm test` 带上：
+
+```bash
+npm test           # 只跑 src/ 下的单元测试（默认，无需任何环境）
+npm run test:smoke # 跑本目录 + docs/ 下的冒烟测试（需下列环境）
+npm run test:all   # 两者都跑
+```
+
+必需环境变量：`COCO_API_URL` / `TEST_USER_TOKEN` / `TEST_CONV_ID` / `TEST_AGENT_ID` / `TEST_PROJECT_ID`；
+目标环境在 Cloudflare Access 后面时还需要 `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET`；
+部分用例需要 `components/openmax/smoke-config.json`（见 `docs/smoke-suite/smoke-config.example.json`）。
+
+缺少这些时它们会**立刻退出并报 missing env**，属于预期行为，不是测试失败。
+
 ## 共享 runner
 
 每个分类自带自己的 lib/runner.js,因为关注点不同(NL 卡片轮询 vs 多 JWT 直接打 API)。两套都源自同一个设计:`sendInstruction`-or-`bearerFetch` → `waitForCard`-or-`callApi` → assertion 三段式。

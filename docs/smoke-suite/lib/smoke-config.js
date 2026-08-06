@@ -28,7 +28,7 @@ import path from 'node:path';
 // level as the runtime config.json:
 //     ~/zylos/components/openmax/smoke-config.json
 // (override the path with SMOKE_CONFIG_PATH). A committed template with the
-// expected shape lives at docs/smoke/smoke-config.example.json. Individual
+// expected shape lives at docs/smoke-suite/smoke-config.example.json. Individual
 // fields can still be overridden by env (COCO_API_URL, CF_ACCESS_CLIENT_ID /
 // CF_ACCESS_CLIENT_SECRET, SMOKE_ORG_ID, SMOKE_PROJECT_ID, SMOKE_USER).
 const SMOKE_CONFIG_PATH = process.env.SMOKE_CONFIG_PATH
@@ -92,7 +92,7 @@ export function resolveSelf() {
 export async function login(userKey = DEFAULT_USER) {
   if (!USERS || Object.keys(USERS).length === 0) {
     throw new Error(`smoke-config: no test users configured — create ${SMOKE_CONFIG_PATH} `
-      + `(see docs/smoke/smoke-config.example.json) or set SMOKE_CONFIG_PATH`);
+      + `(see docs/smoke-suite/smoke-config.example.json) or set SMOKE_CONFIG_PATH`);
   }
   const u = USERS[userKey];
   if (!u) throw new Error(`smoke-config: unknown user "${userKey}" (defined in ${SMOKE_CONFIG_PATH})`);
