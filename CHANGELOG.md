@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.4] — 2026-08-06
+
+Promotes the 2.12.4 beta line to a stable release. No code changes since
+`2.12.4-beta.2`; this entry consolidates what the two pre-releases shipped, and
+the per-beta sections below are retained for traceability.
+
+### Fixed
+
+- **WebSocket dial reliability** (from `2.12.4-beta.2`) — a dial that was accepted
+  but never answered left the agent offline permanently, because the pre-open
+  phase had no timer and the frame watchdog only starts inside the `open`
+  handler. Dialing is now single-flight, a stalled dial times out and is
+  supervised, and the resend path is serialized so results queued mid-run are no
+  longer discarded. Deployed and verified live before this release.
+- **Connect-result delivery** (from `2.12.4-beta.2`) — connect results are
+  retried and persisted, and a boot-crashing connect-result queue was repaired
+  and given regression coverage.
+
+### Security
+
+- **Removed the client-controllable `agentMemberId`/`agent_member_id` identity
+  override** (from `2.12.4-beta.1`) from every cws-connect command path,
+  including the WS-driven connection-event handlers. See the beta.1 section
+  below for the full account.
+
 ## [2.12.4-beta.2] — 2026-08-05
 
 ### Fixed
