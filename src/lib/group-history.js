@@ -53,6 +53,30 @@ function getLimit() {
 }
 
 /**
+ * Compare two message ids for identity, tolerating JSON type drift.
+ *
+ * `message_id` is written straight off the inbound frame (comm-bridge.js builds
+ * the entry with `message_id: msg.id`, unnormalized — unlike the `seq` on the
+ * next line, which is coerced with Number()). cws-comm emits that id as a JSON
+ * number on some delivery paths and as a string on others, so a single log file
+ * routinely holds both shapes.
+ *
+ * A strict `===` between 1786027449978 and "1786027449978" is false, which
+ * would defeat both identity checks below: the dedup in recordHistoryEntry
+ * (same message recorded twice, and appended to the log a second time) and the
+ * exclude filter in getHistory (the current message leaking into the context
+ * built for itself, so the model sees it said twice).
+ *
+ * Normalizing at comparison time rather than on write is deliberate: entries
+ * replayed from disk by ensureReplay() carry whatever shape was already
+ * persisted, so this keeps pre-existing logs working with no migration.
+ */
+function sameMessageId(a, b) {
+  if (a == null || b == null) return false;
+  return String(a) === String(b);
+}
+
+/**
  * Record a message into in-memory history.
  * Deduplicates by message_id.
  */
@@ -61,7 +85,7 @@ function recordHistoryEntry(conversationId, entry) {
   const history = chatHistories.get(conversationId);
 
   if (entry.message_id) {
-    if (history.some(m => m.message_id === entry.message_id)) return;
+    if (history.some(m => sameMessageId(m.message_id, entry.message_id))) return;
   }
 
   history.push(entry);
@@ -109,7 +133,7 @@ export function getHistory(conversationId, excludeMessageId, limit) {
 
   const effectiveLimit = limit || getLimit();
   const filtered = excludeMessageId
-    ? history.filter(m => m.message_id !== excludeMessageId)
+    ? history.filter(m => !sameMessageId(m.message_id, excludeMessageId))
     : history;
   return filtered.slice(-effectiveLimit);
 }
