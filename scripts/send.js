@@ -46,7 +46,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { post, getForOrg, apiPath } from '../src/lib/client.js';
+import { post, get, getForOrg, apiPath } from '../src/lib/client.js';
 import { enabledOrgs } from '../src/lib/config.js';
 import {
   parseEndpoint,
@@ -56,7 +56,12 @@ import {
   splitMessage,
 } from '../src/lib/message.js';
 import { uploadMedia } from '../src/cli/as.js';
-import { resolveMentions, buildMentions } from '../src/lib/mention.js';
+import {
+  resolveMentions,
+  buildMentions,
+  needsRosterHydration,
+  recordRoster,
+} from '../src/lib/mention.js';
 import { lookupConvOrg, registerConvOrg } from '../src/lib/conv-org.js';
 import { RUNTIME_DIR } from '../src/lib/session.js';
 
@@ -94,8 +99,42 @@ function resolveTargetConversation(ep) {
   return ep.threadConversationId || ep.conversationId;
 }
 
+// Conversations whose roster this process has already fetched, so a multi-chunk
+// or multi-mention send can't issue the same request twice. Cross-process reuse
+// comes for free: recordRoster persists into mention-registry.json, so the very
+// next send finds the names locally and needsRosterHydration returns false.
+const _rosterFetched = new Set();
+
+/**
+ * Fill the mention registry from the conversation roster, but only when the
+ * text actually mentions somebody we can't already resolve.
+ *
+ * Best-effort throughout: a roster fetch that fails must never block the send.
+ * The worst case is the pre-existing behaviour — an @name that resolves to no
+ * mention — not a dropped message.
+ */
+async function hydrateRosterIfNeeded(text, convId) {
+  if (!convId || _rosterFetched.has(convId)) return;
+  if (!needsRosterHydration(text, convId)) return;
+  _rosterFetched.add(convId);
+  try {
+    const res = await get(apiPath(`/conversations/${convId}/members`));
+    const members = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);
+    recordRoster(convId, members);
+  } catch {
+    /* best-effort: fall back to whatever the registry already knew */
+  }
+}
+
 async function sendText(ep, text) {
   const convId = resolveTargetConversation(ep);
+  // The registry only knows participants observed speaking here, so an @name
+  // aimed at someone who has never spoken would silently resolve to nothing —
+  // and this reply path has no parameter slot for passing mentions explicitly,
+  // so the auto-resolution below is the only mention mechanism it has. When the
+  // text mentions somebody we can't resolve, fetch the roster once and record
+  // it, then let the normal resolution run against the now-complete registry.
+  await hydrateRosterIfNeeded(text, convId);
   // Canonicalize @mentions to the exact participant display_name so cws-fe's
   // participant-name matcher highlights them (cws-fe issue #6 covers the
   // AGENT_TEXT render side). No-op when no known participant matches.
