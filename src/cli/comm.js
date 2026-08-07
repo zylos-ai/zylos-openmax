@@ -26,7 +26,7 @@
 import { randomUUID } from 'crypto';
 import { getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
-import { buildMentions } from '../lib/mention.js';
+import { buildMentions, needsRosterHydration, recordRoster } from '../lib/mention.js';
 import { loadConfig, updateConfig, enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
 
 const [command, ...rest] = process.argv.slice(2);
@@ -216,6 +216,46 @@ async function fetchSelfMember(org) {
  *   - {content_type, body, attachments?}                → pass-through (advanced)
  *   - already-built object with top-level type+content  → returned as-is
  */
+/**
+ * Best-effort text extraction for the mention pre-check — mirrors the plain-text
+ * branch of buildSendBody(). A pre-built content object carries its text at
+ * `content.body.text`; anything we can't read yields '' and simply skips the
+ * roster fetch.
+ */
+function outboundText(params) {
+  const c = params.content;
+  if (typeof c === 'string') return c;
+  if (c && typeof c === 'object') {
+    if (c.content_type) return String(c.body?.text ?? '');
+    return String(c.text ?? c.body ?? '');
+  }
+  return String(params.body?.content?.body?.text ?? '');
+}
+
+/**
+ * Fill the mention registry from the conversation roster when the outbound text
+ * mentions somebody the registry can't resolve. No-op when the caller supplied
+ * `mentions` explicitly (buildSendBody short-circuits to those, so there is
+ * nothing to resolve) or when every mentioned name already resolves.
+ *
+ * Best-effort: a failed roster fetch leaves the pre-existing behaviour intact
+ * (an unresolvable @name produces no mention) and never blocks the send.
+ */
+async function hydrateRoster(params) {
+  if (Array.isArray(params.mentions)) return;
+  const convId = params.conversationId;
+  if (!convId) return;
+  const text = outboundText(params);
+  if (!needsRosterHydration(text, convId)) return;
+  try {
+    const res = await convClient(params).get(apiPath(`/conversations/${convId}/members`));
+    const members = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);
+    recordRoster(convId, members);
+  } catch {
+    /* best-effort: fall back to whatever the registry already knew */
+  }
+}
+
 function buildSendBody(params) {
   // Allow advanced caller to override completely
   if (params.body && params.body.content && params.body.type) {
@@ -367,7 +407,15 @@ const COMMANDS = {
   // ✅ POST /api/v1/conversations/{id}/messages
   //   body: {client_msg_id, type, content:{content_type, body, attachments}, parent_id?}
   //   See buildSendBody() for the schema details.
-  'comm.send': () => post(apiPath(`/conversations/${params.conversationId}/messages`), buildSendBody(params)),
+  'comm.send': async () => {
+    // Only matters when the caller did NOT pass mentions explicitly — in that
+    // case buildSendBody falls back to resolving `@name` against the local
+    // registry, which only knows participants observed speaking here. Pull the
+    // roster once when the text aims at somebody unresolvable, so a mention of
+    // a member who has never spoken still wakes them. See hydrateRoster().
+    await hydrateRoster(params);
+    return post(apiPath(`/conversations/${params.conversationId}/messages`), buildSendBody(params));
+  },
 
   // ✅ GET /api/v1/conversations/{id}/messages/{msg_id}
   'comm.get_message': () => get(
