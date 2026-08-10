@@ -101,3 +101,11 @@ test('并发调用只发一次（in-flight 防抖）', async () => {
   await Promise.all([p1, p2]);
   assert.equal(calls.length, 1);
 });
+
+test('isDone 反映 done 状态：成功上报后为 true（供就绪门禁跳过无谓等待）', async () => {
+  const { reporter } = makeReporter({ liveMemberId: 'm-1' });
+  assert.equal(reporter.isDone('org-a'), false);
+  await reporter(org('m-1'));
+  assert.equal(reporter.isDone('org-a'), true);
+  assert.equal(reporter.isDone('org-other'), false);
+});

@@ -41,6 +41,7 @@ export const READINESS_DEFAULTS = {
   pollMs: 2000,           // status file is rewritten every ~1s
   maxWaitMs: 10 * 60_000, // hard cap, then report anyway (see FAIL-OPEN above)
   staleStatusMs: 30_000,  // older than this ⇒ monitor not writing ⇒ unknown, not ready
+  heartbeatMs: 30_000,    // while held, re-log at this cadence so a long wait is visible
 };
 
 /**
@@ -57,63 +58,122 @@ export function createReadinessGate({ readStatus, readForeground, readProc, slee
     return { ...READINESS_DEFAULTS, ...(options() || {}) };
   }
 
-  /** One-shot check. Returns `{ready, reason}`; `reason` names the blocker. */
+  /**
+   * One-shot check.
+   * @returns {{ready: boolean, reason: string, detail: object}} `reason` names the
+   *   blocker; `detail` is the observed snapshot, carried so the caller can log
+   *   *why* without re-reading the files (this gate is diagnosed from logs on
+   *   machines we don't have shell access to).
+   */
   function evaluate() {
     const cfg = settings();
 
     const status = readStatus();
-    if (!status?.data) return { ready: false, reason: 'status_missing' };
-    if (now() - status.mtimeMs > cfg.staleStatusMs) return { ready: false, reason: 'status_stale' };
+    if (!status?.data) return { ready: false, reason: 'status_missing', detail: { status_file: 'missing_or_unreadable' } };
 
     const s = status.data;
-    if (typeof s.health === 'string' && s.health !== 'ok') return { ready: false, reason: `health_${s.health}` };
-    if (s.state !== 'idle') return { ready: false, reason: 'busy' };
-    if ((s.idle_seconds ?? 0) < cfg.minIdleSeconds) return { ready: false, reason: 'idle_too_brief' };
+    const statusAgeMs = now() - status.mtimeMs;
+    const fg = readForeground();
+    const proc = readProc();
+    const observedAt = Number(fg?.observed_at) || 0;
+    const launchAt = Number(s.runtime_launch_at) || 0;
+
+    // Snapshot every input the verdict depends on, so one log line explains it.
+    const detail = {
+      state: s.state ?? null,
+      idle_seconds: s.idle_seconds ?? null,
+      health: s.health ?? null,
+      status_age_ms: statusAgeMs,
+      session_observed_at: observedAt || null,
+      runtime_launch_at: launchAt || null,
+      session_in_launch: observedAt ? (!launchAt || observedAt >= launchAt) : false,
+      proc_alive: proc ? proc.alive !== false : null,
+      session_id: fg?.session_id ?? null,
+    };
+    const verdict = (ready, reason) => ({ ready, reason, detail });
+
+    // Order is by diagnostic value, not convenience: when several conditions
+    // fail at once we must name the most fundamental one. During boot both
+    // "no session yet" and "idle for <5s" are true, and reporting the latter
+    // would hide the fact that there is no session at all.
+    if (statusAgeMs > cfg.staleStatusMs) return verdict(false, 'status_stale');
+    if (typeof s.health === 'string' && s.health !== 'ok') return verdict(false, `health_${s.health}`);
 
     // A session must have started, and started within THIS runtime launch.
-    const fg = readForeground();
-    const observedAt = Number(fg?.observed_at) || 0;
-    if (!observedAt) return { ready: false, reason: 'no_session' };
-    const launchAt = Number(s.runtime_launch_at) || 0;
-    if (launchAt && observedAt < launchAt) return { ready: false, reason: 'session_predates_launch' };
+    if (!observedAt) return verdict(false, 'no_session');
+    if (!detail.session_in_launch) return verdict(false, 'session_predates_launch');
 
     // proc-state is advisory: absent/stale ⇒ don't block on it, but a confirmed
-    // dead runtime means the idle reading above is meaningless.
-    const proc = readProc();
-    if (proc && proc.alive === false) return { ready: false, reason: 'runtime_dead' };
+    // dead runtime means any idle reading is meaningless.
+    if (detail.proc_alive === false) return verdict(false, 'runtime_dead');
 
-    return { ready: true, reason: 'ready' };
+    if (s.state !== 'idle') return verdict(false, 'busy');
+    if ((s.idle_seconds ?? 0) < cfg.minIdleSeconds) return verdict(false, 'idle_too_brief');
+
+    return verdict(true, 'ready');
   }
 
   /**
    * Poll until ready or until the cap elapses.
-   * @returns {Promise<{ready: boolean, reason: string, waitedMs: number, timedOut: boolean}>}
+   *
+   * `onWait({reason, detail, waitedMs, kind})` fires on the first block, on every
+   * change of blocker, and on a slow heartbeat while still blocked. The heartbeat
+   * matters: without it a long hold logs one line and then goes silent, which is
+   * indistinguishable from a hung process to whoever is reading the log.
+   *
+   * @returns {Promise<{ready, reason, detail, waitedMs, timedOut, polls}>}
    */
   async function waitUntilReady({ onWait } = {}) {
     const cfg = settings();
     const startedAt = now();
-    let announced = null;
+    let announcedReason = null;
+    let lastHeartbeatAt = startedAt;
+    let polls = 0;
 
     for (;;) {
-      const verdict = evaluate();
+      const v = evaluate();
       const waitedMs = now() - startedAt;
-      if (verdict.ready) return { ...verdict, waitedMs, timedOut: false };
+      if (v.ready) return { ...v, waitedMs, timedOut: false, polls };
 
-      // Report the blocker once per distinct reason — a poll loop must not
-      // become a log firehose.
-      if (onWait && verdict.reason !== announced) {
-        announced = verdict.reason;
-        onWait(verdict.reason, waitedMs);
+      // A poll loop must not become a log firehose: emit on state change, then
+      // only once per heartbeat interval.
+      if (onWait) {
+        const changed = v.reason !== announcedReason;
+        const dueForHeartbeat = now() - lastHeartbeatAt >= cfg.heartbeatMs;
+        if (changed || dueForHeartbeat) {
+          announcedReason = v.reason;
+          lastHeartbeatAt = now();
+          onWait({ reason: v.reason, detail: v.detail, waitedMs, kind: changed ? 'blocked' : 'still_blocked' });
+        }
       }
 
       if (waitedMs + cfg.pollMs > cfg.maxWaitMs) {
-        return { ready: false, reason: verdict.reason, waitedMs, timedOut: true };
+        return { ...v, waitedMs, timedOut: true, polls };
       }
+      polls++;
       await sleep(cfg.pollMs);
     }
   }
 
   return { evaluate, waitUntilReady };
+}
+
+/**
+ * Render a readiness snapshot as one compact, greppable log field set.
+ * Kept next to `evaluate` so the two never drift apart.
+ */
+export function formatReadinessDetail(detail = {}) {
+  if (detail.status_file) return `status_file=${detail.status_file}`;
+  const parts = [
+    `state=${detail.state}`,
+    `idle=${detail.idle_seconds}s`,
+    `health=${detail.health}`,
+    `status_age=${Math.round((detail.status_age_ms ?? 0) / 1000)}s`,
+    `session=${detail.session_observed_at ? (detail.session_in_launch ? 'in-launch' : 'predates-launch') : 'none'}`,
+  ];
+  if (detail.proc_alive !== null && detail.proc_alive !== undefined) parts.push(`proc=${detail.proc_alive ? 'alive' : 'dead'}`);
+  if (detail.session_id) parts.push(`session_id=${detail.session_id}`);
+  return parts.join(' ');
 }
 
 /**
@@ -126,30 +186,51 @@ export function createReadinessGate({ readStatus, readForeground, readProc, slee
  * @param {object} deps
  * @param {(orgConfig: object) => Promise<void>} deps.reportAgentOnline
  * @param {{waitUntilReady: Function}} deps.gate
- * @param {() => boolean} [deps.isDisabled]  bypass the gate entirely (config escape hatch)
+ * @param {() => boolean} [deps.isDisabled]           bypass the gate entirely (config escape hatch)
+ * @param {(slug: string) => boolean} [deps.isAlreadyReported]  org has nothing left to report
  */
-export function createGatedOnlineReporter({ reportAgentOnline, gate, isDisabled = () => false, log = () => {}, warn = () => {} }) {
+export function createGatedOnlineReporter({ reportAgentOnline, gate, isDisabled = () => false, isAlreadyReported = () => false, log = () => {}, warn = () => {} }) {
   const waiting = new Set();
+  const secs = (ms) => `${Math.round(ms / 1000)}s`;
 
   return async function reportAgentOnlineWhenReady(orgConfig) {
     const { slug } = orgConfig;
-    if (waiting.has(slug)) return;
+
+    // Nothing left to report for this org (the report succeeded, or the endpoint
+    // 404'd) ⇒ never enter the gate. The reporter is a no-op from here on, and
+    // waiting for readiness before a no-op would make every later reconnect
+    // poll for minutes and log holds for work that no longer exists.
+    if (isAlreadyReported(slug)) return;
+
+    if (waiting.has(slug)) {
+      // Not silent: otherwise a periodic tick that appears to do nothing looks
+      // like a bug when read back from a log.
+      log(`[readiness] [${slug}] online-report already waiting for agent readiness — skipping duplicate wait`);
+      return;
+    }
     waiting.add(slug);
     try {
       if (isDisabled()) {
+        log(`[readiness] [${slug}] gate disabled by config — reporting online immediately`);
         await reportAgentOnline(orgConfig);
         return;
       }
       const verdict = await gate.waitUntilReady({
-        onWait: (reason, waitedMs) =>
-          log(`[${slug}] online-report held: agent not ready (${reason}, waited ${Math.round(waitedMs / 1000)}s)`),
+        onWait: ({ reason, detail, waitedMs, kind }) => {
+          const prefix = kind === 'blocked'
+            ? `[readiness] [${slug}] online-report HELD: ${reason}`
+            : `[readiness] [${slug}] online-report still held: ${reason} (waited ${secs(waitedMs)})`;
+          log(`${prefix} — ${formatReadinessDetail(detail)}`);
+        },
       });
       if (verdict.timedOut) {
         // Cap reached. Report anyway — a delayed onboarding beats an org that
         // never onboards because its agent stayed busy.
-        warn(`[${slug}] agent still not ready after ${Math.round(verdict.waitedMs / 1000)}s (${verdict.reason}) — reporting online anyway`);
+        warn(`[readiness] [${slug}] agent STILL not ready after ${secs(verdict.waitedMs)} (${verdict.reason}) — reporting online anyway (fail-open cap reached) — ${formatReadinessDetail(verdict.detail)}`);
       } else if (verdict.waitedMs > 0) {
-        log(`[${slug}] agent ready after ${Math.round(verdict.waitedMs / 1000)}s — reporting online`);
+        log(`[readiness] [${slug}] agent READY after ${secs(verdict.waitedMs)} (${verdict.polls} polls) — reporting online — ${formatReadinessDetail(verdict.detail)}`);
+      } else {
+        log(`[readiness] [${slug}] agent ready on first check — reporting online without delay — ${formatReadinessDetail(verdict.detail)}`);
       }
       await reportAgentOnline(orgConfig);
     } finally {

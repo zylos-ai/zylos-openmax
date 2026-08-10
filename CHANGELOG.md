@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.5] — 2026-08-10
+
+### Fixed
+
+- **The onboarding trigger no longer fires at an agent that cannot act yet.**
+  `online-report` is what makes cws-core start onboarding, and it was sent the
+  moment the WebSocket opened. But the socket coming up only proves the
+  comm-bridge process is alive — the runtime agent behind C4 may still be
+  booting, and on a fresh install no agent session exists at all (the `onOpen`
+  first-connect branch already documented that "prepare phase" window). The
+  server therefore began onboarding — welcome DM, seeded issues, an `active`
+  onboarding session — against an agent that could not respond for minutes, so
+  the first real message arrived long after onboarding was believed to have
+  started. The report is now held until the agent is actually ready.
+
+  Readiness is deliberately **not** just `state === 'idle'`: the activity
+  monitor defines idle as `activeTools === 0 && inactiveSeconds >= 3`, and with
+  no conversation file yet its activity source degrades
+  `conv_file → tmux_activity → default`, so a still-booting runtime with no
+  session reads `idle` exactly like a finished one. The gate additionally
+  requires proof that a session reached its SessionStart hooks *within the
+  current runtime launch*
+  (`foreground-session.json.observed_at >= agent-status.json.runtime_launch_at`,
+  which also rejects a stale value from a previous launch), plus `health = ok`,
+  a fresh status file, sustained idle, and a not-confirmed-dead process.
+
+  **Fail-open by design:** the gate delays the trigger, it never cancels it. The
+  wait is capped (default 10 min) and then reports anyway — a permanently busy
+  agent or a stopped activity monitor must not strand an org un-onboarded, which
+  would trade a latency bug for a deadlock. New optional config
+  `agent.readiness_gate` (`enabled`, `min_idle_seconds`, `poll_ms`,
+  `max_wait_ms`, `stale_status_ms`, `heartbeat_ms`); defaults need no config
+  change, and `enabled: false` restores the previous behavior.
+
+  The gate only ever applies while an org still has something to report: the
+  reporter now exposes `isDone(slug)` and the gate is skipped outright once the
+  report has succeeded (or the endpoint 404'd), so later reconnects are not made
+  to wait for readiness on their way to a no-op. Only the first check is
+  synchronous — a ready agent adds no delay at all; polling starts only after a
+  check fails.
+
+  Scope note: this removes only the not-ready share of the delay. Loading the
+  skill and running the Issue→Task registration flow is the agent's own
+  first-turn work and is unaffected.
+
+### Added
+
+- **`[readiness]`-tagged diagnostics for the gate**, so a held trigger can be
+  diagnosed from logs alone on machines we have no shell access to. Every hold
+  logs the blocking reason plus the full snapshot behind it
+  (`state=… idle=…s health=… status_age=…s session=in-launch|predates-launch|none proc=… session_id=…`),
+  re-logs on a 30s heartbeat while still held (a long wait that logged once and
+  then went silent was indistinguishable from a hung process), logs immediately
+  when the blocker changes, and logs the outcome — ready after N seconds and how
+  many polls, or the fail-open cap being reached. When several conditions fail at
+  once the most fundamental one is named, so a boot window reports `no_session`
+  rather than the incidental `idle_too_brief`.
+
 ## [2.12.4] — 2026-08-06
 
 Promotes the 2.12.4 beta line to a stable release. No code changes since

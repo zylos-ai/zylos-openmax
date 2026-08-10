@@ -1955,6 +1955,9 @@ const reportAgentOnlineWhenReady = createGatedOnlineReporter({
   reportAgentOnline,
   gate: readinessGate,
   isDisabled: () => loadConfig().agent?.readiness_gate?.enabled === false,
+  // Once this org has reported (or 404'd), skip the gate entirely — later
+  // reconnects must not pay the readiness wait for a no-op.
+  isAlreadyReported: (slug) => reportAgentOnline.isDone(slug),
   log,
   warn,
 });
