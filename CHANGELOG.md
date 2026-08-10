@@ -37,7 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would trade a latency bug for a deadlock. New optional config
   `agent.readiness_gate` (`enabled`, `min_idle_seconds`, `poll_ms`,
   `max_wait_ms`, `stale_status_ms`, `heartbeat_ms`); defaults need no config
-  change, and `enabled: false` restores the previous behavior.
+  change, and `enabled: false` restores the previous behavior. These snake_case
+  keys are normalized to the module's internals at the boundary, so every
+  documented knob takes effect; values that are not positive numbers are ignored
+  rather than propagated, since a `NaN` cap would disable fail-open and a `NaN`
+  poll interval would turn the wait into a busy spin.
 
   The gate only ever applies while an org still has something to report: the
   reporter now exposes `isDone(slug)` and the gate is skipped outright once the

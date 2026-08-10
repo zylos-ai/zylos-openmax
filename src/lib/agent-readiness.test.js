@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createReadinessGate, createGatedOnlineReporter, formatReadinessDetail, READINESS_DEFAULTS } from './agent-readiness.js';
+import { createReadinessGate, createGatedOnlineReporter, formatReadinessDetail, normalizeReadinessOptions, READINESS_DEFAULTS } from './agent-readiness.js';
 
 const NOW = 1_700_000_000_000;
 const LAUNCH_AT = NOW - 60_000;
@@ -120,6 +120,68 @@ test('永远不 ready ⇒ 到 maxWaitMs 后 timedOut 返回（fail-open，绝不
   assert.equal(v.timedOut, true);
   assert.equal(v.reason, 'busy');
   assert.ok(v.waitedMs <= 5000, `waited ${v.waitedMs} must not exceed the cap`);
+});
+
+// --- public config shape (agent.readiness_gate) -----------------------------
+// Regression: the documented snake_case knobs were merged raw into camelCase
+// defaults, so every timing setting was silently ignored — an operator lowering
+// max_wait_ms still waited the full 10-minute default.
+
+test('公开配置是 snake_case，必须真正生效（回归：曾被静默忽略）', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { poll_ms: 100, max_wait_ms: 300, heartbeat_ms: 100, min_idle_seconds: 9, stale_status_ms: 60_000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.timedOut, true);
+  assert.ok(v.waitedMs <= 300, `max_wait_ms 必须生效，实际等了 ${v.waitedMs}ms`);
+});
+
+test('snake_case min_idle_seconds 生效（默认 5 时 idle=7 本应 ready）', () => {
+  const { gate } = makeGate({ status: readyStatus({ idle_seconds: 7 }), options: { min_idle_seconds: 30 } });
+  assert.equal(gate.evaluate().reason, 'idle_too_brief');
+});
+
+test('snake_case stale_status_ms 生效', () => {
+  const stale = { ...readyStatus(), mtimeMs: NOW - 5000 };
+  assert.equal(makeGate({ status: stale, options: { stale_status_ms: 60_000 } }).gate.evaluate().ready, true);
+  assert.equal(makeGate({ status: stale, options: { stale_status_ms: 1000 } }).gate.evaluate().reason, 'status_stale');
+});
+
+test('normalizeReadinessOptions: snake_case → camelCase 全量映射', () => {
+  assert.deepEqual(
+    normalizeReadinessOptions({
+      min_idle_seconds: 1, poll_ms: 2, max_wait_ms: 3, stale_status_ms: 4, heartbeat_ms: 5,
+    }),
+    { minIdleSeconds: 1, pollMs: 2, maxWaitMs: 3, staleStatusMs: 4, heartbeatMs: 5 },
+  );
+  // every default must have a documented snake_case spelling — no silent gaps
+  for (const key of Object.keys(READINESS_DEFAULTS)) {
+    const snake = key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+    assert.ok(snake in { min_idle_seconds: 1, poll_ms: 1, max_wait_ms: 1, stale_status_ms: 1, heartbeat_ms: 1 },
+      `default ${key} has no snake_case alias (${snake})`);
+  }
+});
+
+test('normalizeReadinessOptions: camelCase 仍接受（程序内/测试调用）', () => {
+  assert.deepEqual(normalizeReadinessOptions({ pollMs: 50 }), { pollMs: 50 });
+});
+
+test('normalizeReadinessOptions: 无效值和无关键忽略，不污染默认值', () => {
+  assert.deepEqual(normalizeReadinessOptions({ enabled: false, poll_ms: 'abc', max_wait_ms: 0, nope: 1 }), {});
+  assert.deepEqual(normalizeReadinessOptions(null), {});
+  assert.deepEqual(normalizeReadinessOptions('x'), {});
+});
+
+test('配置里的垃圾值不会让轮询退化成忙等或取消 fail-open 上限', async () => {
+  const { gate, sleeps } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { poll_ms: 'oops', max_wait_ms: NaN },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.timedOut, true);
+  assert.equal(v.waitedMs, READINESS_DEFAULTS.maxWaitMs, 'falls back to the default cap, and never overshoots it');
+  assert.ok(sleeps.every((ms) => ms === READINESS_DEFAULTS.pollMs), 'must fall back to the default poll interval');
 });
 
 // --- gated reporter ---------------------------------------------------------

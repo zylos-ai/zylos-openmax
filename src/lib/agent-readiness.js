@@ -45,6 +45,41 @@ export const READINESS_DEFAULTS = {
 };
 
 /**
+ * Public config (`agent.readiness_gate` in config.json) is snake_case, like every
+ * other key in this file's neighbours (`device_id`, `api_key`,
+ * `heartbeat_interval`). Internals are camelCase. Normalize at the boundary
+ * rather than letting the two shapes meet: merging raw config into camelCase
+ * defaults silently dropped every documented timing knob, so an operator
+ * lowering the 10-minute cap kept getting 10 minutes with no error to show why.
+ *
+ * camelCase is accepted too, for programmatic/test callers. Non-numeric or
+ * non-positive values are ignored rather than propagated — a NaN reaching
+ * `maxWaitMs` would disable the fail-open cap, and a NaN `pollMs` would turn the
+ * wait into a busy spin.
+ */
+const OPTION_ALIASES = {
+  min_idle_seconds: 'minIdleSeconds',
+  poll_ms: 'pollMs',
+  max_wait_ms: 'maxWaitMs',
+  stale_status_ms: 'staleStatusMs',
+  heartbeat_ms: 'heartbeatMs',
+};
+
+export function normalizeReadinessOptions(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+
+  for (const [key, value] of Object.entries(raw)) {
+    const name = OPTION_ALIASES[key] || key;
+    if (!(name in READINESS_DEFAULTS)) continue; // unknown key (e.g. `enabled`) — not ours
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) continue; // garbage in config must not break the loop
+    out[name] = n;
+  }
+  return out;
+}
+
+/**
  * @param {object} deps
  * @param {() => ({data: object, mtimeMs: number}|null)} deps.readStatus     agent-status.json
  * @param {() => (object|null)} deps.readForeground                          foreground-session.json
@@ -55,7 +90,7 @@ export const READINESS_DEFAULTS = {
  */
 export function createReadinessGate({ readStatus, readForeground, readProc, sleep, now, options = () => ({}) }) {
   function settings() {
-    return { ...READINESS_DEFAULTS, ...(options() || {}) };
+    return { ...READINESS_DEFAULTS, ...normalizeReadinessOptions(options()) };
   }
 
   /**
