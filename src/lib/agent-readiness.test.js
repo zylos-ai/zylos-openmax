@@ -208,6 +208,54 @@ test('gated reporter: ready 后才发 online-report', async () => {
   assert.deepEqual(posts, ['org-a']);
 });
 
+// Regression for the 2026-08-10 cws-agent-runtime finding: a transient
+// prepare-phase comm-bridge must never produce an online-report, because the
+// platform treats it as proof the real runtime is up and fires the welcome DM.
+test('到达上限但压根没有 session ⇒ 绝不上报（no_session 不 fail-open）', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'idle', idle_seconds: 99 }),
+    foreground: null, // prepare phase: no agent session has ever started
+    options: { pollMs: 1000, maxWaitMs: 3000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.timedOut, true);
+  assert.equal(v.reason, 'no_session');
+  assert.equal(v.failOpenAllowed, false, 'reporting here would assert something untrue');
+});
+
+test('上一轮残留的 session 同样不 fail-open（等价于本轮没有 session）', async () => {
+  const { gate } = makeGate({
+    foreground: { observed_at: LAUNCH_AT - 1 },
+    options: { pollMs: 1000, maxWaitMs: 3000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.reason, 'session_predates_launch');
+  assert.equal(v.failOpenAllowed, false);
+});
+
+test('busy 仍然 fail-open（agent 存在，只是忙 ⇒ 不能把 org 永久卡住）', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { pollMs: 1000, maxWaitMs: 3000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.reason, 'busy');
+  assert.notEqual(v.failOpenAllowed, false, 'a present-but-busy agent must still report');
+});
+
+test('gated reporter: no_session 到上限时不发报告（而不是发一个假的）', async () => {
+  const gate = fakeGate({ ready: false, reason: 'no_session', detail: {}, waitedMs: 600000, timedOut: true, failOpenAllowed: false });
+  const posts = [];
+  const warns = [];
+  const report = createGatedOnlineReporter({
+    reportAgentOnline: async (o) => posts.push(o.slug), gate, warn: (m) => warns.push(m),
+  });
+  await report({ slug: 'org-a' });
+  assert.deepEqual(posts, [], 'must NOT report a false online');
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /NOT reporting online/);
+});
+
 test('gated reporter: 等待超时也要发（fail-open），并 warn', async () => {
   const gate = fakeGate({ ready: false, reason: 'busy', waitedMs: 600000, timedOut: true });
   const posts = [];

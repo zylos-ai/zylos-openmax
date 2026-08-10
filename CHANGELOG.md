@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.6] — 2026-08-10
+
+### Fixed
+
+- **The readiness cap can no longer emit a false "online" when no agent session
+  exists.** The 10-minute fail-open exists so an agent that is *present but busy*
+  cannot strand its org un-onboarded. But when the blocker was "no session at
+  all", the cap still released the report — asserting something untrue, which the
+  platform then acts on (welcome DM + seeded onboarding against a runtime that
+  does not exist). This is exactly the premature-welcome path traced in the
+  2026-08-10 cws-agent-runtime investigation: a transient prepare-phase
+  comm-bridge whose `online-report` was taken as proof the real runtime was up,
+  2 seconds before it was SIGINT'd. `no_session` and `session_predates_launch`
+  are now in `NO_FAIL_OPEN_REASONS` and defer instead of failing open; the WS
+  reconnect and periodic tick still retry, so this delays rather than cancels.
+  In practice prepare tears down at ~56s, far below the cap — the previous
+  behaviour was safe only by coincidence.
+
+### Added
+
+- **Event-driven runtime-metrics report on readiness edges.** The platform
+  decides whether an agent can be talked to from the reported `runtime.state`,
+  but that only travelled upward on the 60-second metrics tick (plus a 15-second
+  initial delay), so a freshly provisioned agent could stay greyed out in the UI
+  for up to a minute after it was genuinely able to work. One extra report now
+  fires when the gate-relevant state changes.
+
+  Deliberately **not** on every transition: local execution state flaps between
+  busy and idle constantly while an agent works, and reporting each flap would
+  turn a 1/min PUT into a continuous stream — a worse problem than the latency it
+  fixes. The fingerprint is only what the platform's chat gate can act on
+  (`ready`, and whether a running agent process is observable), so busy↔idle
+  moves neither bit and produces no extra reports. A 5s floor bounds pathological
+  flipping, suppressed edges are logged rather than silently dropped, overlapping
+  reports cannot stack, and the periodic tick is untouched so any missed edge
+  still heals. Opt out with `metricsReport.readinessTrigger.enabled = false`;
+  `poll_ms` / `min_gap_ms` are tunable.
+
 ## [2.12.5] — 2026-08-10
 
 ### Fixed

@@ -36,6 +36,24 @@ import path from 'node:path';
 import os from 'node:os';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 
+/**
+ * Blockers on which the fail-open cap must NOT release the report.
+ *
+ * Fail-open exists so an agent that is *present but busy* cannot strand its org
+ * un-onboarded. It must never manufacture a false "I am online" when no agent
+ * session exists for this launch at all — reporting then asserts something
+ * untrue, and the platform acts on it: the 2026-08-10 cws-agent-runtime
+ * investigation traced the premature "有什么可以帮你" welcome DM to exactly this,
+ * a transient prepare-phase comm-bridge whose online-report was taken as proof
+ * the real runtime was up (it was SIGINT'd 2s later, and the real runtime had
+ * not started yet).
+ *
+ * These two reasons both mean "no session belongs to this runtime launch", so
+ * waiting longer is the only honest behavior. The caller keeps its retry path
+ * (WS reconnect / periodic tick), so this defers rather than cancels.
+ */
+export const NO_FAIL_OPEN_REASONS = new Set(['no_session', 'session_predates_launch']);
+
 export const READINESS_DEFAULTS = {
   minIdleSeconds: 5,      // sustained idle before we believe the agent is waiting
   pollMs: 2000,           // status file is rewritten every ~1s
@@ -156,7 +174,9 @@ export function createReadinessGate({ readStatus, readForeground, readProc, slee
    * matters: without it a long hold logs one line and then goes silent, which is
    * indistinguishable from a hung process to whoever is reading the log.
    *
-   * @returns {Promise<{ready, reason, detail, waitedMs, timedOut, polls}>}
+   * @returns {Promise<{ready, reason, detail, waitedMs, timedOut, polls, failOpenAllowed}>}
+   *   `failOpenAllowed: false` means the cap was reached on a blocker where
+   *   reporting anyway would assert something untrue — see NO_FAIL_OPEN_REASONS.
    */
   async function waitUntilReady({ onWait } = {}) {
     const cfg = settings();
@@ -183,7 +203,7 @@ export function createReadinessGate({ readStatus, readForeground, readProc, slee
       }
 
       if (waitedMs + cfg.pollMs > cfg.maxWaitMs) {
-        return { ...v, waitedMs, timedOut: true, polls };
+        return { ...v, waitedMs, timedOut: true, polls, failOpenAllowed: !NO_FAIL_OPEN_REASONS.has(v.reason) };
       }
       polls++;
       await sleep(cfg.pollMs);
@@ -258,9 +278,17 @@ export function createGatedOnlineReporter({ reportAgentOnline, gate, isDisabled 
           log(`${prefix} — ${formatReadinessDetail(detail)}`);
         },
       });
+      if (verdict.timedOut && verdict.failOpenAllowed === false) {
+        // No session belongs to this launch, so reporting would assert something
+        // untrue and the platform would act on it (premature welcome DM +
+        // onboarding seeded at a runtime that does not exist). Defer instead —
+        // the WS reconnect / periodic tick retries, so this is not a cancel.
+        warn(`[readiness] [${slug}] cap reached with NO agent session (${verdict.reason}) — NOT reporting online; deferring to the next retry — ${formatReadinessDetail(verdict.detail)}`);
+        return;
+      }
       if (verdict.timedOut) {
-        // Cap reached. Report anyway — a delayed onboarding beats an org that
-        // never onboards because its agent stayed busy.
+        // Cap reached with an agent that exists but is busy. Report anyway — a
+        // delayed onboarding beats an org that never onboards.
         warn(`[readiness] [${slug}] agent STILL not ready after ${secs(verdict.waitedMs)} (${verdict.reason}) — reporting online anyway (fail-open cap reached) — ${formatReadinessDetail(verdict.detail)}`);
       } else if (verdict.waitedMs > 0) {
         log(`[readiness] [${slug}] agent READY after ${secs(verdict.waitedMs)} (${verdict.polls} polls) — reporting online — ${formatReadinessDetail(verdict.detail)}`);

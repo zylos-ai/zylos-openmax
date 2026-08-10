@@ -38,6 +38,7 @@ import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.
 import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
 import { createDefaultReadinessGate, createGatedOnlineReporter } from './lib/agent-readiness.js';
+import { createReadinessTrigger } from './lib/readiness-trigger.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
@@ -2371,6 +2372,8 @@ tasks.register('connect-result-resend', () => connectResultQueue.resend(),
   CONNECT_RESULT_RESEND_INTERVAL_MS, { runOnStart: true });
 tasks.register('frame-metrics', dumpFrameMetrics, WS_METRIC_INTERVAL_MS);
 tasks.register('owner-config-sync', periodicSync, PERIODIC_SYNC_INTERVAL_MS);
+// Holder for the readiness-edge trigger; started with the periodic tasks below.
+let metricsReadinessTrigger = null;
 if (config.metricsReport?.enabled !== false) {
   const reportMetrics = createMetricsReporter(activeOrgConfigs, {
     log, warn,
@@ -2379,6 +2382,21 @@ if (config.metricsReport?.enabled !== false) {
   tasks.register('metrics-report', reportMetrics, METRICS_REPORT_INTERVAL_MS, {
     delay: METRICS_REPORT_INITIAL_DELAY_MS,
   });
+
+  // The platform decides whether this agent can be talked to from the reported
+  // runtime state, but the tick above is 60s (plus a 15s initial delay) — long
+  // enough that a provisioned agent stays greyed out in the UI for up to a
+  // minute after it can actually work. Fire one extra report on the edges that
+  // matter (see lib/readiness-trigger.js: busy↔idle flapping deliberately does
+  // not qualify). Additive only — the periodic tick still heals any missed edge.
+  if (config.metricsReport?.readinessTrigger?.enabled !== false) {
+    metricsReadinessTrigger = createReadinessTrigger({
+      evaluate: () => readinessGate.evaluate(),
+      report: reportMetrics,
+      options: () => loadConfig().metricsReport?.readinessTrigger || {},
+      log, warn,
+    });
+  }
 }
 if (config.channelLiveness?.enabled !== false) {
   const reportChannelLiveness = createChannelLivenessReporter(activeOrgConfigs, {
@@ -2399,4 +2417,5 @@ tasks.start('connect-result-resend');
 tasks.start('frame-metrics');
 tasks.start('owner-config-sync');
 if (config.metricsReport?.enabled !== false) tasks.start('metrics-report');
+metricsReadinessTrigger?.start();
 if (config.channelLiveness?.enabled !== false) tasks.start('channel-liveness');
