@@ -37,6 +37,7 @@ import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHead
 import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
 import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
+import { createDefaultReadinessGate, createGatedOnlineReporter } from './lib/agent-readiness.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
@@ -1939,6 +1940,25 @@ function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) 
 
 const reportAgentOnline = createOnlineReporter({ loadConfig, postForOrg, apiPath, log, warn });
 
+// Readiness gate in front of the trigger. The report is what makes cws-core
+// begin onboarding, so firing it the instant the socket opens starts the whole
+// server-side sequence against an agent that may still be booting — the first
+// real reply then arrives minutes after the server thinks onboarding began.
+// Hold the trigger until the runtime agent is actually able to act; rationale,
+// the exact readiness definition, and the fail-open cap live in
+// lib/agent-readiness.js.
+const readinessGate = createDefaultReadinessGate({
+  options: () => loadConfig().agent?.readiness_gate || {},
+});
+
+const reportAgentOnlineWhenReady = createGatedOnlineReporter({
+  reportAgentOnline,
+  gate: readinessGate,
+  isDisabled: () => loadConfig().agent?.readiness_gate?.enabled === false,
+  log,
+  warn,
+});
+
 // =============================================================================
 // Config sync to cws-comm — push local policy config on every WS (re)connect
 // =============================================================================
@@ -1999,7 +2019,9 @@ function periodicSync() {
     // Onboarding online-report: heals transient failures on a stable WS
     // connection (otherwise the next attempt waits for a reconnect).
     // Set-guarded and idempotent — no-op once one report has succeeded.
-    reportAgentOnline(orgConfig).catch(e =>
+    // Goes through the readiness gate too, so a report deferred at onOpen is
+    // not smuggled out early by the periodic tick.
+    reportAgentOnlineWhenReady(orgConfig).catch(e =>
       warn(`[${slug}] periodic online-report failed: ${e.message}`));
   }
 }
@@ -2141,7 +2163,10 @@ function startOrgWs(orgConfig, wsBaseUrl) {
 
     onOpen: async () => {
       log(`[ws] org=${orgConfig.slug} open (org_id=${orgConfig.org_id})`);
-      reportAgentOnline(orgConfig).catch(e =>
+      // Deliberately not awaited: the readiness gate can hold this for minutes
+      // and must never delay the inbox replay below, which is what actually
+      // delivers the onboarding messages once they exist.
+      reportAgentOnlineWhenReady(orgConfig).catch(e =>
         warn(`[${orgConfig.slug}] online-report failed: ${e.message} — will retry on next reconnect`));
       if (!sessionRef.sync_seq) {
         // First-ever connect: REPLAY the inbox from the start and dispatch each
