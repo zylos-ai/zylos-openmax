@@ -17,7 +17,7 @@ export function createOnlineReporter({ loadConfig, postForOrg, apiPath, log, war
   const done = new Set();     // org slugs reported (or permanently skipped) this process
   const inflight = new Set(); // guard against a reconnect racing an in-flight POST
 
-  return async function reportAgentOnline(orgConfig) {
+  async function reportAgentOnline(orgConfig) {
     if (done.has(orgConfig.slug) || inflight.has(orgConfig.slug)) return;
 
     let memberId = orgConfig.self?.member_id;
@@ -50,5 +50,13 @@ export function createOnlineReporter({ loadConfig, postForOrg, apiPath, log, war
     } finally {
       inflight.delete(orgConfig.slug);
     }
-  };
+  }
+
+  // Exposed so a caller that does expensive work *before* calling us (e.g. the
+  // readiness gate, which can poll for minutes) can skip that work entirely
+  // once this org has nothing left to report. Without this the gate would wait
+  // on a reconnect only to reach a no-op.
+  reportAgentOnline.isDone = (slug) => done.has(slug);
+
+  return reportAgentOnline;
 }

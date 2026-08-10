@@ -1,0 +1,346 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createReadinessGate, createGatedOnlineReporter, formatReadinessDetail, normalizeReadinessOptions, READINESS_DEFAULTS } from './agent-readiness.js';
+
+const NOW = 1_700_000_000_000;
+const LAUNCH_AT = NOW - 60_000;
+
+function readyStatus(overrides = {}) {
+  return {
+    data: {
+      state: 'idle',
+      health: 'ok',
+      idle_seconds: 30,
+      runtime_launch_at: LAUNCH_AT,
+      ...overrides,
+    },
+    mtimeMs: NOW,
+  };
+}
+
+/**
+ * Clock advances by pollMs on every sleep so wait loops terminate deterministically
+ * without real timers.
+ */
+function makeGate({ status = readyStatus(), foreground = { observed_at: LAUNCH_AT + 1000 }, proc = { alive: true }, options = {} } = {}) {
+  let clock = NOW;
+  const sleeps = [];
+  const gate = createReadinessGate({
+    readStatus: () => (typeof status === 'function' ? status(clock) : status),
+    readForeground: () => (typeof foreground === 'function' ? foreground(clock) : foreground),
+    readProc: () => proc,
+    sleep: async (ms) => { sleeps.push(ms); clock += ms; },
+    now: () => clock,
+    options: () => options,
+  });
+  return { gate, sleeps, clockAt: () => clock };
+}
+
+test('idle + 本轮 launch 内有 session_start ⇒ ready', () => {
+  const { gate } = makeGate();
+  const v = gate.evaluate();
+  assert.equal(v.ready, true);
+  assert.equal(v.reason, 'ready');
+});
+
+test('busy ⇒ not ready', () => {
+  const { gate } = makeGate({ status: readyStatus({ state: 'busy' }) });
+  assert.equal(gate.evaluate().reason, 'busy');
+});
+
+test('idle 但还没有任何 session ⇒ not ready（这是 raw idle 会漏掉的启动窗口）', () => {
+  const { gate } = makeGate({ foreground: null });
+  const v = gate.evaluate();
+  assert.equal(v.ready, false);
+  assert.equal(v.reason, 'no_session');
+});
+
+test('session_start 早于本轮 runtime_launch_at ⇒ 视为上一轮的残留，not ready', () => {
+  const { gate } = makeGate({ foreground: { observed_at: LAUNCH_AT - 5000 } });
+  assert.equal(gate.evaluate().reason, 'session_predates_launch');
+});
+
+test('idle 时间不足 minIdleSeconds ⇒ not ready', () => {
+  const { gate } = makeGate({ status: readyStatus({ idle_seconds: 1 }) });
+  assert.equal(gate.evaluate().reason, 'idle_too_brief');
+});
+
+test('多个条件同时不满足时，报最根本的那个（启动期报 no_session，不报 idle_too_brief）', () => {
+  // Boot window: idle reading exists but no session at all — remote log readers
+  // must see the real blocker, not the incidental one.
+  const { gate } = makeGate({ status: readyStatus({ idle_seconds: 0 }), foreground: null });
+  assert.equal(gate.evaluate().reason, 'no_session');
+});
+
+test('proc 已死优先于 busy 报出（idle/busy 读数此时无意义）', () => {
+  const { gate } = makeGate({ status: readyStatus({ state: 'busy' }), proc: { alive: false } });
+  assert.equal(gate.evaluate().reason, 'runtime_dead');
+});
+
+test('status 文件缺失或过期 ⇒ not ready（monitor 没在写，状态未知）', () => {
+  assert.equal(makeGate({ status: null }).gate.evaluate().reason, 'status_missing');
+  const stale = { ...readyStatus(), mtimeMs: NOW - READINESS_DEFAULTS.staleStatusMs - 1 };
+  assert.equal(makeGate({ status: stale }).gate.evaluate().reason, 'status_stale');
+});
+
+test('health 非 ok ⇒ not ready，且 reason 带上具体 health', () => {
+  const { gate } = makeGate({ status: readyStatus({ health: 'down' }) });
+  assert.equal(gate.evaluate().reason, 'health_down');
+});
+
+test('proc 明确 alive=false ⇒ not ready（idle 读数无意义）', () => {
+  const { gate } = makeGate({ proc: { alive: false } });
+  assert.equal(gate.evaluate().reason, 'runtime_dead');
+});
+
+test('proc-state 缺失时不阻塞（advisory only）', () => {
+  const { gate } = makeGate({ proc: null });
+  assert.equal(gate.evaluate().ready, true);
+});
+
+test('waitUntilReady 轮询到 ready 后返回等待时长', async () => {
+  let ticks = 0;
+  const { gate } = makeGate({
+    status: () => (ticks++ < 2 ? readyStatus({ state: 'busy' }) : readyStatus()),
+    options: { pollMs: 1000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.ready, true);
+  assert.equal(v.timedOut, false);
+  assert.equal(v.waitedMs, 2000);
+});
+
+test('永远不 ready ⇒ 到 maxWaitMs 后 timedOut 返回（fail-open，绝不无限等）', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { pollMs: 1000, maxWaitMs: 5000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.ready, false);
+  assert.equal(v.timedOut, true);
+  assert.equal(v.reason, 'busy');
+  assert.ok(v.waitedMs <= 5000, `waited ${v.waitedMs} must not exceed the cap`);
+});
+
+// --- public config shape (agent.readiness_gate) -----------------------------
+// Regression: the documented snake_case knobs were merged raw into camelCase
+// defaults, so every timing setting was silently ignored — an operator lowering
+// max_wait_ms still waited the full 10-minute default.
+
+test('公开配置是 snake_case，必须真正生效（回归：曾被静默忽略）', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { poll_ms: 100, max_wait_ms: 300, heartbeat_ms: 100, min_idle_seconds: 9, stale_status_ms: 60_000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.timedOut, true);
+  assert.ok(v.waitedMs <= 300, `max_wait_ms 必须生效，实际等了 ${v.waitedMs}ms`);
+});
+
+test('snake_case min_idle_seconds 生效（默认 5 时 idle=7 本应 ready）', () => {
+  const { gate } = makeGate({ status: readyStatus({ idle_seconds: 7 }), options: { min_idle_seconds: 30 } });
+  assert.equal(gate.evaluate().reason, 'idle_too_brief');
+});
+
+test('snake_case stale_status_ms 生效', () => {
+  const stale = { ...readyStatus(), mtimeMs: NOW - 5000 };
+  assert.equal(makeGate({ status: stale, options: { stale_status_ms: 60_000 } }).gate.evaluate().ready, true);
+  assert.equal(makeGate({ status: stale, options: { stale_status_ms: 1000 } }).gate.evaluate().reason, 'status_stale');
+});
+
+test('normalizeReadinessOptions: snake_case → camelCase 全量映射', () => {
+  assert.deepEqual(
+    normalizeReadinessOptions({
+      min_idle_seconds: 1, poll_ms: 2, max_wait_ms: 3, stale_status_ms: 4, heartbeat_ms: 5,
+    }),
+    { minIdleSeconds: 1, pollMs: 2, maxWaitMs: 3, staleStatusMs: 4, heartbeatMs: 5 },
+  );
+  // every default must have a documented snake_case spelling — no silent gaps
+  for (const key of Object.keys(READINESS_DEFAULTS)) {
+    const snake = key.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+    assert.ok(snake in { min_idle_seconds: 1, poll_ms: 1, max_wait_ms: 1, stale_status_ms: 1, heartbeat_ms: 1 },
+      `default ${key} has no snake_case alias (${snake})`);
+  }
+});
+
+test('normalizeReadinessOptions: camelCase 仍接受（程序内/测试调用）', () => {
+  assert.deepEqual(normalizeReadinessOptions({ pollMs: 50 }), { pollMs: 50 });
+});
+
+test('normalizeReadinessOptions: 无效值和无关键忽略，不污染默认值', () => {
+  assert.deepEqual(normalizeReadinessOptions({ enabled: false, poll_ms: 'abc', max_wait_ms: 0, nope: 1 }), {});
+  assert.deepEqual(normalizeReadinessOptions(null), {});
+  assert.deepEqual(normalizeReadinessOptions('x'), {});
+});
+
+test('配置里的垃圾值不会让轮询退化成忙等或取消 fail-open 上限', async () => {
+  const { gate, sleeps } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { poll_ms: 'oops', max_wait_ms: NaN },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.timedOut, true);
+  assert.equal(v.waitedMs, READINESS_DEFAULTS.maxWaitMs, 'falls back to the default cap, and never overshoots it');
+  assert.ok(sleeps.every((ms) => ms === READINESS_DEFAULTS.pollMs), 'must fall back to the default poll interval');
+});
+
+// --- gated reporter ---------------------------------------------------------
+
+function fakeGate(verdict) {
+  let release;
+  const gate = {
+    calls: 0,
+    waitUntilReady: async () => {
+      gate.calls++;
+      if (verdict === 'hang') return new Promise((r) => { release = () => r({ ready: true, reason: 'ready', waitedMs: 1, timedOut: false }); });
+      return verdict;
+    },
+    release: () => release?.(),
+  };
+  return gate;
+}
+
+test('gated reporter: ready 后才发 online-report', async () => {
+  const gate = fakeGate({ ready: true, reason: 'ready', waitedMs: 4000, timedOut: false });
+  const posts = [];
+  const report = createGatedOnlineReporter({ reportAgentOnline: async (o) => posts.push(o.slug), gate });
+  await report({ slug: 'org-a' });
+  assert.deepEqual(posts, ['org-a']);
+});
+
+test('gated reporter: 等待超时也要发（fail-open），并 warn', async () => {
+  const gate = fakeGate({ ready: false, reason: 'busy', waitedMs: 600000, timedOut: true });
+  const posts = [];
+  const warns = [];
+  const report = createGatedOnlineReporter({
+    reportAgentOnline: async (o) => posts.push(o.slug), gate, warn: (m) => warns.push(m),
+  });
+  await report({ slug: 'org-a' });
+  assert.deepEqual(posts, ['org-a'], 'timeout must still report — never strand the org');
+  assert.equal(warns.length, 1);
+});
+
+test('gated reporter: 同一 org 已有 waiter 时第二次调用直接跳过（periodicSync 不叠加轮询）', async () => {
+  const gate = fakeGate('hang');
+  const posts = [];
+  const report = createGatedOnlineReporter({ reportAgentOnline: async (o) => posts.push(o.slug), gate });
+  const first = report({ slug: 'org-a' });
+  await report({ slug: 'org-a' });           // periodic tick while first is waiting
+  assert.equal(gate.calls, 1, 'second call must not start a second wait');
+  assert.deepEqual(posts, []);
+  gate.release();
+  await first;
+  assert.deepEqual(posts, ['org-a']);
+});
+
+test('gated reporter: waiter 结束后可再次进入（不会永久占位）', async () => {
+  const gate = fakeGate({ ready: true, reason: 'ready', waitedMs: 0, timedOut: false });
+  const posts = [];
+  const report = createGatedOnlineReporter({ reportAgentOnline: async (o) => posts.push(o.slug), gate });
+  await report({ slug: 'org-a' });
+  await report({ slug: 'org-a' });
+  assert.equal(gate.calls, 2);
+  assert.deepEqual(posts, ['org-a', 'org-a']);
+});
+
+test('gated reporter: 已上报过的 org 直接跳过，不进 gate（重连不再白等）', async () => {
+  const gate = fakeGate('hang');
+  const posts = [];
+  const report = createGatedOnlineReporter({
+    reportAgentOnline: async (o) => posts.push(o.slug),
+    gate,
+    isAlreadyReported: (slug) => slug === 'org-done',
+  });
+  await report({ slug: 'org-done' });
+  assert.equal(gate.calls, 0, 'must not even start a readiness wait for a no-op');
+  assert.deepEqual(posts, []);
+  // A different org is unaffected.
+  const other = report({ slug: 'org-a' });
+  assert.equal(gate.calls, 1);
+  gate.release();
+  await other;
+});
+
+test('gated reporter: 配置关闭时绕过 gate 直接发', async () => {
+  const gate = fakeGate('hang');
+  const posts = [];
+  const report = createGatedOnlineReporter({
+    reportAgentOnline: async (o) => posts.push(o.slug), gate, isDisabled: () => true,
+  });
+  await report({ slug: 'org-a' });
+  assert.equal(gate.calls, 0);
+  assert.deepEqual(posts, ['org-a']);
+});
+
+// --- logging contract (this gate is diagnosed from logs on remote machines) ---
+
+test('onWait 同一 reason 不刷屏：心跳间隔内只报一次', async () => {
+  const seen = [];
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { pollMs: 1000, maxWaitMs: 5000, heartbeatMs: 60_000 },
+  });
+  await gate.waitUntilReady({ onWait: (e) => seen.push(e) });
+  assert.equal(seen.length, 1, 'heartbeat 远大于总等待时长时只应有首次那一条');
+  assert.equal(seen[0].kind, 'blocked');
+  assert.equal(seen[0].reason, 'busy');
+});
+
+test('长时间阻塞时按心跳节奏续报，日志不会静默', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { pollMs: 1000, maxWaitMs: 10_000, heartbeatMs: 3000 },
+  });
+  const seen = [];
+  await gate.waitUntilReady({ onWait: (e) => seen.push(e) });
+  assert.ok(seen.length >= 3, `expected repeated heartbeats, got ${seen.length}`);
+  assert.equal(seen[0].kind, 'blocked');
+  assert.ok(seen.slice(1).every((e) => e.kind === 'still_blocked'));
+  assert.ok(seen.at(-1).waitedMs > seen[0].waitedMs, 'heartbeat 必须带上递增的已等待时长');
+});
+
+test('reason 变化时立即续报（不等心跳）', async () => {
+  let ticks = 0;
+  const { gate } = makeGate({
+    status: () => (ticks++ === 0 ? readyStatus({ state: 'busy' }) : readyStatus({ idle_seconds: 1 })),
+    options: { pollMs: 1000, maxWaitMs: 4000, heartbeatMs: 999_999 },
+  });
+  const seen = [];
+  await gate.waitUntilReady({ onWait: (e) => seen.push(e) });
+  assert.deepEqual(seen.map((e) => e.reason), ['busy', 'idle_too_brief']);
+});
+
+test('onWait 带完整快照，能直接看出是哪个条件没过', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'busy', idle_seconds: 0 }),
+    options: { pollMs: 1000, maxWaitMs: 2000 },
+  });
+  const seen = [];
+  await gate.waitUntilReady({ onWait: (e) => seen.push(e) });
+  const d = seen[0].detail;
+  assert.equal(d.state, 'busy');
+  assert.equal(d.health, 'ok');
+  assert.equal(d.session_in_launch, true);
+  assert.equal(d.proc_alive, true);
+});
+
+test('formatReadinessDetail 输出可 grep 的单行字段', () => {
+  const { gate } = makeGate({ status: readyStatus({ state: 'busy' }) });
+  const line = formatReadinessDetail(gate.evaluate().detail);
+  assert.match(line, /state=busy/);
+  assert.match(line, /health=ok/);
+  assert.match(line, /session=in-launch/);
+  assert.match(line, /proc=alive/);
+});
+
+test('formatReadinessDetail: 状态文件缺失时也要有可读输出', () => {
+  const { gate } = makeGate({ status: null });
+  assert.equal(formatReadinessDetail(gate.evaluate().detail), 'status_file=missing_or_unreadable');
+});
+
+test('session 早于 launch 时快照标记 predates-launch', () => {
+  const { gate } = makeGate({ foreground: { observed_at: LAUNCH_AT - 1 } });
+  const v = gate.evaluate();
+  assert.equal(v.detail.session_in_launch, false);
+  assert.match(formatReadinessDetail(v.detail), /session=predates-launch/);
+});
