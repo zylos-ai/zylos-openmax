@@ -36,6 +36,91 @@ import path from 'node:path';
 import os from 'node:os';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 
+/**
+ * Blockers on which the fail-open cap must NOT release the report.
+ *
+ * Fail-open exists so an agent that is *present but busy* cannot strand its org
+ * un-onboarded. It must never manufacture a false "I am online" when no agent
+ * session exists for this launch at all — reporting then asserts something
+ * untrue, and the platform acts on it: the 2026-08-10 cws-agent-runtime
+ * investigation traced the premature "有什么可以帮你" welcome DM to exactly this,
+ * a transient prepare-phase comm-bridge whose online-report was taken as proof
+ * the real runtime was up (it was SIGINT'd 2s later, and the real runtime had
+ * not started yet).
+ *
+ * These two reasons both mean "no session belongs to this runtime launch", so
+ * waiting longer is the only honest behavior. The caller keeps its retry path
+ * (WS reconnect / periodic tick), so this defers rather than cancels.
+ */
+export const NO_FAIL_OPEN_REASONS = new Set(['no_session', 'session_predates_launch']);
+
+/**
+ * How far provisioning has provably got, as one monotonic ladder.
+ *
+ * WHY THIS LIVES HERE: the platform shows a staged "your agent is being set up"
+ * progress UI, and it used to derive those stages itself — from `runtime.state`
+ * and from a WebSocket-presence flag. Both are wrong for the same reason this
+ * gate exists: `state === 'idle'` cannot tell a still-booting runtime from a
+ * finished one (with no session file the activity source degrades to
+ * `tmux_activity` then `default`), and a live WebSocket only proves the
+ * comm-bridge process is up, not that any agent session exists behind it. This
+ * module is the only place that sees every input, so it is the only place that
+ * can answer honestly. The platform stores what it is told and does not
+ * re-interpret it.
+ *
+ *   runtime_down   agent-status.json missing/stale, or health not ok
+ *                  → nothing can be believed yet
+ *   runtime_up     status is fresh and healthy, but no session belongs to this
+ *                  launch (or the runtime process is confirmed dead)
+ *   session_ready  a session for THIS launch exists and the process is alive,
+ *                  but it is busy or has not been idle long enough
+ *   ready          every condition met — the agent can take work
+ *
+ * `runtime_dead` maps to runtime_up rather than session_ready even though
+ * evaluate() only reaches it after the session checks pass: a confirmed-dead
+ * process must never be credited with a working session. Erring toward the
+ * lower rung only ever delays a stage, and the platform stamps each rung
+ * write-once, so a rung already reached is never taken back.
+ *
+ * Unknown/新 reasons fall to runtime_down for the same reason — an unrecognized
+ * blocker must not silently advance the ladder.
+ */
+export const READINESS_STAGES = Object.freeze(['runtime_down', 'runtime_up', 'session_ready', 'ready']);
+
+const STAGE_BY_REASON = new Map([
+  ['ready', 'ready'],
+  ['busy', 'session_ready'],
+  ['idle_too_brief', 'session_ready'],
+  ['no_session', 'runtime_up'],
+  ['session_predates_launch', 'runtime_up'],
+  ['runtime_dead', 'runtime_up'],
+  ['status_missing', 'runtime_down'],
+  ['status_stale', 'runtime_down'],
+]);
+
+/** Map an evaluate() reason to its ladder rung. `health_*` is dynamic, hence the prefix test. */
+export function stageForReason(reason) {
+  return STAGE_BY_REASON.get(reason) || 'runtime_down';
+}
+
+/**
+ * The two bits plus the rung the platform acts on, derived from one verdict.
+ * Exported so the metrics payload and the readiness-edge trigger cannot drift
+ * apart — they previously kept separate copies of the "observable" reason list.
+ */
+export function readinessReport(verdict) {
+  const reason = verdict?.reason ?? 'status_missing';
+  const stage = verdict?.ready === true ? 'ready' : stageForReason(reason);
+  return {
+    ready: verdict?.ready === true,
+    // "a running agent process for this launch is visible" — everything from
+    // session_ready up. Kept for the platform's coarser present/absent check.
+    observable: stage === 'session_ready' || stage === 'ready',
+    stage,
+    reason,
+  };
+}
+
 export const READINESS_DEFAULTS = {
   minIdleSeconds: 5,      // sustained idle before we believe the agent is waiting
   pollMs: 2000,           // status file is rewritten every ~1s
@@ -66,14 +151,39 @@ const OPTION_ALIASES = {
 };
 
 export function normalizeReadinessOptions(raw) {
+  return normalizeNumericOptions(raw, READINESS_DEFAULTS, OPTION_ALIASES);
+}
+
+/**
+ * The snake_case→camelCase normalization above, reusable by any timing-knob
+ * block that follows the same convention (public config snake_case, internals
+ * camelCase).
+ *
+ * Extracted because the readiness-edge trigger repeated the original bug
+ * verbatim — it merged raw config straight into camelCase defaults, so every
+ * documented knob (`poll_ms`, `min_gap_ms`) was silently ignored and the
+ * defaults stayed in force with no error to show why. One shared normalizer
+ * means the next block of knobs cannot make the same mistake a third time.
+ *
+ * Keys not present in `defaults` are dropped rather than passed through: a
+ * sibling key like `enabled` is not a timing knob, and letting unknown keys
+ * flow into the settings object is how a typo becomes a silent no-op.
+ *
+ * Zero is rejected by default because these are intervals — a 0ms poll is a
+ * busy spin, not a configuration. `allowZero` names the keys where 0 is a
+ * real setting rather than nonsense (a throttle floor of 0 means "no floor").
+ */
+export function normalizeNumericOptions(raw, defaults, aliases = {}, { allowZero = [] } = {}) {
   const out = {};
   if (!raw || typeof raw !== 'object') return out;
 
+  const zeroOk = new Set(allowZero);
   for (const [key, value] of Object.entries(raw)) {
-    const name = OPTION_ALIASES[key] || key;
-    if (!(name in READINESS_DEFAULTS)) continue; // unknown key (e.g. `enabled`) — not ours
+    const name = aliases[key] || key;
+    if (!(name in defaults)) continue; // unknown key (e.g. `enabled`) — not ours
     const n = Number(value);
-    if (!Number.isFinite(n) || n <= 0) continue; // garbage in config must not break the loop
+    if (!Number.isFinite(n)) continue;  // garbage in config must not break the loop
+    if (n < 0 || (n === 0 && !zeroOk.has(name))) continue;
     out[name] = n;
   }
   return out;
@@ -156,7 +266,9 @@ export function createReadinessGate({ readStatus, readForeground, readProc, slee
    * matters: without it a long hold logs one line and then goes silent, which is
    * indistinguishable from a hung process to whoever is reading the log.
    *
-   * @returns {Promise<{ready, reason, detail, waitedMs, timedOut, polls}>}
+   * @returns {Promise<{ready, reason, detail, waitedMs, timedOut, polls, failOpenAllowed}>}
+   *   `failOpenAllowed: false` means the cap was reached on a blocker where
+   *   reporting anyway would assert something untrue — see NO_FAIL_OPEN_REASONS.
    */
   async function waitUntilReady({ onWait } = {}) {
     const cfg = settings();
@@ -183,7 +295,7 @@ export function createReadinessGate({ readStatus, readForeground, readProc, slee
       }
 
       if (waitedMs + cfg.pollMs > cfg.maxWaitMs) {
-        return { ...v, waitedMs, timedOut: true, polls };
+        return { ...v, waitedMs, timedOut: true, polls, failOpenAllowed: !NO_FAIL_OPEN_REASONS.has(v.reason) };
       }
       polls++;
       await sleep(cfg.pollMs);
@@ -258,9 +370,17 @@ export function createGatedOnlineReporter({ reportAgentOnline, gate, isDisabled 
           log(`${prefix} — ${formatReadinessDetail(detail)}`);
         },
       });
+      if (verdict.timedOut && verdict.failOpenAllowed === false) {
+        // No session belongs to this launch, so reporting would assert something
+        // untrue and the platform would act on it (premature welcome DM +
+        // onboarding seeded at a runtime that does not exist). Defer instead —
+        // the WS reconnect / periodic tick retries, so this is not a cancel.
+        warn(`[readiness] [${slug}] cap reached with NO agent session (${verdict.reason}) — NOT reporting online; deferring to the next retry — ${formatReadinessDetail(verdict.detail)}`);
+        return;
+      }
       if (verdict.timedOut) {
-        // Cap reached. Report anyway — a delayed onboarding beats an org that
-        // never onboards because its agent stayed busy.
+        // Cap reached with an agent that exists but is busy. Report anyway — a
+        // delayed onboarding beats an org that never onboards.
         warn(`[readiness] [${slug}] agent STILL not ready after ${secs(verdict.waitedMs)} (${verdict.reason}) — reporting online anyway (fail-open cap reached) — ${formatReadinessDetail(verdict.detail)}`);
       } else if (verdict.waitedMs > 0) {
         log(`[readiness] [${slug}] agent READY after ${secs(verdict.waitedMs)} (${verdict.polls} polls) — reporting online — ${formatReadinessDetail(verdict.detail)}`);

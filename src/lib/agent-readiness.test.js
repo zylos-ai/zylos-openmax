@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createReadinessGate, createGatedOnlineReporter, formatReadinessDetail, normalizeReadinessOptions, READINESS_DEFAULTS } from './agent-readiness.js';
+import { createReadinessGate, createGatedOnlineReporter, formatReadinessDetail, normalizeReadinessOptions, READINESS_DEFAULTS, stageForReason, readinessReport } from './agent-readiness.js';
 
 const NOW = 1_700_000_000_000;
 const LAUNCH_AT = NOW - 60_000;
@@ -208,6 +208,54 @@ test('gated reporter: ready 后才发 online-report', async () => {
   assert.deepEqual(posts, ['org-a']);
 });
 
+// Regression for the 2026-08-10 cws-agent-runtime finding: a transient
+// prepare-phase comm-bridge must never produce an online-report, because the
+// platform treats it as proof the real runtime is up and fires the welcome DM.
+test('到达上限但压根没有 session ⇒ 绝不上报（no_session 不 fail-open）', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'idle', idle_seconds: 99 }),
+    foreground: null, // prepare phase: no agent session has ever started
+    options: { pollMs: 1000, maxWaitMs: 3000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.timedOut, true);
+  assert.equal(v.reason, 'no_session');
+  assert.equal(v.failOpenAllowed, false, 'reporting here would assert something untrue');
+});
+
+test('上一轮残留的 session 同样不 fail-open（等价于本轮没有 session）', async () => {
+  const { gate } = makeGate({
+    foreground: { observed_at: LAUNCH_AT - 1 },
+    options: { pollMs: 1000, maxWaitMs: 3000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.reason, 'session_predates_launch');
+  assert.equal(v.failOpenAllowed, false);
+});
+
+test('busy 仍然 fail-open（agent 存在，只是忙 ⇒ 不能把 org 永久卡住）', async () => {
+  const { gate } = makeGate({
+    status: readyStatus({ state: 'busy' }),
+    options: { pollMs: 1000, maxWaitMs: 3000 },
+  });
+  const v = await gate.waitUntilReady();
+  assert.equal(v.reason, 'busy');
+  assert.notEqual(v.failOpenAllowed, false, 'a present-but-busy agent must still report');
+});
+
+test('gated reporter: no_session 到上限时不发报告（而不是发一个假的）', async () => {
+  const gate = fakeGate({ ready: false, reason: 'no_session', detail: {}, waitedMs: 600000, timedOut: true, failOpenAllowed: false });
+  const posts = [];
+  const warns = [];
+  const report = createGatedOnlineReporter({
+    reportAgentOnline: async (o) => posts.push(o.slug), gate, warn: (m) => warns.push(m),
+  });
+  await report({ slug: 'org-a' });
+  assert.deepEqual(posts, [], 'must NOT report a false online');
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /NOT reporting online/);
+});
+
 test('gated reporter: 等待超时也要发（fail-open），并 warn', async () => {
   const gate = fakeGate({ ready: false, reason: 'busy', waitedMs: 600000, timedOut: true });
   const posts = [];
@@ -343,4 +391,55 @@ test('session 早于 launch 时快照标记 predates-launch', () => {
   const v = gate.evaluate();
   assert.equal(v.detail.session_in_launch, false);
   assert.match(formatReadinessDetail(v.detail), /session=predates-launch/);
+});
+
+// ── stage 阶梯（平台的四步开通进度直接消费它） ──────────────────────────
+
+test('stageForReason: 每个 reason 落在正确的档位', () => {
+  const expected = {
+    status_missing: 'runtime_down',
+    status_stale: 'runtime_down',
+    health_degraded: 'runtime_down',
+    no_session: 'runtime_up',
+    session_predates_launch: 'runtime_up',
+    runtime_dead: 'runtime_up',
+    busy: 'session_ready',
+    idle_too_brief: 'session_ready',
+    ready: 'ready',
+  };
+  for (const [reason, stage] of Object.entries(expected)) {
+    assert.equal(stageForReason(reason), stage, `${reason} 应落在 ${stage}`);
+  }
+});
+
+// 未知 reason 必须落到最低档，而不是被当成"更靠前"的进度。新增一个 blocker
+// 却忘了登记，宁可让进度停住，也不能让它悄悄前进 —— 前进是不可撤销的：
+// 平台对每一档写一次时间戳，错误地前进一档就再也收不回来。
+test('stageForReason: 未登记的 reason 保守落到 runtime_down', () => {
+  assert.equal(stageForReason('some_future_blocker'), 'runtime_down');
+  assert.equal(stageForReason(''), 'runtime_down');
+  assert.equal(stageForReason(undefined), 'runtime_down');
+});
+
+test('readinessReport: ready 判定以 verdict.ready 为准，不靠 reason 猜', () => {
+  // reason 说 ready 但 ready 标志为假 —— 以标志为准，宁可不放行。
+  const r = readinessReport({ ready: false, reason: 'ready' });
+  assert.equal(r.ready, false, 'ready 必须来自 verdict.ready');
+  assert.equal(r.stage, 'ready', 'stage 仍按 reason 映射');
+});
+
+test('readinessReport: observable 覆盖 session_ready 及以上', () => {
+  assert.equal(readinessReport({ ready: false, reason: 'busy' }).observable, true);
+  assert.equal(readinessReport({ ready: true, reason: 'ready' }).observable, true);
+  assert.equal(readinessReport({ ready: false, reason: 'no_session' }).observable, false);
+  assert.equal(readinessReport({ ready: false, reason: 'status_missing' }).observable, false);
+});
+
+// 缺 verdict 时不能编一个乐观结论出来。
+test('readinessReport: 没有 verdict 时落到最低档且不 ready', () => {
+  const r = readinessReport(null);
+  assert.equal(r.ready, false);
+  assert.equal(r.observable, false);
+  assert.equal(r.stage, 'runtime_down');
+  assert.equal(r.reason, 'status_missing');
 });
