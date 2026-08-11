@@ -3,6 +3,8 @@
 **Purpose**: Agent-initiated IM operations — creating conversations, sending messages, pulling history, checking unread, WS reconnect gap-fill, page search. All commands go through the cws-core BFF down to cws-comm.
 
 > **`comm.send` is only for agent-initiated (proactive) sends** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing a message into a known conversationId.
+>
+> **To reply to a message routed to you, always use the C4 reply path (`c4-send.js`)** — the `reply via:` command that arrives with the inbound message — **never `comm.send`**. Replying is the C4 bridge's job; `comm.send` is only for the proactive sends above.
 
 **When to load this document**:
 
