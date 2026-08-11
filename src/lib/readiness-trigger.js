@@ -26,12 +26,28 @@
  * removes them, so a missed edge still heals on the next tick.
  */
 
-import { readinessReport } from './agent-readiness.js';
+import { readinessReport, normalizeNumericOptions } from './agent-readiness.js';
 
 export const TRIGGER_DEFAULTS = {
   pollMs: 2000,     // matches the readiness gate's own cadence
   minGapMs: 5000,   // floor between event-driven reports, so a pathological flip cannot spam
 };
+
+/**
+ * Public config (`metricsReport.readinessTrigger`) is snake_case, like every
+ * other operator-facing key; internals are camelCase. Without this mapping the
+ * documented knobs are read, found not to match any default, and silently
+ * dropped — an operator setting `poll_ms: 123` keeps getting 2000ms with
+ * nothing to explain why. camelCase is accepted too, for programmatic callers.
+ */
+const TRIGGER_OPTION_ALIASES = {
+  poll_ms: 'pollMs',
+  min_gap_ms: 'minGapMs',
+};
+
+// minGapMs = 0 is a real setting ("no floor between event-driven reports"),
+// unlike pollMs where 0 would turn the watcher into a busy spin.
+const TRIGGER_ZERO_OK = ['minGapMs'];
 
 /**
  * @param {object} deps
@@ -51,7 +67,10 @@ export function createReadinessTrigger({
   let inflight = false;
 
   function settings() {
-    return { ...TRIGGER_DEFAULTS, ...(options() || {}) };
+    return {
+      ...TRIGGER_DEFAULTS,
+      ...normalizeNumericOptions(options(), TRIGGER_DEFAULTS, TRIGGER_OPTION_ALIASES, { allowZero: TRIGGER_ZERO_OK }),
+    };
   }
 
   /**

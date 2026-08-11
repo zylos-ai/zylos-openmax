@@ -151,14 +151,39 @@ const OPTION_ALIASES = {
 };
 
 export function normalizeReadinessOptions(raw) {
+  return normalizeNumericOptions(raw, READINESS_DEFAULTS, OPTION_ALIASES);
+}
+
+/**
+ * The snake_case→camelCase normalization above, reusable by any timing-knob
+ * block that follows the same convention (public config snake_case, internals
+ * camelCase).
+ *
+ * Extracted because the readiness-edge trigger repeated the original bug
+ * verbatim — it merged raw config straight into camelCase defaults, so every
+ * documented knob (`poll_ms`, `min_gap_ms`) was silently ignored and the
+ * defaults stayed in force with no error to show why. One shared normalizer
+ * means the next block of knobs cannot make the same mistake a third time.
+ *
+ * Keys not present in `defaults` are dropped rather than passed through: a
+ * sibling key like `enabled` is not a timing knob, and letting unknown keys
+ * flow into the settings object is how a typo becomes a silent no-op.
+ *
+ * Zero is rejected by default because these are intervals — a 0ms poll is a
+ * busy spin, not a configuration. `allowZero` names the keys where 0 is a
+ * real setting rather than nonsense (a throttle floor of 0 means "no floor").
+ */
+export function normalizeNumericOptions(raw, defaults, aliases = {}, { allowZero = [] } = {}) {
   const out = {};
   if (!raw || typeof raw !== 'object') return out;
 
+  const zeroOk = new Set(allowZero);
   for (const [key, value] of Object.entries(raw)) {
-    const name = OPTION_ALIASES[key] || key;
-    if (!(name in READINESS_DEFAULTS)) continue; // unknown key (e.g. `enabled`) — not ours
+    const name = aliases[key] || key;
+    if (!(name in defaults)) continue; // unknown key (e.g. `enabled`) — not ours
     const n = Number(value);
-    if (!Number.isFinite(n) || n <= 0) continue; // garbage in config must not break the loop
+    if (!Number.isFinite(n)) continue;  // garbage in config must not break the loop
+    if (n < 0 || (n === 0 && !zeroOk.has(name))) continue;
     out[name] = n;
   }
   return out;

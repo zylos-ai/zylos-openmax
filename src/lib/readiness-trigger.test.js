@@ -164,3 +164,82 @@ test('runtime_up → session_ready → ready 每一步各补报一次', async ()
   advance(10_000); await trigger.tick();  // → ready
   assert.equal(reports.length, 2);
 });
+
+// ── 配置归一化（CHANGELOG 记的是 poll_ms / min_gap_ms） ────────────────────
+
+// 这个 bug 在 agent-readiness.js 里已经犯过一次并修好了，trigger 又原样重犯：
+// 把原始 config 直接并进 camelCase 默认值，于是**每一个文档里写着的旋钮都被
+// 静默忽略**，默认值继续生效，还没有任何报错能说明为什么。
+test('snake_case 的 poll_ms / min_gap_ms 必须生效', () => {
+  const seen = [];
+  const trigger = createReadinessTrigger({
+    evaluate: () => READY,
+    report: async () => {},
+    options: () => ({ poll_ms: 123, min_gap_ms: 456 }),
+    setIntervalImpl: (fn, ms) => { seen.push(ms); return { unref() {} }; },
+  });
+  trigger.start();
+  assert.deepEqual(seen, [123], 'poll_ms 应当覆盖默认的 2000ms');
+});
+
+test('camelCase 同样接受（程序化调用方/ 测试）', () => {
+  const seen = [];
+  const trigger = createReadinessTrigger({
+    evaluate: () => READY,
+    report: async () => {},
+    options: () => ({ pollMs: 321 }),
+    setIntervalImpl: (fn, ms) => { seen.push(ms); return { unref() {} }; },
+  });
+  trigger.start();
+  assert.deepEqual(seen, [321]);
+});
+
+// 非法值不能传播：NaN 的 pollMs 会把轮询变成忙等。
+test('非数值 / 非正数一律忽略，回落到默认值', () => {
+  for (const bad of [{ poll_ms: 'abc' }, { poll_ms: 0 }, { poll_ms: -5 }, { poll_ms: null }]) {
+    const seen = [];
+    const trigger = createReadinessTrigger({
+      evaluate: () => READY,
+      report: async () => {},
+      options: () => bad,
+      setIntervalImpl: (fn, ms) => { seen.push(ms); return { unref() {} }; },
+    });
+    trigger.start();
+    assert.deepEqual(seen, [TRIGGER_DEFAULTS.pollMs], `${JSON.stringify(bad)} 应当回落默认值`);
+  }
+});
+
+// min_gap_ms 走的是另一条路径（补报节流），单独钉一次。
+test('min_gap_ms 生效：低于间隔的第二次变化只记日志不上报', async () => {
+  const { trigger, reports, logs, advance } = makeTrigger({
+    verdicts: [NO_SESSION, BUSY, READY],
+    options: { min_gap_ms: 100_000 },
+  });
+  await trigger.tick();          // 基线
+  advance(1000); await trigger.tick();  // 第一次变化 → 补报
+  advance(1000); await trigger.tick();  // 仍在间隔内 → 只记日志
+  assert.equal(reports.length, 1);
+  assert.ok(logs.some((l) => l.includes('floor')), '被抑制的补报必须留下日志');
+});
+
+// minGapMs = 0 是「不设下限」这个真实配置，不能被当成非法值丢掉；而 pollMs = 0
+// 会把 watcher 变成忙等，必须丢掉。两者的 0 含义不同。
+test('minGapMs 允许为 0，pollMs 不允许', () => {
+  const seenGap = [];
+  const t1 = createReadinessTrigger({
+    evaluate: () => READY, report: async () => {},
+    options: () => ({ min_gap_ms: 0 }),
+    setIntervalImpl: (fn, ms) => { seenGap.push(ms); return { unref() {} }; },
+  });
+  t1.start();
+  assert.deepEqual(seenGap, [TRIGGER_DEFAULTS.pollMs], 'min_gap_ms 不影响轮询间隔');
+
+  const seenPoll = [];
+  const t2 = createReadinessTrigger({
+    evaluate: () => READY, report: async () => {},
+    options: () => ({ poll_ms: 0 }),
+    setIntervalImpl: (fn, ms) => { seenPoll.push(ms); return { unref() {} }; },
+  });
+  t2.start();
+  assert.deepEqual(seenPoll, [TRIGGER_DEFAULTS.pollMs], 'poll_ms=0 必须回落默认值');
+});
