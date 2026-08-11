@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.12.8
+version: 2.12.9
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -114,6 +114,11 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 
 - **When unsure of the command/parameters**: first run `node src/cli/<svc>.js` (no args shows the command list), or check `references/<svc>-operations.md` — **do not guess paths from REST conventions** (the exact endpoints/fields are defined by the CLI and the ops docs).
 - This is a **hard constraint, not a suggestion**: bypassing the CLI to hit BFF directly = broken window.
+
+## How to Send a Message (reply via C4 `c4-send`; `comm.send` is proactive-only)
+
+- **Replying to a message routed to you → always use the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
+- **`comm.send` is for agent-initiated (proactive) sends only** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing into a known `conversationId`.
 
 ## Task Classification and Execution Flow
 

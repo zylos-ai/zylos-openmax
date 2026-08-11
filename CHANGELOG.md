@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.9] — 2026-08-12
+
+### Changed
+
+- **Moved the reply-vs-proactive-send rule into `SKILL.md` (always loaded).**
+  `SKILL.md` now has a concise "How to Send a Message" section: replying to a
+  message routed to you always uses the C4 `c4-send` reply path (the `reply via:`
+  command on the inbound message), while `comm.send` is for agent-initiated
+  (proactive) sends only. The 2.12.7/2.12.8 notes previously lived only in
+  `references/comm-operations.md`, which is load-on-demand (Layer 3); the rule is
+  now stated where it is always loaded. `comm-operations.md` drops the duplicated
+  rule and points to `SKILL.md`, keeping only `comm.send`'s call mechanics.
+  Docs-only; no code change.
+
 ## [2.12.8] — 2026-08-12
 
 ### Changed
