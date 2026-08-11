@@ -25,6 +25,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-stage `readiness` object in the runtime-metrics payload.** The platform
+  used to infer provisioning progress from `runtime.state` / WS-presence, both
+  unreliable. This runtime is the only place that sees every input (status file,
+  session-in-launch, proc liveness, health), so it now emits the conclusion: an
+  additive `readiness` = `{ ready, observable, stage, reason }` on the
+  runtime-metrics PUT, where `stage` climbs a monotonic ladder
+  (`runtime_down → runtime_up → session_ready → ready`). `runtime.state` is
+  untouched and the field is omitted entirely when no verdict exists (absent ≠
+  `{ready:false}`), so a platform that does not know the field keeps working off
+  `runtime.state`. cws-core's provisioning gate consumes this directly.
+
+- **Documented `readiness_gate` / `readinessTrigger` snake_case knobs now take
+  effect.** `poll_ms` / `min_gap_ms` were previously merged raw against camelCase
+  defaults and silently ignored; a shared `normalizeNumericOptions` helper now
+  honors the documented snake_case keys (with `min_gap_ms = 0` allowed as "no
+  floor", `poll_ms = 0` rejected to avoid a busy-loop).
+
 - **Event-driven runtime-metrics report on readiness edges.** The platform
   decides whether an agent can be talked to from the reported `runtime.state`,
   but that only travelled upward on the 60-second metrics tick (plus a 15-second
