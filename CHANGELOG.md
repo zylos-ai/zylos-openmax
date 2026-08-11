@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.7] — 2026-08-11
+
+### Changed
+
+- **Clarified that `comm.send` is only for agent-initiated (proactive) sends** —
+  opening a new DM/group, or proactively pushing a message into a known
+  conversation. Documented in `references/comm-operations.md`. Docs-only; no
+  code change.
+
 ## [2.12.6] — 2026-08-10
 
 ### Fixed
