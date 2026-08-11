@@ -2,10 +2,12 @@
 
 **Purpose**: Agent-initiated IM operations — creating conversations, sending messages, pulling history, checking unread, WS reconnect gap-fill, page search. All commands go through the cws-core BFF down to cws-comm.
 
+> **`comm.send` is only for agent-initiated (proactive) sends** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing a message into a known conversationId.
+
 **When to load this document**:
 
 - Want to proactively DM / create a group to communicate with a person or a group of people (`comm.create_dm` / `comm.create_group` → `comm.send`)
-- Need to send a message into a known conversationId (`comm.send`)
+- Need to **proactively** send a message into a known conversationId (`comm.send`)
 - Pull historical message context (`comm.get_messages` / `comm.get_message`)
 - Check a conversation's unread count or fill gaps after a WS reconnect (`comm.unread` / `comm.sync`)
 - Keyword-search pages in a KB (`comm.search`, the sole search entry point in v5)
