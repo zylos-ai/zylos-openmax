@@ -125,3 +125,42 @@ test('start/stop 幂等且不泄漏定时器', () => {
   trigger.stop(); trigger.stop();
   assert.equal(cleared.length, 1);
 });
+
+// runtime_down → runtime_up 不移动 ready/observable 任何一个 bit，但它是平台
+// 四步进度里实实在在的一步。改成比较 stage 之前，这一步要等下一次 60s 周期
+// 上报才可见 —— 明明我们在启动后几秒就知道了。
+test('stage 变化即使两个 bit 都没动也要补报', async () => {
+  const STATUS_MISSING = { ready: false, reason: 'status_missing' }; // runtime_down
+  const NO_SESSION_V = { ready: false, reason: 'no_session' };       // runtime_up
+  const { trigger, reports, advance } = makeTrigger({
+    verdicts: [STATUS_MISSING, NO_SESSION_V],
+    options: { minGapMs: 0 },
+  });
+  await trigger.tick();          // 基线
+  advance(10_000);
+  await trigger.tick();          // runtime_down → runtime_up
+  assert.equal(reports.length, 1, 'stage 前进必须补报');
+});
+
+// 反过来：同一档内的抖动一次都不能报。干活的 agent 在 busy 和 idle 之间
+// 反复横跳，两者同属 session_ready。
+test('busy ↔ idle_too_brief 同属 session_ready，不产生任何补报', async () => {
+  const { trigger, reports, advance } = makeTrigger({
+    verdicts: [BUSY, IDLE_BRIEF, BUSY, IDLE_BRIEF, BUSY],
+    options: { minGapMs: 0 },
+  });
+  await trigger.tick();
+  for (let i = 0; i < 4; i++) { advance(10_000); await trigger.tick(); }
+  assert.deepEqual(reports, [], '同档抖动必须完全静默');
+});
+
+test('runtime_up → session_ready → ready 每一步各补报一次', async () => {
+  const { trigger, reports, advance } = makeTrigger({
+    verdicts: [NO_SESSION, BUSY, READY],
+    options: { minGapMs: 0 },
+  });
+  await trigger.tick();          // 基线 runtime_up
+  advance(10_000); await trigger.tick();  // → session_ready
+  advance(10_000); await trigger.tick();  // → ready
+  assert.equal(reports.length, 2);
+});

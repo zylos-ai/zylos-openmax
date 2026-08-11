@@ -15,16 +15,18 @@
  * working agent, which is a worse problem than the latency it fixes. So the
  * fingerprint is only what the platform's chat gate can act on:
  *
- *   - `ready`    — can this agent take work at all (readiness gate verdict)
- *   - `observable` — is a running agent process visible (distinguishes a
- *                    provisioning/absent agent from a present one)
+ *   - `stage` — how far provisioning has provably got (see READINESS_STAGES in
+ *               agent-readiness.js). `ready` and `observable` are derived from
+ *               it, so comparing the stage subsumes both.
  *
- * busy↔idle does not move either bit, so an agent grinding through a long task
- * produces no extra reports.
+ * busy↔idle does not move the stage (both are `session_ready`), so an agent
+ * grinding through a long task produces no extra reports.
  *
  * The periodic tick is left exactly as it is: this only adds reports, never
  * removes them, so a missed edge still heals on the next tick.
  */
+
+import { readinessReport } from './agent-readiness.js';
 
 export const TRIGGER_DEFAULTS = {
   pollMs: 2000,     // matches the readiness gate's own cadence
@@ -52,16 +54,16 @@ export function createReadinessTrigger({
     return { ...TRIGGER_DEFAULTS, ...(options() || {}) };
   }
 
-  /** Reduce the gate verdict to the two bits the platform can act on. */
+  /**
+   * Reduce the gate verdict to what the platform can act on.
+   *
+   * Shares readinessReport() with the metrics payload on purpose: this used to
+   * keep its own copy of the "observable" reason list, which is exactly the
+   * kind of duplicate vocabulary that drifts once someone adds a reason in one
+   * place only.
+   */
   function fingerprint() {
-    const v = evaluate();
-    return {
-      ready: v.ready === true,
-      // `no_session` / `runtime_dead` / a missing status file all mean "no
-      // observable agent process for this launch".
-      observable: !['no_session', 'session_predates_launch', 'runtime_dead', 'status_missing', 'status_stale'].includes(v.reason),
-      reason: v.reason,
-    };
+    return readinessReport(evaluate());
   }
 
   async function fire(fp, cause) {
@@ -90,9 +92,18 @@ export function createReadinessTrigger({
       last = fp;
       return;
     }
-    if (fp.ready === last.ready && fp.observable === last.observable) return;
+    // Compare the STAGE, not the two bits. `ready` and `observable` are both
+    // derived from it, so the stage subsumes them — and it also catches
+    // runtime_down→runtime_up, which moves neither bit but IS a step the
+    // platform's provisioning progress shows. Without this, that first step
+    // waited for the next periodic tick (up to 60s) even though we knew
+    // seconds after boot.
+    //
+    // Still flap-free where it matters: busy and idle_too_brief both map to
+    // session_ready, so an agent grinding through work produces no reports.
+    if (fp.stage === last.stage) return;
 
-    const cause = `ready ${last.ready}→${fp.ready}, observable ${last.observable}→${fp.observable} (${fp.reason})`;
+    const cause = `stage ${last.stage}→${fp.stage} (${fp.reason})`;
     last = fp;
     if (now() - lastReportAt < cfg.minGapMs) {
       // Inside the floor — the periodic tick will carry it. Log so a suppressed

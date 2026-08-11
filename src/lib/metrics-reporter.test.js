@@ -74,6 +74,7 @@ const PM2_JLIST_DEFAULT = JSON.stringify([
 function makeHarness({
   dashboardApiKey = '', state, exchange, cli, fileExists, nowRef = { t: 0 },
   zylosList = ZYLOS_LIST_DEFAULT, pm2Jlist = PM2_JLIST_DEFAULT, cgroup = FAKE_CGROUP,
+  evaluateReadiness,
 } = {}) {
   const exchangeCalls = [];
   const stateCalls = [];
@@ -131,6 +132,7 @@ function makeHarness({
       persistKey: (k) => persisted.push(k),
       apiKeyCliPath: CLI_PATH,
       cgroup,
+      ...(evaluateReadiness ? { evaluateReadiness } : {}),
     },
   );
   return { reporter, exchangeCalls, stateCalls, puts, warns, cliCalls, channelCalls, persisted };
@@ -530,3 +532,47 @@ test('供给成功后同进程再遇 401：不再二次供给，warn 一次后�
 // channel-binding status is now driven by the connector's connect-result
 // callback, not by reconciling a periodic installed-channels report. The
 // per-channel derivation + its tests were removed accordingly.
+
+// ── readiness 段（平台的开通门禁读它，而不是从 runtime.state 推断） ──────
+
+test('带上 readiness 段，且不动 runtime.state', async () => {
+  const h = makeHarness({
+    dashboardApiKey: 'zylos_ak_x',
+    evaluateReadiness: () => ({ ready: true, observable: true, stage: 'ready', reason: 'ready' }),
+  });
+  await h.reporter();
+  assert.equal(h.puts.length, 1);
+  const body = h.puts[0].payload;
+  assert.deepEqual(body.readiness, { ready: true, observable: true, stage: 'ready', reason: 'ready' });
+  // 老字段必须原样保留：还没认识 readiness 的平台要照常工作。
+  assert.ok(body.runtime, 'runtime 段必须仍在');
+  assert.ok('state' in body.runtime, 'runtime.state 必须仍在');
+});
+
+// 拿不到 verdict 时**整段省略**，而不是报一个编出来的"未就绪"。省略在接收端
+// 是「不知道」，而 {ready:false} 是「明确没就绪」—— 两者会让平台做不同的事。
+test('没有 verdict 时整段省略而不是编造', async () => {
+  const h = makeHarness({ dashboardApiKey: 'zylos_ak_x', evaluateReadiness: () => null });
+  await h.reporter();
+  assert.equal(h.puts.length, 1);
+  assert.ok(!('readiness' in h.puts[0].payload), 'readiness 应当整段缺席');
+});
+
+// 默认（未注入）也不能凭空产生这个字段 —— 门禁关闭的部署走的就是这条路。
+test('未注入 evaluateReadiness 时不产生该字段', async () => {
+  const h = makeHarness({ dashboardApiKey: 'zylos_ak_x' });
+  await h.reporter();
+  assert.ok(!('readiness' in h.puts[0].payload));
+});
+
+test('未就绪时如实上报当前档位', async () => {
+  const h = makeHarness({
+    dashboardApiKey: 'zylos_ak_x',
+    evaluateReadiness: () => ({ ready: false, observable: false, stage: 'runtime_up', reason: 'no_session' }),
+  });
+  await h.reporter();
+  const { readiness } = h.puts[0].payload;
+  assert.equal(readiness.ready, false);
+  assert.equal(readiness.stage, 'runtime_up');
+  assert.equal(readiness.reason, 'no_session');
+});

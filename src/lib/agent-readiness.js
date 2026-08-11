@@ -54,6 +54,73 @@ import { existsSync, statSync, readFileSync } from 'node:fs';
  */
 export const NO_FAIL_OPEN_REASONS = new Set(['no_session', 'session_predates_launch']);
 
+/**
+ * How far provisioning has provably got, as one monotonic ladder.
+ *
+ * WHY THIS LIVES HERE: the platform shows a staged "your agent is being set up"
+ * progress UI, and it used to derive those stages itself — from `runtime.state`
+ * and from a WebSocket-presence flag. Both are wrong for the same reason this
+ * gate exists: `state === 'idle'` cannot tell a still-booting runtime from a
+ * finished one (with no session file the activity source degrades to
+ * `tmux_activity` then `default`), and a live WebSocket only proves the
+ * comm-bridge process is up, not that any agent session exists behind it. This
+ * module is the only place that sees every input, so it is the only place that
+ * can answer honestly. The platform stores what it is told and does not
+ * re-interpret it.
+ *
+ *   runtime_down   agent-status.json missing/stale, or health not ok
+ *                  → nothing can be believed yet
+ *   runtime_up     status is fresh and healthy, but no session belongs to this
+ *                  launch (or the runtime process is confirmed dead)
+ *   session_ready  a session for THIS launch exists and the process is alive,
+ *                  but it is busy or has not been idle long enough
+ *   ready          every condition met — the agent can take work
+ *
+ * `runtime_dead` maps to runtime_up rather than session_ready even though
+ * evaluate() only reaches it after the session checks pass: a confirmed-dead
+ * process must never be credited with a working session. Erring toward the
+ * lower rung only ever delays a stage, and the platform stamps each rung
+ * write-once, so a rung already reached is never taken back.
+ *
+ * Unknown/新 reasons fall to runtime_down for the same reason — an unrecognized
+ * blocker must not silently advance the ladder.
+ */
+export const READINESS_STAGES = Object.freeze(['runtime_down', 'runtime_up', 'session_ready', 'ready']);
+
+const STAGE_BY_REASON = new Map([
+  ['ready', 'ready'],
+  ['busy', 'session_ready'],
+  ['idle_too_brief', 'session_ready'],
+  ['no_session', 'runtime_up'],
+  ['session_predates_launch', 'runtime_up'],
+  ['runtime_dead', 'runtime_up'],
+  ['status_missing', 'runtime_down'],
+  ['status_stale', 'runtime_down'],
+]);
+
+/** Map an evaluate() reason to its ladder rung. `health_*` is dynamic, hence the prefix test. */
+export function stageForReason(reason) {
+  return STAGE_BY_REASON.get(reason) || 'runtime_down';
+}
+
+/**
+ * The two bits plus the rung the platform acts on, derived from one verdict.
+ * Exported so the metrics payload and the readiness-edge trigger cannot drift
+ * apart — they previously kept separate copies of the "observable" reason list.
+ */
+export function readinessReport(verdict) {
+  const reason = verdict?.reason ?? 'status_missing';
+  const stage = verdict?.ready === true ? 'ready' : stageForReason(reason);
+  return {
+    ready: verdict?.ready === true,
+    // "a running agent process for this launch is visible" — everything from
+    // session_ready up. Kept for the platform's coarser present/absent check.
+    observable: stage === 'session_ready' || stage === 'ready',
+    stage,
+    reason,
+  };
+}
+
 export const READINESS_DEFAULTS = {
   minIdleSeconds: 5,      // sustained idle before we believe the agent is waiting
   pollMs: 2000,           // status file is rewritten every ~1s

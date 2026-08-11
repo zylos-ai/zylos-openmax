@@ -37,7 +37,7 @@ import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHead
 import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
 import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
-import { createDefaultReadinessGate, createGatedOnlineReporter } from './lib/agent-readiness.js';
+import { createDefaultReadinessGate, createGatedOnlineReporter, readinessReport } from './lib/agent-readiness.js';
 import { createReadinessTrigger } from './lib/readiness-trigger.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
@@ -2378,6 +2378,15 @@ if (config.metricsReport?.enabled !== false) {
   const reportMetrics = createMetricsReporter(activeOrgConfigs, {
     log, warn,
     dashboardApiKey: config.metricsReport?.dashboardApiKey || '',
+    // Same gate that holds the online-report, so the platform's chat gate and
+    // our own onboarding trigger can never disagree about whether this agent
+    // is ready. Disabling the gate omits the field rather than reporting a
+    // made-up verdict.
+    evaluateReadiness: () => (
+      loadConfig().agent?.readiness_gate?.enabled === false
+        ? null
+        : readinessReport(readinessGate.evaluate())
+    ),
   });
   tasks.register('metrics-report', reportMetrics, METRICS_REPORT_INTERVAL_MS, {
     delay: METRICS_REPORT_INITIAL_DELAY_MS,

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createReadinessGate, createGatedOnlineReporter, formatReadinessDetail, normalizeReadinessOptions, READINESS_DEFAULTS } from './agent-readiness.js';
+import { createReadinessGate, createGatedOnlineReporter, formatReadinessDetail, normalizeReadinessOptions, READINESS_DEFAULTS, stageForReason, readinessReport } from './agent-readiness.js';
 
 const NOW = 1_700_000_000_000;
 const LAUNCH_AT = NOW - 60_000;
@@ -391,4 +391,55 @@ test('session 早于 launch 时快照标记 predates-launch', () => {
   const v = gate.evaluate();
   assert.equal(v.detail.session_in_launch, false);
   assert.match(formatReadinessDetail(v.detail), /session=predates-launch/);
+});
+
+// ── stage 阶梯（平台的四步开通进度直接消费它） ──────────────────────────
+
+test('stageForReason: 每个 reason 落在正确的档位', () => {
+  const expected = {
+    status_missing: 'runtime_down',
+    status_stale: 'runtime_down',
+    health_degraded: 'runtime_down',
+    no_session: 'runtime_up',
+    session_predates_launch: 'runtime_up',
+    runtime_dead: 'runtime_up',
+    busy: 'session_ready',
+    idle_too_brief: 'session_ready',
+    ready: 'ready',
+  };
+  for (const [reason, stage] of Object.entries(expected)) {
+    assert.equal(stageForReason(reason), stage, `${reason} 应落在 ${stage}`);
+  }
+});
+
+// 未知 reason 必须落到最低档，而不是被当成"更靠前"的进度。新增一个 blocker
+// 却忘了登记，宁可让进度停住，也不能让它悄悄前进 —— 前进是不可撤销的：
+// 平台对每一档写一次时间戳，错误地前进一档就再也收不回来。
+test('stageForReason: 未登记的 reason 保守落到 runtime_down', () => {
+  assert.equal(stageForReason('some_future_blocker'), 'runtime_down');
+  assert.equal(stageForReason(''), 'runtime_down');
+  assert.equal(stageForReason(undefined), 'runtime_down');
+});
+
+test('readinessReport: ready 判定以 verdict.ready 为准，不靠 reason 猜', () => {
+  // reason 说 ready 但 ready 标志为假 —— 以标志为准，宁可不放行。
+  const r = readinessReport({ ready: false, reason: 'ready' });
+  assert.equal(r.ready, false, 'ready 必须来自 verdict.ready');
+  assert.equal(r.stage, 'ready', 'stage 仍按 reason 映射');
+});
+
+test('readinessReport: observable 覆盖 session_ready 及以上', () => {
+  assert.equal(readinessReport({ ready: false, reason: 'busy' }).observable, true);
+  assert.equal(readinessReport({ ready: true, reason: 'ready' }).observable, true);
+  assert.equal(readinessReport({ ready: false, reason: 'no_session' }).observable, false);
+  assert.equal(readinessReport({ ready: false, reason: 'status_missing' }).observable, false);
+});
+
+// 缺 verdict 时不能编一个乐观结论出来。
+test('readinessReport: 没有 verdict 时落到最低档且不 ready', () => {
+  const r = readinessReport(null);
+  assert.equal(r.ready, false);
+  assert.equal(r.observable, false);
+  assert.equal(r.stage, 'runtime_down');
+  assert.equal(r.reason, 'status_missing');
 });

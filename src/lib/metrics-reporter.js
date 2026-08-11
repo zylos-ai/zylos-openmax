@@ -118,7 +118,7 @@ function getDashboardPort() {
 //     "none"): there is no container quota to read, so fall back to ALL
 //     metrics from the dashboard — node-level numbers are the best available
 //     and beat reporting null. (Gavin's call, 2026-07-15.)
-function buildPayload(dashboard, cg) {
+function buildPayload(dashboard, cg, readiness) {
   if (!dashboard) return null;
   const sys = dashboard.system_metrics || {};
   const rt = dashboard.runtime_info || {};
@@ -146,6 +146,15 @@ function buildPayload(dashboard, cg) {
       weekly:  dashboard.weekly_cost ?? null,
     },
     rate_limit_pct: dashboard.rate_limit_pct ?? null,
+    // Provisioning readiness, as judged by the readiness gate — the platform's
+    // chat gate reads this instead of inferring from `runtime.state`.
+    //
+    // `runtime.state` above is deliberately left untouched: it is still the
+    // live execution state, still reported every tick, and a platform that has
+    // not learned about this field keeps working exactly as before. Omitted
+    // entirely when no verdict is available, so "absent" stays distinguishable
+    // from "not ready" on the receiving end.
+    ...(readiness ? { readiness } : {}),
   };
 }
 
@@ -153,6 +162,10 @@ export function createMetricsReporter(activeOrgConfigs, {
   log,
   warn,
   dashboardApiKey = '',
+  // Readiness verdict source. Injected rather than imported so this reporter
+  // stays testable without an activity monitor, and so a deployment with the
+  // gate disabled simply omits the field instead of reporting a fabricated one.
+  evaluateReadiness = () => null,
   fetch = globalThis.fetch,
   now = Date.now,
   putForOrg = realPutForOrg,
@@ -340,7 +353,7 @@ export function createMetricsReporter(activeOrgConfigs, {
       loggedCgroupFallback = true;
       log?.('cgroup unavailable (non-containerized agent) — reporting node-level CPU/memory from dashboard');
     }
-    const payload = buildPayload(dashboard, cg);
+    const payload = buildPayload(dashboard, cg, evaluateReadiness());
     if (!payload) return;
 
     // Report to the PRIMARY org only (the first enabled org, i.e. the first
