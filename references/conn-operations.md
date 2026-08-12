@@ -2,6 +2,24 @@
 
 CLI: `node src/cli/conn.js <command> '<json>'`
 
+## What a Connection is (read this first)
+
+A **Connection** is a third-party app or account — mail, chat, calendar, docs, a tracker, any external SaaS/API — that an owner has **authorized directly to you** through cws-connect. It is this platform's answer to "act on an external service": you do **not** install packages, run MCP servers, configure SMTP, drive a browser, or hold credentials in `.env`. The credential lives server-side; you invoke actions and cws-connect injects the token.
+
+**One universal flow works for every app — you never pre-learn a specific provider:**
+
+1. **`conn.list`** — which apps/accounts are authorized to you right now (each entry pairs an `application` with a `connectionId` + `status`).
+2. **`conn.catalog {app}`** (or `conn.app_actions {applicationId}`) — the app's **action catalog**: every action it exposes, each carrying an `input_schema` (JSON Schema) that describes that action's parameters.
+3. **`conn.invoke {app, action, params}`** — run the chosen action with `params` shaped by its `input_schema`. Authorization and token injection happen server-side.
+
+Because you read the catalog and its `input_schema` **at call time**, the same three verbs drive *any* connected app. What differs per app is only the action names and their `input_schema` — which you **discover, never hardcode** — so a newly-added provider needs zero changes here.
+
+**When the app you need isn't in `conn.list`:** it simply isn't authorized to you yet. Tell the owner and ask them to connect/authorize it — do not fall back to a non-platform workaround (installing something, SMTP, scraping, etc.).
+
+**Two credential modes, one flow:** *proxy* — cws-connect calls the provider for you and you never see a token (`conn.invoke`/`conn.proxy`); *direct* — you receive a real `access_token` to call the provider yourself (this also needs the provider's base URL, which the catalog does not carry). Prefer the cache-aware verbs (`conn.invoke` / `conn.catalog`), which resolve the connection and action for you. See "Credential Modes" and "Capability Cache & Call Chain" below for the mechanics.
+
+> The command reference below is app-agnostic: examples use placeholders like `<app>`, `<toolkit-slug>/<action-name>`, and a generic provider URL. Substitute the real values you get from `conn.list` / `conn.catalog` at runtime — never assume a particular provider.
+
 ## Commands
 
 ### conn.list
@@ -33,17 +51,19 @@ Proxy a request through a connection (proxy mode). The agent doesn't see real cr
 node src/cli/conn.js conn.proxy '{
   "connectionId": "2b0e4f41-...",
   "method": "GET",
-  "url": "https://api.github.com/user/repos",
+  "url": "https://api.<provider-host>/<resource-path>",
   "headers": {"Accept": "application/json"}
 }'
 
 node src/cli/conn.js conn.proxy '{
   "connectionId": "2b0e4f41-...",
   "method": "POST",
-  "url": "https://api.github.com/repos/owner/repo/issues",
-  "body": {"title": "Bug report", "body": "..."}
+  "url": "https://api.<provider-host>/<resource-path>",
+  "body": {"<field>": "<value>"}
 }'
 ```
+
+(Proxy mode needs the provider's own URL/shape — use it when you must call a raw endpoint the action catalog doesn't cover. For everything the catalog covers, prefer `conn.invoke` / `conn.execute`, which resolve the endpoint for you.)
 
 Returns `{ status_code, headers, body }`.
 
@@ -62,12 +82,12 @@ Run a registered named action through a connection. cws-connect resolves the act
 ```bash
 node src/cli/conn.js conn.execute '{
   "connectionId": "2b0e4f41-...",
-  "action": "github-repos/list",
-  "params": {"visibility": "public"}
+  "action": "<toolkit-slug>/<action-name>",
+  "params": {"<param>": "<value>"}
 }'
 ```
 
-Returns `{ status_code, body }`.
+Get the `action` string and the exact `params` keys from `conn.catalog` / `conn.actions` (each action's `input_schema`) — do not guess them. Returns `{ status_code, body }`.
 
 ### conn.status
 Get connection details: status, owner, application, scopes, expiry.
