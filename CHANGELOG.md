@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.13.0] — 2026-08-12
+
+### Added
+
+- **Notify the agent when a connection is authorized to it.** On a `connection.authorized` WS
+  event the comm-bridge now enqueues a one-line session notice (`🔌 [连接已授权] …`, via the C4
+  control queue, mirroring the owner-changed notice) naming the app, so a bot learns it can act
+  via `conn.*` **immediately** instead of only discovering the connection if it happens to run
+  `conn.list`. The notice is produced by an injectable `notify` dep on `handleConnectionEvent`
+  (keeps the logic unit-testable); it is **best-effort** — a notify failure never breaks the
+  credential/index/catalog path — and fires **only on authorize** (not revoke / disconnect /
+  credential-updated / reauth). Completes the third item of the connect-discoverability design
+  (the first two — the always-loaded SKILL.md trigger and the app-agnostic ops rewrite — are below).
+
+### Changed
+
+- **Made third-party Connections discoverable from the always-loaded layer.**
+  A bot asked to do something involving an external app/account (e.g. "send an
+  email") could previously conclude it "had no capability" and reach for
+  SMTP/MCP/local-connector workarounds, because `SKILL.md` (always loaded) only
+  referenced Connect via one narrow Layer-3 index row while the `conn.*` capability
+  and `conn-operations.md` sit load-on-demand. Added a new always-loaded `SKILL.md`
+  section — "Acting on External Apps / Accounts (Connections) — recognize this
+  first": any request that touches an external app/account is the trigger to load
+  `conn-operations.md` and use `conn.list` → `conn.catalog` → `conn.invoke`. The
+  rule is **generic (no per-app names/examples)**, so onboarding new connectors
+  needs no skill change. Also broadened the Layer-3 index row's trigger wording
+  from specific apps to action types.
+- **Rewrote `references/conn-operations.md` to be app-agnostic.** Added a "What a
+  Connection is" preamble covering what a Connection is, what it is for, and the
+  one universal `list → catalog → invoke` flow that works for every app (actions +
+  `input_schema` are discovered at call time, never hardcoded). Replaced the
+  provider-specific examples (raw provider URLs, a named action) with placeholders.
+  Docs-only; no code change.
+
 ## [2.12.9] — 2026-08-12
 
 ### Changed

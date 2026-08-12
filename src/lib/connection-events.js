@@ -65,7 +65,7 @@ export async function warmIdentityAndCatalog(orgId, connectionId, idxPath, { get
 export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
   const {
     log = () => {}, warn = () => {}, post = postForOrg, get = getForOrg,
-    connectDir, credentialsDir, catalogDir,
+    connectDir, credentialsDir, catalogDir, notify = () => {},
   } = deps;
   const { event, data } = frame.payload || {};
   if (!event || !data) return;
@@ -118,13 +118,24 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
         log(`[${slug}] proxy connection indexed (no local credential) conn=${connectionId} provider=${data.provider || '?'}`);
       }
       // Best-effort: any failure here never breaks the credential/index path above.
+      let applicationId = null;
+      let actionCount = 0;
       try {
-        const { applicationId, actionCount } = await warmIdentityAndCatalog(orgId, connectionId, idxPath, { get, catalogDir });
+        ({ applicationId, actionCount } = await warmIdentityAndCatalog(orgId, connectionId, idxPath, { get, catalogDir }));
         if (applicationId) {
           log(`[${slug}] identity resolved + action-catalog warmed conn=${connectionId} app=${applicationId} actions=${actionCount}`);
         }
       } catch (e) {
         warn(`[${slug}] identity/catalog warm failed conn=${connectionId}: ${e.message}`);
+      }
+      // Surface the new capability to the agent session: without this a bot only
+      // learns a connection exists if it happens to run conn.list. On authorize we
+      // proactively notify it so it can act via conn.* right away. Best-effort —
+      // a notify failure never breaks the credential/index/catalog path above.
+      try {
+        notify({ connectionId, provider: data.provider, applicationId, actionCount, mode });
+      } catch (e) {
+        warn(`[${slug}] connection.authorized notify failed conn=${connectionId}: ${e.message}`);
       }
       break;
     }

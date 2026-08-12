@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.12.9
+version: 2.13.0
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -119,6 +119,21 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 
 - **Replying to a message routed to you → always use the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
 - **`comm.send` is for agent-initiated (proactive) sends only** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing into a known `conversationId`.
+
+## Acting on External Apps / Accounts (Connections) — recognize this first
+
+Whenever a request needs a **third-party app or account** — sending or reading mail, posting or reading messages, calendar/contacts, documents/files, issue trackers, or **any** action that reaches a service or account outside this platform — do **not** conclude you "can't", and do **not** reach for SMTP, MCP servers, browser automation, locally-installed connectors, or `.env` credentials. On this platform those capabilities are delivered as **cws-connect Connections**: third-party accounts an owner authorizes directly to you. Treat "this touches an external app/account" as the trigger to use them.
+
+**The reflex — the same three verbs work for every app, with no per-app setup or prior knowledge:**
+
+1. **Load `references/conn-operations.md`.**
+2. **`conn.list`** — which apps/accounts are authorized to you right now.
+3. **`conn.catalog {app}`** — that app's available actions, each with an `input_schema` describing its parameters.
+4. **`conn.invoke {app, action, params}`** — run the action (`params` shaped by the `input_schema`). Authorization and tokens are injected server-side; you never see or handle credentials.
+
+You learn what an app can do by reading its catalog **at call time**, so this one flow covers **any** connected app — you never hardcode or pre-learn a specific provider, and a newly-added connector needs no change here. If `conn.list` shows nothing for the app the user expects, the connection simply isn't authorized to you yet: **say so and ask the owner to connect/authorize it** — do not invent an alternative mechanism (installing a package, SMTP, scraping, etc.).
+
+When an owner authorizes a new connection to you, you also receive a proactive **`🔌 [连接已授权]`** session notice naming the app — that is your cue it is ready; act on it with the same `conn.*` flow (no need to wait to be asked again).
 
 ## Task Classification and Execution Flow
 
@@ -549,6 +564,6 @@ You can generate it in one step with the CLI: `node src/cli/core.js core.fronten
 | **AS** | File upload (IM/KB dual mode) + download URL resolution + local download | send conversation attachments, archive files to KB, download remote artifacts for vision/analysis | `references/as-operations.md` |
 | **Comm** | IM that the Agent **proactively initiates**: conversation/message/unread/WS sync/KB page search | proactively DM a colleague, create a group, search a page in a targeted way, WS reconnect to fill gaps | `references/comm-operations.md` |
 | **Core** | Identity + member/project/role/invitation directory queries + org switching + platform agent lifecycle | `core.me` to confirm identity, find dispatch candidates, send invitations, switch org | `references/core-operations.md` |
-| **Connect** | Third-party app connections (OAuth/API): list/status, action discovery + execute, and the app-keyed capability cache under `runtime/connect/` | call a connected app (Notion/X/…): prefer `conn.invoke {app, action, params}` (resolves the connection from the local index → executes; auth stays server-side) after picking an action via `conn.catalog {app}` | `references/conn-operations.md` |
+| **Connect** | Third-party app connections (OAuth/API): list/status, action discovery + execute, and the app-keyed capability cache under `runtime/connect/` | **any request that touches an external app/account** — send/read mail, post/read messages, calendar, docs/files, trackers, etc.: `conn.list` → `conn.catalog {app}` → `conn.invoke {app, action, params}` (auth stays server-side) | `references/conn-operations.md` |
 
 The top of each Layer 3 doc has its own four-part summary of `Purpose` / `When to load this document` / `Out of scope for this document` / `Prerequisites`; after loading it into memory, first scan this section to confirm it is the one you want, then read on to the command list.
