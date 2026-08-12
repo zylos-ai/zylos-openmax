@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Notify the agent when a connection is authorized to it.** On a `connection.authorized` WS
-  event the comm-bridge now enqueues a one-line session notice (`🔌 [连接已授权] …`, via the C4
+  event the comm-bridge now enqueues a one-line session notice (`🔌 [Connection authorized] …`, via the C4
   control queue, mirroring the owner-changed notice) naming the app, so a bot learns it can act
   via `conn.*` **immediately** instead of only discovering the connection if it happens to run
   `conn.list`. The notice is produced by an injectable `notify` dep on `handleConnectionEvent`

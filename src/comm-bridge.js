@@ -1574,13 +1574,13 @@ function handleConnectionEventForOrg(orgConfig, frame) {
 function notifyConnectionAuthorized(orgConfig, info = {}) {
   const { connectionId, provider, actionCount, mode } = info;
   const app = provider || 'a third-party app';
-  const modeNote = mode && mode !== '?' ? `，${mode} 模式` : '';
-  const actionsNote = Number.isInteger(actionCount) && actionCount > 0 ? `，约 ${actionCount} 个可用动作` : '';
+  const modeNote = mode && mode !== '?' ? `, ${mode} mode` : '';
+  const actionsNote = Number.isInteger(actionCount) && actionCount > 0 ? `, ~${actionCount} actions` : '';
   const appHint = provider ? ` {app:"${provider}"}` : '';
   const content =
-    `🔌 [连接已授权] 新的第三方连接已授权给你：${app}（org ${orgConfig.slug}${modeNote}${actionsNote}）。`
-    + `你现在无需安装任何东西即可使用它——用 conn.list 查看、conn.catalog${appHint} 找动作、`
-    + `conn.invoke {app, action, params} 调用（凭据由服务端注入，你不接触）。connection_id=${connectionId || '?'}。`;
+    `🔌 [Connection authorized] A new third-party connection was authorized to you: ${app} (org ${orgConfig.slug}${modeNote}${actionsNote}). `
+    + `You can use it now — no install needed: conn.list to see it, conn.catalog${appHint} to find actions, `
+    + `conn.invoke {app, action, params} to call (credentials are injected server-side; you never handle them). connection_id=${connectionId || '?'}.`;
   execFile(
     process.execPath,
     [C4_CONTROL, 'enqueue', '--content', content, '--priority', '2', '--no-ack-suffix'],

@@ -133,7 +133,7 @@ Whenever a request needs a **third-party app or account** — sending or reading
 
 You learn what an app can do by reading its catalog **at call time**, so this one flow covers **any** connected app — you never hardcode or pre-learn a specific provider, and a newly-added connector needs no change here. If `conn.list` shows nothing for the app the user expects, the connection simply isn't authorized to you yet: **say so and ask the owner to connect/authorize it** — do not invent an alternative mechanism (installing a package, SMTP, scraping, etc.).
 
-When an owner authorizes a new connection to you, you also receive a proactive **`🔌 [连接已授权]`** session notice naming the app — that is your cue it is ready; act on it with the same `conn.*` flow (no need to wait to be asked again).
+When an owner authorizes a new connection to you, you also receive a proactive **`🔌 [Connection authorized]`** session notice naming the app — that is your cue it is ready; act on it with the same `conn.*` flow (no need to wait to be asked again).
 
 ## Task Classification and Execution Flow
 
