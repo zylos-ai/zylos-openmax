@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.12.10
+version: 2.13.0
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -132,6 +132,8 @@ Whenever a request needs a **third-party app or account** — sending or reading
 4. **`conn.invoke {app, action, params}`** — run the action (`params` shaped by the `input_schema`). Authorization and tokens are injected server-side; you never see or handle credentials.
 
 You learn what an app can do by reading its catalog **at call time**, so this one flow covers **any** connected app — you never hardcode or pre-learn a specific provider, and a newly-added connector needs no change here. If `conn.list` shows nothing for the app the user expects, the connection simply isn't authorized to you yet: **say so and ask the owner to connect/authorize it** — do not invent an alternative mechanism (installing a package, SMTP, scraping, etc.).
+
+When an owner authorizes a new connection to you, you also receive a proactive **`🔌 [连接已授权]`** session notice naming the app — that is your cue it is ready; act on it with the same `conn.*` flow (no need to wait to be asked again).
 
 ## Task Classification and Execution Flow
 

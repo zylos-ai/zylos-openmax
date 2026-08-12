@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.12.10] — 2026-08-12
+## [2.13.0] — 2026-08-12
+
+### Added
+
+- **Notify the agent when a connection is authorized to it.** On a `connection.authorized` WS
+  event the comm-bridge now enqueues a one-line session notice (`🔌 [连接已授权] …`, via the C4
+  control queue, mirroring the owner-changed notice) naming the app, so a bot learns it can act
+  via `conn.*` **immediately** instead of only discovering the connection if it happens to run
+  `conn.list`. The notice is produced by an injectable `notify` dep on `handleConnectionEvent`
+  (keeps the logic unit-testable); it is **best-effort** — a notify failure never breaks the
+  credential/index/catalog path — and fires **only on authorize** (not revoke / disconnect /
+  credential-updated / reauth). Completes the third item of the connect-discoverability design
+  (the first two — the always-loaded SKILL.md trigger and the app-agnostic ops rewrite — are below).
 
 ### Changed
 

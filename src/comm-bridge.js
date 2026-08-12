@@ -1561,7 +1561,35 @@ async function handleSystemEvent(orgConfig, frame) {
 // otherwise.
 
 function handleConnectionEventForOrg(orgConfig, frame) {
-  return handleConnectionEvent(orgConfig, frame, { log, warn });
+  return handleConnectionEvent(orgConfig, frame, {
+    log, warn,
+    notify: (info) => notifyConnectionAuthorized(orgConfig, info),
+  });
+}
+
+// A connection was authorized to this agent → tell the bot session so it can act
+// via conn.* immediately, instead of only discovering the connection if it happens
+// to run conn.list. Session-level control inject (no conversation context), mirroring
+// notifyOwnerChanged. Best-effort; never throws into the event handler.
+function notifyConnectionAuthorized(orgConfig, info = {}) {
+  const { connectionId, provider, actionCount, mode } = info;
+  const app = provider || 'a third-party app';
+  const modeNote = mode && mode !== '?' ? `，${mode} 模式` : '';
+  const actionsNote = Number.isInteger(actionCount) && actionCount > 0 ? `，约 ${actionCount} 个可用动作` : '';
+  const appHint = provider ? ` {app:"${provider}"}` : '';
+  const content =
+    `🔌 [连接已授权] 新的第三方连接已授权给你：${app}（org ${orgConfig.slug}${modeNote}${actionsNote}）。`
+    + `你现在无需安装任何东西即可使用它——用 conn.list 查看、conn.catalog${appHint} 找动作、`
+    + `conn.invoke {app, action, params} 调用（凭据由服务端注入，你不接触）。connection_id=${connectionId || '?'}。`;
+  execFile(
+    process.execPath,
+    [C4_CONTROL, 'enqueue', '--content', content, '--priority', '2', '--no-ack-suffix'],
+    { timeout: 10000 },
+    (err, _stdout, stderr) => {
+      if (err) warn(`[${orgConfig.slug}] failed to enqueue connection-authorized control: ${stderr || err.message}`);
+      else log(`[${orgConfig.slug}] connection-authorized control enqueued conn=${connectionId || '?'}`);
+    },
+  );
 }
 
 // =============================================================================

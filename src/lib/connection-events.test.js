@@ -119,3 +119,48 @@ test('handleConnectionEvent: ignores events not addressed to this agent', async 
   await handleConnectionEvent(baseOrgConfig, frame, { get: guardedGet, post: guardedPost });
   assert.equal(calls.length, 0, 'an event addressed to a different agent must trigger no HTTP calls at all');
 });
+
+test('connection.authorized: notifies the agent session (so it learns it can act via conn.* without running conn.list)', async () => {
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const { get, post } = recordingHttp();
+  const notes = [];
+  const notify = (info) => notes.push(info);
+
+  const frame = { payload: { event: 'connection.authorized', data: {
+    connection_id: 'conn-9', provider: 'gmail', credential_mode: 'proxy',
+  } } };
+  await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notify });
+
+  assert.equal(notes.length, 1, 'authorize must notify the agent exactly once');
+  assert.equal(notes[0].connectionId, 'conn-9');
+  assert.equal(notes[0].provider, 'gmail');
+  assert.equal(notes[0].mode, 'proxy');
+});
+
+test('only connection.authorized notifies — revoked / disconnected / credential_updated / reauth_needed do NOT', async () => {
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const { get, post } = recordingHttp();
+  const notes = [];
+  const notify = (info) => notes.push(info);
+
+  for (const event of [
+    'connection.revoked', 'connection.disconnected',
+    'connection.credential_updated', 'connection.reauth_needed',
+  ]) {
+    const frame = { payload: { event, data: { connection_id: 'conn-x', provider: 'gmail' } } };
+    await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notify });
+  }
+  assert.equal(notes.length, 0, 'only connection.authorized should notify the agent session');
+});
+
+test('connection.authorized notify is best-effort: a throwing notify never breaks the handler', async () => {
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const { get, post } = recordingHttp();
+  const notify = () => { throw new Error('boom'); };
+
+  const frame = { payload: { event: 'connection.authorized', data: {
+    connection_id: 'conn-10', provider: 'gmail', credential_mode: 'proxy',
+  } } };
+  // Must resolve, not reject, despite the notify throwing.
+  await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notify });
+});
