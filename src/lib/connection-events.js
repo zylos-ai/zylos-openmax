@@ -18,6 +18,8 @@ import {
   readIndex,
   replaceIndexFromList,
   writeCatalog,
+  invalidateCatalog,
+  appHasAnyConnection,
 } from './connect-store.js';
 import { saveCredentialCache, deleteCredentialCache, hasCredentialCache } from './credential-cache.js';
 
@@ -132,9 +134,32 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
     case 'connection.revoked':
     case 'connection.disconnected': {
       log(`[${slug}] ${event} conn=${connectionId}`);
+      // Capture the app BEFORE removeConnection deletes the local index entry.
+      // The revoke event may not carry application_id and the server-side
+      // connection may already be gone, so the local index entry is the
+      // authoritative source; fall back to the event payload when the entry has
+      // no app recorded.
+      const revokedAppId = readIndex(idxPath)?.connections?.[connectionId]?.applicationId
+        || data.application_id || null;
       removeConnection(connectionId, idxPath);
       deleteCredentialCache(connectionId, credentialsDir);
       log(`[${slug}] connection unindexed + credential cache cleared conn=${connectionId}`);
+      // The action-catalog is GLOBAL (app-keyed, shared across every org and
+      // connection — no secrets, just tool definitions), so only drop it once NO
+      // remaining connection in ANY org still uses the app. Best-effort: a failed
+      // catalog drop must never break event handling, matching the handler style
+      // above. When application_id can't be resolved, skip cleanup with a warn
+      // rather than crash (the catalog is left in place, refreshable by TTL).
+      try {
+        if (!revokedAppId) {
+          warn(`[${slug}] ${event} conn=${connectionId}: application_id unresolved, skipping action-catalog cleanup`);
+        } else if (!appHasAnyConnection(revokedAppId, connectDir !== undefined ? connectDir : undefined)) {
+          invalidateCatalog(revokedAppId, catalogDir !== undefined ? catalogDir : undefined);
+          log(`[${slug}] dropped orphaned action-catalog app=${revokedAppId} (no remaining connection in any org)`);
+        }
+      } catch (e) {
+        warn(`[${slug}] action-catalog cleanup failed conn=${connectionId} app=${revokedAppId || '?'}: ${e.message}`);
+      }
       break;
     }
 

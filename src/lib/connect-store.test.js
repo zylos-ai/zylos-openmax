@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   readIndex, upsertConnection, removeConnection, replaceIndexFromList, findConnectionByApp,
   readCatalog, writeCatalog, invalidateCatalog, catalogPath, indexPathForOrg,
+  appHasAnyConnection,
 } from './connect-store.js';
 
 function tmpIndex() {
@@ -86,6 +87,24 @@ test('index 按 org 隔离：不同 org 的同 slug 连接互不串（多 org �
   assert.equal(findConnectionByApp('notion', orgB)?.id, 'cB');
   // 两个不同的物理文件
   assert.notEqual(orgA, orgB);
+});
+
+test('appHasAnyConnection 跨所有 org 扫描：任一 org 仍引用该 app 即为 true（全局共享目录的清理依据）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'connect-any-'));
+  upsertConnection({ connection_id: 'cA', application_id: 'app-1', application_slug: 'notion', status: 'active' }, indexPathForOrg('org-a', dir));
+  upsertConnection({ connection_id: 'cB', application_id: 'app-1', application_slug: 'notion', status: 'active' }, indexPathForOrg('org-b', dir));
+  // app-1 在两个 org 都有连接
+  assert.equal(appHasAnyConnection('app-1', dir), true);
+  // 撤销 org-a 的连接后，org-b 仍引用 → 依旧 true
+  removeConnection('cA', indexPathForOrg('org-a', dir));
+  assert.equal(appHasAnyConnection('app-1', dir), true);
+  // 再撤销 org-b → 无人引用
+  removeConnection('cB', indexPathForOrg('org-b', dir));
+  assert.equal(appHasAnyConnection('app-1', dir), false);
+  // 未知 app / 空 id / 缺失目录都为 false，不抛错
+  assert.equal(appHasAnyConnection('nope', dir), false);
+  assert.equal(appHasAnyConnection('', dir), false);
+  assert.equal(appHasAnyConnection('app-1', path.join(dir, 'missing')), false);
 });
 
 // --- action catalog ---------------------------------------------------------

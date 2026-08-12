@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { handleConnectionEvent, acquireCredential, isEventForMe } from './connection-events.js';
+import {
+  upsertConnection, readIndex, indexPathForOrg, writeCatalog, readCatalog,
+} from './connect-store.js';
 
 // Regression coverage for the 2026-08-04 security fix: cws-core no longer
 // accepts a client-supplied agent_member_id, and its
@@ -105,6 +108,71 @@ test('connection.credential_updated: re-acquires via the bare path when a cached
   assert.equal(calls.length, 1);
   assert.equal(calls[0].path, '/api/v1/connect/connections/conn-3/credential');
   assert.ok(!calls[0].path.includes('agent_member_id'));
+});
+
+// --- revoke/disconnect: orphaned action-catalog cleanup ---------------------
+// The action-catalog is GLOBAL (app-keyed, shared across orgs/connections), so
+// revoking a connection must drop the app's catalog ONLY when no remaining
+// connection in ANY org still uses that app.
+
+test('connection.revoked (last connection of the app): drops the orphaned catalog + clears index entry & credential', async () => {
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const idxPath = indexPathForOrg('org-1', connectDir);
+  // Seed the local index (application_id lives on the ENTRY, not the revoke event)
+  // and a credential + the app's global catalog.
+  upsertConnection({ connection_id: 'conn-1', application_id: 'app-1', application_slug: 'notion', status: 'active' }, idxPath);
+  fs.mkdirSync(credentialsDir, { recursive: true });
+  fs.writeFileSync(path.join(credentialsDir, 'conn-1.json'), JSON.stringify({ credential_mode: 'direct', access_token: 'tok' }));
+  writeCatalog('app-1', [{ action: 'notion-pages/create' }], { dir: catalogDir });
+
+  // Revoke event deliberately carries NO application_id → resolution must come
+  // from the local index entry captured before removeConnection.
+  const frame = { payload: { event: 'connection.revoked', data: { connection_id: 'conn-1' } } };
+  await handleConnectionEvent(baseOrgConfig, frame, { connectDir, credentialsDir, catalogDir });
+
+  assert.equal(readIndex(idxPath).connections['conn-1'], undefined, 'index entry must be removed');
+  assert.ok(!fs.existsSync(path.join(credentialsDir, 'conn-1.json')), 'credential cache must be cleared');
+  assert.equal(readCatalog('app-1', { dir: catalogDir }), null, 'orphaned catalog must be dropped');
+});
+
+test('connection.revoked (another connection of the SAME app remains in a DIFFERENT org): keeps the shared catalog', async () => {
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const idxOrg1 = indexPathForOrg('org-1', connectDir);
+  const idxOrg2 = indexPathForOrg('org-2', connectDir);
+  // Same app (app-1) connected in two orgs. Revoke org-1's connection.
+  upsertConnection({ connection_id: 'conn-A', application_id: 'app-1', application_slug: 'notion', status: 'active' }, idxOrg1);
+  upsertConnection({ connection_id: 'conn-B', application_id: 'app-1', application_slug: 'notion', status: 'active' }, idxOrg2);
+  writeCatalog('app-1', [{ action: 'notion-pages/create' }], { dir: catalogDir });
+
+  const frame = { payload: { event: 'connection.disconnected', data: { connection_id: 'conn-A' } } };
+  await handleConnectionEvent(baseOrgConfig, frame, { connectDir, credentialsDir, catalogDir });
+
+  assert.equal(readIndex(idxOrg1).connections['conn-A'], undefined, 'revoked connection must be unindexed');
+  assert.ok(readIndex(idxOrg2).connections['conn-B'], 'the other org’s connection must remain');
+  assert.ok(readCatalog('app-1', { dir: catalogDir }), 'catalog must be KEPT while another org still uses the app');
+});
+
+test('connection.revoked (application_id unresolvable): no crash, catalog untouched, index/credential still cleared', async () => {
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const idxPath = indexPathForOrg('org-1', connectDir);
+  // Index entry has NO applicationId (sparse event source) and the revoke event
+  // carries none either → app cannot be resolved.
+  upsertConnection({ connection_id: 'conn-x', provider: 'notion', status: 'active' }, idxPath);
+  fs.mkdirSync(credentialsDir, { recursive: true });
+  fs.writeFileSync(path.join(credentialsDir, 'conn-x.json'), JSON.stringify({ credential_mode: 'direct', access_token: 'tok' }));
+  // An unrelated catalog that must remain untouched.
+  writeCatalog('app-unrelated', [{ action: 'a' }], { dir: catalogDir });
+
+  const warns = [];
+  const frame = { payload: { event: 'connection.revoked', data: { connection_id: 'conn-x' } } };
+  await assert.doesNotReject(
+    handleConnectionEvent(baseOrgConfig, frame, { warn: (m) => warns.push(m), connectDir, credentialsDir, catalogDir }),
+  );
+
+  assert.equal(readIndex(idxPath).connections['conn-x'], undefined, 'index entry must still be removed');
+  assert.ok(!fs.existsSync(path.join(credentialsDir, 'conn-x.json')), 'credential cache must still be cleared');
+  assert.ok(readCatalog('app-unrelated', { dir: catalogDir }), 'no catalog may be dropped when the app is unresolvable');
+  assert.ok(warns.some((m) => /application_id unresolved/.test(m)), 'should warn about the skipped catalog cleanup');
 });
 
 test('handleConnectionEvent: ignores events not addressed to this agent', async () => {

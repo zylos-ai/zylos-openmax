@@ -140,6 +140,33 @@ export function findConnectionByApp(app, indexPath = INDEX_PATH) {
   return matches.find((e) => e.status === 'active') || matches[0];
 }
 
+/**
+ * Whether ANY connection, in ANY org's index, still references this application.
+ *
+ * The action catalog is GLOBAL (keyed by applicationId, shared across every org
+ * and connection — see CATALOG_DIR), while the connections index is per-org. So
+ * a caller deciding whether an app's shared catalog is now orphaned MUST scan
+ * every org's index, not just the one the revoke arrived on: a connection to the
+ * same app in another org must keep the shared catalog alive. Scans every
+ * `connections-index.*.json` file under `dir`. Missing dir / no id → false.
+ */
+export function appHasAnyConnection(applicationId, dir = CONNECT_DIR) {
+  if (!applicationId) return false;
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.startsWith('connections-index.') && f.endsWith('.json'));
+  } catch {
+    return false;
+  }
+  for (const f of files) {
+    const index = readIndex(path.join(dir, f));
+    for (const entry of Object.values(index.connections)) {
+      if (entry.applicationId === applicationId) return true;
+    }
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 //  Action catalog (applicationId → capability metadata)
 // ---------------------------------------------------------------------------

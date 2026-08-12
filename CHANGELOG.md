@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.10] — 2026-08-12
+
+### Fixed
+
+- **Drop an app's action-catalog on connection revoke once it is orphaned.** On
+  `connection.revoked` / `connection.disconnected` the handler already cleared the
+  connection's index entry and credential cache but left the global, app-keyed
+  `action-catalog/<applicationId>.json` behind, leaking stale tool definitions for
+  apps no longer connected. The revoke handler now resolves the revoked
+  connection's `application_id` from the local index entry (captured *before*
+  removal, since the event may not carry it and the server-side connection may
+  already be gone; falls back to the event payload), and drops the catalog only
+  when no remaining connection in ANY org still uses that app. The catalog is
+  global/shared across orgs, so the check scans every `connections-index.*.json`
+  via the new `appHasAnyConnection()` helper — a Notion connection in org B keeps
+  the catalog alive when org A's is revoked. Cleanup is best-effort: an
+  unresolvable app or a failed drop warns and skips without breaking event
+  handling, and the existing credential/index cleanup is unchanged. The catalog
+  holds only tool-definition metadata (no secrets).
+
 ## [2.12.9] — 2026-08-12
 
 ### Changed
