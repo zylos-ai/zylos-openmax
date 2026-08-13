@@ -51,7 +51,12 @@ import { createMetricsReporter } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
-import { AGENT_DIAGNOSTICS_EVENT, createDiagnosticsHandler } from './lib/diagnostics.js';
+import {
+  AGENT_DIAGNOSTICS_CONFIG_EVENT,
+  AGENT_DIAGNOSTICS_EVENT,
+  applyDiagnosticsConfig,
+  createDiagnosticsHandler,
+} from './lib/diagnostics.js';
 import { isSelfMentioned } from './lib/self-mention.js';
 
 const LOG_PREFIX = '[comm-bridge]';
@@ -1219,6 +1224,23 @@ function handleConfigUpdate(orgConfig, frame) {
   const slug = orgConfig.slug;
 
   switch (event) {
+    case AGENT_DIAGNOSTICS_CONFIG_EVENT: {
+      const result = applyDiagnosticsConfig(data, {
+        agentMemberId: orgConfig.self?.member_id,
+        update: updateConfig,
+      });
+      if (!result.applied) {
+        warn(`[${slug}] diagnostics_changed rejected: ${result.reason}`);
+        return;
+      }
+      // updateConfig refreshes its module cache, but diagnostics command
+      // admission closes over this live variable. Assign synchronously instead
+      // of relying on fs.watch after the atomic config-file rename.
+      config = result.config;
+      log(`[${slug}] config updated: diagnostics.enabled → ${result.enabled} (by ${data.changed_by || '?'})`);
+      return;
+    }
+
     case 'agent.config.dm_policy_changed': {
       const { policy } = data;
       if (!VALID_DM_POLICIES.has(policy)) {

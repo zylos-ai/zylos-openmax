@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  applyDiagnosticsConfig,
   AGENT_DIAGNOSTICS_EVENT,
   DIAGNOSTICS_SEND_PROBE,
   createDiagnosticsHandler,
@@ -59,6 +60,28 @@ test('diagnostics is disabled by default and cannot carry arbitrary actions or t
   assert.equal((await make(true)({ slug: 'test', org_id: 'org-1' }, commandFrame({ conversation_id: 'conv?member=other' }))).reason, 'invalid_conversation_id');
   assert.equal((await make(true)({ slug: 'test', org_id: 'org-1' }, commandFrame({ expires_at: '2026-07-25T11:59:59Z' }))).reason, 'expired');
   assert.equal(calls, 0);
+});
+
+test('diagnostics config event updates only the exact target with a boolean', () => {
+  const base = { diagnostics: { enabled: false } };
+  const update = (mutate) => {
+    const next = structuredClone(base);
+    mutate(next);
+    return next;
+  };
+  const applied = applyDiagnosticsConfig({ agent_member_id: 'agent-1', enabled: true }, {
+    agentMemberId: 'agent-1', update,
+  });
+  assert.equal(applied.applied, true);
+  assert.equal(applied.config.diagnostics.enabled, true);
+  assert.deepEqual(
+    applyDiagnosticsConfig({ agent_member_id: 'other', enabled: true }, { agentMemberId: 'agent-1', update }),
+    { applied: false, reason: 'target_mismatch' },
+  );
+  assert.deepEqual(
+    applyDiagnosticsConfig({ agent_member_id: 'agent-1', enabled: 'true' }, { agentMemberId: 'agent-1', update }),
+    { applied: false, reason: 'invalid_enabled' },
+  );
 });
 
 test('a command is idempotent and a failed attempt may be retried', async () => {

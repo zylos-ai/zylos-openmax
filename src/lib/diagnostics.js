@@ -8,6 +8,7 @@
  */
 
 export const AGENT_DIAGNOSTICS_EVENT = 'agent.diagnostics.command';
+export const AGENT_DIAGNOSTICS_CONFIG_EVENT = 'agent.config.diagnostics_changed';
 export const DIAGNOSTICS_SEND_PROBE = 'diagnostics.message.send_probe';
 
 const PROBE_TOKEN_RE = /^[A-Za-z0-9_-]{8,128}$/;
@@ -17,6 +18,21 @@ const MAX_SEEN_COMMANDS = 1000;
 
 export function probeMessageText(probeToken) {
   return `[workspace-diagnostics:${probeToken}]`;
+}
+
+/** Apply the closed diagnostics configuration event and return the new live config. */
+export function applyDiagnosticsConfig(data, { agentMemberId, update }) {
+  if (!data || data.agent_member_id !== agentMemberId) {
+    return { applied: false, reason: 'target_mismatch' };
+  }
+  if (typeof data.enabled !== 'boolean') {
+    return { applied: false, reason: 'invalid_enabled' };
+  }
+  const config = update((cfg) => {
+    cfg.diagnostics = cfg.diagnostics || {};
+    cfg.diagnostics.enabled = data.enabled;
+  });
+  return { applied: true, enabled: data.enabled, config };
 }
 
 export function createDiagnosticsHandler({
