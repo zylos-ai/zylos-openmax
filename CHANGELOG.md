@@ -20,11 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     assembly is **code-driven from the catalog** — the caller/LLM supplies only `action` + `params`
     and can never inject a free-form URL.
   - **proxy** → unchanged server-side `/actions/execute` path.
-- **Local token cache + refresh-on-invoke (O4).** Before a direct send, an OAuth token at/near
-  `expires_at` is proactively re-acquired via cws-core and re-saved locally. On a provider **401**
-  an OAuth token is reactively refreshed **once** and the call retried; a second 401 is surfaced
-  (no loop). `api_key` tokens are treated as static (never refreshed; 401 surfaced). Tokens without
-  `expires_at` (e.g. GitHub) rely on the reactive-401 path.
+- **Local token cache + refresh-on-invoke (O4).** The sole proactive-refresh signal is
+  `expires_at` **presence**: a token that carries an `expires_at` and is at/near expiry is
+  re-acquired via cws-core and re-saved locally before the send; a token with no `expires_at`
+  (api_key OR non-expiring OAuth like GitHub) is never proactively refreshed. In **all** cases a
+  provider **401** triggers a single reactive refresh + retry as the backstop; a second 401 is
+  surfaced (no loop).
+- **Re-acquire on a direct cache miss (O4).** When a resolved connection has no local credential
+  file (authorized offline, `runtime/` wiped/reinstalled, or `conn.clear_cache`), `conn.invoke`
+  now re-acquires via cws-core, saves the credential, and proceeds with local direct execution
+  instead of falling through to the proxy path (which cws-connect rejects for a direct connection
+  with `ErrDirectNotProxyable`/422). `acquire` returns `credential_mode`, so a proxy connection is
+  discovered on the same call and routed server-side without caching anything. Only an acquire
+  failure is surfaced — a direct call is never silently downgraded.
 - **Audit logging for direct calls (O6).** Each direct call logs a short `[conn.direct]` line with
   the request method + assembled URL + params only, secrets redacted (`redact.js`), headers never
   logged; same stdout/file sinks (`COCO_RPC_LOG` / `COCO_RPC_LOG_FILE`) as the RPC client.

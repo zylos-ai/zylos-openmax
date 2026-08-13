@@ -21,10 +21,13 @@
  * URL. The action name must resolve in the catalog and the URL can only be the
  * registered `url_template` expanded with schema-checked params.
  *
- * Token lifecycle (O4): OAuth tokens are refreshed proactively when near expiry
- * and reactively ONCE on a provider 401; api_key tokens are static (never
- * refreshed) and a 401 is surfaced to the user. Refresh = re-acquire via
- * cws-core (injected `acquire`) + re-save the local cache.
+ * Token lifecycle (O4): the sole proactive-refresh signal is `expires_at`
+ * PRESENCE. A token that carries an `expires_at` is refreshed proactively when
+ * near/expired before the call; a token WITHOUT `expires_at` (api_key, or a
+ * non-expiring OAuth token like GitHub) is never proactively refreshed. In all
+ * cases a provider 401 triggers a single reactive refresh + retry as the
+ * backstop; a second 401 is surfaced to the user (no loop). Refresh = re-acquire
+ * via cws-core (injected `acquire`) + re-save the local cache.
  *
  * Pure-ish: `fetch`, `acquire`, and `saveCache` are injectable so this is unit
  * testable without network or disk. No import-time side effects.
@@ -202,20 +205,6 @@ export function assembleRequest(actionDef, params = {}, token) {
 //  Token lifecycle helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Is this credential an OAuth token that can be refreshed? Everything is treated
- * as refreshable EXCEPT tokens explicitly marked api_key (static, long-lived).
- * Detection is intentionally conservative — an api_key must not be re-acquired
- * on a 401 (it will never change), while OAuth (including no-expiry tokens like
- * GitHub) must be refreshable via the reactive-401 path.
- */
-export function isTokenRefreshable(cred) {
-  if (!cred) return false;
-  const marker = String(cred.auth_type || cred.token_type || '').toLowerCase();
-  if (marker === 'api_key' || marker === 'apikey' || /api[_-]?key/.test(marker)) return false;
-  return true;
-}
-
 function expiryMs(cred) {
   const raw = cred && cred.expires_at;
   if (raw == null) return null;
@@ -228,9 +217,10 @@ function expiryMs(cred) {
 }
 
 /**
- * Is the token at/near expiry? A token with no `expires_at` returns false — it
- * is never proactively refreshed and relies on the reactive-401 path instead
- * (this is the GitHub case).
+ * Is the token at/near expiry? `expires_at` PRESENCE is the sole proactive
+ * signal: a token with no `expires_at` returns false — it is never proactively
+ * refreshed and relies entirely on the reactive-401 backstop instead (this
+ * covers both api_key and non-expiring OAuth like GitHub).
  */
 export function isTokenNearExpiry(cred, now = Date.now(), skewMs = DEFAULT_EXPIRY_SKEW_MS) {
   const exp = expiryMs(cred);
@@ -245,6 +235,34 @@ export function isTokenNearExpiry(cred, now = Date.now(), skewMs = DEFAULT_EXPIR
  */
 export function chooseExecMode(credential) {
   return credential && credential.credential_mode === 'direct' ? 'direct' : 'proxy';
+}
+
+/**
+ * Resolve the credential + execution mode for an invoke, re-acquiring on a cache
+ * miss so a direct connection with NO local credential file is not wrongly
+ * downgraded to proxy.
+ *
+ * A direct connection may have no cache file — authorized while offline, runtime/
+ * wiped/reinstalled, or conn.clear_cache was run. Since cws-connect now rejects a
+ * direct connection on the proxy/execute path (ErrDirectNotProxyable/422), on a
+ * miss we `acquire` once: `acquire` works for both modes and returns
+ * `credential_mode`, so a direct result is saved locally and used, while a proxy
+ * result leaves the credential null (→ proxy path, which caches nothing). An
+ * acquire FAILURE propagates — we never silently downgrade a direct call.
+ *
+ * @returns {Promise<{credential: object|null, mode: 'direct'|'proxy'}>}
+ */
+export async function resolveCredential({ orgId, connectionId, cached }, { acquire, saveCache = () => {} } = {}) {
+  let credential = cached || null;
+  if (!credential && acquire) {
+    const acquired = await acquire(orgId, connectionId); // throws → surfaced by caller
+    if (acquired && acquired.credential_mode === 'direct') {
+      saveCache(connectionId, acquired);
+      credential = acquired;
+    }
+    // proxy / unknown → leave credential null so chooseExecMode routes to proxy.
+  }
+  return { credential, mode: chooseExecMode(credential) };
 }
 
 // ---------------------------------------------------------------------------
@@ -356,9 +374,12 @@ export async function invokeDirect(
   let cred = credential;
   const connId = connection.id;
 
-  // Proactive refresh: OAuth tokens only, when at/near expiry. A refresh failure
-  // is non-fatal here — proceed with the current token and let the 401 path try.
-  if (acquire && isTokenRefreshable(cred) && isTokenNearExpiry(cred, now(), skewMs)) {
+  // Proactive refresh: driven solely by `expires_at` presence — a token that
+  // carries one and is at/near expiry is refreshed before the call; a token with
+  // no `expires_at` (api_key / non-expiring OAuth) is never proactively touched.
+  // A refresh failure here is non-fatal — proceed with the current token and let
+  // the reactive-401 backstop try.
+  if (acquire && isTokenNearExpiry(cred, now(), skewMs)) {
     try {
       const fresh = await acquire(orgId, connId);
       if (fresh && fresh.access_token) { saveCache(connId, fresh); cred = fresh; }
@@ -372,9 +393,10 @@ export async function invokeDirect(
   auditDirectCall(assembled.method, assembled.url, params, audit);
   let result = await sendDirect(assembled, { fetchImpl });
 
-  // Reactive refresh: a provider 401 on an OAuth token → refresh ONCE and retry.
-  // api_key (non-refreshable) or a repeat 401 is surfaced as-is (no loop).
-  if (result.status_code === 401 && acquire && isTokenRefreshable(cred)) {
+  // Reactive refresh backstop (ALL cases): a provider 401 → refresh ONCE and
+  // retry. This covers no-expiry tokens (GitHub) and any token whose proactive
+  // refresh was skipped/stale. A second 401 is surfaced as-is (no loop).
+  if (result.status_code === 401 && acquire) {
     log(`[conn.direct] provider 401 conn=${connId}; reactive refresh + retry once`);
     const fresh = await acquire(orgId, connId); // if refresh itself throws, surface it
     if (fresh && fresh.access_token) {

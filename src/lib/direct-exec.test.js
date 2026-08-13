@@ -5,9 +5,9 @@ import {
   resolveActionDef,
   validateParams,
   assembleRequest,
-  isTokenRefreshable,
   isTokenNearExpiry,
   chooseExecMode,
+  resolveCredential,
   sendDirect,
   invokeDirect,
   MAX_RESPONSE_BYTES,
@@ -147,16 +147,60 @@ test('O2 chooseExecMode: direct only when a cached credential is credential_mode
   assert.equal(chooseExecMode(undefined), 'proxy');
 });
 
-// ---------------------------------------------------------------------------
-//  O4 — token lifecycle: refreshable detection + near-expiry + reactive 401
-// ---------------------------------------------------------------------------
-
-test('O4 isTokenRefreshable: OAuth yes, api_key no', () => {
-  assert.equal(isTokenRefreshable({ token_type: 'Bearer' }), true);
-  assert.equal(isTokenRefreshable({}), true); // GitHub-style no-expiry OAuth still refreshable
-  assert.equal(isTokenRefreshable({ token_type: 'api_key' }), false);
-  assert.equal(isTokenRefreshable({ auth_type: 'api_key' }), false);
+test('O2 resolveCredential: a present direct cache is used as-is (no acquire)', async () => {
+  let acquires = 0;
+  const cached = { credential_mode: 'direct', access_token: 'T' };
+  const res = await resolveCredential(
+    { orgId: 'o', connectionId: 'c', cached },
+    { acquire: async () => { acquires++; return {}; } },
+  );
+  assert.equal(acquires, 0);
+  assert.equal(res.mode, 'direct');
+  assert.equal(res.credential, cached);
 });
+
+// Refinement 2: a direct connection with NO local cache must re-acquire (not
+// fall through to proxy), save the credential, then run direct.
+test('O2 resolveCredential: direct connection + no cache file → acquire + save, then direct', async () => {
+  let acquires = 0;
+  const saved = [];
+  const res = await resolveCredential(
+    { orgId: 'org-1', connectionId: 'conn-1', cached: null },
+    {
+      acquire: async (oid, cid) => { acquires++; assert.deepEqual([oid, cid], ['org-1', 'conn-1']); return { credential_mode: 'direct', access_token: 'FRESH', expires_at: 123 }; },
+      saveCache: (cid, cred) => saved.push([cid, cred.access_token]),
+    },
+  );
+  assert.equal(acquires, 1, 'a cache miss must trigger exactly one acquire');
+  assert.deepEqual(saved, [['conn-1', 'FRESH']], 're-acquired direct credential is cached locally');
+  assert.equal(res.mode, 'direct');
+  assert.equal(res.credential.access_token, 'FRESH');
+});
+
+test('O2 resolveCredential: proxy connection + no cache → acquire discovers proxy, caches nothing, routes proxy', async () => {
+  const saved = [];
+  const res = await resolveCredential(
+    { orgId: 'o', connectionId: 'c', cached: null },
+    { acquire: async () => ({ credential_mode: 'proxy', proxy_ref: 'ref' }), saveCache: (cid, cred) => saved.push([cid, cred]) },
+  );
+  assert.equal(res.mode, 'proxy');
+  assert.equal(res.credential, null, 'a proxy connection caches no local credential');
+  assert.equal(saved.length, 0);
+});
+
+test('O2 resolveCredential: an acquire failure propagates (never a silent proxy downgrade)', async () => {
+  await assert.rejects(
+    () => resolveCredential(
+      { orgId: 'o', connectionId: 'c', cached: null },
+      { acquire: async () => { throw Object.assign(new Error('acquire boom'), { status: 502 }); } },
+    ),
+    /acquire boom/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+//  O4 — token lifecycle: expires_at-driven proactive + universal reactive-401
+// ---------------------------------------------------------------------------
 
 test('O4 isTokenNearExpiry: near/expired vs comfortable vs no-expiry', () => {
   const now = 1_000_000_000_000;
@@ -253,20 +297,41 @@ test('O4 invokeDirect: still 401 after the single reactive refresh → surfaced,
   assert.equal(out.status_code, 401, 'the second 401 is surfaced to the caller');
 });
 
-test('O4 invokeDirect: api_key 401 → surfaced immediately, NEVER refreshed', async () => {
-  const { impl, calls } = fakeFetch({ status: 401, body: { error: 'bad key' } });
+test('O4 invokeDirect: no expires_at (api_key / non-expiring) → NO proactive refresh on a normal call', async () => {
+  const { impl } = fakeFetch({ status: 200, body: {} });
+  let acquires = 0;
+  await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
+      params: { id: 'm' }, catalog: [GMAIL_GET],
+      credential: { credential_mode: 'direct', access_token: 'KEY' }, // no expires_at
+    },
+    { fetchImpl: impl, acquire: async () => { acquires++; return {}; }, audit: quietAudit },
+  );
+  assert.equal(acquires, 0, 'a token with no expires_at is never proactively refreshed');
+});
+
+test('O4 invokeDirect: no expires_at + provider 401 → reactive refresh ONCE (backstop applies to all)', async () => {
+  const { impl, calls } = fakeFetch([
+    { status: 401, body: { error: 'expired' } },
+    { status: 200, body: { ok: true } },
+  ]);
   let acquires = 0;
   const out = await invokeDirect(
     {
       orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
       params: { id: 'm' }, catalog: [GMAIL_GET],
-      credential: { credential_mode: 'direct', token_type: 'api_key', access_token: 'KEY' },
+      credential: { credential_mode: 'direct', access_token: 'OLD' }, // no expires_at (GitHub-style)
     },
-    { fetchImpl: impl, acquire: async () => { acquires++; return {}; }, audit: quietAudit },
+    {
+      fetchImpl: impl,
+      acquire: async () => { acquires++; return { credential_mode: 'direct', access_token: 'NEW' }; },
+      audit: quietAudit,
+    },
   );
-  assert.equal(acquires, 0, 'api_key is static — never re-acquired');
-  assert.equal(calls.length, 1);
-  assert.equal(out.status_code, 401);
+  assert.equal(acquires, 1, 'the reactive-401 backstop refreshes once even without expires_at');
+  assert.equal(calls[1].opts.headers.Authorization, 'Bearer NEW');
+  assert.equal(out.status_code, 200);
 });
 
 test('O4 invokeDirect: unknown action → 404 before any send', async () => {

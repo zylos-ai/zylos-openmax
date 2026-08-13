@@ -17,7 +17,7 @@ import {
   readCatalog, writeCatalog, invalidateCatalog, CATALOG_TTL_MS,
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
-import { invokeDirect, chooseExecMode } from '../lib/direct-exec.js';
+import { invokeDirect, resolveCredential } from '../lib/direct-exec.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -236,11 +236,17 @@ const COMMANDS = {
     const entry = await resolveConnectionForApp(app, orgId, agentId);
     if (!entry) throw Object.assign(new Error(`no connection found for app "${app}" (org ${orgId}, agent ${agentId})`), { status: 404 });
 
-    // The presence of a direct-mode local credential decides the path. Proxy
-    // connections cache no credential file, so this cleanly falls through to the
-    // server-side execute below.
-    const credential = readCredentialCache(entry.id);
-    const mode = chooseExecMode(credential);
+    // Decide the path from the local credential cache, re-acquiring on a miss so
+    // a direct connection with no cache file (authorized offline / runtime wiped
+    // / conn.clear_cache) is not wrongly downgraded to proxy (which cws-connect
+    // now rejects with ErrDirectNotProxyable/422). See resolveCredential.
+    const { credential, mode } = await resolveCredential(
+      { orgId, connectionId: entry.id, cached: readCredentialCache(entry.id) },
+      {
+        acquire: (oid, connId) => acquireCredential(oid, connId),
+        saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+      },
+    );
 
     if (mode === 'direct') {
       if (!entry.applicationId) {

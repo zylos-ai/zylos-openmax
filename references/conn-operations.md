@@ -92,7 +92,7 @@ Both modes are driven by the **same** `conn.invoke {app, action, params}` — it
 
 | Mode | Where the token lives | How `conn.invoke` runs the call |
 |------|-----------------------|---------------------------------|
-| **direct** | Real `access_token` cached locally (`connect/credentials/<id>.json`, `0600`) | Assembles the request from the catalog's `url_template` + params, injects the local token, and calls the provider **from this host's egress**. Refreshes the token on near-expiry / a provider 401 (OAuth only). |
+| **direct** | Real `access_token` cached locally (`connect/credentials/<id>.json`, `0600`) | Assembles the request from the catalog's `url_template` + params, injects the local token, and calls the provider **from this host's egress**. Refreshes the token proactively when it carries an `expires_at` that is near/expired, and reactively once on a provider 401 (all tokens); a missing local cache is re-acquired first rather than downgraded to proxy. |
 | **proxy** | Never leaves cws-connect | Forwards to the server-side execute endpoint; cws-connect resolves the action, injects the token, and calls the provider. |
 
 Request assembly for direct mode is **code-driven from the catalog** — the action name must resolve in the local catalog and the URL can only be that action's `url_template` expanded with schema-checked params. A free-form provider URL is never accepted from the caller.
