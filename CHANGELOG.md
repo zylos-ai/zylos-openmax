@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.1] — 2026-08-13
+
+### Added
+
+- Accept the targeted `agent.config.diagnostics_changed` WebSocket system event and atomically
+  persist its boolean diagnostics gate to `config.json`. The active comm bridge updates its
+  in-memory gate synchronously, so deterministic diagnostics commands can be enabled or disabled
+  without restarting the Agent session. Exact Agent targeting and boolean-only validation remain
+  closed; probe execution continues to use the separate `agent.diagnostics.command` event family.
+
 ## [2.14.0] — 2026-08-13
 
 ### Added
