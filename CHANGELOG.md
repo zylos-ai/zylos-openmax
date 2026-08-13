@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Direct-mode local-egress execution for Connections.** `conn.invoke` now splits internally on
+  the resolved connection's credential mode and is transparent to the caller (same command, same
+  `{status_code, headers, body}` result shape):
+  - **direct** → new `src/lib/direct-exec.js` resolves the action from the **local** action-catalog
+    cache (now carrying per-action `url_template` + optional `headers_template`), validates params
+    against `input_schema`, fills `{placeholder}` path/query tokens and builds the JSON body from the
+    remaining params, injects `Authorization: Bearer <local-cache-token>`, and makes the HTTP request
+    **from this host directly to the provider** (raw response passthrough, 10 MB read cap). Request
+    assembly is **code-driven from the catalog** — the caller/LLM supplies only `action` + `params`
+    and can never inject a free-form URL.
+  - **proxy** → unchanged server-side `/actions/execute` path.
+- **Local token cache + refresh-on-invoke (O4).** Before a direct send, an OAuth token at/near
+  `expires_at` is proactively re-acquired via cws-core and re-saved locally. On a provider **401**
+  an OAuth token is reactively refreshed **once** and the call retried; a second 401 is surfaced
+  (no loop). `api_key` tokens are treated as static (never refreshed; 401 surfaced). Tokens without
+  `expires_at` (e.g. GitHub) rely on the reactive-401 path.
+- **Audit logging for direct calls (O6).** Each direct call logs a short `[conn.direct]` line with
+  the request method + assembled URL + params only, secrets redacted (`redact.js`), headers never
+  logged; same stdout/file sinks (`COCO_RPC_LOG` / `COCO_RPC_LOG_FILE`) as the RPC client.
+- `readCredentialCache()` in `credential-cache.js` (full record incl. token, for direct execution).
+
+### Changed
+
+- **Connection-authorized notice is now mode-aware (O3).** Direct connections get self-trigger
+  wording ("the token is ready locally … you make the request from your own egress"); proxy
+  connections keep the server-side-injection wording.
+- **Hid `conn.proxy` / `conn.execute` from the agent surface (O5).** Removed from the `conn.js`
+  help text and from `references/conn-operations.md` agent guidance (they are proxy-only now). The
+  handler functions and dispatch entries are **retained** (proxy mode + future use). Updated
+  `SKILL.md` / `conn-operations.md` to describe `conn.invoke`'s mode-transparent behavior and the
+  new catalog `url_template`.
+
 ## [2.13.0] — 2026-08-12
 
 ### Added

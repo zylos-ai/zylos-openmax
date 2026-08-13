@@ -85,6 +85,21 @@ export function deleteCredentialCache(connectionId, dir = CREDENTIALS_DIR) {
 }
 
 /**
+ * Read the FULL cached credential record for a connection (including the real
+ * access_token, expires_at, credential_mode, provider). Returns null when no
+ * cache file exists. Unlike listCachedCredentials (metadata only), direct-mode
+ * execution needs the token itself, so this returns the raw record — callers
+ * must never log it (see redact.js / direct-exec audit).
+ */
+export function readCredentialCache(connectionId, dir = CREDENTIALS_DIR) {
+  try {
+    return JSON.parse(fs.readFileSync(credentialPath(connectionId, dir), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Whether a local credential file exists for a connection. Only direct/token-mode
  * connections have one, so this doubles as "is this a direct connection we track?"
  * — used by the `credential_updated` handler, whose upstream event does not carry

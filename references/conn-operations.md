@@ -4,7 +4,7 @@ CLI: `node src/cli/conn.js <command> '<json>'`
 
 ## What a Connection is (read this first)
 
-A **Connection** is a third-party app or account — mail, chat, calendar, docs, a tracker, any external SaaS/API — that an owner has **authorized directly to you** through cws-connect. It is this platform's answer to "act on an external service": you do **not** install packages, run MCP servers, configure SMTP, drive a browser, or hold credentials in `.env`. The credential lives server-side; you invoke actions and cws-connect injects the token.
+A **Connection** is a third-party app or account — mail, chat, calendar, docs, a tracker, any external SaaS/API — that an owner has **authorized directly to you** through cws-connect. It is this platform's answer to "act on an external service": you do **not** install packages, run MCP servers, configure SMTP, drive a browser, or hold credentials in `.env`. You pick an action from the app's catalog and `conn.invoke` it; the token is handled for you — you never hardcode a provider URL or craft a raw HTTP request.
 
 **One universal flow works for every app — you never pre-learn a specific provider:**
 
@@ -16,7 +16,7 @@ Because you read the catalog and its `input_schema` **at call time**, the same t
 
 **When the app you need isn't in `conn.list`:** it simply isn't authorized to you yet. Tell the owner and ask them to connect/authorize it — do not fall back to a non-platform workaround (installing something, SMTP, scraping, etc.).
 
-**Two credential modes, one flow:** *proxy* — cws-connect calls the provider for you and you never see a token (`conn.invoke`/`conn.proxy`); *direct* — you receive a real `access_token` to call the provider yourself (this also needs the provider's base URL, which the catalog does not carry). Prefer the cache-aware verbs (`conn.invoke` / `conn.catalog`), which resolve the connection and action for you. See "Credential Modes" and "Capability Cache & Call Chain" below for the mechanics.
+**Two credential modes, one flow — and the flow is identical for both.** `conn.invoke` splits on the connection's credential mode internally, so you use the exact same command and get the exact same result shape either way: *direct* — the token is cached locally and `conn.invoke` assembles the request from the catalog and calls the provider **from your own egress**; *proxy* — cws-connect calls the provider server-side and injects the token for you. You never choose the mode, hold a URL, or craft a raw request. Prefer the cache-aware verbs (`conn.invoke` / `conn.catalog`), which resolve the connection and action for you. See "Credential Modes" and "Capability Cache & Call Chain" below for the mechanics.
 
 > The command reference below is app-agnostic: examples use placeholders like `<app>`, `<toolkit-slug>/<action-name>`, and a generic provider URL. Substitute the real values you get from `conn.list` / `conn.catalog` at runtime — never assume a particular provider.
 
@@ -44,50 +44,14 @@ node src/cli/conn.js conn.acquire '{"connectionId":"2b0e4f41-..."}'
 
 The comm-bridge automatically acquires and caches credentials on `connection.authorized` events. Use this command to manually acquire or refresh.
 
-### conn.proxy
-Proxy a request through a connection (proxy mode). The agent doesn't see real credentials — cws-connect injects them server-side.
-
-```bash
-node src/cli/conn.js conn.proxy '{
-  "connectionId": "2b0e4f41-...",
-  "method": "GET",
-  "url": "https://api.<provider-host>/<resource-path>",
-  "headers": {"Accept": "application/json"}
-}'
-
-node src/cli/conn.js conn.proxy '{
-  "connectionId": "2b0e4f41-...",
-  "method": "POST",
-  "url": "https://api.<provider-host>/<resource-path>",
-  "body": {"<field>": "<value>"}
-}'
-```
-
-(Proxy mode needs the provider's own URL/shape — use it when you must call a raw endpoint the action catalog doesn't cover. For everything the catalog covers, prefer `conn.invoke` / `conn.execute`, which resolve the endpoint for you.)
-
-Returns `{ status_code, headers, body }`.
-
 ### conn.actions
-Discover the named actions available for a connection's provider. Pair with `conn.execute` to invoke one by name. Scoped to the agent's authorization on the connection (same boundary as `conn.execute`/`conn.proxy`).
+Discover the named actions available for a connection's provider. Pair with `conn.invoke` to run one by name. Scoped to the agent's authorization on the connection.
 
 ```bash
 node src/cli/conn.js conn.actions '{"connectionId":"2b0e4f41-..."}'
 ```
 
-Returns an array of `{ toolkit, action, method, description, params[], input_schema }`. `input_schema` is a JSON Schema (draft-07 style) describing the raw provider request body forwarded for that action; an empty string means the schema is not published / unknown (do NOT assume an empty body), while an explicit empty-object schema (`{"type":"object","properties":{},"additionalProperties":false}`) means the action takes no request body. `params[]` still lists URL path/query placeholders separately.
-
-### conn.execute
-Run a registered named action through a connection. cws-connect resolves the action, injects the token server-side, and calls the provider — the agent needs neither the token nor the provider URL. Action format: `toolkit-slug/action-name`.
-
-```bash
-node src/cli/conn.js conn.execute '{
-  "connectionId": "2b0e4f41-...",
-  "action": "<toolkit-slug>/<action-name>",
-  "params": {"<param>": "<value>"}
-}'
-```
-
-Get the `action` string and the exact `params` keys from `conn.catalog` / `conn.actions` (each action's `input_schema`) — do not guess them. Returns `{ status_code, body }`.
+Returns an array of `{ toolkit, action, method, description, params[], input_schema }`. `input_schema` is a JSON Schema (draft-07 style) describing the raw provider request body forwarded for that action; an empty string means the schema is not published / unknown (do NOT assume an empty body), while an explicit empty-object schema (`{"type":"object","properties":{},"additionalProperties":false}`) means the action takes no request body. `params[]` still lists URL path/query placeholders separately. To run an action, use `conn.invoke {app, action, params}`.
 
 ### conn.status
 Get connection details: status, owner, application, scopes, expiry.
@@ -124,10 +88,14 @@ node src/cli/conn.js conn.clear_cache '{}'
 
 ## Credential Modes
 
-| Mode | Agent gets | Use case |
-|------|-----------|----------|
-| **direct** | Real access_token | Agent calls external API directly with token |
-| **proxy** | proxy_ref token | Agent calls cws-connect proxy; real credentials never leave server |
+Both modes are driven by the **same** `conn.invoke {app, action, params}` — it splits internally, so you never select a mode or change how you call.
+
+| Mode | Where the token lives | How `conn.invoke` runs the call |
+|------|-----------------------|---------------------------------|
+| **direct** | Real `access_token` cached locally (`connect/credentials/<id>.json`, `0600`) | Assembles the request from the catalog's `url_template` + params, injects the local token, and calls the provider **from this host's egress**. Refreshes the token on near-expiry / a provider 401 (OAuth only). |
+| **proxy** | Never leaves cws-connect | Forwards to the server-side execute endpoint; cws-connect resolves the action, injects the token, and calls the provider. |
+
+Request assembly for direct mode is **code-driven from the catalog** — the action name must resolve in the local catalog and the URL can only be that action's `url_template` expanded with schema-checked params. A free-form provider URL is never accepted from the caller.
 
 ## Capability Cache & Call Chain (runtime/connect/)
 
@@ -166,10 +134,12 @@ it does not need to "know" the sequence:
 
 1. **`conn.invoke {app, action, params}`** — resolves the connection for `app`
    from `connections-index.json` (refreshing from `conn.list` on a miss), then
-   runs the action via the execute endpoint. Authorization + token injection stay
-   fully server-side (`connection_agents` is re-checked every call). On an
-   action/schema-shaped error it invalidates the cached catalog once so the next
-   `conn.catalog` refetches.
+   runs the action, splitting on credential mode: **direct** → assemble from the
+   local catalog's `url_template` and call the provider from this host (injecting
+   the locally-cached token, refreshed on near-expiry / 401); **proxy** → the
+   server-side execute endpoint (`connection_agents` re-checked there). Same
+   command and result shape for both. On an action/schema-shaped error it
+   invalidates the cached catalog once so the next `conn.catalog` refetches.
 2. **`conn.catalog {app|applicationId}`** — returns the cached action catalog for
    discovery, filling from `conn.app_actions` on a miss / TTL-expiry (24h) /
    `{refresh:true}`. Read this to pick an `action` + build `params` from its
@@ -180,10 +150,12 @@ Invalidation is **TTL + error-triggered** — the app-actions response carries n
 version/etag today (see "cws-connect follow-up" below), so there is no
 change-detected refresh yet.
 
-> **direct mode caveat:** the catalog is *sufficient* for proxy/execute (server
-> resolves the action → provider URL and injects the token). For direct mode the
-> catalog is *reference only* — neither it nor the direct acquire response carries
-> the provider base URL, so a direct call also needs provider-endpoint knowledge.
+> **catalog note:** the catalog now carries a per-action `url_template` (and an
+> optional `headers_template`, Authorization excluded). Direct-mode `conn.invoke`
+> uses these to assemble the real request locally; proxy-mode resolves the same
+> mapping server-side. Either way the mapping comes from the catalog, never from
+> a caller-supplied URL. If a cached catalog predates `url_template`, a direct
+> `conn.invoke` returns a clear error — run `conn.catalog {refresh:true}`.
 
 ## WS Event Flow
 
@@ -226,11 +198,11 @@ Notes:
 | Method | Path | CLI |
 |--------|------|-----|
 | GET | `/connect/agents/me/connections` | conn.list / conn.index --refresh |
-| POST | `/connect/connections/{id}/credential` | conn.acquire |
-| POST | `/connect/connections/{id}/proxy` | conn.proxy |
+| POST | `/connect/connections/{id}/credential` | conn.acquire (also the direct-mode token refresh) |
+| POST | `/connect/connections/{id}/proxy` | (proxy-mode internal) |
 | GET | `/connect/connections/{id}` | conn.status |
 | GET | `/connect/connections/{id}/actions` | conn.actions |
-| POST | `/connect/connections/{id}/actions/execute` | conn.execute / conn.invoke |
+| POST | `/connect/connections/{id}/actions/execute` | conn.invoke (proxy mode) |
 | GET | `/connect/applications/{id}/actions` | conn.app_actions / conn.catalog |
 
 None of these endpoints accept a client-supplied `agent_member_id` — cws-core
