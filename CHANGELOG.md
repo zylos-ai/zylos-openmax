@@ -20,7 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     with a **streaming** 10 MB cap — an oversized response is cancelled mid-stream and errors (status
     502) rather than being buffered whole or silently truncated. Request assembly is **code-driven
     from the catalog** — the caller/LLM supplies only `action` + `params` and can never inject a
-    free-form URL.
+    free-form URL. `{placeholder}` tokens resolve from **both** the action params and the
+    credential's `url_placeholders` (connection-owned NON-secret URL parts, e.g. a self-hosted
+    connector's `base_url` like Jenkins) — a `url_placeholders` value is substituted **verbatim** as
+    a structural prefix (not percent-encoded), while a param value is URL-encoded; params win on a
+    name clash. A `{base_url}`-style token that neither source provides is a clear **422** (no
+    literal `{base_url}` ever reaches the wire). `url_placeholders` round-trips through the local
+    credential cache and is re-fetched on re-acquire.
   - **proxy** → unchanged server-side `/actions/execute` path.
 - **Local token cache + refresh-on-invoke (O4).** Two signals: `token_type` gates whether a token
   can be refreshed at all — cws-connect stores `"api_key"` (no refresh flow) vs `"bearer"` (OAuth);

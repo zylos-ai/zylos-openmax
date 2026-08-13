@@ -66,9 +66,12 @@ export function ensureCredentialsDir(dir = CREDENTIALS_DIR) {
 }
 
 /**
- * Persist an acquired credential. `provider` (application slug) is folded in
- * additively — it is not overwritten if the record already carries one, and
- * older caches without it still parse.
+ * Persist an acquired credential. The full acquire record is stored verbatim, so
+ * every field round-trips — including `url_placeholders` (connection-owned
+ * NON-secret URL parts like a self-hosted connector's `base_url`), which
+ * direct-mode execution needs to fill `{base_url}`-style url_template tokens.
+ * `provider` (application slug) is folded in additively — it is not overwritten
+ * if the record already carries one, and older caches without it still parse.
  */
 export function saveCredentialCache(connectionId, data, provider, dir = CREDENTIALS_DIR) {
   ensureCredentialsDir(dir);

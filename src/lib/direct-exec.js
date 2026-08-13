@@ -8,9 +8,12 @@
  *   1. resolves the action definition from the LOCAL catalog,
  *   2. validates params against the action's `input_schema` (lenient — the
  *      authoritative check still runs provider/server-side),
- *   3. fills `{placeholder}` tokens in the url_template (path + query) from
- *      params, builds the JSON body from the *remaining* params, and injects
- *      `Authorization: Bearer <token>` plus any templated headers,
+ *   3. fills `{placeholder}` tokens in the url_template (path + query) from BOTH
+ *      the action params AND the credential's `url_placeholders` (connection-owned
+ *      NON-secret URL parts like a self-hosted connector's `base_url` — e.g.
+ *      Jenkins, whose url_template starts with "{base_url}"), builds the JSON body
+ *      from the *remaining* params, and injects `Authorization: Bearer <token>`
+ *      plus any templated headers,
  *   4. makes the HTTP request FROM THIS HOST directly to the provider, and
  *   5. returns the SAME shape the server execute path returns —
  *      `{ status_code, headers, body }` — as a raw passthrough (the provider
@@ -111,11 +114,16 @@ export function validateParams(params, schema) {
 //  Request assembly (code-driven from the catalog url_template)
 // ---------------------------------------------------------------------------
 
-function fillTemplateValue(str, params, consumed) {
+function hasVal(v) {
+  return v !== undefined && v !== null && v !== '';
+}
+
+function fillTemplateValue(str, params, urlPlaceholders, consumed) {
   return String(str).replace(/\{([^}]+)\}/g, (_, key) => {
     consumed.add(key);
-    const v = params[key];
-    return v === undefined || v === null ? '' : String(v);
+    if (hasVal(params[key])) return String(params[key]);
+    if (hasVal(urlPlaceholders[key])) return String(urlPlaceholders[key]);
+    return '';
   });
 }
 
@@ -128,14 +136,28 @@ function fillTemplateValue(str, params, consumed) {
  *
  * Placeholder rules:
  *   - PATH placeholders are required — a missing value is an error (a literal
- *     "{id}" must never reach the wire).
+ *     "{id}" / "{base_url}" must never reach the wire).
  *   - QUERY placeholders are optional — a missing value drops that whole
  *     key=value pair.
- *   - HEADER placeholders (from headers_template) fill from params too.
+ *   - HEADER placeholders (from headers_template) fill from both sources too.
  *   - Any param NOT consumed by a placeholder becomes a body field (body
- *     methods only).
+ *     methods only). url_placeholders never contribute to the body.
+ *
+ * Placeholders resolve from TWO sources: the action `params` AND the
+ * credential's `url_placeholders` (connection-owned, NON-secret URL parts like a
+ * self-hosted connector's `base_url`, e.g. Jenkins whose url_template starts
+ * with "{base_url}"). `params` win on a name clash. A value from `params` is
+ * URL-encoded (it is data — a path/query value); a value from `url_placeholders`
+ * is substituted VERBATIM (it is structural — a scheme/host/base-URL prefix that
+ * must not be percent-encoded, or "https://host/x" would corrupt into
+ * "https%3A%2F%2F…").
+ *
+ * @param {object} actionDef
+ * @param {object} [params]           action params (caller/LLM supplied)
+ * @param {string} token             the injected bearer token
+ * @param {object} [urlPlaceholders] connection-owned url placeholder values
  */
-export function assembleRequest(actionDef, params = {}, token) {
+export function assembleRequest(actionDef, params = {}, token, urlPlaceholders = {}) {
   if (!actionDef || typeof actionDef.url_template !== 'string' || !actionDef.url_template) {
     throw Object.assign(
       new Error('action has no url_template — local catalog is too old for direct execution (run conn.catalog {refresh:true})'),
@@ -144,23 +166,34 @@ export function assembleRequest(actionDef, params = {}, token) {
   }
   const method = String(actionDef.method || 'GET').toUpperCase();
   const template = actionDef.url_template;
+  const uph = (urlPlaceholders && typeof urlPlaceholders === 'object') ? urlPlaceholders : {};
   const consumed = new Set();
 
   const qIdx = template.indexOf('?');
   const pathPart = qIdx >= 0 ? template.slice(0, qIdx) : template;
   const queryPart = qIdx >= 0 ? template.slice(qIdx + 1) : '';
 
-  // Path placeholders — required.
+  // Path placeholders — required. Params first (URL-encoded data), then
+  // connection-owned url_placeholders (verbatim structural prefix, e.g.
+  // "{base_url}" → "https://jenkins.example.com").
   const path = pathPart.replace(/\{([^}]+)\}/g, (_, key) => {
     consumed.add(key);
-    const v = params[key];
-    if (v === undefined || v === null || v === '') {
-      throw Object.assign(new Error(`missing required path param "${key}" for action ${actionDef.toolkit}/${actionDef.action}`), { status: 400 });
+    if (hasVal(params[key])) return encodeURIComponent(String(params[key]));
+    if (hasVal(uph[key])) return String(uph[key]);
+    // Neither source has it. A leading "{base_url}"-style placeholder is a
+    // connection-owned URL part the credential should have carried — surface it
+    // as a 422 (connection/credential too old) rather than a missing-param 400.
+    if (pathPart.startsWith(`{${key}}`)) {
+      throw Object.assign(
+        new Error(`connection is missing URL placeholder "${key}" (e.g. base_url) — reconnect the connection or refresh the credential; url_placeholders did not provide it`),
+        { status: 422 },
+      );
     }
-    return encodeURIComponent(String(v));
+    throw Object.assign(new Error(`missing required path param "${key}" for action ${actionDef.toolkit}/${actionDef.action}`), { status: 400 });
   });
 
   // Query placeholders — optional (drop the pair when the value is absent).
+  // Same two-source resolution; query values are always URL-encoded.
   const outPairs = [];
   for (const pair of queryPart.split('&').filter(Boolean)) {
     const eq = pair.indexOf('=');
@@ -170,8 +203,8 @@ export function assembleRequest(actionDef, params = {}, token) {
     if (m) {
       const key = m[1];
       consumed.add(key);
-      const v = params[key];
-      if (v === undefined || v === null || v === '') continue; // optional query param omitted
+      const v = hasVal(params[key]) ? params[key] : uph[key];
+      if (!hasVal(v)) continue; // optional query param omitted
       outPairs.push(`${k}=${encodeURIComponent(String(v))}`);
     } else {
       outPairs.push(pair); // static query segment
@@ -184,7 +217,7 @@ export function assembleRequest(actionDef, params = {}, token) {
   const headerTemplate = (actionDef.headers_template && typeof actionDef.headers_template === 'object') ? actionDef.headers_template : {};
   for (const [hk, hv] of Object.entries(headerTemplate)) {
     if (hk.toLowerCase() === 'authorization') continue; // never let the template override our injected auth
-    headers[hk] = fillTemplateValue(hv, params, consumed);
+    headers[hk] = fillTemplateValue(hv, params, uph, consumed);
   }
 
   // Body — every param not consumed by a placeholder, for body-bearing methods.
@@ -454,7 +487,7 @@ export async function invokeDirect(
     }
   }
 
-  let assembled = assembleRequest(actionDef, params, cred && cred.access_token);
+  let assembled = assembleRequest(actionDef, params, cred && cred.access_token, cred && cred.url_placeholders);
   auditDirectCall(assembled.method, actionDef.url_template, params, audit);
   let result = await sendDirect(assembled, { fetchImpl });
 
@@ -468,7 +501,7 @@ export async function invokeDirect(
     if (fresh && fresh.access_token) {
       saveCache(connId, fresh);
       cred = fresh;
-      assembled = assembleRequest(actionDef, params, cred.access_token);
+      assembled = assembleRequest(actionDef, params, cred.access_token, cred.url_placeholders);
       auditDirectCall(assembled.method, actionDef.url_template, params, audit);
       result = await sendDirect(assembled, { fetchImpl });
     }

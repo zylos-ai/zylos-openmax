@@ -11,6 +11,7 @@ import {
   clearCachedCredentials,
   credentialPath,
   hasCredentialCache,
+  readCredentialCache,
 } from './credential-cache.js';
 
 function tmpDir() {
@@ -73,6 +74,27 @@ test('对不存在的目录 list/clear 优雅降级为空', () => {
   const dir = path.join(os.tmpdir(), 'cred-cache-does-not-exist-xyz');
   assert.deepEqual(listCachedCredentials(dir), []);
   assert.deepEqual(clearCachedCredentials(undefined, dir), []);
+});
+
+test('readCredentialCache 完整回读记录，url_placeholders 往返保留（自托管连接器 base_url）', () => {
+  const dir = tmpDir();
+  const record = {
+    credential_mode: 'direct',
+    token_type: 'api_key',
+    access_token: 'secret-token',
+    expires_at: null,
+    url_placeholders: { base_url: 'https://jenkins.example.com', instance_url: 'https://ci.internal' },
+  };
+  saveCredentialCache('conn-uph', record, 'jenkins', dir);
+
+  const back = readCredentialCache('conn-uph', dir);
+  // url_placeholders 必须原样往返,直连执行才能填 {base_url}
+  assert.deepEqual(back.url_placeholders, record.url_placeholders);
+  assert.equal(back.token_type, 'api_key');
+  assert.equal(back.access_token, 'secret-token');
+  assert.equal(back.provider, 'jenkins');
+  // 缺文件时返回 null
+  assert.equal(readCredentialCache('nope', dir), null);
 });
 
 test('hasCredentialCache 反映凭证文件是否存在（credential_updated 的 direct 探测器）', () => {

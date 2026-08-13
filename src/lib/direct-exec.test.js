@@ -104,6 +104,41 @@ test('O1 assembleRequest: url_template missing → 422 (catalog too old for dire
   );
 });
 
+const JENKINS_JOBS = {
+  toolkit: 'jenkins',
+  action: 'jobs',
+  method: 'GET',
+  url_template: '{base_url}/api/json?tree={tree}',
+  input_schema: '',
+};
+
+test('O1 assembleRequest: a connection-owned {base_url} is filled VERBATIM from url_placeholders', () => {
+  const req = assembleRequest(JENKINS_JOBS, { tree: 'jobs' }, 'TOK', { base_url: 'https://jenkins.example.com' });
+  // base_url substituted literally as the prefix (NOT percent-encoded); the
+  // genuine query param {tree} IS encoded.
+  assert.equal(req.url, 'https://jenkins.example.com/api/json?tree=jobs');
+  assert.equal(req.headers.Authorization, 'Bearer TOK');
+});
+
+test('O1 assembleRequest: {base_url} present in neither params nor url_placeholders → 422, no literal on the wire', () => {
+  const req = () => assembleRequest(JENKINS_JOBS, { tree: 'jobs' }, 'TOK', {});
+  assert.throws(req, (e) => e.status === 422 && /base_url/.test(e.message));
+  // And nothing with a literal "{base_url}" could ever be produced:
+  try { req(); } catch (e) { assert.ok(!String(e.url || '').includes('{base_url}')); }
+});
+
+test('O1 assembleRequest: params win over url_placeholders on a name clash', () => {
+  const def = { toolkit: 't', action: 'a', method: 'GET', url_template: 'https://host/{id}', input_schema: '' };
+  const req = assembleRequest(def, { id: 'from-param' }, 'T', { id: 'from-conn' });
+  assert.equal(req.url, 'https://host/from-param');
+});
+
+test('O1 assembleRequest: url_placeholders can fill an optional QUERY placeholder too', () => {
+  const def = { toolkit: 't', action: 'a', method: 'GET', url_template: 'https://host/x?region={region}', input_schema: '' };
+  const req = assembleRequest(def, {}, 'T', { region: 'eu-west' });
+  assert.equal(req.url, 'https://host/x?region=eu-west');
+});
+
 test('O1 assembleRequest: a headers_template Authorization can NOT override the injected token', () => {
   const def = { ...GMAIL_GET, headers_template: { Authorization: 'Bearer EVIL' } };
   const req = assembleRequest(def, { id: 'x' }, 'GOOD');
@@ -436,6 +471,36 @@ test('O4 invokeDirect: api_key with a near-expiry expires_at is still NOT proact
     { fetchImpl: impl, now: () => now, acquire: async () => { acquires++; return {}; }, audit: quietAudit },
   );
   assert.equal(acquires, 0, 'token_type gates refreshability even when expires_at says "near"');
+});
+
+test('O1/O4 invokeDirect: a self-hosted connector resolves {base_url} from the credential url_placeholders', async () => {
+  const { impl, calls } = fakeFetch({ status: 200, body: { jobs: [] } });
+  const out = await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'jenkins/jobs',
+      params: { tree: 'jobs' }, catalog: [JENKINS_JOBS],
+      credential: { credential_mode: 'direct', token_type: 'api_key', access_token: 'KEY', url_placeholders: { base_url: 'https://jenkins.example.com' } },
+    },
+    { fetchImpl: impl, audit: quietAudit },
+  );
+  assert.equal(calls[0].url, 'https://jenkins.example.com/api/json?tree=jobs', 'base_url must come from the credential and be substituted verbatim');
+  assert.equal(out.status_code, 200);
+});
+
+test('O1/O4 invokeDirect: a direct connection with no url_placeholders for {base_url} → 422, never sends', async () => {
+  const { impl, calls } = fakeFetch({ status: 200, body: {} });
+  await assert.rejects(
+    () => invokeDirect(
+      {
+        orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'jenkins/jobs',
+        params: { tree: 'jobs' }, catalog: [JENKINS_JOBS],
+        credential: { credential_mode: 'direct', token_type: 'api_key', access_token: 'KEY' }, // no url_placeholders
+      },
+      { fetchImpl: impl, audit: quietAudit },
+    ),
+    (e) => e.status === 422 && /base_url/.test(e.message),
+  );
+  assert.equal(calls.length, 0, 'no request may be sent with an unresolved {base_url}');
 });
 
 test('O4 invokeDirect: unknown action → 404 before any send', async () => {
