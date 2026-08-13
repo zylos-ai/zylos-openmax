@@ -1599,10 +1599,16 @@ function notifyConnectionAuthorized(orgConfig, info = {}) {
   const modeNote = mode && mode !== '?' ? `, ${mode} mode` : '';
   const actionsNote = Number.isInteger(actionCount) && actionCount > 0 ? `, ~${actionCount} actions` : '';
   const appHint = provider ? ` {app:"${provider}"}` : '';
+  // The call semantics differ by credential mode, so the notice must too:
+  //   - direct → self-trigger: the token is already cached locally and the agent
+  //     makes the request from its OWN egress (conn.invoke assembles + sends it).
+  //   - proxy  → server-side injection: the agent never handles the credential.
+  const callNote = mode === 'direct'
+    ? `the token is ready locally — conn.catalog${appHint} to find actions and conn.invoke {app, action, params} to call; you make the request from your own egress`
+    : `conn.catalog${appHint} to find actions, conn.invoke {app, action, params} to call (credentials are injected server-side; you never handle them)`;
   const content =
     `🔌 [Connection authorized] A new third-party connection was authorized to you: ${app} (org ${orgConfig.slug}${modeNote}${actionsNote}). `
-    + `You can use it now — no install needed: conn.list to see it, conn.catalog${appHint} to find actions, `
-    + `conn.invoke {app, action, params} to call (credentials are injected server-side; you never handle them). connection_id=${connectionId || '?'}.`;
+    + `You can use it now — no install needed: conn.list to see it, ${callNote}. connection_id=${connectionId || '?'}.`;
   execFile(
     process.execPath,
     [C4_CONTROL, 'enqueue', '--content', content, '--priority', '2', '--no-ack-suffix'],

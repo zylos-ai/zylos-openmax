@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.13.1] — 2026-08-13
+## [Unreleased]
+
+## [2.14.1] — 2026-08-13
 
 ### Added
 
@@ -14,6 +16,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-memory gate synchronously, so deterministic diagnostics commands can be enabled or disabled
   without restarting the Agent session. Exact Agent targeting and boolean-only validation remain
   closed; probe execution continues to use the separate `agent.diagnostics.command` event family.
+
+## [2.14.0] — 2026-08-13
+
+### Added
+
+- **Direct-mode local-egress execution for Connections.** `conn.invoke` now splits internally on
+  the resolved connection's credential mode and is transparent to the caller (same command, same
+  `{status_code, headers, body}` result shape):
+  - **direct** → new `src/lib/direct-exec.js` resolves the action from the **local** action-catalog
+    cache (now carrying per-action `url_template` + optional `headers_template`), validates params
+    against `input_schema`, fills `{placeholder}` path/query tokens and builds the JSON body from the
+    remaining params, injects `Authorization: Bearer <local-cache-token>`, and makes the HTTP request
+    **from this host directly to the provider** (raw response passthrough). The response body is read
+    with a **streaming** 10 MB cap — an oversized response is cancelled mid-stream and errors (status
+    502) rather than being buffered whole or silently truncated. Request assembly is **code-driven
+    from the catalog** — the caller/LLM supplies only `action` + `params` and can never inject a
+    free-form URL. `{placeholder}` tokens resolve from **both** the action params and the
+    credential's `url_placeholders` (connection-owned NON-secret URL parts, e.g. a self-hosted
+    connector's `base_url` like Jenkins) — a `url_placeholders` value is substituted **verbatim** as
+    a structural prefix (not percent-encoded), while a param value is URL-encoded; params win on a
+    name clash. A `{base_url}`-style token that neither source provides is a clear **422** (no
+    literal `{base_url}` ever reaches the wire). `url_placeholders` round-trips through the local
+    credential cache and is re-fetched on re-acquire.
+  - **proxy** → unchanged server-side `/actions/execute` path.
+- **Local token cache + refresh-on-invoke (O4).** Two signals: `token_type` gates whether a token
+  can be refreshed at all — cws-connect stores `"api_key"` (no refresh flow) vs `"bearer"` (OAuth);
+  `expires_at` gates whether a refreshable token is refreshed proactively. An **api_key** is never
+  refreshed (proactively or on a 401) — a provider 401 is surfaced. An **OAuth** token is refreshed
+  proactively when it carries an `expires_at` that is near/expired, and reactively **once** on a
+  provider 401 (this covers non-expiring OAuth like GitHub, which has no `expires_at`); a second
+  401 is surfaced (no loop). Refresh re-acquires via cws-core and re-saves the local cache.
+- **Re-acquire on a direct cache miss (O4).** When a resolved connection has no local credential
+  file (authorized offline, `runtime/` wiped/reinstalled, or `conn.clear_cache`), `conn.invoke`
+  now re-acquires via cws-core, saves the credential, and proceeds with local direct execution
+  instead of falling through to the proxy path (which cws-connect rejects for a direct connection
+  with `ErrDirectNotProxyable`/422). `acquire` returns `credential_mode`, so a proxy connection is
+  discovered on the same call and routed server-side without caching anything. Only an acquire
+  failure is surfaced — a direct call is never silently downgraded.
+- **Audit logging for direct calls (O6).** Each direct call logs a short `[conn.direct]` line with
+  the request method + the **un-expanded `url_template`** (placeholders kept literal, so a secret in
+  a query placeholder like `?api_key={api_key}` can never reach the log) + params only, params
+  redacted (`redact.js`), headers never logged; same stdout/file sinks (`COCO_RPC_LOG` /
+  `COCO_RPC_LOG_FILE`) as the RPC client.
+- `readCredentialCache()` in `credential-cache.js` (full record incl. token, for direct execution).
+
+### Changed
+
+- **Connection-authorized notice is now mode-aware (O3).** Direct connections get self-trigger
+  wording ("the token is ready locally … you make the request from your own egress"); proxy
+  connections keep the server-side-injection wording.
+- **Hid `conn.proxy` / `conn.execute` from the agent surface (O5).** Removed from the `conn.js`
+  help text and from `references/conn-operations.md` agent guidance (they are proxy-only now). The
+  handler functions and dispatch entries are **retained** (proxy mode + future use). Updated
+  `SKILL.md` / `conn-operations.md` to describe `conn.invoke`'s mode-transparent behavior and the
+  new catalog `url_template`.
 
 ## [2.13.0] — 2026-08-12
 

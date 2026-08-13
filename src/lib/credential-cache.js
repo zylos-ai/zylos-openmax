@@ -66,9 +66,12 @@ export function ensureCredentialsDir(dir = CREDENTIALS_DIR) {
 }
 
 /**
- * Persist an acquired credential. `provider` (application slug) is folded in
- * additively — it is not overwritten if the record already carries one, and
- * older caches without it still parse.
+ * Persist an acquired credential. The full acquire record is stored verbatim, so
+ * every field round-trips — including `url_placeholders` (connection-owned
+ * NON-secret URL parts like a self-hosted connector's `base_url`), which
+ * direct-mode execution needs to fill `{base_url}`-style url_template tokens.
+ * `provider` (application slug) is folded in additively — it is not overwritten
+ * if the record already carries one, and older caches without it still parse.
  */
 export function saveCredentialCache(connectionId, data, provider, dir = CREDENTIALS_DIR) {
   ensureCredentialsDir(dir);
@@ -82,6 +85,21 @@ export function saveCredentialCache(connectionId, data, provider, dir = CREDENTI
 
 export function deleteCredentialCache(connectionId, dir = CREDENTIALS_DIR) {
   try { fs.unlinkSync(credentialPath(connectionId, dir)); } catch {}
+}
+
+/**
+ * Read the FULL cached credential record for a connection (including the real
+ * access_token, expires_at, credential_mode, provider). Returns null when no
+ * cache file exists. Unlike listCachedCredentials (metadata only), direct-mode
+ * execution needs the token itself, so this returns the raw record — callers
+ * must never log it (see redact.js / direct-exec audit).
+ */
+export function readCredentialCache(connectionId, dir = CREDENTIALS_DIR) {
+  try {
+    return JSON.parse(fs.readFileSync(credentialPath(connectionId, dir), 'utf8'));
+  } catch {
+    return null;
+  }
 }
 
 /**
