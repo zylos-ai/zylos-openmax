@@ -42,7 +42,7 @@ import { createReadinessTrigger } from './lib/readiness-trigger.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
-import { handleConnectionEvent } from './lib/connection-events.js';
+import { handleConnectionEvent, sendOwnerReauthDm } from './lib/connection-events.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
@@ -1586,7 +1586,30 @@ function handleConnectionEventForOrg(orgConfig, frame) {
   return handleConnectionEvent(orgConfig, frame, {
     log, warn,
     notify: (info) => notifyConnectionAuthorized(orgConfig, info),
+    notifyReauth: (info) => notifyReauthNeeded(orgConfig, info),
   });
+}
+
+// A connection needs re-authorization (its credential expired / was revoked
+// upstream) → DM the owner (a real DM, not a session control inject) so a human
+// can go re-authorize it in the connect UI. The DM send itself lives in
+// connection-events.js (postForOrg-injectable, unit tested); this wraps it with
+// production defaults + logging. Best-effort — never throws into the event
+// handler (the handler already flagged the connection needs_reauth locally, so
+// conn.invoke surfaces an actionable hint even if this DM fails).
+async function notifyReauthNeeded(orgConfig, info = {}) {
+  const ownerId = orgConfig.owner?.member_id;
+  if (!ownerId) {
+    warn(`[${orgConfig.slug}] reauth_needed: no owner bound — cannot DM (conn=${info.connectionId || '?'})`);
+    return;
+  }
+  try {
+    const r = await sendOwnerReauthDm(orgConfig, info);
+    if (r.sent) log(`[${orgConfig.slug}] reauth owner DM sent conn=${info.connectionId || '?'} conv=${r.conversationId}`);
+    else warn(`[${orgConfig.slug}] reauth owner DM not sent (${r.reason}) conn=${info.connectionId || '?'}`);
+  } catch (e) {
+    warn(`[${orgConfig.slug}] reauth owner DM failed conn=${info.connectionId || '?'}: ${e.message}`);
+  }
 }
 
 // A connection was authorized to this agent → tell the bot session so it can act

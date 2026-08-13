@@ -236,6 +236,18 @@ const COMMANDS = {
     const entry = await resolveConnectionForApp(app, orgId, agentId);
     if (!entry) throw Object.assign(new Error(`no connection found for app "${app}" (org ${orgId}, agent ${agentId})`), { status: 404 });
 
+    // A reauth_needed event has flagged this connection and cleared its cached
+    // credential (see connection-events.js). Surface an actionable hint instead
+    // of letting the acquire below fail with a bare 404/401. (An owner DM is
+    // attempted separately on a best-effort basis, so we do NOT assert here that
+    // the owner was notified — only that re-authorization is required.)
+    if (entry.status === 'needs_reauth') {
+      throw Object.assign(
+        new Error(`connection for app "${app}" needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
+        { status: 409 },
+      );
+    }
+
     // Decide the path from the local credential cache, re-acquiring on a miss so
     // a direct connection with no cache file (authorized offline / runtime wiped
     // / conn.clear_cache) is not wrongly downgraded to proxy (which cws-connect

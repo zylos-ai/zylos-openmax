@@ -65,7 +65,7 @@ export async function warmIdentityAndCatalog(orgId, connectionId, idxPath, { get
 export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
   const {
     log = () => {}, warn = () => {}, post = postForOrg, get = getForOrg,
-    connectDir, credentialsDir, catalogDir, notify = () => {},
+    connectDir, credentialsDir, catalogDir, notify = () => {}, notifyReauth = () => {},
   } = deps;
   const { event, data } = frame.payload || {};
   if (!event || !data) return;
@@ -177,10 +177,63 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
 
     case 'connection.reauth_needed': {
       warn(`[${slug}] reauth_needed conn=${connectionId} app=${data.application_id || '?'} trigger=${data.trigger || '?'}`);
+      // Stop calling the provider with a now-dead credential: drop the local
+      // cache so conn.invoke never assembles a request with a stale token, and a
+      // re-acquire cannot help until a human re-authorizes. Proxy-mode
+      // connections have no local file — deleteCredentialCache is a no-op there.
+      deleteCredentialCache(connectionId, credentialsDir);
+      // Unlike revoked/disconnected (which fully removeConnection), a reauth is
+      // recoverable — keep the connection INDEXED but flagged needs_reauth, so
+      // conn.invoke can still resolve it and surface an actionable "re-authorize"
+      // hint instead of a bare 404. status is the only field forced;
+      // application_id/slug/name are carried forward additively by the upsert.
+      upsertConnection({ ...indexConn, status: 'needs_reauth' }, idxPath);
+      log(`[${slug}] credential cache cleared + connection flagged needs_reauth conn=${connectionId}`);
+      // Notify the owner (real DM) so a human can re-authorize. Best-effort — a
+      // notify failure never breaks the cache-clear/flag path above.
+      try {
+        notifyReauth({ connectionId, provider: data.provider, applicationId: data.application_id, trigger: data.trigger });
+      } catch (e) {
+        warn(`[${slug}] reauth_needed notify failed conn=${connectionId}: ${e.message}`);
+      }
       break;
     }
 
     default:
       warn(`[${slug}] unknown connection event: ${event}`);
   }
+}
+
+/**
+ * DM the org owner that a connection needs re-authorization (P0 reauth handling).
+ *
+ * A real DM (not a session-level control inject like notifyConnectionAuthorized):
+ * opens/gets the owner DM conversation, then posts a concise, human-actionable
+ * message. Lives here rather than in comm-bridge.js so it is unit testable —
+ * `post` (postForOrg) is injectable, matching the DI shape of the rest of this
+ * module; comm-bridge.js has import-time side effects and cannot be loaded in a
+ * test. Returns `{ sent, ... }` and never throws for the expected no-owner case;
+ * the comm-bridge wrapper handles logging + swallows unexpected HTTP failures.
+ *
+ * @param {object} orgConfig - needs org_id + owner.member_id
+ * @param {object} info      - { connectionId, provider, applicationId, trigger }
+ * @param {object} [deps]    - { post = postForOrg }
+ */
+export async function sendOwnerReauthDm(orgConfig, info = {}, { post = postForOrg } = {}) {
+  const ownerId = orgConfig.owner?.member_id;
+  if (!ownerId) return { sent: false, reason: 'no-owner' };
+  const orgId = orgConfig.org_id;
+  const app = info.provider || info.applicationId || 'a connection';
+  // Open (or fetch the existing) owner DM. cws-core derives caller + org from the
+  // JWT, so only peer_member_id is sent.
+  const conv = await post(orgId, apiPath('/conversations/dm'), { peer_member_id: ownerId });
+  const conversationId = conv?.id || conv?.conversation_id;
+  if (!conversationId) return { sent: false, reason: 'no-conversation' };
+  const text = `你的 ${app} 连接已失效，需要重新授权，请到连接页点「重新授权」。`;
+  await post(orgId, apiPath(`/conversations/${conversationId}/messages`), {
+    client_msg_id: `reauth-${info.connectionId || 'x'}-${Date.now()}`,
+    type: 'AGENT_TEXT',
+    content: { content_type: 'text', body: { text }, attachments: [] },
+  });
+  return { sent: true, conversationId };
 }

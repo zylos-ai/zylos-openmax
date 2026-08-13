@@ -167,7 +167,7 @@ The comm-bridge automatically maintains the index, the action-catalog cache, and
 | `connection.revoked` | Remove from index + delete cached credential |
 | `connection.disconnected` | Remove from index + delete cached credential |
 | `connection.credential_updated` | Upsert index; re-acquire + refresh the credential **iff a local credential file already exists** (the direct-mode marker — this event carries no `credential_mode`). Drops the file if the connection is no longer direct. Proxy connections (no file) are skipped. |
-| `connection.reauth_needed` | Log warning (owner must re-authorize) |
+| `connection.reauth_needed` | **Stop calling the dead connection**: delete the cached credential and keep the connection indexed but flagged `status: needs_reauth` (not removed — reauth is recoverable), so `conn.invoke` surfaces an actionable 409 "needs re-authorization" hint instead of a bare 404. Also **best-effort DM the owner** to re-authorize (`sendOwnerReauthDm`; a no-owner / send failure only warns, never blocks the event path). |
 
 Cache location: `components/openmax/runtime/connect/`
 
