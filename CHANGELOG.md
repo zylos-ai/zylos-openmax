@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.0] — 2026-08-13
+
 ### Added
 
 - **Direct-mode local-egress execution for Connections.** `conn.invoke` now splits internally on
