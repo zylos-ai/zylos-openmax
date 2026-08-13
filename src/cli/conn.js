@@ -11,11 +11,13 @@
 
 import { get, post, del, patch, apiPath, getForOrg, postForOrg } from '../lib/client.js';
 import { loadConfig, enabledOrgs, resolveDefaultOrgId } from '../lib/config.js';
-import { listCachedCredentials, clearCachedCredentials } from '../lib/credential-cache.js';
+import { listCachedCredentials, clearCachedCredentials, readCredentialCache, saveCredentialCache } from '../lib/credential-cache.js';
 import {
   readIndex, replaceIndexFromList, findConnectionByApp, indexPathForOrg,
   readCatalog, writeCatalog, invalidateCatalog, CATALOG_TTL_MS,
 } from '../lib/connect-store.js';
+import { acquireCredential } from '../lib/connection-events.js';
+import { invokeDirect, resolveCredential } from '../lib/direct-exec.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -127,7 +129,10 @@ const COMMANDS = {
     return post(apiPath(`/connect/connections/${connId}/credential`));
   },
 
-  // Proxy a request through a connection (proxy mode).
+  // Proxy a request through a connection.
+  // NOTE: proxy-mode only; hidden from the agent surface (help text + reference
+  // doc), retained here for proxy connections and future use. Not reachable via
+  // conn.invoke (which does direct locally / proxy via conn.execute).
   'conn.proxy': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
@@ -155,6 +160,9 @@ const COMMANDS = {
   // cws-connect resolves the action, injects the token server-side, and calls
   // the provider — the agent needs neither the token nor the provider URL).
   // action format: "toolkit-slug/action-name" (e.g. "github-repos/list").
+  // NOTE: proxy-mode only; hidden from the agent surface (help text + reference
+  // doc), retained here. conn.invoke routes proxy connections through this same
+  // server-side execute endpoint internally.
   'conn.execute': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
@@ -207,9 +215,14 @@ const COMMANDS = {
 
   // One-call app-keyed execute: resolve the connection for an application from
   // the local index (refreshing from conn.list on a miss), then run the named
-  // action via conn.execute. This is the cache-aware entry meant for agents —
-  // it removes the per-call discovery round-trip while keeping authorization +
-  // token injection fully server-side (conn.execute re-checks connection_agents).
+  // action. This is the cache-aware entry meant for agents — it removes the
+  // per-call discovery round-trip. Internally it splits on credential_mode
+  // (transparent to the caller — same command, same result shape):
+  //   - direct → LOCAL EGRESS: assemble the request from the local catalog's
+  //     url_template + params, inject the locally-cached token (refreshing it on
+  //     near-expiry / a provider 401), and call the provider from THIS host.
+  //   - proxy  → server-side execute (cws-connect resolves the action, injects
+  //     the token, and calls the provider; connection_agents re-checked there).
   // On an action/schema-shaped failure it invalidates the cached catalog once so
   // the next conn.catalog is fresh, then resurfaces the error.
   'conn.invoke': async () => {
@@ -223,6 +236,43 @@ const COMMANDS = {
     const entry = await resolveConnectionForApp(app, orgId, agentId);
     if (!entry) throw Object.assign(new Error(`no connection found for app "${app}" (org ${orgId}, agent ${agentId})`), { status: 404 });
 
+    // Decide the path from the local credential cache, re-acquiring on a miss so
+    // a direct connection with no cache file (authorized offline / runtime wiped
+    // / conn.clear_cache) is not wrongly downgraded to proxy (which cws-connect
+    // now rejects with ErrDirectNotProxyable/422). See resolveCredential.
+    const { credential, mode } = await resolveCredential(
+      { orgId, connectionId: entry.id, cached: readCredentialCache(entry.id) },
+      {
+        acquire: (oid, connId) => acquireCredential(oid, connId),
+        saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+      },
+    );
+
+    if (mode === 'direct') {
+      if (!entry.applicationId) {
+        throw Object.assign(new Error(`cannot run direct action for app "${app}": applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
+      }
+      try {
+        // The local catalog now carries per-action url_template/headers_template;
+        // direct execution assembles the request from it (never a free-form URL).
+        const catalogRec = await getCatalog(orgId, entry.applicationId, {});
+        return await invokeDirect(
+          { orgId, connection: entry, actionSlug: params.action, params: params.params || {}, catalog: catalogRec.actions, credential },
+          {
+            acquire: (oid, connId) => acquireCredential(oid, connId),
+            saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+          },
+        );
+      } catch (err) {
+        // Drop the cached catalog on an action/schema mismatch OR a 422 (a catalog
+        // predating url_template — direct assembly can't proceed) so the agent's
+        // next conn.catalog refetches. Re-thrown as-is (no auto-retry).
+        if ((looksLikeActionOrSchemaError(err) || err.status === 422) && entry.applicationId) invalidateCatalog(entry.applicationId);
+        throw err;
+      }
+    }
+
+    // proxy mode — server-side execute (existing behavior, unchanged).
     try {
       // Execute against the resolved connection using the SAME org's JWT — a
       // multi-org agent must not run one org's connection with another's token.
@@ -274,11 +324,7 @@ Usage: node src/cli/conn.js <command> '<json-params>'
 Connections
   conn.list           {}                                        # list connections available to this agent (self only)
   conn.acquire        {connectionId}                            # acquire credential (returns access_token or proxy_ref)
-  conn.proxy          {connectionId, method, url,               # proxy a request through a connection
-                       headers?, body?}
   conn.actions        {connectionId}                            # discover named actions for a connection
-  conn.execute        {connectionId, action, params?}           # run a named action (toolkit-slug/action-name)
-                                                                  #   via cws-connect (server injects the token)
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)
 
 Applications
