@@ -283,6 +283,18 @@ test('GA assembleRequest: a descriptor header wins over a headers_template heade
   assert.equal(req.headers['X-API-Key'], 'TOK', 'descriptor wins over the template');
 });
 
+test('GA assembleRequest: descriptor header wins over a DIFFERENT-CASE template header (no duplicate key)', () => {
+  // Template uses lowercase `x-api-key`; descriptor injects `X-API-Key`. The old code
+  // left BOTH keys, which Node/fetch merges into one comma-joined value ("template-value, TOK")
+  // — an invalid credential header. The injected value must be the sole survivor.
+  const def = { ...GMAIL_GET, headers_template: { 'x-api-key': 'template-value' } };
+  const req = assembleRequest(def, { id: 'x' }, 'TOK', {}, 'api_key', { location: 'header', name: 'X-API-Key', value_template: '{token}' });
+  const apiKeyKeys = Object.keys(req.headers).filter((k) => k.toLowerCase() === 'x-api-key');
+  assert.deepEqual(apiKeyKeys, ['X-API-Key'], 'exactly one x-api-key header, in the descriptor casing');
+  assert.equal(req.headers['X-API-Key'], 'TOK', 'value is the injected token, not the template value');
+  assert.equal(req.headers['x-api-key'], undefined, 'the lowercase template key was removed');
+});
+
 test('GA invokeDirect: credential token_type flows into the Authorization scheme on the wire', async () => {
   const { impl, calls } = fakeFetch({ status: 200, body: { ok: true } });
   await invokeDirect(

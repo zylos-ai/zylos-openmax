@@ -267,6 +267,14 @@ export function assembleRequest(actionDef, params = {}, token, urlPlaceholders =
       // Query value IS URL-encoded (it rides in the URL); header value is verbatim.
       url += `${url.includes('?') ? '&' : '?'}${authInjection.name}=${encodeURIComponent(expanded)}`;
     } else {
+      // Drop any templated header of the SAME NAME case-insensitively before
+      // setting ours — otherwise a template `x-api-key` and an injected
+      // `X-API-Key` both survive as distinct object keys and Node/fetch merges
+      // them into one comma-joined value, so the descriptor would not truly win.
+      const lower = authInjection.name.toLowerCase();
+      for (const k of Object.keys(headers)) {
+        if (k.toLowerCase() === lower) delete headers[k];
+      }
       headers[authInjection.name] = expanded;
     }
   } else {
