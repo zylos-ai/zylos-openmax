@@ -5,6 +5,7 @@ import {
   resolveActionDef,
   validateParams,
   assembleRequest,
+  canonicalAuthScheme,
   isTokenRefreshable,
   isTokenNearExpiry,
   chooseExecMode,
@@ -199,6 +200,114 @@ test('O1 validateParams: enforces required + declared types, lenient on unknowns
   assert.equal(validateParams({ raw: 123 }, GMAIL_SEND.input_schema).ok, false); // wrong type
   assert.equal(validateParams({ raw: 'x', extra: 1 }, GMAIL_SEND.input_schema).ok, true); // unknown ok
   assert.equal(validateParams({ anything: 1 }, '').ok, true); // empty schema → no validation
+});
+
+// ---------------------------------------------------------------------------
+//  Generic token injection — canonicalAuthScheme(token_type) + auth_injection
+//  descriptor. Mirrors cws-connect's canonicalAuthScheme EXACTLY.
+// ---------------------------------------------------------------------------
+
+test('GA canonicalAuthScheme: mirrors cws-connect (bearer/api_key/empty→Bearer, basic→Basic, else verbatim)', () => {
+  assert.equal(canonicalAuthScheme(''), 'Bearer');
+  assert.equal(canonicalAuthScheme(undefined), 'Bearer');
+  assert.equal(canonicalAuthScheme(null), 'Bearer');
+  assert.equal(canonicalAuthScheme('bearer'), 'Bearer');
+  assert.equal(canonicalAuthScheme('Bearer'), 'Bearer');
+  assert.equal(canonicalAuthScheme('BEARER'), 'Bearer');
+  assert.equal(canonicalAuthScheme('api_key'), 'Bearer');
+  assert.equal(canonicalAuthScheme('API_KEY'), 'Bearer');
+  assert.equal(canonicalAuthScheme('basic'), 'Basic');
+  assert.equal(canonicalAuthScheme('BASIC'), 'Basic');
+  assert.equal(canonicalAuthScheme('Token'), 'Token'); // verbatim
+  assert.equal(canonicalAuthScheme('SSWS'), 'SSWS');   // verbatim
+});
+
+test('GA assembleRequest: token_type "bearer" → Authorization: Bearer <t>', () => {
+  const req = assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, 'bearer');
+  assert.equal(req.headers.Authorization, 'Bearer TOK');
+});
+
+test('GA assembleRequest: token_type "api_key" → Authorization: Bearer <t>', () => {
+  const req = assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, 'api_key');
+  assert.equal(req.headers.Authorization, 'Bearer TOK');
+});
+
+test('GA assembleRequest: token_type "basic" → Authorization: Basic <t>', () => {
+  const req = assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, 'basic');
+  assert.equal(req.headers.Authorization, 'Basic TOK');
+});
+
+test('GA assembleRequest: token_type "Token" → Authorization: Token <t> (verbatim scheme)', () => {
+  const req = assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, 'Token');
+  assert.equal(req.headers.Authorization, 'Token TOK');
+});
+
+test('GA assembleRequest: token_type any-case bearer (BEARER/bearer) → Authorization: Bearer <t>', () => {
+  assert.equal(assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, 'BEARER').headers.Authorization, 'Bearer TOK');
+  assert.equal(assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, 'bearer').headers.Authorization, 'Bearer TOK');
+});
+
+test('GA assembleRequest: token_type "" / undefined → Authorization: Bearer <t>', () => {
+  assert.equal(assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, '').headers.Authorization, 'Bearer TOK');
+  assert.equal(assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, undefined).headers.Authorization, 'Bearer TOK');
+  assert.equal(assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK').headers.Authorization, 'Bearer TOK'); // default arg
+});
+
+test('GA assembleRequest: auth_injection {header, X-API-Key, "{token}"} → X-API-Key header, NO Authorization', () => {
+  const req = assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, 'api_key', { location: 'header', name: 'X-API-Key', value_template: '{token}' });
+  assert.equal(req.headers['X-API-Key'], 'TOK');
+  assert.equal(req.headers.Authorization, undefined, 'descriptor path must not emit an Authorization header');
+});
+
+test('GA assembleRequest: auth_injection {query, api_key, "{token}"} → URL carries api_key=<t>, no Authorization', () => {
+  const req = assembleRequest(GMAIL_GET, { id: 'x', format: 'full' }, 'TOK', {}, 'api_key', { location: 'query', name: 'api_key', value_template: '{token}' });
+  assert.ok(req.url.includes('api_key=TOK'), `URL should carry api_key=TOK: ${req.url}`);
+  assert.equal(req.headers.Authorization, undefined, 'query-injection path must not emit an Authorization header');
+});
+
+test('GA assembleRequest: auth_injection {query,...} appends onto an existing query string', () => {
+  // GMAIL_GET already has ?format={format}; the query descriptor must append with &.
+  const req = assembleRequest(GMAIL_GET, { id: 'x', format: 'full' }, 'TOK', {}, 'api_key', { location: 'query', name: 'api_key', value_template: '{token}' });
+  assert.ok(req.url.includes('format=full'), 'the templated query param survives');
+  assert.ok(/[?&]api_key=TOK/.test(req.url), 'injected query pair is present with a proper separator');
+});
+
+test('GA assembleRequest: auth_injection {header, Authorization, "SSWS {token}"} → Authorization: SSWS <t>', () => {
+  const req = assembleRequest(GMAIL_GET, { id: 'x' }, 'TOK', {}, 'bearer', { location: 'header', name: 'Authorization', value_template: 'SSWS {token}' });
+  assert.equal(req.headers.Authorization, 'SSWS TOK');
+});
+
+test('GA assembleRequest: a descriptor header wins over a headers_template header of the same name', () => {
+  const def = { ...GMAIL_GET, headers_template: { 'X-API-Key': 'template-value' } };
+  const req = assembleRequest(def, { id: 'x' }, 'TOK', {}, 'api_key', { location: 'header', name: 'X-API-Key', value_template: '{token}' });
+  assert.equal(req.headers['X-API-Key'], 'TOK', 'descriptor wins over the template');
+});
+
+test('GA invokeDirect: credential token_type flows into the Authorization scheme on the wire', async () => {
+  const { impl, calls } = fakeFetch({ status: 200, body: { ok: true } });
+  await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
+      params: { id: 'm' }, catalog: [GMAIL_GET],
+      credential: { credential_mode: 'direct', token_type: 'basic', access_token: 'BLOB' },
+    },
+    { fetchImpl: impl, audit: quietAudit },
+  );
+  assert.equal(calls[0].opts.headers.Authorization, 'Basic BLOB');
+});
+
+test('GA invokeDirect: a credential auth_injection descriptor flows through to the wire', async () => {
+  const { impl, calls } = fakeFetch({ status: 200, body: { ok: true } });
+  await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
+      params: { id: 'm' }, catalog: [GMAIL_GET],
+      credential: { credential_mode: 'direct', token_type: 'api_key', access_token: 'KEY', auth_injection: { location: 'header', name: 'X-API-Key', value_template: '{token}' } },
+    },
+    { fetchImpl: impl, audit: quietAudit },
+  );
+  assert.equal(calls[0].opts.headers['X-API-Key'], 'KEY');
+  assert.equal(calls[0].opts.headers.Authorization, undefined);
 });
 
 // ---------------------------------------------------------------------------

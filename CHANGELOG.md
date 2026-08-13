@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.2] — 2026-08-13
+
+### Changed
+
+- Generic token injection in `direct-exec` (local-egress path only; no proxy path touched).
+  Request assembly no longer hardcodes `Authorization: Bearer <token>`. It now derives the
+  HTTP auth scheme from the credential's `token_type` via a new `canonicalAuthScheme()` helper
+  that mirrors cws-connect's `canonicalAuthScheme` EXACTLY: `""` / `bearer` / `api_key`
+  (any case) → `Bearer`, `basic` (any case) → `Basic`, anything else verbatim
+  (e.g. `Token`). An optional `auth_injection` descriptor
+  (`{ location: 'header'|'query', name, value_template }`, with a literal `{token}`
+  placeholder) can instead place the credential in a custom header or query parameter
+  (e.g. `X-API-Key`, `?api_key=…`, `Authorization: SSWS …`); the descriptor wins over a
+  same-named templated header, and a `headers_template` `authorization` key still can never
+  override the injected Authorization on the canonical path.
+
 ## [2.14.1] — 2026-08-13
 
 ### Added

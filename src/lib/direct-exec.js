@@ -12,7 +12,9 @@
  *      the action params AND the credential's `url_placeholders` (connection-owned
  *      NON-secret URL parts like a self-hosted connector's `base_url` — e.g.
  *      Jenkins, whose url_template starts with "{base_url}"), builds the JSON body
- *      from the *remaining* params, and injects `Authorization: Bearer <token>`
+ *      from the *remaining* params, and injects the credential's auth generically
+ *      (canonical `Authorization: <scheme> <token>` derived from token_type, or an
+ *      optional auth_injection descriptor placing it in a custom header/query)
  *      plus any templated headers,
  *   4. makes the HTTP request FROM THIS HOST directly to the provider, and
  *   5. returns the SAME shape the server execute path returns —
@@ -118,6 +120,24 @@ function hasVal(v) {
   return v !== undefined && v !== null && v !== '';
 }
 
+/**
+ * Canonicalize a credential `token_type` into the HTTP Authorization scheme word.
+ * Mirrors cws-connect's `canonicalAuthScheme` (connection_service.go) EXACTLY:
+ *   - ""  / "bearer" (any case) / "api_key" (any case) → "Bearer".
+ *     ("api_key" is a mode marker, NOT a real scheme; providers that carry a
+ *     personal token in the Authorization header expect "Bearer", so normalize
+ *     it rather than emit the invalid "Authorization: api_key".)
+ *   - "basic" (any case) → "Basic" (the token value already holds
+ *     base64(username:token), pre-baked at connection-creation time).
+ *   - anything else → returned VERBATIM (e.g. "Token", "SSWS").
+ */
+export function canonicalAuthScheme(tokenType) {
+  const t = tokenType == null ? '' : String(tokenType);
+  if (t === '' || t.toLowerCase() === 'bearer' || t.toLowerCase() === 'api_key') return 'Bearer';
+  if (t.toLowerCase() === 'basic') return 'Basic';
+  return t;
+}
+
 function fillTemplateValue(str, params, urlPlaceholders, consumed) {
   return String(str).replace(/\{([^}]+)\}/g, (_, key) => {
     consumed.add(key);
@@ -152,12 +172,27 @@ function fillTemplateValue(str, params, urlPlaceholders, consumed) {
  * must not be percent-encoded, or "https://host/x" would corrupt into
  * "https%3A%2F%2F…").
  *
+ * Auth injection is GENERIC (mirrors cws-connect). Two paths:
+ *   - `authInjection` descriptor present ({ location, name, value_template }) →
+ *     expand value_template's literal "{token}" placeholder with the token, then
+ *     place it: location==='header' sets headers[name] (verbatim, NOT
+ *     URL-encoded); location==='query' appends name=encodeURIComponent(expanded)
+ *     to the assembled URL's query string. The descriptor WINS over a
+ *     headers_template key of the same name.
+ *   - descriptor absent (today's 100% path) → set
+ *     headers['Authorization'] = canonicalAuthScheme(tokenType) + ' ' + token.
+ *     A headers_template 'authorization' key can NEVER override this.
+ *
  * @param {object} actionDef
  * @param {object} [params]           action params (caller/LLM supplied)
- * @param {string} token             the injected bearer token
+ * @param {string} token             the injected token (EffectiveToken — already
+ *                                   pre-baked for basic/token_param modes)
  * @param {object} [urlPlaceholders] connection-owned url placeholder values
+ * @param {string} [tokenType]       credential token_type → Authorization scheme
+ * @param {object} [authInjection]   optional generic injection descriptor
+ *                                   { location:'header'|'query', name, value_template }
  */
-export function assembleRequest(actionDef, params = {}, token, urlPlaceholders = {}) {
+export function assembleRequest(actionDef, params = {}, token, urlPlaceholders = {}, tokenType = '', authInjection = null) {
   if (!actionDef || typeof actionDef.url_template !== 'string' || !actionDef.url_template) {
     throw Object.assign(
       new Error('action has no url_template — local catalog is too old for direct execution (run conn.catalog {refresh:true})'),
@@ -210,14 +245,32 @@ export function assembleRequest(actionDef, params = {}, token, urlPlaceholders =
       outPairs.push(pair); // static query segment
     }
   }
-  const url = path + (outPairs.length ? `?${outPairs.join('&')}` : '');
+  let url = path + (outPairs.length ? `?${outPairs.join('&')}` : '');
 
-  // Headers — Authorization is injected by us (never from the template).
-  const headers = { Authorization: `Bearer ${token}` };
+  // Headers — templated headers first (Authorization is ours, never the
+  // template's), then the generic auth injection is applied last so it wins.
+  const headers = {};
   const headerTemplate = (actionDef.headers_template && typeof actionDef.headers_template === 'object') ? actionDef.headers_template : {};
   for (const [hk, hv] of Object.entries(headerTemplate)) {
     if (hk.toLowerCase() === 'authorization') continue; // never let the template override our injected auth
     headers[hk] = fillTemplateValue(hv, params, uph, consumed);
+  }
+
+  // Generic auth injection (mirrors cws-connect). A descriptor, when present,
+  // fully controls placement and wins over any templated header of the same
+  // name; otherwise we fall back to the canonical Authorization header — the
+  // path taken by 100% of connections today.
+  if (authInjection && typeof authInjection === 'object' && authInjection.location && authInjection.name) {
+    const vt = typeof authInjection.value_template === 'string' ? authInjection.value_template : '{token}';
+    const expanded = vt.replace(/\{token\}/g, token == null ? '' : String(token));
+    if (authInjection.location === 'query') {
+      // Query value IS URL-encoded (it rides in the URL); header value is verbatim.
+      url += `${url.includes('?') ? '&' : '?'}${authInjection.name}=${encodeURIComponent(expanded)}`;
+    } else {
+      headers[authInjection.name] = expanded;
+    }
+  } else {
+    headers.Authorization = `${canonicalAuthScheme(tokenType)} ${token}`;
   }
 
   // Body — every param not consumed by a placeholder, for body-bearing methods.
@@ -487,7 +540,14 @@ export async function invokeDirect(
     }
   }
 
-  let assembled = assembleRequest(actionDef, params, cred && cred.access_token, cred && cred.url_placeholders);
+  let assembled = assembleRequest(
+    actionDef,
+    params,
+    cred && cred.access_token,
+    cred && cred.url_placeholders,
+    cred && cred.token_type,
+    cred && cred.auth_injection,
+  );
   auditDirectCall(assembled.method, actionDef.url_template, params, audit);
   let result = await sendDirect(assembled, { fetchImpl });
 
@@ -501,7 +561,14 @@ export async function invokeDirect(
     if (fresh && fresh.access_token) {
       saveCache(connId, fresh);
       cred = fresh;
-      assembled = assembleRequest(actionDef, params, cred.access_token, cred.url_placeholders);
+      assembled = assembleRequest(
+        actionDef,
+        params,
+        cred.access_token,
+        cred.url_placeholders,
+        cred.token_type,
+        cred.auth_injection,
+      );
       auditDirectCall(assembled.method, actionDef.url_template, params, audit);
       result = await sendDirect(assembled, { fetchImpl });
     }
