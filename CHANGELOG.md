@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event now stops calling the dead connection: it clears the local credential
   cache and keeps the connection indexed under a new `needs_reauth` status
   (rather than fully removing it), so `conn.invoke` can surface an actionable
-  "re-authorize" hint (HTTP 409, `owner已通知`) instead of a bare 404.
-- The owner is notified with a real DM (`sendOwnerReauthDm`): open/get the owner
+  "re-authorize" hint (HTTP 409, needs re-authorization) instead of a bare 404.
+- The owner is also notified via a best-effort DM (`sendOwnerReauthDm`): open/get the owner
   DM conversation, then post a concise `你的 <app> 连接已失效，需要重新授权，请到连接页点「重新授权」`
   message. Wired into the comm bridge's connection-event handler alongside the
   existing authorize notification; best-effort and never breaks the event path.
