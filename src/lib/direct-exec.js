@@ -309,11 +309,15 @@ function defaultAudit(line) {
   }
 }
 
-function auditDirectCall(method, url, params, audit) {
-  // Never log headers (Authorization lives there). Redact any secret-shaped
-  // param values; keep it to one short line.
+function auditDirectCall(method, urlTemplate, params, audit) {
+  // Log the UN-expanded url_template, NOT the concrete URL: a query placeholder
+  // like "?api_key={api_key}" would otherwise expand to the plaintext secret in
+  // the log line. The template keeps placeholders literal ("{api_key}"), so no
+  // secret can ever reach the log via the URL. Params are separately redacted
+  // (redactSecrets masks secret-shaped keys), and headers (where Authorization
+  // lives) are never logged. One short line.
   const safeParams = JSON.stringify(redactSecrets(params || {}));
-  audit(`[conn.direct] → ${method} ${url} params: ${safeParams}`);
+  audit(`[conn.direct] → ${method} ${urlTemplate} params: ${safeParams}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -328,10 +332,58 @@ function headersToObject(h) {
 }
 
 /**
+ * Read a fetch Response body with a STREAMING byte cap, so an oversized provider
+ * response never fully lands in memory. Reads `res.body` incrementally and
+ * accumulates up to MAX_RESPONSE_BYTES; the moment the running total exceeds the
+ * cap it cancels the stream and THROWS (over-cap is an ERROR, not a silent
+ * truncation — a truncated body would be a corrupt/misleading passthrough).
+ *
+ * Falls back to `res.text()` only when the response exposes no readable stream
+ * (e.g. a minimal test double); that path still enforces the cap, but by then
+ * the body is already buffered, so it is a compatibility fallback, not the
+ * memory-safety guarantee. Production `fetch` always provides `res.body`.
+ */
+async function readCappedText(res) {
+  const reader = res.body && typeof res.body.getReader === 'function' ? res.body.getReader() : null;
+  if (!reader) {
+    const text = await res.text();
+    if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
+      throw Object.assign(
+        new Error(`provider response exceeds the ${MAX_RESPONSE_BYTES}-byte cap`),
+        { status: 502 },
+      );
+    }
+    return text;
+  }
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.length ?? value.byteLength ?? 0;
+      if (total > MAX_RESPONSE_BYTES) {
+        try { await reader.cancel(); } catch { /* best-effort */ }
+        throw Object.assign(
+          new Error(`provider response exceeds the ${MAX_RESPONSE_BYTES}-byte cap`),
+          { status: 502 },
+        );
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* already released/cancelled */ }
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
  * Send one assembled request and normalize the response into the server-parity
  * shape `{ status_code, headers, body }`. Raw passthrough — the provider body is
  * returned as parsed JSON when it parses, else as the raw string; it is never
- * transformed. A body over MAX_RESPONSE_BYTES is truncated and flagged.
+ * transformed. The body is read with a streaming cap (see readCappedText): a
+ * response over MAX_RESPONSE_BYTES throws (status 502) rather than being
+ * buffered whole or silently truncated.
  */
 export async function sendDirect(assembled, { fetchImpl = fetch } = {}) {
   const res = await fetchImpl(assembled.url, {
@@ -340,18 +392,10 @@ export async function sendDirect(assembled, { fetchImpl = fetch } = {}) {
     body: assembled.body !== undefined ? JSON.stringify(assembled.body) : undefined,
   });
 
-  const text = await res.text();
+  const text = await readCappedText(res);
   let body;
-  let truncated = false;
-  if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
-    truncated = true;
-    body = text.slice(0, MAX_RESPONSE_BYTES);
-  } else {
-    try { body = JSON.parse(text); } catch { body = text; }
-  }
-  const out = { status_code: res.status, headers: headersToObject(res.headers), body };
-  if (truncated) out.truncated = true;
-  return out;
+  try { body = JSON.parse(text); } catch { body = text; }
+  return { status_code: res.status, headers: headersToObject(res.headers), body };
 }
 
 /**
@@ -411,7 +455,7 @@ export async function invokeDirect(
   }
 
   let assembled = assembleRequest(actionDef, params, cred && cred.access_token);
-  auditDirectCall(assembled.method, assembled.url, params, audit);
+  auditDirectCall(assembled.method, actionDef.url_template, params, audit);
   let result = await sendDirect(assembled, { fetchImpl });
 
   // Reactive refresh backstop (refreshable/OAuth only): a provider 401 → refresh
@@ -425,7 +469,7 @@ export async function invokeDirect(
       saveCache(connId, fresh);
       cred = fresh;
       assembled = assembleRequest(actionDef, params, cred.access_token);
-      auditDirectCall(assembled.method, assembled.url, params, audit);
+      auditDirectCall(assembled.method, actionDef.url_template, params, audit);
       result = await sendDirect(assembled, { fetchImpl });
     }
   }

@@ -16,9 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     cache (now carrying per-action `url_template` + optional `headers_template`), validates params
     against `input_schema`, fills `{placeholder}` path/query tokens and builds the JSON body from the
     remaining params, injects `Authorization: Bearer <local-cache-token>`, and makes the HTTP request
-    **from this host directly to the provider** (raw response passthrough, 10 MB read cap). Request
-    assembly is **code-driven from the catalog** — the caller/LLM supplies only `action` + `params`
-    and can never inject a free-form URL.
+    **from this host directly to the provider** (raw response passthrough). The response body is read
+    with a **streaming** 10 MB cap — an oversized response is cancelled mid-stream and errors (status
+    502) rather than being buffered whole or silently truncated. Request assembly is **code-driven
+    from the catalog** — the caller/LLM supplies only `action` + `params` and can never inject a
+    free-form URL.
   - **proxy** → unchanged server-side `/actions/execute` path.
 - **Local token cache + refresh-on-invoke (O4).** Two signals: `token_type` gates whether a token
   can be refreshed at all — cws-connect stores `"api_key"` (no refresh flow) vs `"bearer"` (OAuth);
@@ -35,8 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discovered on the same call and routed server-side without caching anything. Only an acquire
   failure is surfaced — a direct call is never silently downgraded.
 - **Audit logging for direct calls (O6).** Each direct call logs a short `[conn.direct]` line with
-  the request method + assembled URL + params only, secrets redacted (`redact.js`), headers never
-  logged; same stdout/file sinks (`COCO_RPC_LOG` / `COCO_RPC_LOG_FILE`) as the RPC client.
+  the request method + the **un-expanded `url_template`** (placeholders kept literal, so a secret in
+  a query placeholder like `?api_key={api_key}` can never reach the log) + params only, params
+  redacted (`redact.js`), headers never logged; same stdout/file sinks (`COCO_RPC_LOG` /
+  `COCO_RPC_LOG_FILE`) as the RPC client.
 - `readCredentialCache()` in `credential-cache.js` (full record incl. token, for direct execution).
 
 ### Changed

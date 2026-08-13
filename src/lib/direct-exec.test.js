@@ -18,7 +18,9 @@ import {
 const quietAudit = () => {};
 
 // A fetch double: returns a Response-like object with a status, JSON/text body,
-// and Headers. Records each call so assembly can be asserted end-to-end.
+// and Headers. Exposes `body` as a real web ReadableStream so sendDirect's
+// streaming capped-read path is exercised (with a text() fallback). Records each
+// call so assembly can be asserted end-to-end.
 function fakeFetch(responses) {
   const calls = [];
   const queue = Array.isArray(responses) ? [...responses] : [responses];
@@ -26,9 +28,11 @@ function fakeFetch(responses) {
     calls.push({ url, opts });
     const r = queue.length > 1 ? queue.shift() : queue[0];
     const bodyText = typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {});
+    const bytes = new TextEncoder().encode(bodyText);
     return {
       status: r.status ?? 200,
       headers: new Map(Object.entries(r.headers || { 'content-type': 'application/json' })),
+      body: new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } }),
       text: async () => bodyText,
     };
   };
@@ -121,12 +125,37 @@ test('O1 sendDirect: non-JSON body is passed through raw (not transformed)', asy
   assert.equal(out.body, 'plain text');
 });
 
-test('O1 sendDirect: an over-cap body is truncated + flagged, never buffered unbounded', async () => {
-  const huge = 'x'.repeat(MAX_RESPONSE_BYTES + 10);
-  const { impl } = fakeFetch({ status: 200, body: huge, headers: { 'content-type': 'text/plain' } });
+test('P2-B sendDirect: an over-cap response ERRORS via streaming read, stopping early (never fully buffered)', async () => {
+  const chunkSize = 1024 * 1024;       // 1 MiB per chunk
+  const chunk = new Uint8Array(chunkSize);
+  const maxChunks = 20;                // 20 MiB available; cap is 10 MiB
+  let pulled = 0;
+  const impl = async () => ({
+    status: 200,
+    headers: new Map([['content-type', 'application/octet-stream']]),
+    body: new ReadableStream({
+      pull(controller) {
+        if (pulled >= maxChunks) { controller.close(); return; }
+        pulled += 1;
+        controller.enqueue(chunk);
+      },
+    }),
+    text: async () => { throw new Error('text() must not be used when a readable stream is available'); },
+  });
+  await assert.rejects(
+    () => sendDirect({ url: 'https://x/y', method: 'GET', headers: {} }, { fetchImpl: impl }),
+    (e) => e.status === 502 && /cap/.test(e.message),
+  );
+  // The stream must be cancelled near the cap — NOT drained fully into memory.
+  // (A small read-ahead margin is allowed for the stream's internal buffering.)
+  assert.ok(pulled < maxChunks, `stream must stop early at the cap (pulled ${pulled}/${maxChunks} chunks)`);
+  assert.ok(pulled <= Math.ceil(MAX_RESPONSE_BYTES / chunkSize) + 3, `must stop near the cap, not drain the whole body (pulled ${pulled})`);
+});
+
+test('O1 sendDirect: an under-cap streamed body parses to JSON (streaming path)', async () => {
+  const { impl } = fakeFetch({ status: 200, body: { hello: 'world' } });
   const out = await sendDirect(assembleRequest(GMAIL_GET, { id: '1' }, 'T'), { fetchImpl: impl });
-  assert.equal(out.truncated, true);
-  assert.equal(out.body.length, MAX_RESPONSE_BYTES);
+  assert.deepEqual(out.body, { hello: 'world' });
 });
 
 test('O1 validateParams: enforces required + declared types, lenient on unknowns', () => {
@@ -135,6 +164,35 @@ test('O1 validateParams: enforces required + declared types, lenient on unknowns
   assert.equal(validateParams({ raw: 123 }, GMAIL_SEND.input_schema).ok, false); // wrong type
   assert.equal(validateParams({ raw: 'x', extra: 1 }, GMAIL_SEND.input_schema).ok, true); // unknown ok
   assert.equal(validateParams({ anything: 1 }, '').ok, true); // empty schema → no validation
+});
+
+// ---------------------------------------------------------------------------
+//  P2-A — audit must never leak a secret through the logged URL
+// ---------------------------------------------------------------------------
+
+test('P2-A audit: a secret in a url_template query placeholder never reaches the log', async () => {
+  const SECRET_ACTION = {
+    toolkit: 'svc', action: 'get', method: 'GET',
+    // A secret carried in the query string — the exact leak P2-A describes.
+    url_template: 'https://api.example.com/v1/thing?api_key={api_key}&id={id}',
+    input_schema: '',
+  };
+  const { impl, calls } = fakeFetch({ status: 200, body: { ok: true } });
+  const lines = [];
+  await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'svc/get',
+      params: { api_key: 'SUPERSECRETVALUE', id: '42' }, catalog: [SECRET_ACTION],
+      credential: { credential_mode: 'direct', token_type: 'bearer', access_token: 'T' },
+    },
+    { fetchImpl: impl, audit: (l) => lines.push(l) },
+  );
+  const joined = lines.join('\n');
+  assert.ok(lines.length >= 1, 'a direct call must produce an audit line');
+  assert.ok(!joined.includes('SUPERSECRETVALUE'), `audit line leaked the secret: ${joined}`);
+  assert.ok(joined.includes('{api_key}'), 'audit should log the UN-expanded url_template (placeholder literal)');
+  // Sanity: the secret WAS expanded onto the real wire (just not into the log).
+  assert.ok(calls[0].url.includes('SUPERSECRETVALUE'), 'the actual request URL still carries the real secret');
 });
 
 // ---------------------------------------------------------------------------
