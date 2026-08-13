@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { handleConnectionEvent, acquireCredential, isEventForMe } from './connection-events.js';
+import { handleConnectionEvent, acquireCredential, isEventForMe, sendOwnerReauthDm } from './connection-events.js';
+import { readIndex, indexPathForOrg } from './connect-store.js';
 
 // Regression coverage for the 2026-08-04 security fix: cws-core no longer
 // accepts a client-supplied agent_member_id, and its
@@ -137,20 +138,98 @@ test('connection.authorized: notifies the agent session (so it learns it can act
   assert.equal(notes[0].mode, 'proxy');
 });
 
-test('only connection.authorized notifies — revoked / disconnected / credential_updated / reauth_needed do NOT', async () => {
+test('the authorize notify hook is authorize-only — revoked / disconnected / credential_updated / reauth_needed do NOT fire it', async () => {
   const { connectDir, credentialsDir, catalogDir } = tmpDirs();
   const { get, post } = recordingHttp();
   const notes = [];
   const notify = (info) => notes.push(info);
+  // reauth_needed has its OWN hook (notifyReauth); passing one here proves it is
+  // never mistaken for the authorize hook.
+  const reauthNotes = [];
+  const notifyReauth = (info) => reauthNotes.push(info);
 
   for (const event of [
     'connection.revoked', 'connection.disconnected',
     'connection.credential_updated', 'connection.reauth_needed',
   ]) {
     const frame = { payload: { event, data: { connection_id: 'conn-x', provider: 'gmail' } } };
-    await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notify });
+    await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notify, notifyReauth });
   }
-  assert.equal(notes.length, 0, 'only connection.authorized should notify the agent session');
+  assert.equal(notes.length, 0, 'only connection.authorized should fire the authorize notify hook');
+});
+
+test('connection.reauth_needed: clears the credential cache, flags the connection needs_reauth (kept indexed), and fires the reauth notify hook', async () => {
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const { get, post } = recordingHttp();
+  // Pre-seed a cached (now-stale) credential so we can assert it gets cleared.
+  fs.mkdirSync(credentialsDir, { recursive: true });
+  fs.writeFileSync(path.join(credentialsDir, 'conn-r.json'), JSON.stringify({ credential_mode: 'direct', access_token: 'stale' }));
+
+  const notes = [];
+  const reauthNotes = [];
+  const notify = (info) => notes.push(info);
+  const notifyReauth = (info) => reauthNotes.push(info);
+
+  const frame = { payload: { event: 'connection.reauth_needed', data: {
+    connection_id: 'conn-r', provider: 'github', application_id: 'app-1', trigger: 'provider_401',
+  } } };
+  await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notify, notifyReauth });
+
+  // 1) the stale local credential must be gone (stop calling the dead connection)
+  assert.ok(!fs.existsSync(path.join(credentialsDir, 'conn-r.json')), 'reauth_needed must clear the cached credential');
+  // 2) the connection stays INDEXED, flagged needs_reauth (not removed)
+  const idx = readIndex(indexPathForOrg('org-1', connectDir));
+  assert.ok(idx.connections['conn-r'], 'reauth_needed must keep the connection indexed');
+  assert.equal(idx.connections['conn-r'].status, 'needs_reauth', 'connection must be flagged needs_reauth');
+  // 3) the reauth notify hook fires exactly once; the authorize hook never does
+  assert.equal(reauthNotes.length, 1, 'reauth_needed must fire the reauth notify hook once');
+  assert.equal(reauthNotes[0].connectionId, 'conn-r');
+  assert.equal(reauthNotes[0].provider, 'github');
+  assert.equal(reauthNotes[0].trigger, 'provider_401');
+  assert.equal(notes.length, 0, 'reauth_needed must not fire the authorize notify hook');
+});
+
+test('connection.reauth_needed notify is best-effort: a throwing reauth hook never breaks the handler', async () => {
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const { get, post } = recordingHttp();
+  const notifyReauth = () => { throw new Error('boom'); };
+  const frame = { payload: { event: 'connection.reauth_needed', data: { connection_id: 'conn-r2', provider: 'github' } } };
+  // Must resolve, not reject, despite the reauth hook throwing.
+  await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notifyReauth });
+  const idx = readIndex(indexPathForOrg('org-1', connectDir));
+  assert.equal(idx.connections['conn-r2'].status, 'needs_reauth', 'flag must still be set even when notify throws');
+});
+
+test('sendOwnerReauthDm: opens the owner DM then posts a reauth message (create_dm → send)', async () => {
+  const calls = [];
+  const post = async (orgId, urlPath, body) => {
+    calls.push({ orgId, path: urlPath, body });
+    if (urlPath.endsWith('/conversations/dm')) return { id: 'cv-owner-1' };
+    return { id: 'msg-1' };
+  };
+  const orgConfig = { slug: 'acme', org_id: 'org-1', owner: { member_id: 'owner-9' } };
+
+  const r = await sendOwnerReauthDm(orgConfig, { connectionId: 'conn-r', provider: 'github' }, { post });
+
+  assert.equal(r.sent, true);
+  assert.equal(r.conversationId, 'cv-owner-1');
+  assert.equal(calls.length, 2, 'must make exactly two calls: create_dm then send');
+  // 1) create the owner DM with peer_member_id (no org_id/caller — JWT-derived)
+  assert.equal(calls[0].path, '/api/v1/conversations/dm');
+  assert.equal(calls[0].body.peer_member_id, 'owner-9');
+  // 2) send the message into the resolved conversation
+  assert.equal(calls[1].path, '/api/v1/conversations/cv-owner-1/messages');
+  assert.ok(calls[1].body.content.body.text.includes('github'), 'message must name the app');
+  assert.ok(calls[1].body.content.body.text.includes('重新授权'), 'message must prompt re-authorization');
+});
+
+test('sendOwnerReauthDm: no owner bound → no DM sent, no HTTP calls', async () => {
+  const calls = [];
+  const post = async (...a) => { calls.push(a); return {}; };
+  const r = await sendOwnerReauthDm({ slug: 'acme', org_id: 'org-1', owner: {} }, { connectionId: 'conn-r' }, { post });
+  assert.equal(r.sent, false);
+  assert.equal(r.reason, 'no-owner');
+  assert.equal(calls.length, 0, 'no owner → must not touch the network');
 });
 
 test('connection.authorized notify is best-effort: a throwing notify never breaks the handler', async () => {

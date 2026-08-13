@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.3] — 2026-08-14
+
+### Added
+
+- P0 re-authorization handling on the openmax side. A `connection.reauth_needed`
+  event now stops calling the dead connection: it clears the local credential
+  cache and keeps the connection indexed under a new `needs_reauth` status
+  (rather than fully removing it), so `conn.invoke` can surface an actionable
+  "re-authorize" hint (HTTP 409, `owner已通知`) instead of a bare 404.
+- The owner is notified with a real DM (`sendOwnerReauthDm`): open/get the owner
+  DM conversation, then post a concise `你的 <app> 连接已失效，需要重新授权，请到连接页点「重新授权」`
+  message. Wired into the comm bridge's connection-event handler alongside the
+  existing authorize notification; best-effort and never breaks the event path.
+
 ## [2.14.2] — 2026-08-13
 
 ### Changed
