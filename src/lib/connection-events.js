@@ -185,7 +185,7 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
       // Unlike revoked/disconnected (which fully removeConnection), a reauth is
       // recoverable — keep the connection INDEXED but flagged needs_reauth, so
       // conn.invoke can still resolve it and surface an actionable "re-authorize"
-      // hint (owner已通知) instead of a bare 404. status is the only field forced;
+      // hint instead of a bare 404. status is the only field forced;
       // application_id/slug/name are carried forward additively by the upsert.
       upsertConnection({ ...indexConn, status: 'needs_reauth' }, idxPath);
       log(`[${slug}] credential cache cleared + connection flagged needs_reauth conn=${connectionId}`);
