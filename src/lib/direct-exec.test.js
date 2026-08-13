@@ -5,6 +5,7 @@ import {
   resolveActionDef,
   validateParams,
   assembleRequest,
+  isTokenRefreshable,
   isTokenNearExpiry,
   chooseExecMode,
   resolveCredential,
@@ -199,8 +200,22 @@ test('O2 resolveCredential: an acquire failure propagates (never a silent proxy 
 });
 
 // ---------------------------------------------------------------------------
-//  O4 — token lifecycle: expires_at-driven proactive + universal reactive-401
+//  O4 — token lifecycle: token_type gates refreshability, expires_at gates
+//  proactive refresh; reactive-401-once for refreshable (OAuth) tokens.
 // ---------------------------------------------------------------------------
+
+test('O4 isTokenRefreshable: only a normalized "api_key" is non-refreshable; any casing of bearer / other → OAuth', () => {
+  // api_key (fixed value) — normalized exact match, incl. surrounding space / case
+  assert.equal(isTokenRefreshable({ token_type: 'api_key' }), false);
+  assert.equal(isTokenRefreshable({ token_type: ' API_KEY ' }), false);
+  // OAuth — both casings of bearer, never matched by a fragile "bearer" test
+  assert.equal(isTokenRefreshable({ token_type: 'Bearer' }), true);
+  assert.equal(isTokenRefreshable({ token_type: 'bearer' }), true);
+  // anything unexpected, or a missing token_type, defaults to refreshable OAuth (GitHub)
+  assert.equal(isTokenRefreshable({ token_type: 'something-else' }), true);
+  assert.equal(isTokenRefreshable({}), true);
+  assert.equal(isTokenRefreshable(null), false);
+});
 
 test('O4 isTokenNearExpiry: near/expired vs comfortable vs no-expiry', () => {
   const now = 1_000_000_000_000;
@@ -297,21 +312,21 @@ test('O4 invokeDirect: still 401 after the single reactive refresh → surfaced,
   assert.equal(out.status_code, 401, 'the second 401 is surfaced to the caller');
 });
 
-test('O4 invokeDirect: no expires_at (api_key / non-expiring) → NO proactive refresh on a normal call', async () => {
+test('O4 invokeDirect: no-expiry OAuth (GitHub-style) → NO proactive refresh on a normal call', async () => {
   const { impl } = fakeFetch({ status: 200, body: {} });
   let acquires = 0;
   await invokeDirect(
     {
       orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
       params: { id: 'm' }, catalog: [GMAIL_GET],
-      credential: { credential_mode: 'direct', access_token: 'KEY' }, // no expires_at
+      credential: { credential_mode: 'direct', token_type: 'bearer', access_token: 'TOK' }, // no expires_at
     },
     { fetchImpl: impl, acquire: async () => { acquires++; return {}; }, audit: quietAudit },
   );
   assert.equal(acquires, 0, 'a token with no expires_at is never proactively refreshed');
 });
 
-test('O4 invokeDirect: no expires_at + provider 401 → reactive refresh ONCE (backstop applies to all)', async () => {
+test('O4 invokeDirect: no-expiry OAuth + provider 401 → reactive refresh ONCE (backstop)', async () => {
   const { impl, calls } = fakeFetch([
     { status: 401, body: { error: 'expired' } },
     { status: 200, body: { ok: true } },
@@ -321,17 +336,48 @@ test('O4 invokeDirect: no expires_at + provider 401 → reactive refresh ONCE (b
     {
       orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
       params: { id: 'm' }, catalog: [GMAIL_GET],
-      credential: { credential_mode: 'direct', access_token: 'OLD' }, // no expires_at (GitHub-style)
+      credential: { credential_mode: 'direct', token_type: 'bearer', access_token: 'OLD' }, // no expires_at (GitHub-style)
     },
     {
       fetchImpl: impl,
-      acquire: async () => { acquires++; return { credential_mode: 'direct', access_token: 'NEW' }; },
+      acquire: async () => { acquires++; return { credential_mode: 'direct', token_type: 'bearer', access_token: 'NEW' }; },
       audit: quietAudit,
     },
   );
-  assert.equal(acquires, 1, 'the reactive-401 backstop refreshes once even without expires_at');
+  assert.equal(acquires, 1, 'the reactive-401 backstop refreshes a no-expiry OAuth token once');
   assert.equal(calls[1].opts.headers.Authorization, 'Bearer NEW');
   assert.equal(out.status_code, 200);
+});
+
+test('O4 invokeDirect: api_key (token_type "api_key") → NEVER refreshed, 401 surfaced', async () => {
+  const { impl, calls } = fakeFetch({ status: 401, body: { error: 'bad key' } });
+  let acquires = 0;
+  const out = await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
+      params: { id: 'm' }, catalog: [GMAIL_GET],
+      credential: { credential_mode: 'direct', token_type: 'api_key', access_token: 'KEY' },
+    },
+    { fetchImpl: impl, acquire: async () => { acquires++; return {}; }, audit: quietAudit },
+  );
+  assert.equal(acquires, 0, 'api_key has no refresh flow — neither proactive nor reactive');
+  assert.equal(calls.length, 1, 'no retry for an api_key 401');
+  assert.equal(out.status_code, 401, 'the api_key 401 is surfaced to the user');
+});
+
+test('O4 invokeDirect: api_key with a near-expiry expires_at is still NOT proactively refreshed', async () => {
+  const now = 2_000_000_000_000;
+  const { impl } = fakeFetch({ status: 200, body: {} });
+  let acquires = 0;
+  await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
+      params: { id: 'm' }, catalog: [GMAIL_GET],
+      credential: { credential_mode: 'direct', token_type: 'api_key', access_token: 'KEY', expires_at: now + 1_000 },
+    },
+    { fetchImpl: impl, now: () => now, acquire: async () => { acquires++; return {}; }, audit: quietAudit },
+  );
+  assert.equal(acquires, 0, 'token_type gates refreshability even when expires_at says "near"');
 });
 
 test('O4 invokeDirect: unknown action → 404 before any send', async () => {

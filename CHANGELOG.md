@@ -20,12 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     assembly is **code-driven from the catalog** — the caller/LLM supplies only `action` + `params`
     and can never inject a free-form URL.
   - **proxy** → unchanged server-side `/actions/execute` path.
-- **Local token cache + refresh-on-invoke (O4).** The sole proactive-refresh signal is
-  `expires_at` **presence**: a token that carries an `expires_at` and is at/near expiry is
-  re-acquired via cws-core and re-saved locally before the send; a token with no `expires_at`
-  (api_key OR non-expiring OAuth like GitHub) is never proactively refreshed. In **all** cases a
-  provider **401** triggers a single reactive refresh + retry as the backstop; a second 401 is
-  surfaced (no loop).
+- **Local token cache + refresh-on-invoke (O4).** Two signals: `token_type` gates whether a token
+  can be refreshed at all — cws-connect stores `"api_key"` (no refresh flow) vs `"bearer"` (OAuth);
+  `expires_at` gates whether a refreshable token is refreshed proactively. An **api_key** is never
+  refreshed (proactively or on a 401) — a provider 401 is surfaced. An **OAuth** token is refreshed
+  proactively when it carries an `expires_at` that is near/expired, and reactively **once** on a
+  provider 401 (this covers non-expiring OAuth like GitHub, which has no `expires_at`); a second
+  401 is surfaced (no loop). Refresh re-acquires via cws-core and re-saves the local cache.
 - **Re-acquire on a direct cache miss (O4).** When a resolved connection has no local credential
   file (authorized offline, `runtime/` wiped/reinstalled, or `conn.clear_cache`), `conn.invoke`
   now re-acquires via cws-core, saves the credential, and proceeds with local direct execution

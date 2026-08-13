@@ -21,13 +21,17 @@
  * URL. The action name must resolve in the catalog and the URL can only be the
  * registered `url_template` expanded with schema-checked params.
  *
- * Token lifecycle (O4): the sole proactive-refresh signal is `expires_at`
- * PRESENCE. A token that carries an `expires_at` is refreshed proactively when
- * near/expired before the call; a token WITHOUT `expires_at` (api_key, or a
- * non-expiring OAuth token like GitHub) is never proactively refreshed. In all
- * cases a provider 401 triggers a single reactive refresh + retry as the
- * backstop; a second 401 is surfaced to the user (no loop). Refresh = re-acquire
- * via cws-core (injected `acquire`) + re-save the local cache.
+ * Token lifecycle (O4): two independent signals answer two questions.
+ *   - `token_type` gates whether a token can be refreshed AT ALL: cws-connect
+ *     stores `"api_key"` for api_key connections (no refresh flow) and
+ *     `"bearer"` for OAuth. An api_key is NEVER refreshed — not proactively, not
+ *     on a 401; a provider 401 is surfaced to the user.
+ *   - `expires_at` gates whether a refreshable (OAuth) token should be refreshed
+ *     PROACTIVELY before the call: present AND near/expired → refresh first.
+ * A refreshable token WITHOUT `expires_at` (non-expiring OAuth like GitHub) is
+ * not refreshed proactively but IS refreshed reactively — a provider 401
+ * triggers a single refresh + retry; a second 401 is surfaced (no loop).
+ * Refresh = re-acquire via cws-core (injected `acquire`) + re-save the cache.
  *
  * Pure-ish: `fetch`, `acquire`, and `saveCache` are injectable so this is unit
  * testable without network or disk. No import-time side effects.
@@ -205,6 +209,24 @@ export function assembleRequest(actionDef, params = {}, token) {
 //  Token lifecycle helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Can this token be refreshed at all? Gated solely by `token_type`: cws-connect
+ * stores `"api_key"` for api_key connections (which have NO refresh flow) and
+ * `"bearer"` for OAuth. Everything that is not explicitly `"api_key"` is treated
+ * as refreshable OAuth (a missing token_type defaults to refreshable — the
+ * GitHub-style no-expiry OAuth case). This is what separates a non-refreshable
+ * api_key from a no-expiry OAuth token: `expires_at` alone cannot, since both
+ * lack it.
+ */
+export function isTokenRefreshable(cred) {
+  if (!cred) return false;
+  // Normalized exact match: api_key is the fixed value "api_key", while OAuth's
+  // token_type varies in case across providers ("Bearer"/"bearer"). Only an
+  // exact (trimmed, lowercased) "api_key" is non-refreshable; every other value
+  // — including any casing of bearer and anything unexpected — is OAuth.
+  return String(cred.token_type || '').trim().toLowerCase() !== 'api_key';
+}
+
 function expiryMs(cred) {
   const raw = cred && cred.expires_at;
   if (raw == null) return null;
@@ -217,10 +239,10 @@ function expiryMs(cred) {
 }
 
 /**
- * Is the token at/near expiry? `expires_at` PRESENCE is the sole proactive
- * signal: a token with no `expires_at` returns false — it is never proactively
- * refreshed and relies entirely on the reactive-401 backstop instead (this
- * covers both api_key and non-expiring OAuth like GitHub).
+ * Is the token at/near expiry? `expires_at` presence gates PROACTIVE refresh: a
+ * token with no `expires_at` returns false — it is never proactively refreshed
+ * (a refreshable one still relies on the reactive-401 backstop; this is the
+ * GitHub-style no-expiry OAuth case).
  */
 export function isTokenNearExpiry(cred, now = Date.now(), skewMs = DEFAULT_EXPIRY_SKEW_MS) {
   const exp = expiryMs(cred);
@@ -374,12 +396,11 @@ export async function invokeDirect(
   let cred = credential;
   const connId = connection.id;
 
-  // Proactive refresh: driven solely by `expires_at` presence — a token that
-  // carries one and is at/near expiry is refreshed before the call; a token with
-  // no `expires_at` (api_key / non-expiring OAuth) is never proactively touched.
-  // A refresh failure here is non-fatal — proceed with the current token and let
-  // the reactive-401 backstop try.
-  if (acquire && isTokenNearExpiry(cred, now(), skewMs)) {
+  // Proactive refresh: refreshable (OAuth) tokens only, and only when they carry
+  // an `expires_at` that is at/near expiry. api_key (token_type "api_key") is
+  // never touched. A refresh failure here is non-fatal — proceed with the current
+  // token and let the reactive-401 backstop try.
+  if (acquire && isTokenRefreshable(cred) && isTokenNearExpiry(cred, now(), skewMs)) {
     try {
       const fresh = await acquire(orgId, connId);
       if (fresh && fresh.access_token) { saveCache(connId, fresh); cred = fresh; }
@@ -393,10 +414,11 @@ export async function invokeDirect(
   auditDirectCall(assembled.method, assembled.url, params, audit);
   let result = await sendDirect(assembled, { fetchImpl });
 
-  // Reactive refresh backstop (ALL cases): a provider 401 → refresh ONCE and
-  // retry. This covers no-expiry tokens (GitHub) and any token whose proactive
-  // refresh was skipped/stale. A second 401 is surfaced as-is (no loop).
-  if (result.status_code === 401 && acquire) {
+  // Reactive refresh backstop (refreshable/OAuth only): a provider 401 → refresh
+  // ONCE and retry. This covers no-expiry OAuth (GitHub) and any token whose
+  // proactive refresh was skipped/stale. An api_key is NOT refreshed here — its
+  // 401 is surfaced as-is. A second 401 is likewise surfaced (no loop).
+  if (result.status_code === 401 && acquire && isTokenRefreshable(cred)) {
     log(`[conn.direct] provider 401 conn=${connId}; reactive refresh + retry once`);
     const fresh = await acquire(orgId, connId); // if refresh itself throws, surface it
     if (fresh && fresh.access_token) {
