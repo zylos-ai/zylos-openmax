@@ -138,6 +138,45 @@ export function canonicalAuthScheme(tokenType) {
   return t;
 }
 
+/**
+ * Inject the credential's auth into an assembled request, GENERICALLY (mirrors
+ * cws-connect). Mutates `headers` in place and returns the (possibly updated)
+ * URL — query-mode injection appends a pair to the URL. Two paths:
+ *   - `authInjection` descriptor present ({ location, name, value_template }) →
+ *     expand its literal "{token}" with the token, then place it. location
+ *     'header' sets headers[name] (verbatim, dropping any same-name header
+ *     case-insensitively first so the descriptor truly wins); location 'query'
+ *     appends name=encodeURIComponent(expanded) to the URL's query string.
+ *   - descriptor absent (today's 100% path) → set
+ *     headers.Authorization = canonicalAuthScheme(tokenType) + ' ' + token.
+ *
+ * This is the SINGLE source of truth for host-side credential injection: both
+ * catalog-driven assembleRequest (conn.invoke direct) and the free-path
+ * passthrough (conn.request) call it, so the caller/LLM can never set auth.
+ */
+export function injectAuthHeaders(headers, url, { token, tokenType = '', authInjection = null } = {}) {
+  if (authInjection && typeof authInjection === 'object' && authInjection.location && authInjection.name) {
+    const vt = typeof authInjection.value_template === 'string' ? authInjection.value_template : '{token}';
+    const expanded = vt.replace(/\{token\}/g, token == null ? '' : String(token));
+    if (authInjection.location === 'query') {
+      // Query value IS URL-encoded (it rides in the URL); header value is verbatim.
+      return `${url}${url.includes('?') ? '&' : '?'}${authInjection.name}=${encodeURIComponent(expanded)}`;
+    }
+    // Drop any header of the SAME NAME case-insensitively before setting ours —
+    // otherwise a template/caller `x-api-key` and an injected `X-API-Key` both
+    // survive as distinct object keys and Node/fetch merges them into one
+    // comma-joined value, so the descriptor would not truly win.
+    const lower = authInjection.name.toLowerCase();
+    for (const k of Object.keys(headers)) {
+      if (k.toLowerCase() === lower) delete headers[k];
+    }
+    headers[authInjection.name] = expanded;
+    return url;
+  }
+  headers.Authorization = `${canonicalAuthScheme(tokenType)} ${token}`;
+  return url;
+}
+
 function fillTemplateValue(str, params, urlPlaceholders, consumed) {
   return String(str).replace(/\{([^}]+)\}/g, (_, key) => {
     consumed.add(key);
@@ -259,27 +298,10 @@ export function assembleRequest(actionDef, params = {}, token, urlPlaceholders =
   // Generic auth injection (mirrors cws-connect). A descriptor, when present,
   // fully controls placement and wins over any templated header of the same
   // name; otherwise we fall back to the canonical Authorization header — the
-  // path taken by 100% of connections today.
-  if (authInjection && typeof authInjection === 'object' && authInjection.location && authInjection.name) {
-    const vt = typeof authInjection.value_template === 'string' ? authInjection.value_template : '{token}';
-    const expanded = vt.replace(/\{token\}/g, token == null ? '' : String(token));
-    if (authInjection.location === 'query') {
-      // Query value IS URL-encoded (it rides in the URL); header value is verbatim.
-      url += `${url.includes('?') ? '&' : '?'}${authInjection.name}=${encodeURIComponent(expanded)}`;
-    } else {
-      // Drop any templated header of the SAME NAME case-insensitively before
-      // setting ours — otherwise a template `x-api-key` and an injected
-      // `X-API-Key` both survive as distinct object keys and Node/fetch merges
-      // them into one comma-joined value, so the descriptor would not truly win.
-      const lower = authInjection.name.toLowerCase();
-      for (const k of Object.keys(headers)) {
-        if (k.toLowerCase() === lower) delete headers[k];
-      }
-      headers[authInjection.name] = expanded;
-    }
-  } else {
-    headers.Authorization = `${canonicalAuthScheme(tokenType)} ${token}`;
-  }
+  // path taken by 100% of connections today. Extracted into injectAuthHeaders
+  // so the direct-mode passthrough path (conn.request) injects credentials via
+  // the EXACT same code (single source of truth for auth-header placement).
+  url = injectAuthHeaders(headers, url, { token, tokenType, authInjection });
 
   // Body — every param not consumed by a placeholder, for body-bearing methods.
   let body;
@@ -387,7 +409,7 @@ export async function resolveCredential({ orgId, connectionId, cached }, { acqui
 
 // Mirrors client.js's RPC logging surfaces: stdout gated by COCO_RPC_LOG,
 // file append gated by COCO_RPC_LOG_FILE. Tagged [conn.direct] for grep.
-function defaultAudit(line) {
+export function defaultAudit(line) {
   if (process.env.COCO_RPC_LOG !== '0') console.error(line);
   const filePath = process.env.COCO_RPC_LOG_FILE;
   if (filePath && filePath.length > 0) {

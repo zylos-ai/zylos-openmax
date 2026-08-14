@@ -18,6 +18,7 @@ import {
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
 import { invokeDirect, resolveCredential } from '../lib/direct-exec.js';
+import { invokeDirectRequest } from '../lib/direct-request.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -301,6 +302,103 @@ const COMMANDS = {
     }
   },
 
+  // Custom direct-mode passthrough: call a provider method that has NO
+  // predefined action. The caller supplies {method, path, query?, body?,
+  // headers?}; we assemble the URL, inject the credential HOST-SIDE (never seen
+  // by the model), forward from this host, and return { status, body, headers }.
+  //
+  // DIRECT MODE ONLY (v1). Unlike conn.invoke (catalog-action-driven), the path
+  // is free-form, so the request is fenced by a HOST ALLOWLIST derived from the
+  // connection's OWN action catalog (the origins of every action's url_template,
+  // plus the connection's {base_url} origin, plus an optional per-connector
+  // extra_hosts list). The target host must be a member of that allowlist —
+  // this locks the token to the connector's own API domains and prevents the
+  // credential from ever being auto-attached to a model-chosen foreign host.
+  // See src/lib/direct-request.js (deriveHostAllowlist) for the derivation.
+  'conn.request': async () => {
+    const app = params.app || params.applicationId || params.application_id || params.slug;
+    const connIdParam = params.connectionId || params.connection_id;
+    if (!app && !connIdParam) throw Object.assign(new Error('app (slug/applicationId) or connectionId is required'), { status: 400 });
+    if (!params.method) throw Object.assign(new Error('method is required (GET, POST, PUT, PATCH, DELETE, HEAD)'), { status: 400 });
+    if (!params.path) throw Object.assign(new Error('path is required (a RELATIVE path with a leading "/")'), { status: 400 });
+
+    const orgId = resolveOrgId();
+    const agentId = resolveSelfMemberId(orgId);
+    if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+
+    // Resolve the connection exactly like conn.invoke: by app (via the local
+    // index, refreshing on a miss) or by an explicit connectionId (index lookup,
+    // refreshing once when absent so a freshly-authorized connection is found).
+    let entry;
+    if (app) {
+      entry = await resolveConnectionForApp(app, orgId, agentId);
+    } else {
+      const idxPath = indexPathForOrg(orgId);
+      entry = readIndex(idxPath).connections[connIdParam];
+      if (!entry) {
+        await refreshIndex(orgId, agentId);
+        entry = readIndex(idxPath).connections[connIdParam];
+      }
+    }
+    if (!entry) throw Object.assign(new Error(`no connection found for ${app ? `app "${app}"` : `connectionId "${connIdParam}"`} (org ${orgId}, agent ${agentId})`), { status: 404 });
+
+    if (entry.status === 'needs_reauth') {
+      throw Object.assign(
+        new Error(`connection for ${app ? `app "${app}"` : `connectionId "${connIdParam}"`} needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
+        { status: 409 },
+      );
+    }
+
+    const { credential, mode } = await resolveCredential(
+      { orgId, connectionId: entry.id, cached: readCredentialCache(entry.id) },
+      {
+        acquire: (oid, connId) => acquireCredential(oid, connId),
+        saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+      },
+    );
+
+    // Direct-mode only. A proxy connection has no local token to inject and its
+    // host allowlist is not derivable this way — steer the caller to conn.invoke.
+    if (mode !== 'direct') {
+      throw Object.assign(
+        new Error('conn.request currently supports direct-mode connections only; use conn.invoke for proxy-mode actions'),
+        { status: 422 },
+      );
+    }
+    if (!entry.applicationId) {
+      throw Object.assign(new Error(`cannot run conn.request for ${app ? `app "${app}"` : `connectionId "${connIdParam}"`}: applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
+    }
+
+    try {
+      // The action catalog seeds the host allowlist (origins of every action's
+      // url_template). Same local catalog conn.invoke/direct-exec use.
+      const catalogRec = await getCatalog(orgId, entry.applicationId, {});
+      return await invokeDirectRequest(
+        {
+          orgId,
+          connection: entry,
+          method: params.method,
+          path: params.path,
+          host: params.host,
+          query: params.query,
+          body: params.body,
+          headers: params.headers,
+          catalog: catalogRec.actions,
+          credential,
+        },
+        {
+          acquire: (oid, connId) => acquireCredential(oid, connId),
+          saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+        },
+      );
+    } catch (err) {
+      // A 422 here means the cached catalog was too old to derive the allowlist
+      // (predates url_template) — drop it so the next conn.catalog refetches.
+      if (err.status === 422 && entry.applicationId) invalidateCatalog(entry.applicationId);
+      throw err;
+    }
+  },
+
   // Show the local connections index for an org (observability). {refresh}
   // rebuilds it from conn.list first; {org} selects the org (default otherwise).
   'conn.index': async () => {
@@ -344,8 +442,12 @@ Applications
 
 Capability cache (runtime/connect/)
   conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
+  conn.request        {app, method, path, query?, body?}        # direct-mode custom passthrough (method/path not in the action catalog)
   conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
   conn.index          {refresh?}                                # show the local connections index (connection → application)
+
+  # conn.request example (host is locked to the connector's own API domains):
+  #   conn.request {app:"github", method:"GET", path:"/user/repos", query:{per_page:10}}
 
 Local cache
   conn.cached         {}                                        # list locally cached credentials (direct-mode tokens)

@@ -69,6 +69,47 @@ node src/cli/conn.js conn.app_actions '{"applicationId":"cb4e4f15-..."}'
 
 Returns an array of `{ toolkit, action, method, description, params[], input_schema }` (same shape as `conn.actions`). Resolved strictly by `applicationId` — the BFF route keys on the path id and does not accept a slug override, so the requested resource identity always matches the returned catalog.
 
+### conn.request
+Call a provider method that has **no predefined action** in the catalog — a
+direct-mode custom passthrough. You supply the HTTP `method` + a **relative**
+`path` (+ optional `query`, `body`, non-auth `headers`); the CLI assembles the
+URL, injects the credential **host-side** (you never see the token), forwards
+the request from this host, and returns `{ status, body, headers }` (a small safe
+subset of response headers). Use it only for endpoints `conn.catalog` /
+`conn.invoke` don't cover — prefer a named action when one exists.
+
+```bash
+node src/cli/conn.js conn.request '{"app":"github","method":"GET","path":"/user/repos","query":{"per_page":10}}'
+node src/cli/conn.js conn.request '{"app":"github","method":"POST","path":"/repos/o/r/issues","body":{"title":"Bug"}}'
+```
+
+Params: `app` (slug/applicationId) **or** `connectionId`; `method` (GET, POST,
+PUT, PATCH, DELETE, HEAD); `path` (relative, leading `/`, may include a query
+string — an **absolute URL is rejected**); optional `host` (target a
+non-primary but allowlisted host, e.g. `uploads.github.com`), `query` (merged
+with any query in `path`), `body` (non-GET), `headers` (non-auth only).
+
+Constraints and security model:
+- **Direct-mode connections only.** A proxy-mode connection is rejected (use
+  `conn.invoke`) — proxy tokens never leave cws-connect, so there is nothing to
+  inject host-side.
+- **Host is restricted to the connector's own API domains.** The allowed hosts
+  are **derived from the action catalog** — the origins of every action's
+  `url_template` (with `{base_url}`-style placeholders resolved from the
+  connection), the connection's own `{base_url}` origin, and an optional small
+  per-connector `extra_hosts` list. The target host must be a member of that
+  allowlist, else the request is rejected with the list of allowed hosts. This
+  locks the token to the connector's own domains — it can **never** be
+  auto-attached to a model-chosen foreign host.
+- **You cannot set auth.** Caller-supplied `Authorization` / `Cookie` / other
+  auth headers are rejected; the real credential is injected host-side via the
+  exact same code path as `conn.invoke` (canonical `Authorization: <scheme>
+  <token>`, or the connector's `auth_injection` descriptor). The token is never
+  logged (audit logs origin + path only) and never returned.
+- OAuth tokens are refreshed the same way as `conn.invoke` (proactively near
+  expiry, once reactively on a provider 401). A provider error status is passed
+  through as-is (returned with that `status`, not thrown).
+
 ### conn.cached
 List locally cached credentials (from WS event auto-acquire).
 
@@ -145,6 +186,13 @@ it does not need to "know" the sequence:
    `{refresh:true}`. Read this to pick an `action` + build `params` from its
    `input_schema` before calling `conn.invoke`.
 3. **`conn.index {refresh?}`** — inspect the local index (observability).
+
+> **Escape hatch — `conn.request`:** when the provider endpoint you need has no
+> named action in the catalog, a **direct-mode** connection can call it via
+> `conn.request {app, method, path, …}` (see the command reference above). The
+> host is still fenced to the connector's own API domains (derived from the same
+> catalog) and the credential is injected host-side — you never supply a URL host
+> or the token. Prefer a named `conn.invoke` action whenever one exists.
 
 Invalidation is **TTL + error-triggered** — the app-actions response carries no
 version/etag today (see "cws-connect follow-up" below), so there is no
