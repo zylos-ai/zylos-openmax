@@ -17,8 +17,8 @@ import {
   readCatalog, writeCatalog, invalidateCatalog, CATALOG_TTL_MS,
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
-import { invokeDirect, resolveCredential } from '../lib/direct-exec.js';
-import { invokeDirectRequest } from '../lib/direct-request.js';
+import { invokeDirect, resolveCredential, resolveActionDef, urlTemplatePath, defaultAudit } from '../lib/direct-exec.js';
+import { invokeDirectRequest, skipNonDirect } from '../lib/direct-request.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -285,6 +285,17 @@ const COMMANDS = {
       }
     }
 
+    // Per-call request log: path + mode only (same contract as the direct path,
+    // which emits its line inside invokeDirect). The path is resolved best-effort
+    // from the locally-cached catalog (no network, no throw); absent → empty.
+    let proxyPath = '';
+    try {
+      const cat = entry.applicationId ? readCatalog(entry.applicationId) : null;
+      const def = cat && Array.isArray(cat.actions) ? resolveActionDef(cat.actions, params.action) : null;
+      if (def) proxyPath = urlTemplatePath(def.url_template);
+    } catch { /* best-effort — logging must never break the call */ }
+    defaultAudit(`[conn.invoke] path=${proxyPath} mode=proxy`);
+
     // proxy mode — server-side execute (existing behavior, unchanged).
     try {
       // Execute against the resolved connection using the SAME org's JWT — a
@@ -357,13 +368,13 @@ const COMMANDS = {
       },
     );
 
-    // Direct-mode only. A proxy connection has no local token to inject and its
-    // host allowlist is not derivable this way — steer the caller to conn.invoke.
+    // conn.request is the direct-native escape hatch: it needs a local token to
+    // inject and a catalog-derived host allowlist, neither of which a non-direct
+    // connection has. When the resolved connection is not direct-mode there is
+    // nothing for this path to do — log a concise line and return a neutral skip
+    // result (no throw, and no credential-mode detail surfaced to the caller).
     if (mode !== 'direct') {
-      throw Object.assign(
-        new Error('conn.request currently supports direct-mode connections only; use conn.invoke for proxy-mode actions'),
-        { status: 422 },
-      );
+      return skipNonDirect({ connectionId: entry.id, slug: entry.slug });
     }
     if (!entry.applicationId) {
       throw Object.assign(new Error(`cannot run conn.request for ${app ? `app "${app}"` : `connectionId "${connIdParam}"`}: applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
@@ -442,7 +453,7 @@ Applications
 
 Capability cache (runtime/connect/)
   conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
-  conn.request        {app, method, path, query?, body?}        # direct-mode custom passthrough (method/path not in the action catalog)
+  conn.request        {app, method, path, query?, body?}        # call a provider endpoint that has no named action (custom method/path)
   conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
   conn.index          {refresh?}                                # show the local connections index (connection → application)
 

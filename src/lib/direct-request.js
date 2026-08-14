@@ -71,6 +71,18 @@ function statusErr(message, status) {
   return Object.assign(new Error(message), { status });
 }
 
+/**
+ * conn.request is a DIRECT-NATIVE escape hatch: it has a local token to inject
+ * and its host allowlist is derived from the connection's own catalog. A
+ * non-direct connection has neither, so there is nothing for this path to do —
+ * we log a concise line and return a neutral skip result (no throw, and nothing
+ * about credential modes is surfaced to the caller).
+ */
+export function skipNonDirect({ connectionId, slug } = {}, audit = defaultAudit) {
+  audit(`[conn.request] connection ${connectionId} (app ${slug}) not direct-mode — skipped`);
+  return { skipped: true, reason: 'not-direct' };
+}
+
 // ---------------------------------------------------------------------------
 //  Host-allowlist derivation (from the connector's OWN action catalog)
 // ---------------------------------------------------------------------------

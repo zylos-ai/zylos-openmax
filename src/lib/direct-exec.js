@@ -42,8 +42,6 @@
  * testable without network or disk. No import-time side effects.
  */
 
-import { redactSecrets } from './redact.js';
-
 // Cap on the provider response we read into memory (mirrors the server-side
 // 10MB read limit). A larger body is truncated (and flagged) rather than
 // buffered without bound.
@@ -404,11 +402,11 @@ export async function resolveCredential({ orgId, connectionId, cached }, { acqui
 }
 
 // ---------------------------------------------------------------------------
-//  Audit logging (O6) — URL + params only, secrets redacted, short.
+//  Audit logging (O6) — conn.invoke request log: ONLY the request path + mode.
 // ---------------------------------------------------------------------------
 
 // Mirrors client.js's RPC logging surfaces: stdout gated by COCO_RPC_LOG,
-// file append gated by COCO_RPC_LOG_FILE. Tagged [conn.direct] for grep.
+// file append gated by COCO_RPC_LOG_FILE. Tagged [conn.invoke] for grep.
 export function defaultAudit(line) {
   if (process.env.COCO_RPC_LOG !== '0') console.error(line);
   const filePath = process.env.COCO_RPC_LOG_FILE;
@@ -425,15 +423,33 @@ export function defaultAudit(line) {
   }
 }
 
-function auditDirectCall(method, urlTemplate, params, audit) {
-  // Log the UN-expanded url_template, NOT the concrete URL: a query placeholder
-  // like "?api_key={api_key}" would otherwise expand to the plaintext secret in
-  // the log line. The template keeps placeholders literal ("{api_key}"), so no
-  // secret can ever reach the log via the URL. Params are separately redacted
-  // (redactSecrets masks secret-shaped keys), and headers (where Authorization
-  // lives) are never logged. One short line.
-  const safeParams = JSON.stringify(redactSecrets(params || {}));
-  audit(`[conn.direct] → ${method} ${urlTemplate} params: ${safeParams}`);
+/**
+ * Extract just the PATH portion of a url_template — no host, no query string,
+ * no expanded params, so it can never carry a secret. Handles three shapes:
+ *   - absolute URL  ("https://api.github.com/repos/{owner}/issues?x={y}") → "/repos/{owner}/issues"
+ *   - {placeholder}-prefixed ("{base_url}/api/json?tree={t}")             → "/api/json"
+ *   - already a bare path ("/user/repos")                                 → "/user/repos"
+ * Placeholder tokens (e.g. "{owner}") are param NAMES, not values — left literal.
+ */
+export function urlTemplatePath(template) {
+  const t = String(template || '');
+  if (!t) return '';
+  const noQuery = t.split('?')[0];
+  const abs = /^[a-z][a-z0-9+.-]*:\/\/[^/]*(\/.*)?$/i.exec(noQuery);
+  if (abs) return abs[1] || '/';
+  const tpl = /^\{[^}]+\}(.*)$/.exec(noQuery);
+  if (tpl) {
+    const rest = tpl[1];
+    const slash = rest.indexOf('/');
+    return slash >= 0 ? rest.slice(slash) : (rest || '/');
+  }
+  return noQuery;
+}
+
+// conn.invoke per-call request log: the owner's contract is "only path and mode,
+// print nothing else". No method, no url_template query, no params, no token.
+function auditInvokeRequest(urlTemplate, audit) {
+  audit(`[conn.invoke] path=${urlTemplatePath(urlTemplate)} mode=direct`);
 }
 
 // ---------------------------------------------------------------------------
@@ -578,7 +594,7 @@ export async function invokeDirect(
     cred && cred.token_type,
     cred && cred.auth_injection,
   );
-  auditDirectCall(assembled.method, actionDef.url_template, params, audit);
+  auditInvokeRequest(actionDef.url_template, audit);
   let result = await sendDirect(assembled, { fetchImpl });
 
   // Reactive refresh backstop (refreshable/OAuth only): a provider 401 → refresh
@@ -599,7 +615,6 @@ export async function invokeDirect(
         cred.token_type,
         cred.auth_injection,
       );
-      auditDirectCall(assembled.method, actionDef.url_template, params, audit);
       result = await sendDirect(assembled, { fetchImpl });
     }
   }

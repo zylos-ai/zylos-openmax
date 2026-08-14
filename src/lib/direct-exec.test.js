@@ -12,6 +12,7 @@ import {
   resolveCredential,
   sendDirect,
   invokeDirect,
+  urlTemplatePath,
   MAX_RESPONSE_BYTES,
 } from './direct-exec.js';
 
@@ -345,10 +346,40 @@ test('P2-A audit: a secret in a url_template query placeholder never reaches the
   );
   const joined = lines.join('\n');
   assert.ok(lines.length >= 1, 'a direct call must produce an audit line');
+  // The conn.invoke request log is reduced to ONLY path + mode: no query string
+  // (where the secret lives), no params, no method, no token.
+  assert.equal(joined, '[conn.invoke] path=/v1/thing mode=direct');
   assert.ok(!joined.includes('SUPERSECRETVALUE'), `audit line leaked the secret: ${joined}`);
-  assert.ok(joined.includes('{api_key}'), 'audit should log the UN-expanded url_template (placeholder literal)');
+  assert.ok(!joined.includes('{api_key}'), 'the query placeholder must not appear — path only');
   // Sanity: the secret WAS expanded onto the real wire (just not into the log).
   assert.ok(calls[0].url.includes('SUPERSECRETVALUE'), 'the actual request URL still carries the real secret');
+});
+
+// ---------------------------------------------------------------------------
+//  conn.invoke request log — path + mode ONLY (owner: "只打印 path 和 mode")
+// ---------------------------------------------------------------------------
+
+test('urlTemplatePath: absolute / {base_url}-prefixed / bare-path → path portion, no host/query', () => {
+  assert.equal(urlTemplatePath('https://api.github.com/repos/{owner}/{repo}/issues'), '/repos/{owner}/{repo}/issues');
+  assert.equal(urlTemplatePath('https://api.example.com/v1/thing?api_key={api_key}&id={id}'), '/v1/thing');
+  assert.equal(urlTemplatePath('{base_url}/api/json?tree={tree}'), '/api/json');
+  assert.equal(urlTemplatePath('/user/repos'), '/user/repos');
+  assert.equal(urlTemplatePath('https://api.github.com'), '/');
+  assert.equal(urlTemplatePath(''), '');
+});
+
+test('invokeDirect: emits exactly one "[conn.invoke] path=<path> mode=direct" line, nothing else', async () => {
+  const { impl } = fakeFetch({ status: 200, body: { ok: true } });
+  const lines = [];
+  await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
+      params: { id: 'm', format: 'full' }, catalog: [GMAIL_GET],
+      credential: { credential_mode: 'direct', token_type: 'bearer', access_token: 'TOK' },
+    },
+    { fetchImpl: impl, audit: (l) => lines.push(l) },
+  );
+  assert.deepEqual(lines, ['[conn.invoke] path=/gmail/v1/users/me/messages/{id} mode=direct']);
 });
 
 // ---------------------------------------------------------------------------

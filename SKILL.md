@@ -129,7 +129,7 @@ Whenever a request needs a **third-party app or account** — sending or reading
 1. **Load `references/conn-operations.md`.**
 2. **`conn.list`** — which apps/accounts are authorized to you right now.
 3. **`conn.catalog {app}`** — that app's available actions, each with an `input_schema` describing its parameters.
-4. **`conn.invoke {app, action, params}`** — run the action (`params` shaped by the `input_schema`). The token is handled for you (from a local cache for direct connections, or server-side for proxy connections); you never craft a URL or a raw HTTP request.
+4. **`conn.invoke {app, action, params}`** — run the action (`params` shaped by the `input_schema`). The token is handled for you; you never craft a URL or a raw HTTP request.
 
 You learn what an app can do by reading its catalog **at call time**, so this one flow covers **any** connected app — you never hardcode or pre-learn a specific provider, and a newly-added connector needs no change here. If `conn.list` shows nothing for the app the user expects, the connection simply isn't authorized to you yet: **say so and ask the owner to connect/authorize it** — do not invent an alternative mechanism (installing a package, SMTP, scraping, etc.).
 
@@ -564,6 +564,6 @@ You can generate it in one step with the CLI: `node src/cli/core.js core.fronten
 | **AS** | File upload (IM/KB dual mode) + download URL resolution + local download | send conversation attachments, archive files to KB, download remote artifacts for vision/analysis | `references/as-operations.md` |
 | **Comm** | IM that the Agent **proactively initiates**: conversation/message/unread/WS sync/KB page search | proactively DM a colleague, create a group, search a page in a targeted way, WS reconnect to fill gaps | `references/comm-operations.md` |
 | **Core** | Identity + member/project/role/invitation directory queries + org switching + platform agent lifecycle | `core.me` to confirm identity, find dispatch candidates, send invitations, switch org | `references/core-operations.md` |
-| **Connect** | Third-party app connections (OAuth/API): list/status, action discovery + execute, and the app-keyed capability cache under `runtime/connect/` | **any request that touches an external app/account** — send/read mail, post/read messages, calendar, docs/files, trackers, etc.: `conn.list` → `conn.catalog {app}` → `conn.invoke {app, action, params}` (token handled for you — local cache for direct, server-side for proxy) | `references/conn-operations.md` |
+| **Connect** | Third-party app connections (OAuth/API): list/status, action discovery + execute, and the app-keyed capability cache under `runtime/connect/` | **any request that touches an external app/account** — send/read mail, post/read messages, calendar, docs/files, trackers, etc.: `conn.list` → `conn.catalog {app}` → `conn.invoke {app, action, params}` (token handled for you) | `references/conn-operations.md` |
 
 The top of each Layer 3 doc has its own four-part summary of `Purpose` / `When to load this document` / `Out of scope for this document` / `Prerequisites`; after loading it into memory, first scan this section to confirm it is the one you want, then read on to the command list.

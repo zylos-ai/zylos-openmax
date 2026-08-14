@@ -8,6 +8,7 @@ import {
   deriveHostAllowlist,
   assemblePassthroughRequest,
   invokeDirectRequest,
+  skipNonDirect,
   METHOD_ALLOWLIST,
 } from './direct-request.js';
 
@@ -185,6 +186,22 @@ test('assemble: auth_injection descriptor places the credential and emits NO Aut
   });
   assert.equal(req.headers['X-API-Key'], 'KEY');
   assert.equal(req.headers.Authorization, undefined);
+});
+
+// ---------------------------------------------------------------------------
+//  Non-direct skip — conn.request stays direct-only: a non-direct connection is
+//  logged + neutrally skipped (no throw, no credential-mode detail surfaced).
+// ---------------------------------------------------------------------------
+
+test('skipNonDirect: returns the neutral { skipped, reason } result', () => {
+  const out = skipNonDirect({ connectionId: 'c-1', slug: 'github' }, () => {});
+  assert.deepEqual(out, { skipped: true, reason: 'not-direct' });
+});
+
+test('skipNonDirect: logs a concise "not direct-mode — skipped" line with connId + slug', () => {
+  const lines = [];
+  skipNonDirect({ connectionId: 'c-1', slug: 'github' }, (l) => lines.push(l));
+  assert.deepEqual(lines, ['[conn.request] connection c-1 (app github) not direct-mode — skipped']);
 });
 
 // ---------------------------------------------------------------------------
