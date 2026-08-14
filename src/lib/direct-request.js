@@ -32,6 +32,7 @@ import {
   canonicalAuthScheme,        // re-exported for callers/tests that want the scheme
   injectAuthHeaders,
   sendDirect,
+  authReinjectInfo,
   isTokenRefreshable,
   isTokenNearExpiry,
   DEFAULT_EXPIRY_SKEW_MS,
@@ -48,11 +49,52 @@ export const METHOD_ALLOWLIST = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'
 // Methods that carry a JSON body built from the `body` param.
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-// Caller-supplied headers with any of these (case-insensitive) names are
-// REJECTED — auth is ours to inject, never the model's to set.
+// Caller-supplied headers with any of these (case-insensitive, hyphen/underscore
+// -normalized) names are REJECTED — auth is ours to inject, never the model's to
+// set. A comprehensive static list of common credential-bearing headers so the
+// "caller-supplied auth headers are rejected" guarantee is not a fragile 4-item
+// list (a caller could otherwise smuggle a token via X-API-Key, Private-Token, …).
 const AUTH_HEADER_DENYLIST = new Set([
-  'authorization', 'cookie', 'proxy-authorization', 'x-csrf-token',
+  'authorization', 'proxy-authorization', 'cookie', 'set-cookie',
+  'x-csrf-token', 'x-xsrf-token',
+  'x-api-key', 'api-key', 'apikey',
+  'x-auth-token', 'x-auth', 'auth-token', 'access-token', 'x-access-token',
+  'private-token', 'x-amz-security-token',
+  'authentication', 'www-authenticate', 'proxy-authenticate',
 ]);
+
+// Conservative catch-all for obvious credential header-name segments not in the
+// static list. Matches credential-ish tokens delimited by start/end or a
+// hyphen/underscore, so it targets real auth headers (client-secret, x-foo-apikey,
+// user-password) WITHOUT snaring legit non-auth headers such as Idempotency-Key,
+// Accept, Content-Type, or X-GitHub-Api-Version.
+const CREDENTIAL_HEADER_RE = new RegExp(
+  '(?:^|[-_])(?:'
+    + 'api[-_]?key|access[-_]?token|auth[-_]?token|private[-_]?token'
+    + '|x[-_]auth|secret|password|credential'
+  + ')s?(?:[-_]|$)',
+  'i',
+);
+
+/**
+ * Is this caller-supplied header name one we must reject? Rejects (a) the static
+ * denylist, (b) the connection's ACTUAL injected auth header name (`injectedName`,
+ * from auth_injection.name, whatever it is called), and (c) the conservative
+ * credential-segment catch-all. All checks run on both the lowercased name and a
+ * hyphen-normalized variant (so `x_api_key` is caught like `x-api-key`).
+ */
+function isRejectedCallerHeader(name, injectedName) {
+  const lower = String(name == null ? '' : name).trim().toLowerCase();
+  if (!lower) return false;
+  const norm = lower.replace(/_/g, '-');
+  if (AUTH_HEADER_DENYLIST.has(lower) || AUTH_HEADER_DENYLIST.has(norm)) return true;
+  if (injectedName) {
+    const inj = String(injectedName).trim().toLowerCase();
+    const injNorm = inj.replace(/_/g, '-');
+    if (inj && (lower === inj || norm === injNorm)) return true;
+  }
+  return CREDENTIAL_HEADER_RE.test(lower) || CREDENTIAL_HEADER_RE.test(norm);
+}
 
 // Response headers we pass back to the caller — a small, safe subset (never
 // set-cookie / authorization / anything credential-bearing). These are the ones
@@ -225,11 +267,15 @@ export function assemblePassthroughRequest({
   }
   let url = origin + pathPart + (pairs.length ? `?${pairs.join('&')}` : '');
 
-  // Non-auth headers only. A caller-supplied auth header is a hard error.
+  // Non-auth headers only. A caller-supplied auth header is a hard error — the
+  // static denylist, the connection's own injected header name, and the
+  // credential-segment catch-all all reject. Message stays mode-neutral (no
+  // "host-side"/"server-side"/credential-mode vocabulary).
   const outHeaders = {};
+  const injectedName = authInjection && authInjection.name;
   for (const [hk, hv] of Object.entries(headers && typeof headers === 'object' ? headers : {})) {
-    if (AUTH_HEADER_DENYLIST.has(String(hk).toLowerCase())) {
-      throw statusErr(`caller may not set the "${hk}" header — authentication is injected host-side`, 400);
+    if (isRejectedCallerHeader(hk, injectedName)) {
+      throw statusErr(`caller may not set the "${hk}" header — authentication is injected for you`, 400);
     }
     outHeaders[hk] = String(hv);
   }
@@ -342,8 +388,12 @@ export async function invokeDirectRequest(
     }
   }
 
+  // Redirects are gated by the SAME host allowlist as the initial request: a 3xx
+  // to an off-allowlist origin is NOT followed with the credential (P1). reinject
+  // re-attaches the credential on each followed (in-allowlist) hop.
+  const isOriginAllowed = (o) => allowlist.has(o);
   auditRequest(assembled.method, assembled.origin, assembled.pathPart, query, audit);
-  let result = await sendDirect(assembled, { fetchImpl });
+  let result = await sendDirect(assembled, { fetchImpl, isOriginAllowed, reinject: authReinjectInfo(cred) });
 
   // Reactive-401 backstop (refreshable/OAuth only): refresh ONCE and retry.
   if (result.status_code === 401 && acquire && isTokenRefreshable(cred)) {
@@ -354,7 +404,7 @@ export async function invokeDirectRequest(
       cred = fresh;
       assembled = build();
       auditRequest(assembled.method, assembled.origin, assembled.pathPart, query, audit);
-      result = await sendDirect(assembled, { fetchImpl });
+      result = await sendDirect(assembled, { fetchImpl, isOriginAllowed, reinject: authReinjectInfo(cred) });
     }
   }
 

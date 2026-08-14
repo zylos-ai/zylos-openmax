@@ -509,6 +509,46 @@ async function readCappedText(res) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+// 3xx statuses that carry a `Location` we may (conditionally) follow.
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+// Cap on how many redirect hops we follow before giving up (return the last 3xx).
+export const MAX_REDIRECT_HOPS = 5;
+
+/** The origin (scheme+host[+port]) of a URL, or null if it does not parse. */
+function originOf(url) {
+  try { return new URL(url).origin; } catch { return null; }
+}
+
+/** Read a single header from a fetch Response's headers (real Headers or a Map). */
+function getResponseHeader(headers, name) {
+  if (!headers) return null;
+  if (typeof headers.get === 'function') {
+    return headers.get(name) ?? headers.get(name.toLowerCase()) ?? null;
+  }
+  const lower = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers)) {
+    if (String(k).toLowerCase() === lower) return v;
+  }
+  return null;
+}
+
+/**
+ * The per-request credential re-injection descriptor derived from a credential
+ * record. Passed into sendDirect so a FOLLOWED redirect hop can re-inject the
+ * credential freshly (headers are per-request; a query-mode credential must be
+ * re-appended to the new hop's URL). Never carries the credential to a
+ * non-allowed origin — sendDirect only re-injects on an origin that passed the
+ * allow check.
+ */
+export function authReinjectInfo(cred) {
+  return {
+    token: cred && cred.access_token,
+    tokenType: (cred && cred.token_type) || '',
+    authInjection: (cred && cred.auth_injection) || null,
+  };
+}
+
 /**
  * Send one assembled request and normalize the response into the server-parity
  * shape `{ status_code, headers, body }`. Raw passthrough — the provider body is
@@ -516,13 +556,63 @@ async function readCappedText(res) {
  * transformed. The body is read with a streaming cap (see readCappedText): a
  * response over MAX_RESPONSE_BYTES throws (status 502) rather than being
  * buffered whole or silently truncated.
+ *
+ * SECURITY (P1) — redirects are NEVER auto-followed. `redirect: 'manual'` stops
+ * fetch from silently re-sending the injected credential to whatever origin a
+ * 3xx `Location` names (a credential exfiltration that would bypass the host
+ * allowlist). We follow by hand, bounded to MAX_REDIRECT_HOPS, and ONLY when the
+ * next hop's origin passes the same origin check as the initial request:
+ *   - `isOriginAllowed(origin)` predicate — conn.request passes its derived host
+ *     allowlist; when omitted we default to SAME-ORIGIN-ONLY (conn.invoke), i.e.
+ *     the credential may only follow a redirect back to the request's own origin.
+ *   - On a followed hop the credential is re-injected fresh via `reinject`.
+ *   - On an off-allowlist (or unparseable/absent) Location we STOP and return the
+ *     3xx response as-is (status + headers incl. Location, no body-follow) so the
+ *     credential is never sent to a non-allowed origin.
  */
-export async function sendDirect(assembled, { fetchImpl = fetch } = {}) {
-  const res = await fetchImpl(assembled.url, {
+export async function sendDirect(
+  assembled,
+  { fetchImpl = fetch, isOriginAllowed, reinject = null, maxRedirects = MAX_REDIRECT_HOPS } = {},
+) {
+  const initialOrigin = originOf(assembled.url);
+  const allowOrigin = typeof isOriginAllowed === 'function'
+    ? isOriginAllowed
+    : (o) => o != null && o === initialOrigin;
+
+  const bodyInit = assembled.body !== undefined ? JSON.stringify(assembled.body) : undefined;
+
+  let url = assembled.url;
+  let headers = assembled.headers;
+  let res = await fetchImpl(url, {
     method: assembled.method,
-    headers: assembled.headers,
-    body: assembled.body !== undefined ? JSON.stringify(assembled.body) : undefined,
+    headers,
+    body: bodyInit,
+    redirect: 'manual', // never auto-follow — we gate each hop below
   });
+
+  for (let hops = 0; hops < maxRedirects && REDIRECT_STATUSES.has(res.status); hops += 1) {
+    const location = getResponseHeader(res.headers, 'location');
+    if (!location) break; // 3xx without a Location — nothing to follow; return as-is
+    let nextUrl;
+    let nextOrigin = null;
+    try {
+      nextUrl = new URL(location, url).toString();
+      nextOrigin = new URL(nextUrl).origin;
+    } catch { break; } // unparseable Location — return the 3xx as-is, no credential re-send
+    // Off-allowlist target → STOP. Do NOT re-issue with the credential; returning
+    // the 3xx as-is guarantees the credential never reaches a non-allowed origin.
+    if (!allowOrigin(nextOrigin)) break;
+    // Allowed: follow, re-injecting the credential FRESH for this hop.
+    const nextHeaders = { ...assembled.headers };
+    url = reinject ? injectAuthHeaders(nextHeaders, nextUrl, reinject) : nextUrl;
+    headers = nextHeaders;
+    res = await fetchImpl(url, {
+      method: assembled.method,
+      headers,
+      body: bodyInit,
+      redirect: 'manual',
+    });
+  }
 
   const text = await readCappedText(res);
   let body;
@@ -595,7 +685,10 @@ export async function invokeDirect(
     cred && cred.auth_injection,
   );
   auditInvokeRequest(actionDef.url_template, audit);
-  let result = await sendDirect(assembled, { fetchImpl });
+  // conn.invoke has no multi-host allowlist → same-origin-only redirect guard
+  // (sendDirect's default). reinject re-attaches the credential on a same-origin
+  // hop; a cross-origin redirect is never followed with the credential.
+  let result = await sendDirect(assembled, { fetchImpl, reinject: authReinjectInfo(cred) });
 
   // Reactive refresh backstop (refreshable/OAuth only): a provider 401 → refresh
   // ONCE and retry. This covers no-expiry OAuth (GitHub) and any token whose
@@ -615,7 +708,7 @@ export async function invokeDirect(
         cred.token_type,
         cred.auth_injection,
       );
-      result = await sendDirect(assembled, { fetchImpl });
+      result = await sendDirect(assembled, { fetchImpl, reinject: authReinjectInfo(cred) });
     }
   }
 

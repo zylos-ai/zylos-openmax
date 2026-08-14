@@ -15,7 +15,7 @@ A **Connection** is a third-party app or account — mail, chat, calendar, docs,
 
 1. **`conn.list`** — which apps/accounts are authorized to you right now (each entry pairs an `application` with a `connectionId` + `status`).
 2. **`conn.catalog {app}`** (or `conn.app_actions {applicationId}`) — the app's **action catalog**: every action it exposes, each carrying an `input_schema` (JSON Schema) that describes that action's parameters.
-3. **`conn.invoke {app, action, params}`** — run the chosen action with `params` shaped by its `input_schema`. Authorization and token injection happen server-side.
+3. **`conn.invoke {app, action, params}`** — run the chosen action with `params` shaped by its `input_schema`. Authorization/token handling is done for you.
 
 Because you read the catalog and its `input_schema` **at call time**, the same three verbs drive *any* connected app. What differs per app is only the action names and their `input_schema` — which you **discover, never hardcode** — so a newly-added provider needs zero changes here.
 

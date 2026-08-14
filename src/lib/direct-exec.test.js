@@ -11,6 +11,7 @@ import {
   chooseExecMode,
   resolveCredential,
   sendDirect,
+  authReinjectInfo,
   invokeDirect,
   urlTemplatePath,
   MAX_RESPONSE_BYTES,
@@ -18,6 +19,36 @@ import {
 
 // Silence the audit sink for tests (it writes to stderr by default).
 const quietAudit = () => {};
+
+// A fetch double that models NATIVE fetch's redirect-following. `routes` maps an
+// absolute URL → { status, headers, body }. When a route is a 3xx with a Location
+// AND the caller did not pass `redirect: 'manual'`, it AUTO-FOLLOWS by re-invoking
+// itself for the Location URL carrying the SAME headers — exactly the credential
+// re-send that P1 fixes. With `redirect: 'manual'` it returns the 3xx as-is. Every
+// hop (url + headers) is recorded so we can prove which origins saw the credential.
+function redirectingFetch(routes) {
+  const calls = [];
+  const impl = async (url, opts = {}) => {
+    calls.push({ url, opts, headers: opts.headers });
+    const r = routes[url] || { status: 404, body: {} };
+    const status = r.status ?? 200;
+    const loc = r.headers && (r.headers.location || r.headers.Location);
+    if (loc && status >= 300 && status < 400 && opts.redirect !== 'manual') {
+      // Native-fetch auto-follow: re-send with the SAME headers (the leak path).
+      const nextUrl = new URL(loc, url).toString();
+      return impl(nextUrl, opts);
+    }
+    const bodyText = typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {});
+    const bytes = new TextEncoder().encode(bodyText);
+    return {
+      status,
+      headers: new Map(Object.entries(r.headers || { 'content-type': 'application/json' })),
+      body: new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } }),
+      text: async () => bodyText,
+    };
+  };
+  return { impl, calls };
+}
 
 // A fetch double: returns a Response-like object with a status, JSON/text body,
 // and Headers. Exposes `body` as a real web ReadableStream so sendDirect's
@@ -677,4 +708,63 @@ test('O4 invokeDirect: params failing input_schema → 400 before any send', asy
     (e) => e.status === 400,
   );
   assert.equal(calls.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+//  P1 — redirect must NEVER leak the injected credential off-origin. sendDirect
+//  uses redirect: 'manual' and only re-issues (with the credential) when the next
+//  origin passes the same origin guard. conn.invoke's guard is SAME-ORIGIN-ONLY.
+// ---------------------------------------------------------------------------
+
+test('P1 sendDirect: a SAME-ORIGIN 3xx is followed with redirect:manual and the credential re-injected', async () => {
+  const { impl, calls } = redirectingFetch({
+    'https://gmail.googleapis.com/a': { status: 302, headers: { location: 'https://gmail.googleapis.com/b' } },
+    'https://gmail.googleapis.com/b': { status: 200, body: { ok: true } },
+  });
+  const out = await sendDirect(
+    { url: 'https://gmail.googleapis.com/a', method: 'GET', headers: { Authorization: 'Bearer TOK' } },
+    { fetchImpl: impl, reinject: authReinjectInfo({ access_token: 'TOK', token_type: 'bearer' }) },
+  );
+  assert.equal(out.status_code, 200);
+  assert.equal(calls.length, 2, 'the same-origin hop is followed');
+  assert.equal(calls[0].opts.redirect, 'manual', 'fetch must be told NOT to auto-follow');
+  assert.equal(calls[1].url, 'https://gmail.googleapis.com/b');
+  assert.equal(calls[1].headers.Authorization, 'Bearer TOK', 'credential is re-injected on the followed hop');
+});
+
+test('P1 sendDirect: a CROSS-ORIGIN 3xx is NOT followed — the credential never leaves the origin', async () => {
+  // WITHOUT the fix (default follow), redirectingFetch auto-follows to evil and
+  // re-sends Authorization → `leaked` is non-empty and status is 200. The fix
+  // (redirect:manual + same-origin guard) stops at the 302 and returns it as-is.
+  const { impl, calls } = redirectingFetch({
+    'https://gmail.googleapis.com/a': { status: 302, headers: { location: 'https://evil.example.com/steal' } },
+    'https://evil.example.com/steal': { status: 200, body: { stolen: true } },
+  });
+  const out = await sendDirect(
+    { url: 'https://gmail.googleapis.com/a', method: 'GET', headers: { Authorization: 'Bearer SECRETTOK' } },
+    { fetchImpl: impl, reinject: authReinjectInfo({ access_token: 'SECRETTOK', token_type: 'bearer' }) },
+  );
+  assert.equal(out.status_code, 302, 'the off-origin 3xx is returned as-is, not followed');
+  assert.equal(out.headers.location, 'https://evil.example.com/steal');
+  assert.equal(calls.length, 1, 'no second request is issued');
+  const leaked = calls.filter((c) => c.url.includes('evil.example.com') && c.headers && c.headers.Authorization);
+  assert.equal(leaked.length, 0, 'the injected credential must NEVER reach the off-origin host');
+});
+
+test('P1 invokeDirect: a cross-origin redirect from an action is NOT followed with the credential', async () => {
+  const { impl, calls } = redirectingFetch({
+    'https://gmail.googleapis.com/gmail/v1/users/me/messages/m1?format=full': { status: 302, headers: { location: 'https://accounts.google.com/steal' } },
+    'https://accounts.google.com/steal': { status: 200, body: { stolen: true } },
+  });
+  const out = await invokeDirect(
+    {
+      orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 'gmail-messages/get',
+      params: { id: 'm1', format: 'full' }, catalog: [GMAIL_GET],
+      credential: { credential_mode: 'direct', token_type: 'bearer', access_token: 'GHTOK-SECRET' },
+    },
+    { fetchImpl: impl, audit: quietAudit },
+  );
+  assert.equal(out.status_code, 302, 'conn.invoke uses a same-origin guard — the cross-origin 3xx is surfaced as-is');
+  assert.equal(calls.length, 1, 'no credentialed request may be issued to the redirect target');
+  assert.equal(calls.filter((c) => c.url.includes('accounts.google.com')).length, 0);
 });

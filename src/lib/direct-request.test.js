@@ -36,6 +36,31 @@ function fakeFetch(responses) {
   return { impl, calls };
 }
 
+// A fetch double that models NATIVE fetch redirect-following (see direct-exec.test.js).
+// A 3xx route with a Location auto-follows (re-sending the SAME headers — the leak)
+// UNLESS the caller passed redirect:'manual'. Records every hop's url + headers.
+function redirectingFetch(routes) {
+  const calls = [];
+  const impl = async (url, opts = {}) => {
+    calls.push({ url, opts, headers: opts.headers });
+    const r = routes[url] || { status: 404, body: {} };
+    const status = r.status ?? 200;
+    const loc = r.headers && (r.headers.location || r.headers.Location);
+    if (loc && status >= 300 && status < 400 && opts.redirect !== 'manual') {
+      return impl(new URL(loc, url).toString(), opts);
+    }
+    const bodyText = typeof r.body === 'string' ? r.body : JSON.stringify(r.body ?? {});
+    const bytes = new TextEncoder().encode(bodyText);
+    return {
+      status,
+      headers: new Map(Object.entries(r.headers || { 'content-type': 'application/json' })),
+      body: new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } }),
+      text: async () => bodyText,
+    };
+  };
+  return { impl, calls };
+}
+
 // A GitHub-shaped catalog: two SaaS actions on api.github.com, seeding the host
 // allowlist purely from their url_templates.
 const GH_CATALOG = [
@@ -308,4 +333,91 @@ test('invokeDirectRequest: self-hosted connector uses {base_url} as its primary 
   );
   assert.equal(calls[0].url, 'https://jenkins.example.com/queue/api/json');
   assert.equal(out.status, 200);
+});
+
+// ---------------------------------------------------------------------------
+//  P1 — redirect must NOT leak the injected credential past the host allowlist.
+//  The reviewer's scenario: an allowlisted origin 302s to an OFF-allowlist origin;
+//  the credential must never be re-sent to that origin.
+// ---------------------------------------------------------------------------
+
+test('P1 invokeDirectRequest: an in-allowlist origin 302 → OFF-allowlist origin is NOT followed; credential never re-sent', async () => {
+  // WITHOUT the fix, native-fetch auto-follow re-sends Authorization to evil (leak);
+  // WITH the fix (redirect:manual + allowlist origin guard) sendDirect returns the 302.
+  const { impl, calls } = redirectingFetch({
+    'https://api.github.com/user/repos': { status: 302, headers: { location: 'https://evil.example.com/steal' } },
+    'https://evil.example.com/steal': { status: 200, body: { stolen: true } },
+  });
+  const out = await invokeDirectRequest(
+    { orgId: 'o', connection: { id: 'c', applicationId: 'a' }, method: 'GET', path: '/user/repos', catalog: GH_CATALOG, credential: { ...GH_CRED, access_token: 'GHTOK-SECRET' } },
+    { fetchImpl: impl, audit: quietAudit },
+  );
+  assert.equal(out.status, 302, 'the off-allowlist 3xx is returned as-is, not followed');
+  assert.equal(out.headers.location, 'https://evil.example.com/steal', 'Location is surfaced (a safe response header)');
+  assert.equal(calls.length, 1, 'only the initial in-allowlist request is issued');
+  const leaked = calls.filter((c) => c.url.includes('evil.example.com') && c.headers && c.headers.Authorization);
+  assert.equal(leaked.length, 0, 'the injected credential must NEVER reach the off-allowlist origin');
+});
+
+test('P1 invokeDirectRequest: an IN-allowlist redirect IS followed with the credential re-injected', async () => {
+  const { impl, calls } = redirectingFetch({
+    'https://api.github.com/user/repos': { status: 302, headers: { location: 'https://uploads.github.com/user/repos' } },
+    'https://uploads.github.com/user/repos': { status: 200, body: { ok: true } },
+  });
+  const out = await invokeDirectRequest(
+    // uploads.github.com is unioned into the allowlist via the connection's extraHosts.
+    { orgId: 'o', connection: { id: 'c', applicationId: 'a', extraHosts: ['uploads.github.com'] }, method: 'GET', path: '/user/repos', catalog: GH_CATALOG, credential: GH_CRED },
+    { fetchImpl: impl, audit: quietAudit },
+  );
+  assert.equal(out.status, 200, 'the in-allowlist redirect is followed');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].opts.redirect, 'manual', 'fetch is told not to auto-follow');
+  assert.equal(calls[1].url, 'https://uploads.github.com/user/repos');
+  assert.equal(calls[1].headers.Authorization, 'Bearer GHTOK', 'credential is re-injected on the followed in-allowlist hop');
+});
+
+// ---------------------------------------------------------------------------
+//  P2 — caller auth-header rejection is comprehensive (not a fragile 4-item list)
+//  yet does not snare legit non-auth headers.
+// ---------------------------------------------------------------------------
+
+test('P2 assemble: common credential headers are rejected (X-API-Key / Api-Key / Private-Token / X-Auth-Token / …)', () => {
+  for (const name of ['X-API-Key', 'Api-Key', 'apikey', 'Private-Token', 'X-Auth-Token', 'Access-Token', 'X-Amz-Security-Token', 'x_api_key', 'Client-Secret', 'X-User-Password']) {
+    assert.throws(
+      () => assembleGh({ headers: { [name]: 'sneaky' } }),
+      (e) => e.status === 400 && /may not set/.test(e.message) && !/host-side|server-side|proxy|direct/i.test(e.message),
+      `${name} must be rejected with a mode-neutral message`,
+    );
+  }
+});
+
+test('P2 assemble: the connection\'s own auth_injection.name is rejected (whatever it is called, incl. _ variant)', () => {
+  const authInjection = { location: 'header', name: 'X-Custom-Key', value_template: '{token}' };
+  // X-Custom-Key is not in the static list nor caught by the regex — only the
+  // dynamic injected-name check rejects it (and its hyphen-normalized variant).
+  assert.throws(
+    () => assembleGh({ authInjection, headers: { 'X-Custom-Key': 'sneaky' } }),
+    (e) => e.status === 400 && /may not set/.test(e.message),
+  );
+  assert.throws(
+    () => assembleGh({ authInjection, headers: { x_custom_key: 'sneaky' } }),
+    (e) => e.status === 400 && /may not set/.test(e.message),
+  );
+});
+
+test('P2 assemble: legit non-auth headers pass through (Accept / Content-Type / X-GitHub-Api-Version / Idempotency-Key)', () => {
+  const req = assembleGh({
+    headers: {
+      Accept: 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Idempotency-Key': 'abc-123',
+      'User-Agent': 'zylos',
+    },
+  });
+  assert.equal(req.headers.Accept, 'application/vnd.github+json');
+  assert.equal(req.headers['Content-Type'], 'application/json');
+  assert.equal(req.headers['X-GitHub-Api-Version'], '2022-11-28');
+  assert.equal(req.headers['Idempotency-Key'], 'abc-123');
+  assert.equal(req.headers['User-Agent'], 'zylos');
 });
