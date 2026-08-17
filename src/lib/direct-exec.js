@@ -644,8 +644,62 @@ export const RAW_CATALOG_FRESHNESS_MS = 24 * 60 * 60 * 1000;
 export const CATALOG_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
 // Methods conn.request accepts (a superset of BODY_METHODS; the read verbs carry
-// no body).
+// no body). TRACE / CONNECT / TRACK / anything else is rejected.
 const RAW_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+
+// Max percent-decode passes when canonicalizing a caller path to a fixed point.
+// decodeURIComponent strictly shrinks the string whenever it changes it (a 3-char
+// "%XX" collapses to 1 char), so any real path stabilizes in a handful of passes;
+// a path still changing after this many passes is pathological and is REJECTED
+// (fail closed) rather than trusted.
+const MAX_PATH_DECODE_ITERS = 8;
+
+/**
+ * Structural method-allowlist gate. Uppercases + checks against RAW_METHODS and
+ * throws 400 on anything else (TRACE / CONNECT / …). Credential-free — safe to
+ * call BEFORE any credential is resolved. Returns the normalized method.
+ */
+export function assertRawMethodAllowed(method) {
+  const m = String(method || 'GET').toUpperCase();
+  if (!RAW_METHODS.has(m)) {
+    throw Object.assign(new Error(`unsupported HTTP method "${method}"`), { status: 400 });
+  }
+  return m;
+}
+
+/**
+ * Canonicalize a caller-supplied `path` to a FIXED POINT and reject a query /
+ * fragment delimiter at ANY percent-encoding layer. Percent-decoding is applied
+ * repeatedly until the string stops changing (a fixed point) or the small
+ * iteration cap is hit; a "?" / "#" surfacing at the literal layer OR at any
+ * decoded layer is rejected — so "%3F"/"%23", double "%253F"/"%2523", triple
+ * "%25253F", … all fail exactly like a literal "?"/"#". A path that never
+ * stabilizes within the cap is rejected too (fail closed). This closes the
+ * double-/triple-encoding bypass a single decode misses. Credential-free.
+ * Returns the normalized path (leading "/") when clean; throws 400 otherwise.
+ */
+export function assertPathHasNoDelimiter(path) {
+  let p = path == null ? '/' : String(path);
+  if (!p.startsWith('/')) p = `/${p}`;
+  const reject = () => {
+    throw Object.assign(
+      new Error('path must not contain "?" or "#" (any percent-encoding layer included, e.g. "%3F"/"%253F") — pass query parameters via the dedicated `query` field'),
+      { status: 400 },
+    );
+  };
+  let cur = p;
+  if (cur.includes('?') || cur.includes('#')) reject();
+  for (let i = 0; i < MAX_PATH_DECODE_ITERS; i++) {
+    let next;
+    try { next = decodeURIComponent(cur); }
+    catch { return p; } // malformed %-escape: cannot decode further; every layer so far is delimiter-clean
+    if (next.includes('?') || next.includes('#')) reject();
+    if (next === cur) return p; // stable fixed point — no delimiter at any layer
+    cur = next;
+  }
+  reject(); // never stabilized within the cap → pathological nesting → fail closed
+  return p; // unreachable (reject throws) — keeps the signature total
+}
 
 /**
  * Extract the static HOST from an action url_template. Returns the lowercased
@@ -826,24 +880,38 @@ function parseIPv6(str) {
   return bytes;
 }
 
-/** Classify 16 IPv6 bytes. true ⇒ disallowed (non-global-unicast / internal). */
+/**
+ * Classify 16 IPv6 bytes. true ⇒ disallowed. FAIL-CLOSED, GLOBAL-UNICAST-ONLY:
+ * rather than enumerate every bad range (error-prone — a missed carve-out like
+ * the deprecated site-local fec0::/10 silently ALLOWS an internal address), this
+ * ALLOWS only what is provably global-unicast and REJECTS everything else.
+ *
+ * The only IPv6 space that is global unicast is 2000::/3 (leading 3 bits 001 ⇒
+ * top byte 0x20–0x3f). So link-local fe80::/10, deprecated site-local fec0::/10
+ * (fec0/fedf/feff), ULA fc00::/7, multicast ff00::/8, loopback ::1, unspecified
+ * ::, and every other reserved range fall OUTSIDE 2000::/3 and are rejected
+ * automatically — no enumeration required. Within 2000::/3 a couple of
+ * special-purpose carve-outs (documentation, 6to4) are still rejected.
+ */
 function ipv6BytesDisallowed(b) {
   const first10Zero = b.slice(0, 10).every((x) => x === 0);
-  // v4-mapped ::ffff:x.x.x.x — classify by the embedded v4 (dotted OR hex form).
+  // v4-mapped ::ffff:x.x.x.x — classify by the embedded v4 (dotted OR hex form),
+  // so the real v4 destination's public/private verdict governs.
   if (first10Zero && b[10] === 0xff && b[11] === 0xff) {
     return ipv4BytesDisallowed([b[12], b[13], b[14], b[15]]);
   }
-  if (b.every((x) => x === 0)) return true;                        // unspecified ::
-  if (b.slice(0, 15).every((x) => x === 0) && b[15] === 1) return true; // loopback ::1 (any spelling)
-  // v4-compatible ::a.b.c.d (deprecated) — classify by the embedded v4 too, so
-  // ::10.0.0.1 / ::127.0.0.1 style forms cannot slip a private v4 through.
+  // v4-compatible ::a.b.c.d (deprecated) — also classify by the embedded v4. This
+  // subsumes unspecified :: (→ 0.0.0.0) and loopback ::1 (→ 0.0.0.1), both of
+  // which the v4 classifier rejects (a===0), and blocks ::10.0.0.1 / ::127.0.0.1.
   if (b.slice(0, 12).every((x) => x === 0)) {
     return ipv4BytesDisallowed([b[12], b[13], b[14], b[15]]);
   }
-  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true;        // link-local fe80::/10 (fe80–febf)
-  if ((b[0] & 0xfe) === 0xfc) return true;                         // ULA fc00::/7
-  if (b[0] === 0xff) return true;                                  // multicast ff00::/8
-  return false;                                                    // global unicast
+  // FAIL-CLOSED: anything not in global-unicast 2000::/3 is disallowed.
+  if ((b[0] & 0xe0) !== 0x20) return true;                         // outside 2000::/3
+  // Special-purpose carve-outs WITHIN 2000::/3 that are not usable global hosts:
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x0d && b[3] === 0xb8) return true; // 2001:db8::/32 documentation
+  if (b[0] === 0x20 && b[1] === 0x02) return true;                 // 2002::/16 6to4 (embeds an arbitrary v4 relay)
+  return false;                                                    // genuine global unicast
 }
 
 /**
@@ -989,32 +1057,17 @@ export function assembleRawRequest(
   tokenType = '',
   authInjection = null,
 ) {
-  const m = String(method || 'GET').toUpperCase();
-  if (!RAW_METHODS.has(m)) {
-    throw Object.assign(new Error(`unsupported HTTP method "${method}"`), { status: 400 });
-  }
+  const m = assertRawMethodAllowed(method);
   if (!authority) {
     throw Object.assign(new Error('assembleRawRequest: authority (host) is required'), { status: 400 });
   }
-  let p = path == null ? '/' : String(path);
-  if (!p.startsWith('/')) p = `/${p}`;
   // The query string and fragment are CLI-assembled from the dedicated `query`
   // field; a "?"/"#" embedded in `path` is rejected so a caller-supplied secret
   // (e.g. "/v1/items?api_key=SECRET") can never ride in via the path and reach a
-  // log or the wire un-owned. Query params MUST go through `query`.
-  //
-  // CANONICALIZATION-AWARE: a percent-encoded "%3F"(?) / "%23"(#) decodes to the
-  // same delimiter and would otherwise slip a query/secret ("/v1/%3Fapi_key%3D…")
-  // past the literal check and into the audit line verbatim. Decode ONCE and
-  // reject the encoded forms exactly like their literal counterparts.
-  let decodedPath = p;
-  try { decodedPath = decodeURIComponent(p); } catch { /* malformed %-escape → keep raw */ }
-  if (p.includes('?') || p.includes('#') || decodedPath.includes('?') || decodedPath.includes('#')) {
-    throw Object.assign(
-      new Error('path must not contain "?" or "#" (encoded "%3F"/"%23" included) — pass query parameters via the dedicated `query` field'),
-      { status: 400 },
-    );
-  }
+  // log or the wire un-owned. Query params MUST go through `query`. The check is
+  // canonicalization-aware to a FIXED POINT (see assertPathHasNoDelimiter): a
+  // "%3F"/"%253F"/… encoded delimiter at ANY layer is rejected like a literal one.
+  const p = assertPathHasNoDelimiter(path);
 
   const qs = buildRawQuery(query);
   let url = `https://${authority}${p}`;
@@ -1137,6 +1190,15 @@ export function sendPinnedHttps(assembled, pin, tlsOptions = {}) {
         headers,
         servername: url.hostname, // SNI = real host (cert validated against it)
         lookup: pinnedLookup(pin),
+        // CONNECTION POOLING DISABLED. https.globalAgent keys sockets by
+        // `hostname:port` — and our hostname is the REAL provider host, identical
+        // across calls even when the pinned IP differs. A pooled socket from an
+        // earlier call would be reused for a NEW request, so the new request's
+        // custom `lookup`/pin would never run and its token would ride the OLD
+        // socket to the OLD pinned IP. `agent:false` forces a FRESH connection
+        // (and thus a fresh pinned lookup) for every call, so a changed pin is
+        // always honoured and a token is never sent on a stale socket.
+        agent: false,
         // TLS trust anchors are default (rejectUnauthorized:true) in production;
         // tests may inject a self-signed loopback CA here without weakening the
         // real path. Only whitelisted TLS knobs are threaded through.
@@ -1185,18 +1247,14 @@ export async function sendRawDirect(assembled, { fetchImpl, pin, tlsOptions } = 
   return sendPinnedHttps(assembled, pin, tlsOptions || {});
 }
 
-// Audit a raw call: method + host + REDACTED PATHNAME only. Headers (where
-// Authorization lives), the query string, the fragment, and the body are NEVER
-// logged — any of them could carry a caller-supplied secret. The pathname is
-// defensively DECODED FIRST (canonicalization-aware) and then stripped of any
-// "?"/"#" tail — so an encoded "%3F…"(?) query smuggled into `path` cannot reach
-// the audit line verbatim (assembleRawRequest already rejects both literal and
-// encoded forms, so this is belt-and-suspenders). One short line, tagged for grep.
-function auditRawCall(method, authority, normPath, audit) {
-  let decoded = String(normPath == null ? '/' : normPath);
-  try { decoded = decodeURIComponent(decoded); } catch { /* malformed %-escape → use raw */ }
-  const pathnameOnly = decoded.split(/[?#]/)[0] || '/';
-  audit(`[conn.request] → ${method} https://${authority}${pathnameOnly}`);
+// Audit a raw call: method + validated HOST + a STATIC REDACTED marker — NEVER
+// any caller-controlled path, query, fragment, header, or body. Even a
+// "canonicalized" pathname is caller-controlled and could carry a secret stuffed
+// before a delimiter (or a path segment that IS a secret), so the path is not
+// logged at all — only the method and the allowlist-validated host, which are
+// CLI-owned. One short line, tagged for grep.
+function auditRawCall(method, authority, audit) {
+  audit(`[conn.request] → ${method} https://${authority}/<path redacted>`);
 }
 
 /**
@@ -1306,6 +1364,15 @@ export async function requestDirect(
   }
   // 3. Reject caller routing-override headers (CLI owns Host).
   assertNoRoutingHeaders(headers);
+  // 3b. METHOD allowlist + PATH delimiter/encoding canonicalization — STRUCTURAL
+  // and credential-free, enforced HERE (not deferred to assembleRawRequest at
+  // step 7, which runs AFTER the credential is read). An illegal method
+  // (TRACE / CONNECT / …) or a query/secret-bearing path ("?"/"#", or ANY
+  // percent-encoding layer of them) is therefore rejected BEFORE getCredential is
+  // ever called — the credential getter is never invoked for a structurally
+  // invalid request. assembleRawRequest re-runs both as belt-and-suspenders.
+  assertRawMethodAllowed(method);
+  assertPathHasNoDelimiter(path);
   // 4. Literal-IP SSRF block on the requested host string.
   if (isDisallowedHost(target.hostname)) {
     throw Object.assign(
@@ -1345,14 +1412,12 @@ export async function requestDirect(
   }
 
   // 7. Assemble (token attached HERE — after every gate) and send to the PINNED IP.
-  let normPath = path == null ? '/' : String(path);
-  if (!normPath.startsWith('/')) normPath = `/${normPath}`;
   const build = () => assembleRawRequest(
     { authority: target.authority, path, method, headers, query, body },
     cred.access_token, cred.token_type, cred.auth_injection,
   );
   let assembled = build();
-  auditRawCall(assembled.method, target.authority, normPath, audit);
+  auditRawCall(assembled.method, target.authority, audit);
   let result = await sendImpl(assembled, { fetchImpl, pin });
 
   // 8. Reactive-401 refresh backstop (refreshable/OAuth only) — refresh once, retry.

@@ -451,9 +451,11 @@ test('resolveAndPin: pins the first validated address; throws 403 when any is pr
   await assert.rejects(() => resolveAndPin('h', async () => []), (e) => e.status === 502);
 });
 
-// P2 — the audit line carries ONLY the redacted pathname (method + host + path);
-// never a query string / fragment / secret, even if one is smuggled downstream.
-test('auditRawCall (via requestDirect): logs method + host + pathname only — no query/secret', async () => {
+// P2 (updated per peer-review #12 fix-3 blocker #3b) — the audit line carries
+// method + validated HOST + a STATIC REDACTED marker ONLY; the caller path,
+// query, fragment, and any secret are NEVER logged (even a "canonicalized"
+// pathname is caller-controlled and could carry a secret before a delimiter).
+test('auditRawCall (via requestDirect): logs method + host + REDACTED path only — no caller path/query/secret', async () => {
   const { impl } = fakeFetch({ status: 200, body: {} });
   const lines = [];
   await requestDirect(
@@ -461,7 +463,8 @@ test('auditRawCall (via requestDirect): logs method + host + pathname only — n
     { fetchImpl: impl, resolve: publicResolve(), now: nowFn, audit: (l) => lines.push(l) },
   );
   assert.equal(lines.length, 1);
-  assert.equal(lines[0], '[conn.request] → GET https://gmail.googleapis.com/gmail/v1/messages');
+  assert.equal(lines[0], '[conn.request] → GET https://gmail.googleapis.com/<path redacted>');
+  assert.ok(!lines[0].includes('/gmail/v1/messages'), 'caller pathname never reaches the audit log');
   assert.ok(!lines[0].includes('CALLER-SECRET'), 'query secret never reaches the audit log');
   assert.ok(!lines[0].includes('SECRET-TOKEN'), 'token never reaches the audit log');
 });
