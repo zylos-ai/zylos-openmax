@@ -105,15 +105,76 @@ async function resolveConnectionForApp(app, orgId, agentId) {
   return entry;
 }
 
+// Format a connection createdAt (ISO string or epoch ms) as YYYY-MM-DD, or with
+// second precision when `time` is set. Returns null when missing/unparseable.
+function fmtCreated(ts, { time = false } = {}) {
+  if (ts == null || ts === '') return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  const iso = d.toISOString();
+  return time ? `${iso.slice(0, 10)} ${iso.slice(11, 19)}` : iso.slice(0, 10);
+}
+
+// Build a guaranteed-NON-EMPTY and guaranteed-UNIQUE human LABEL per candidate,
+// so the agent can refer to same-app connections unambiguously WITHOUT ever
+// exposing the raw connection_id (design §3/§5 empty-name fallback). Precedence:
+//   1. display_name when non-empty;
+//   2. else "<app name> · <created date>" (app name + creation time);
+// then collisions (duplicate/empty display_name, same-day creations) are broken
+// with finer created-time precision and, as a LAST resort, a positional ordinal
+// "(1)/(2)". A raw connection_id is NEVER used as a label.
+export function buildCandidateLabels(entries) {
+  const list = entries || [];
+  const base = list.map((e) => {
+    const dn = (e.displayName || '').trim();
+    if (dn) return dn;
+    const appName = (`${e.name || e.slug || 'connection'}`).trim() || 'connection';
+    const d = fmtCreated(e.createdAt);
+    return d ? `${appName} · ${d}` : appName;
+  });
+  // Disambiguate each group of colliding base labels.
+  const groups = new Map();
+  base.forEach((l, i) => {
+    if (!groups.has(l)) groups.set(l, []);
+    groups.get(l).push(i);
+  });
+  const labels = base.slice();
+  for (const [l, idxs] of groups) {
+    if (idxs.length < 2) continue;
+    const times = idxs.map((i) => fmtCreated(list[i].createdAt, { time: true }));
+    const distinctTimes = times.every(Boolean) && new Set(times).size === idxs.length;
+    idxs.forEach((i, n) => {
+      labels[i] = distinctTimes
+        ? `${l} · ${fmtCreated(list[i].createdAt, { time: true })}`
+        : `${l} (${n + 1})`;
+    });
+  }
+  // Belt-and-suspenders: enforce non-emptiness + global uniqueness.
+  const used = new Set();
+  return labels.map((l, i) => {
+    let label = (l && l.trim()) ? l : `connection (${i + 1})`;
+    if (used.has(label)) {
+      let k = 2;
+      while (used.has(`${label} (${k})`)) k += 1;
+      label = `${label} (${k})`;
+    }
+    used.add(label);
+    return label;
+  });
+}
+
 // Build the `needs_selection` result for the >1-active-connections case. This is
 // a NORMAL return value (printed to stdout, exit 0) — NOT an error — so the
 // agent can act on it. i18n contract: `agent_instruction` is LANGUAGE-NEUTRAL
 // English guidance telling the agent to localize its question into the USER'S
 // language; it deliberately contains NO ready-made zh/en user-facing sentence.
-// `display_name` passes through as-is (it is the only human-readable way to tell
-// two same-app connections apart); the raw connection_id is never shown to the
-// user, only echoed back on retry via `connectionId`.
+// Each candidate carries a guaranteed-non-empty, unique `label` (built from
+// display_name with a created-time fallback) — the agent refers to connections
+// by label; the raw connection_id is never shown to the user, only echoed back
+// on retry via `connectionId`. `display_name` still passes through as-is.
 export function buildNeedsSelection(app, action, candidates) {
+  const list = candidates || [];
+  const labels = buildCandidateLabels(list);
   return {
     needs_selection: true,
     reason: 'multiple_connections',
@@ -121,9 +182,10 @@ export function buildNeedsSelection(app, action, candidates) {
     agent_instruction:
       "Multiple connections match this app. Ask the user which one to use, phrasing your "
       + "question in the USER'S language (they may write Chinese or English). Refer to each "
-      + "connection by its display_name, never the connection_id. Then retry with the chosen connectionId.",
-    candidates: (candidates || []).map((e) => ({
+      + "connection by its label, never the connection_id. Then retry with the chosen connectionId.",
+    candidates: list.map((e, i) => ({
       connection_id: e.id,
+      label: labels[i],
       display_name: e.displayName ?? null,
       status: e.status,
     })),
@@ -353,14 +415,25 @@ const COMMANDS = {
     // (no app), fall back to the resolved slug/id so hints stay meaningful.
     const appLabel = app || entry.slug || entry.id;
 
-    // A reauth_needed event has flagged this connection and cleared its cached
-    // credential (see connection-events.js). Surface an actionable hint instead
-    // of letting the acquire below fail with a bare 404/401. (An owner DM is
-    // attempted separately on a best-effort basis, so we do NOT assert here that
-    // the owner was notified — only that re-authorization is required.)
-    if (entry.status === 'needs_reauth') {
+    // Reject ANY non-active connection BEFORE credential resolution — for BOTH
+    // the app-resolved path (a 0-active fallback may surface a blocked entry) and
+    // the explicit connectionId path (app-resolution bypassed). cws-connect list
+    // responses can mark a connection needs_reauth / error / expired / revoked;
+    // proceeding to acquire a credential for one of these fails opaquely, or worse
+    // calls the provider with a dead token. needs_reauth (incl. the normalized
+    // status:"error"+needs_reauth from toEntry) gets the specific re-authorize
+    // hint; any other blocked status gets a generic actionable error. A reauth_needed
+    // event also clears the cached credential (see connection-events.js), so an
+    // acquire could not help until a human re-authorizes anyway.
+    if (entry.status && entry.status !== 'active') {
+      if (entry.status === 'needs_reauth') {
+        throw Object.assign(
+          new Error(`connection for app "${appLabel}" needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
+          { status: 409 },
+        );
+      }
       throw Object.assign(
-        new Error(`connection for app "${appLabel}" needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
+        new Error(`connection for app "${appLabel}" is not usable (status: ${entry.status}) — it may be expired, revoked, or in an error state. Re-authorize it on the connection page, then retry.`),
         { status: 409 },
       );
     }

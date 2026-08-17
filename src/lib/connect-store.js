@@ -75,17 +75,30 @@ function writeIndex(index, indexPath = INDEX_PATH) {
 function toEntry(conn) {
   const id = conn.id || conn.connection_id;
   if (!id) return null;
+  // Normalize a reauth-required connection to the local blocked state. Some
+  // cws-connect list responses express this as status:"error" + needs_reauth:true
+  // (or a bare needs_reauth flag) rather than a literal "needs_reauth" status; if
+  // we stored the raw status, an "error"+needs_reauth connection would slip past
+  // the conn.invoke reauth guard (which keys on status) after a list/backfill
+  // refresh and reach credential resolution with a dead token. Collapse any
+  // needs_reauth signal to status:"needs_reauth" so the guard always catches it.
+  let status = conn.status || 'active';
+  if (conn.needs_reauth === true || conn.needsReauth === true) status = 'needs_reauth';
   return {
     id,
     applicationId: conn.application_id || conn.applicationId || null,
     slug: conn.application_slug || conn.slug || conn.provider || null,
     // `name` is the APPLICATION name (e.g. "Gmail"); `displayName` is the
-    // connection's user-given label (e.g. "工作邮箱") — the ONLY human-readable
+    // connection's user-given label (e.g. "工作邮箱") — the primary human-readable
     // way to tell two same-app connections apart, so multi-connection
-    // disambiguation asks the user by displayName (never the connection id).
+    // disambiguation asks the user by a label built from it (never the id).
     name: conn.application_name || conn.name || null,
     displayName: conn.display_name || conn.displayName || null,
-    status: conn.status || 'active',
+    // Creation time (ISO string or epoch ms), preserved so a stable, UNIQUE
+    // human label can still be built for legacy connections whose display_name
+    // is empty or collides with another same-app connection's.
+    createdAt: conn.created_at || conn.createdAt || null,
+    status,
   };
 }
 
@@ -108,6 +121,7 @@ export function upsertConnection(conn, indexPath = INDEX_PATH) {
     // display_name) must never null a display_name a richer conn.list record
     // already captured.
     displayName: entry.displayName ?? prev.displayName ?? null,
+    createdAt: entry.createdAt ?? prev.createdAt ?? null,
     status: entry.status ?? prev.status ?? 'active',
   };
   writeIndex(index, indexPath);

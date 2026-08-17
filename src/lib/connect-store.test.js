@@ -124,6 +124,44 @@ test('upsert 叠加：稀疏事件（只带 slug）不清空已知 display_name'
   assert.equal(readIndex(idx).connections.c1.displayName, '工作邮箱');
 });
 
+test('toEntry 保留 createdAt（用于空/重名连接的兜底标签）', () => {
+  const idx = tmpIndex();
+  upsertConnection({ connection_id: 'c1', application_slug: 'gmail', created_at: '2026-01-05T10:00:00Z', status: 'active' }, idx);
+  assert.equal(readIndex(idx).connections.c1.createdAt, '2026-01-05T10:00:00Z');
+  // camelCase 别名也认，且叠加：稀疏事件不清空已知 createdAt
+  upsertConnection({ connection_id: 'c1', provider: 'gmail', status: 'active' }, idx);
+  assert.equal(readIndex(idx).connections.c1.createdAt, '2026-01-05T10:00:00Z');
+});
+
+// --- reauth normalization (invoke guard depends on it) ----------------------
+
+test('toEntry 规范化 error+needs_reauth → status:needs_reauth（被 invoke 守卫拦截）', () => {
+  const idx = tmpIndex();
+  upsertConnection({ connection_id: 'c1', application_slug: 'gmail', status: 'error', needs_reauth: true }, idx);
+  assert.equal(readIndex(idx).connections.c1.status, 'needs_reauth');
+  // 规范化后不再是 active，绝不作为静默候选
+  assert.deepEqual(findActiveConnectionsByApp('gmail', idx), []);
+});
+
+test('toEntry 规范化裸 needs_reauth 标志（无 error status）→ needs_reauth', () => {
+  const idx = tmpIndex();
+  upsertConnection({ connection_id: 'c1', application_slug: 'gmail', status: 'active', needsReauth: true }, idx);
+  assert.equal(readIndex(idx).connections.c1.status, 'needs_reauth');
+});
+
+test('replaceIndexFromList 回填也规范化 needs_reauth（list/backfill 刷新路径）', () => {
+  const idx = tmpIndex();
+  replaceIndexFromList([
+    { id: 'c1', application_id: 'app-1', application_slug: 'gmail', status: 'error', needs_reauth: true },
+    { id: 'c2', application_id: 'app-1', application_slug: 'gmail', status: 'active' },
+  ], idx);
+  assert.equal(readIndex(idx).connections.c1.status, 'needs_reauth');
+  // 只有真正 active 的进入候选
+  const actives = findActiveConnectionsByApp('gmail', idx);
+  assert.equal(actives.length, 1);
+  assert.equal(actives[0].id, 'c2');
+});
+
 // --- findActiveConnectionsByApp (0/1/>1 discrimination) ----------------------
 
 test('findActiveConnectionsByApp 返回该 app 的全部 active（多连接消歧的数据源）', () => {
