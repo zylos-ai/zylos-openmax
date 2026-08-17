@@ -126,3 +126,79 @@ test('negative control: same empty config.orgs but COCO_ORG_ID unset → fail-fa
     await new Promise((r) => server.close(r));
   }
 });
+
+// -----------------------------------------------------------------------------
+// Sibling blocker (auto-task #13, reviewer zylos0t re-review NEEDS-FIX).
+//
+// The P1 fix above lets resolveOrgConfig() return a MINIMAL { org_id } routing
+// block for a COCO_ORG_ID that is not in config.orgs. That is correct for the
+// HTTP/JWT-routed verbs (list_conversations above), but it MUST NOT flow into
+// the CONFIG-BACKED comm commands (sync_owner, dm_policy read+write, dm_list,
+// dm_allow, dm_revoke), which need a real slug/self/access block. Before this
+// re-fix the minimal block made dm_list / read-only dm_policy fabricate success
+// for a non-existent org, and dm_policy-write / dm_allow / dm_revoke / sync_owner
+// crash or emit org "undefined".
+//
+// These pin the intended fail-fast: with empty config.orgs + COCO_ORG_ID set,
+// each of the 5 config-backed commands returns an ACTIONABLE 400 (no crash, no
+// fake success, no config mutation, no config-read API call). This mirrors the
+// old-head fail-fast behavior that the reviewer reproduced on 44ca483.
+
+const ACTIONABLE = /selected via COCO_ORG_ID has no block in config\.orgs/;
+
+// Read config.orgs back off disk to prove no fake write happened.
+function readOrgs(home) {
+  const cfgPath = path.join(home, 'zylos/components/openmax/config.json');
+  return JSON.parse(fs.readFileSync(cfgPath, 'utf-8')).orgs;
+}
+
+// Assert an env-only config-backed command fails fast with an actionable 400
+// and touched neither the mock API nor config.json.
+async function expectConfigMiss400(command, params) {
+  const home = setupEmptyHome();
+  // Match any REST path so ANY leaked call (config-read or member fetch) trips it.
+  const { server, seen } = orgTokenHarness('/api/v1/');
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const r = await run(home, command, params, {
+      COCO_ORG_ID: 'org-env-only',
+      COCO_AUTH_TOKEN: '', COCO_USER_TOKEN: '', COCO_API_KEY: '',
+    }, `http://127.0.0.1:${port}`);
+    assert.equal(r.code, 1, `${command}: expected fail-fast (not fake success), got stdout: ${r.stdout}`);
+    // stderr must be a clean error envelope — proves no crash/stack trace.
+    let err;
+    assert.doesNotThrow(() => { err = JSON.parse(r.stderr); }, `${command}: stderr not a clean error envelope (crash?): ${r.stderr}`);
+    assert.equal(err.status, 400, `${command}: expected 400, got: ${r.stderr}`);
+    assert.match(err.error, ACTIONABLE, `${command}: error must be the actionable config-miss message, got: ${err.error}`);
+    assert.equal(seen.hit, false, `${command}: must NOT hit the API for a non-existent env-only org`);
+    // No fake config mutation — orgs stays empty.
+    assert.deepEqual(readOrgs(home), {}, `${command}: must NOT mutate config.orgs`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+}
+
+test('config-miss regression: comm.dm_list (env-only org NOT in config.orgs) → actionable 400, no fake success', async () => {
+  await expectConfigMiss400('comm.dm_list', {});
+});
+
+test('config-miss regression: comm.dm_policy READ (env-only org NOT in config.orgs) → actionable 400, no fake {dmPolicy} success', async () => {
+  await expectConfigMiss400('comm.dm_policy', {});
+});
+
+test('config-miss regression: comm.dm_policy WRITE (env-only org NOT in config.orgs) → actionable 400, no crash, no config write', async () => {
+  await expectConfigMiss400('comm.dm_policy', { policy: 'open' });
+});
+
+test('config-miss regression: comm.dm_allow (env-only org NOT in config.orgs) → actionable 400, no crash, no config write', async () => {
+  await expectConfigMiss400('comm.dm_allow', { memberId: 'm-1' });
+});
+
+test('config-miss regression: comm.dm_revoke (env-only org NOT in config.orgs) → actionable 400, no crash, no config write', async () => {
+  await expectConfigMiss400('comm.dm_revoke', { memberId: 'm-1' });
+});
+
+test('config-miss regression: comm.sync_owner (env-only org NOT in config.orgs) → actionable 400, no member fetch, no org "undefined"', async () => {
+  await expectConfigMiss400('comm.sync_owner', {});
+});

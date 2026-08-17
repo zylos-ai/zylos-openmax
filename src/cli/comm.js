@@ -37,13 +37,20 @@ function ensureClientMsgId(id) {
 }
 
 /**
- * Resolve the target org block. Accepts `org` as a config key (org_id),
- * org UUID, or org_name (case-insensitive); with neither, defaults to the
- * env-selected org (COCO_ORG_ID) or the single enabled org.
+ * Resolve the target org for HTTP/JWT ROUTING. Accepts `org` as a config key
+ * (org_id), org UUID, or org_name (case-insensitive); with neither, defaults to
+ * the env-selected org (COCO_ORG_ID) or the single enabled org.
  * Returns { slug, org_id, org_name, self, owner, ... } where `slug` is the
  * config key (used for config writes). For an env-only org that is not in
- * config.orgs, returns a minimal { org_id } block carrying just the id for
- * JWT routing (no slug/self — config-backed member/owner ops need config).
+ * config.orgs, returns a MINIMAL { org_id } block carrying just the id for
+ * JWT routing (no slug/self).
+ *
+ * This minimal env-only block is ONLY safe for routing (getForOrg/postForOrg/
+ * delForOrg key off org_id alone). Commands that read/write config-backed
+ * fields (slug/self/access/owner) must instead call resolveConfiguredOrg(),
+ * which rejects the slug-less minimal block with an actionable 400 rather than
+ * fabricating success on / crashing over a non-existent org (reviewer zylos0t
+ * sibling blocker, auto-task #13).
  */
 function resolveOrgConfig(p) {
   const key = p.org || p.orgSlug || p.orgId || p.org_id;
@@ -77,6 +84,35 @@ function resolveOrgConfig(p) {
     new Error(`multiple enabled orgs — pass {"org":"<name>"} (one of: ${names})`),
     { status: 400 },
   );
+}
+
+/**
+ * Resolve the target org for CONFIG-BACKED commands (sync_owner, dm_policy,
+ * dm_list, dm_allow, dm_revoke). These read/write slug/self/access/owner, which
+ * only exist on a real config.orgs block — they cannot operate on the minimal
+ * env-only { org_id } routing block resolveOrgConfig() returns for a
+ * COCO_ORG_ID that is not in config.orgs.
+ *
+ * Delegates org SELECTION to resolveOrgConfig() (so explicit {org}, single-org,
+ * multi-org fail-fast and env-selection all stay identical), then REQUIRES the
+ * result to be a real config block (identified by `slug`). If selection landed
+ * on the slug-less env-only fallback, fail fast with an actionable 400 instead
+ * of returning fake success (dm_list / read-only dm_policy) or crashing on
+ * undefined config (dm_policy write / dm_allow / dm_revoke / sync_owner).
+ */
+function resolveConfiguredOrg(p) {
+  const org = resolveOrgConfig(p);
+  if (!org.slug) {
+    throw Object.assign(
+      new Error(
+        `org ${org.org_id} selected via COCO_ORG_ID has no block in config.orgs; `
+        + `these commands require a configured org (add an orgs.<key> block with `
+        + `slug/self/access, or pass {"org":"<configured org>"})`,
+      ),
+      { status: 400 },
+    );
+  }
+  return org;
 }
 
 /**
@@ -332,7 +368,7 @@ const COMMANDS = {
 
   // ---- Owner ------------------------------------------------------------------
   'comm.sync_owner': async () => {
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const member = await fetchSelfMember(org);
     const coreOwnerId = member?.owner_member_id || '';
     const localOwnerId = org.owner?.member_id || '';
@@ -354,7 +390,7 @@ const COMMANDS = {
   // ---- DM access control (local config, hot-reloaded) -----------------------
 
   'comm.dm_policy': () => {
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const access = org.access || {};
     if (params.policy) {
       const valid = ['open', 'allowlist', 'owner'];
@@ -366,7 +402,7 @@ const COMMANDS = {
   },
 
   'comm.dm_list': () => {
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const access = org.access || {};
     return { org: org.org_name || org.slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
   },
@@ -376,7 +412,7 @@ const COMMANDS = {
       ? [].concat(params.memberIds || params.memberId)
       : [];
     if (!ids.length) throw new Error('memberIds (or memberId) required');
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const result = updateConfig(cfg => {
       const access = cfg.orgs[org.slug].access = cfg.orgs[org.slug].access || {};
       const list = new Set(access.dmAllowFrom || []);
@@ -391,7 +427,7 @@ const COMMANDS = {
       ? [].concat(params.memberIds || params.memberId)
       : [];
     if (!ids.length) throw new Error('memberIds (or memberId) required');
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const result = updateConfig(cfg => {
       const access = cfg.orgs[org.slug].access = cfg.orgs[org.slug].access || {};
       const remove = new Set(ids.map(String));
