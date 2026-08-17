@@ -163,9 +163,8 @@ test('#3 assertPathHasNoDelimiter: single/double/triple-encoded ? and # all reje
     '/v1/%2523frag',           // double-encoded #
     '/v1/items?x=1',           // literal ?
     '/v1/items#f',             // literal #
-    '/100%discount',           // malformed %-escape → FAIL CLOSED (cannot decode)
-    '/x/%ZZ/%253Fapi_key%253DS', // poison prefix ahead of a double-encoded ? — malformed → reject
-    '/x/%E0%A4%A/%253Fsecret',   // truncated UTF-8 escape ahead of a double-encoded ? → reject
+    '/x/%ZZ/%253Fapi_key%253DS', // poison "%ZZ" prefix — decoding CONTINUES past it and the double-encoded ? is caught
+    '/x/%E0%A4%A/%253Fsecret',   // truncated UTF-8 escape ahead of a double-encoded ? — the ? is still caught
   ];
   for (const p of bad) {
     assert.throws(
@@ -174,11 +173,18 @@ test('#3 assertPathHasNoDelimiter: single/double/triple-encoded ? and # all reje
       `path ${p} must be rejected`,
     );
   }
-  // Clean paths (incl. legitimately encoded non-delimiter bytes) are accepted.
+  // Clean paths (incl. legitimately encoded non-delimiter bytes AND encoded
+  // LITERAL percent signs with no delimiter) are accepted — tolerant fixed-point
+  // canonicalization does NOT fail closed on a bare "%" derived from "%25".
   assert.equal(assertPathHasNoDelimiter('/v1/users/me/messages'), '/v1/users/me/messages');
   assert.equal(assertPathHasNoDelimiter('/v1/a%20b'), '/v1/a%20b');       // encoded space
   assert.equal(assertPathHasNoDelimiter('/v1/a%2Fb'), '/v1/a%2Fb');       // encoded slash (not a delimiter)
-  assert.equal(assertPathHasNoDelimiter('/v1/caf%C3%A9'), '/v1/caf%C3%A9'); // WELL-FORMED UTF-8 escape decodes cleanly → accepted
+  assert.equal(assertPathHasNoDelimiter('/v1/caf%C3%A9'), '/v1/caf%C3%A9'); // WELL-FORMED UTF-8 escape → accepted
+  assert.equal(assertPathHasNoDelimiter('/v1/100%25done'), '/v1/100%25done'); // "%25" → literal "%", no delimiter → accepted
+  assert.equal(assertPathHasNoDelimiter('/v1/literal%25'), '/v1/literal%25'); // trailing "%25" → literal "%" → accepted
+  assert.equal(assertPathHasNoDelimiter('/v1/%2525'), '/v1/%2525');       // double-encoded literal "%" (→ "%25" → "%") → accepted
+  assert.equal(assertPathHasNoDelimiter('/100%discount'), '/100%discount'); // bare "%" then non-hex → literal, no delimiter → accepted
+  assert.equal(assertPathHasNoDelimiter('/trailing%'), '/trailing%');    // bare trailing "%" → literal, no delimiter → accepted
   assert.equal(assertPathHasNoDelimiter('rel'), '/rel');                  // leading slash added
 });
 
@@ -308,8 +314,6 @@ const B1_ADDR_MATRIX = [
   ['198.51.100.5', true, 'TEST-NET-2 198.51.100.0/24'],
   ['203.0.113.5', true, 'TEST-NET-3 203.0.113.0/24'],
   ['192.88.99.1', true, '6to4 relay anycast 192.88.99.0/24'],
-  ['192.31.196.1', true, 'AS112-v4 192.31.196.0/24'],
-  ['192.52.193.1', true, 'AMT 192.52.193.0/24'],
   ['240.0.0.1', true, 'reserved 240.0.0.0/4'],
   ['255.255.255.255', true, 'limited broadcast 255.255.255.255/32'],
   ['224.0.0.1', true, 'multicast 224.0.0.0/4'],
@@ -319,9 +323,8 @@ const B1_ADDR_MATRIX = [
   ['169.254.169.254', true, 'cloud metadata 169.254/16'],
   ['100.64.0.1', true, 'CGNAT 100.64/10'],
   // --- IPv6 special-purpose blocks ---
-  ['2001:2::1', true, 'benchmarking 2001:2::/48 (within 2001::/23)'],
+  ['2001:2::1', true, 'benchmarking 2001:2::/48 (within 2001::/23, NOT an allow-exception)'],
   ['2001:db8::1', true, 'documentation 2001:db8::/32'],
-  ['2001:20::1', true, 'ORCHIDv2 2001:20::/28'],
   ['3fff::1', true, 'documentation 3fff::/20 (RFC 9637)'],
   ['3fff:ffff::1', true, 'IANA-reserved 3fff::/16'],
   ['2002:c0a8:0101::1', true, '6to4 2002::/16'],
@@ -341,6 +344,18 @@ const B1_ADDR_MATRIX = [
   ['2607:f8b0:4004:800::200e', false, 'Google global v6'],
   ['2000::1', false, 'first address of global-unicast 2000::/3'],
   ['::ffff:8.8.8.8', false, 'v4-mapped GLOBAL address is allowed'],
+  // --- IANA "Globally Reachable = True" ALLOW exceptions (longest-prefix
+  //     override of a broader deny) that were wrongly 403'd before this fix ---
+  ['192.0.0.9', false, 'PCP anycast 192.0.0.9/32 (GR=True carve-out of 192.0.0.0/24)'],
+  ['192.0.0.10', false, 'TURN anycast 192.0.0.10/32 (GR=True carve-out of 192.0.0.0/24)'],
+  ['192.31.196.1', false, 'AS112-v4 192.31.196.0/24 (GR=True)'],
+  ['192.52.193.1', false, 'AMT 192.52.193.0/24 (GR=True)'],
+  ['2001:1::1', false, 'PCP anycast 2001:1::1/128 (GR=True, inside 2001::/23)'],
+  ['2001:1::2', false, 'TURN anycast 2001:1::2/128 (GR=True, inside 2001::/23)'],
+  ['2001:3::1', false, 'AMT 2001:3::/32 (GR=True, inside 2001::/23)'],
+  ['2001:4:112::1', false, 'AS112-v6 2001:4:112::/48 (GR=True, inside 2001::/23)'],
+  ['2001:20::1', false, 'ORCHIDv2 2001:20::/28 (GR=True, inside 2001::/23)'],
+  ['2001:30::1', false, 'DET 2001:30::/28 (GR=True, inside 2001::/23)'],
 ];
 
 test('B1 isDisallowedAddress: complete special-purpose table — blocked vs. genuine global', () => {
@@ -401,16 +416,48 @@ for (const [addr, family] of [['8.8.8.8', 4], ['2606:4700:4700::1111', 6]]) {
   });
 }
 
+// requestDirect: a host resolving to any IANA GR=True ALLOW exception (formerly
+// over-blocked by the broader deny) is allowed again — getter=1, send=1. This is
+// the concrete regression for the longest-prefix explicit-allow override.
+const B1_ALLOWED_EXCEPTION_DNS = [
+  ['192.0.0.9', 4],   // PCP anycast (carve-out of 192.0.0.0/24)
+  ['192.0.0.10', 4],  // TURN anycast (carve-out of 192.0.0.0/24)
+  ['192.31.196.1', 4], // AS112-v4
+  ['192.52.193.1', 4], // AMT
+  ['2001:1::1', 6],   // PCP
+  ['2001:1::2', 6],   // TURN
+  ['2001:3::1', 6],   // AMT
+  ['2001:4:112::1', 6], // AS112-v6
+  ['2001:20::1', 6],  // ORCHIDv2
+  ['2001:30::1', 6],  // DET
+];
+for (const [addr, family] of B1_ALLOWED_EXCEPTION_DNS) {
+  test(`B1 requestDirect: GR=True allow-exception DNS answer ${addr} → sent, getter=1`, async () => {
+    const { sendImpl, calls } = captureSend({ status: 200, body: { ok: true } });
+    let getterCalls = 0;
+    const res = await requestDirect(
+      { orgId: 'o', connection: { id: 'c1' }, catalog: CATALOG, catalogFetchedAt: FRESH, domain: 'gmail.googleapis.com', path: '/gmail/v1/users/me/messages', method: 'GET' },
+      { sendImpl, resolve: async () => [{ address: addr, family }], now: nowFn, audit: quietAudit, getCredential: async () => { getterCalls += 1; return CRED; } },
+    );
+    assert.equal(res.status_code, 200);
+    assert.equal(getterCalls, 1, `${addr}: getter called exactly once on the allowed exception`);
+    assert.equal(calls.length, 1, `${addr}: request sent to the pinned exception IP`);
+  });
+}
+
 // ---------------------------------------------------------------------------
-//  B2 — a malformed %-escape must FAIL CLOSED (400), never return the raw path.
-//  Poison prefix ("%ZZ" / truncated UTF-8) ahead of a double-encoded delimiter
-//  must NOT be able to hide the delimiter. Legal escapes still work.
+//  B2 — TOLERANT fixed-point canonicalizer. A poison prefix ("%ZZ" / truncated
+//  UTF-8) ahead of a double-encoded delimiter must NOT be able to hide it:
+//  decoding STEPS OVER the poison (left literal) and CONTINUES, so the deeper
+//  "%253F" still surfaces "?" and is rejected. But a legitimate encoded LITERAL
+//  percent with no delimiter ("%25"/"%2525"/"literal%25"/"100%25done") must be
+//  ACCEPTED — it canonicalizes to a bare "%", which is NOT a delimiter and must
+//  NOT fail closed. Delimiters at any encoding layer are still rejected.
 // ---------------------------------------------------------------------------
 
 for (const [label, p] of [
   ['poison "%ZZ" prefix + double-encoded ?', '/x/%ZZ/%253Fapi_key%253DCALLER-SECRET'],
   ['truncated UTF-8 prefix + double-encoded ?', '/x/%E0%A4%A/%253Fsecret'],
-  ['bare trailing "%"', '/x/100%'],
 ]) {
   test(`B2 requestDirect: ${label} → 400, getter=0, send=0, secret NEVER audited`, async () => {
     const { sendImpl, calls } = captureSend({ status: 200 });
@@ -423,18 +470,43 @@ for (const [label, p] of [
       ),
       (err) => { assert.equal(err.status, 400); return true; },
     );
-    assert.equal(getterCalls, 0, 'malformed-escape path rejected before the credential getter');
+    assert.equal(getterCalls, 0, 'delimiter (surfaced past the poison prefix) rejected before the credential getter');
     assert.equal(calls.length, 0, 'nothing sent');
     assert.ok(!logged.some((l) => /CALLER-SECRET|api_key|secret/i.test(l)), 'no secret substring in any audit line');
   });
 }
 
-test('B2 assertPathHasNoDelimiter: malformed escapes throw 400; well-formed escapes still succeed', () => {
-  for (const bad of ['/x/%ZZ/%253F', '/x/%E0%A4%A/y', '/100%discount', '/trailing%']) {
-    assert.throws(() => assertPathHasNoDelimiter(bad), (e) => e.status === 400, `${bad} must fail closed`);
-  }
-  // Well-formed escapes that reach a delimiter-free fixed point are accepted.
+// requestDirect: a legitimate encoded-literal-percent path with NO delimiter is
+// ACCEPTED end-to-end — getter=1, send=1. These were wrongly 400'd by the old
+// (over-strict) fail-closed-on-derived-"%" loop.
+for (const p of ['/v1/100%25done', '/v1/literal%25', '/v1/%2525', '/v1/caf%C3%A9', '/v1/a%20b', '/v1/a%2Fb']) {
+  test(`B2 requestDirect: legit encoded-literal path ${p} → 200, getter=1, send=1`, async () => {
+    const { sendImpl, calls } = captureSend({ status: 200, body: { ok: true } });
+    let getterCalls = 0;
+    const res = await requestDirect(
+      { orgId: 'o', connection: { id: 'c1' }, catalog: CATALOG, catalogFetchedAt: FRESH, domain: 'gmail.googleapis.com', path: p, method: 'GET' },
+      { sendImpl, resolve: publicResolve(), now: nowFn, audit: quietAudit, getCredential: async () => { getterCalls += 1; return CRED; } },
+    );
+    assert.equal(res.status_code, 200, `${p} accepted`);
+    assert.equal(getterCalls, 1, `${p}: getter called exactly once`);
+    assert.equal(calls.length, 1, `${p}: request sent`);
+  });
+}
+
+test('B2 assertPathHasNoDelimiter: poison+hidden-delimiter fails closed; legit encoded-literal % succeeds', () => {
+  // A delimiter surfacing at ANY layer is rejected — even behind a poison prefix
+  // that used to halt decoding.
+  assert.throws(() => assertPathHasNoDelimiter('/x/%ZZ/%253F'), (e) => e.status === 400, 'poison "%ZZ" must not hide the double-encoded ?');
+  assert.throws(() => assertPathHasNoDelimiter('/x/%E0%A4%A/%253F'), (e) => e.status === 400, 'truncated UTF-8 must not hide the double-encoded ?');
+  // Legit encoded-literal-percent paths (no delimiter) reach a fixed point and
+  // are ACCEPTED — tolerant decoding leaves undecodable/invalid "%" literal
+  // rather than failing closed.
   assert.equal(assertPathHasNoDelimiter('/v1/a%20b'), '/v1/a%20b');
   assert.equal(assertPathHasNoDelimiter('/v1/caf%C3%A9'), '/v1/caf%C3%A9');
   assert.equal(assertPathHasNoDelimiter('/v1/a%2Fb'), '/v1/a%2Fb');
+  assert.equal(assertPathHasNoDelimiter('/v1/100%25done'), '/v1/100%25done');
+  assert.equal(assertPathHasNoDelimiter('/v1/literal%25'), '/v1/literal%25');
+  assert.equal(assertPathHasNoDelimiter('/v1/%2525'), '/v1/%2525');
+  assert.equal(assertPathHasNoDelimiter('/100%discount'), '/100%discount');
+  assert.equal(assertPathHasNoDelimiter('/trailing%'), '/trailing%');
 });

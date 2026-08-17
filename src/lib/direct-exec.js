@@ -648,8 +648,9 @@ export const CATALOG_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const RAW_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 
 // Max percent-decode passes when canonicalizing a caller path to a fixed point.
-// decodeURIComponent strictly shrinks the string whenever it changes it (a 3-char
-// "%XX" collapses to 1 char), so any real path stabilizes in a handful of passes;
+// A tolerant layer decode strictly shrinks the string whenever it changes it
+// (each decoded "%XX" collapses 3 chars to ≤3, and at least one does or the pass
+// is a no-op fixed point), so any real path stabilizes in a handful of passes;
 // a path still changing after this many passes is pathological and is REJECTED
 // (fail closed) rather than trusted.
 const MAX_PATH_DECODE_ITERS = 8;
@@ -668,18 +669,37 @@ export function assertRawMethodAllowed(method) {
 }
 
 /**
+ * Decode ONE percent-encoding layer TOLERANTLY: every VALID "%XX" (two hex
+ * digits) is decoded; every INVALID "%" sequence (e.g. a bare "%", "%Z", "%ZZ",
+ * a truncated multi-byte tail like the trailing "%A" of "%E0%A4%A") is LEFT
+ * LITERAL rather than throwing. This is the key difference from a raw
+ * decodeURIComponent: a poison prefix can no longer HALT decoding and hide a
+ * double-encoded delimiter deeper in the string — decoding simply steps over the
+ * poison and keeps going. A lone "%XX" that is a mid-sequence UTF-8 byte
+ * (decodeURIComponent throws) is also left literal; delimiters "?"/"#" are ASCII
+ * and single-byte ("%3F"/"%23"), so leaving multi-byte fragments encoded never
+ * hides one.
+ */
+function decodeOnePercentLayer(s) {
+  return s.replace(/%[0-9a-fA-F]{2}/g, (m) => {
+    try { return decodeURIComponent(m); } catch { return m; } // undecodable byte → literal
+  });
+}
+
+/**
  * Canonicalize a caller-supplied `path` to a FIXED POINT and reject a query /
- * fragment delimiter at ANY percent-encoding layer. Percent-decoding is applied
- * repeatedly until the string stops changing (a fixed point) or the small
- * iteration cap is hit; a "?" / "#" surfacing at the literal layer OR at any
- * decoded layer is rejected — so "%3F"/"%23", double "%253F"/"%2523", triple
- * "%25253F", … all fail exactly like a literal "?"/"#". A path that never
- * stabilizes within the cap is rejected too (fail closed), AND a malformed
- * percent-escape (decodeURIComponent throws) is rejected rather than trusted —
- * otherwise a poison prefix like "%ZZ" would halt decoding and hide a
- * double-encoded delimiter deeper in the string. This closes the
- * double-/triple-encoding bypass a single decode misses. Credential-free.
- * Returns the normalized path (leading "/") when clean; throws 400 otherwise.
+ * fragment delimiter at ANY percent-encoding layer. A tolerant layer decode
+ * (decodeOnePercentLayer) is applied repeatedly until the string stops changing
+ * (a fixed point) or the small iteration cap is hit; a "?" / "#" surfacing at
+ * the literal layer OR at any decoded layer is rejected — so "%3F"/"%23", double
+ * "%253F"/"%2523", triple "%25253F", … all fail exactly like a literal "?"/"#".
+ * Because the decode is tolerant, a legitimate encoded LITERAL percent with no
+ * delimiter (e.g. "/v1/100%25done", "/v1/literal%25", "/v1/%2525") canonicalizes
+ * to a bare "%" and is ACCEPTED, while a poison prefix ("%ZZ", a truncated UTF-8
+ * escape) can no longer halt decoding to hide a double-encoded delimiter behind
+ * it — decoding continues past the poison and still catches the "%253F". A path
+ * that never stabilizes within the cap is rejected (fail closed). Credential-
+ * free. Returns the normalized path (leading "/") when clean; throws 400 otherwise.
  */
 export function assertPathHasNoDelimiter(path) {
   let p = path == null ? '/' : String(path);
@@ -693,14 +713,9 @@ export function assertPathHasNoDelimiter(path) {
   let cur = p;
   if (cur.includes('?') || cur.includes('#')) reject();
   for (let i = 0; i < MAX_PATH_DECODE_ITERS; i++) {
-    let next;
-    try { next = decodeURIComponent(cur); }
-    catch { reject(); } // malformed %-escape: FAIL CLOSED. A decode error halts
-    // decoding, so we cannot prove the deeper layers are delimiter-free — a
-    // poison prefix like "%ZZ" ahead of a double-encoded "%253F" would otherwise
-    // hide the delimiter. Reject rather than trust the partially-decoded string.
-    if (next.includes('?') || next.includes('#')) reject();
+    const next = decodeOnePercentLayer(cur);
     if (next === cur) return p; // stable fixed point — no delimiter at any layer
+    if (next.includes('?') || next.includes('#')) reject();
     cur = next;
   }
   reject(); // never stabilized within the cap → pathological nesting → fail closed
@@ -864,10 +879,9 @@ const IPV4_DISALLOWED_CIDRS = [
   [127, 0, 0, 0, 8],      // loopback
   [169, 254, 0, 0, 16],   // link-local (incl. cloud metadata 169.254.169.254)
   [172, 16, 0, 0, 12],    // private
-  [192, 0, 0, 0, 24],     // IETF protocol assignments
+  [192, 0, 0, 0, 24],     // IETF protocol assignments (mostly GR=False; two /32
+                          //   anycast carve-outs are GR=True — see ALLOW table)
   [192, 0, 2, 0, 24],     // TEST-NET-1 (documentation)
-  [192, 31, 196, 0, 24],  // AS112-v4 direct delegation
-  [192, 52, 193, 0, 24],  // AMT
   [192, 88, 99, 0, 24],   // 6to4 relay anycast (deprecated)
   [192, 168, 0, 0, 16],   // private
   [198, 18, 0, 0, 15],    // benchmarking (198.18/15)
@@ -877,8 +891,31 @@ const IPV4_DISALLOWED_CIDRS = [
   [240, 0, 0, 0, 4],      // reserved (240/4, incl. 255.255.255.255 limited broadcast)
 ];
 
-/** Classify 4 IPv4 octets against the special-purpose table. true ⇒ disallowed. */
+// IANA IPv4 Special-Purpose ALLOW exceptions — blocks the registry marks
+// "Globally Reachable = True" that either sit INSIDE a broader GR=False deny
+// block above (the two /32 anycast carve-outs of 192.0.0.0/24) or were formerly
+// over-blocked as whole /24s (AS112-v4, AMT). Checked FIRST; on a match the
+// address is ALLOWED — an explicit longest-prefix override of the broader deny
+// (an allow exception is always as-specific-or-more-specific than the deny block
+// it carves out). A new GR=True carve-out is a one-line addition. Each entry is
+// [a, b, c, d, prefixLen].
+const IPV4_ALLOWED_EXCEPTIONS = [
+  [192, 0, 0, 9, 32],     // PCP anycast (GR=True) — carve-out of 192.0.0.0/24
+  [192, 0, 0, 10, 32],    // TURN anycast (GR=True) — carve-out of 192.0.0.0/24
+  [192, 31, 196, 0, 24],  // AS112-v4 direct delegation (GR=True)
+  [192, 52, 193, 0, 24],  // AMT (GR=True)
+];
+
+/**
+ * Classify 4 IPv4 octets. true ⇒ disallowed. LONGEST-PREFIX with explicit
+ * ALLOW override: an address matching a GR=True allow exception is allowed even
+ * when it falls inside a broader GR=False deny block; otherwise a deny match
+ * rejects; otherwise (public unicast) it is allowed.
+ */
 function ipv4BytesDisallowed(bytes) {
+  for (const c of IPV4_ALLOWED_EXCEPTIONS) {
+    if (inCidr(bytes, c, c[4])) return false; // explicit GR=True carve-out wins
+  }
   for (const c of IPV4_DISALLOWED_CIDRS) {
     if (inCidr(bytes, c, c[4])) return true;
   }
@@ -939,8 +976,11 @@ const IPV6_DISALLOWED_CIDRS = [
   ['64:ff9b::', 96],     // NAT64 well-known prefix (IPv4/IPv6 translation)
   ['64:ff9b:1::', 48],   // NAT64 local-use
   ['100::', 64],         // discard-only sink
-  ['2001::', 23],        // IETF protocol assignments (incl. 2001:2::/48 benchmarking, 2001:20::/28)
-  ['2001:20::', 28],     // ORCHIDv2 (subsumed by 2001::/23 but explicit)
+  ['2001::', 23],        // IETF protocol assignments (incl. 2001:2::/48 benchmarking);
+                         //   several MORE-specific GR=True carve-outs inside it
+                         //   (PCP/TURN 2001:1::/32, AMT 2001:3::/32, AS112-v6
+                         //   2001:4:112::/48, ORCHIDv2 2001:20::/28, DET 2001:30::/28)
+                         //   are re-allowed by the ALLOW table below
   ['2001:db8::', 32],    // documentation (NOT inside 2001::/23 — needs its own entry)
   ['2002::', 16],        // 6to4 (embeds an arbitrary v4 relay)
   ['3fff::', 16],        // RFC 9637 documentation is 3fff::/20; the whole 3fff::/16 is IANA-reserved, not globally reachable
@@ -951,15 +991,33 @@ const IPV6_DISALLOWED_CIDRS = [
   ['ff00::', 8],         // multicast
 ].map(([addr, len]) => [parseIPv6(addr), len]);
 
+// IANA IPv6 Special-Purpose ALLOW exceptions — the "Globally Reachable = True"
+// blocks that sit INSIDE the broader GR=False 2001::/23 deny block above, as
+// [addressString, prefixLen] parsed to 16 bytes once at load. Checked FIRST; on
+// a match the address is ALLOWED — a longest-prefix override of the broader deny
+// (each exception is strictly more specific than 2001::/23). A new GR=True
+// carve-out is a one-line addition.
+const IPV6_ALLOWED_EXCEPTIONS = [
+  ['2001:1::1', 128],    // PCP anycast (GR=True)
+  ['2001:1::2', 128],    // TURN anycast (GR=True)
+  ['2001:3::', 32],      // AMT (GR=True)
+  ['2001:4:112::', 48],  // AS112-v6 (GR=True)
+  ['2001:20::', 28],     // ORCHIDv2 (GR=True)
+  ['2001:30::', 28],     // DET (GR=True)
+].map(([addr, len]) => [parseIPv6(addr), len]);
+
 /**
  * Classify 16 IPv6 bytes. true ⇒ disallowed. FAIL-CLOSED and
  * GLOBAL-UNICAST-ONLY, in three layers:
  *   1. a v4-mapped (::ffff:0:0/96) or v4-compatible (::/96, incl. :: and ::1)
  *      address is classified by its EMBEDDED IPv4 (dotted OR hex form) — the real
  *      v4 destination's public/private verdict governs;
- *   2. any address matching the IPV6_DISALLOWED_CIDRS special-purpose table is
- *      rejected (documentation 2001:db8::/2001:2::/3fff::, 6to4 2002::, ULA,
- *      link-local, deprecated site-local fec0::/10, NAT64, multicast, …);
+ *   2. an address matching the IPV6_ALLOWED_EXCEPTIONS table (GR=True carve-outs
+ *      inside 2001::/23 — PCP/TURN/AMT/AS112-v6/ORCHIDv2/DET) is ALLOWED first,
+ *      a longest-prefix override; else any address matching the
+ *      IPV6_DISALLOWED_CIDRS special-purpose table is rejected (documentation
+ *      2001:db8::/2001:2::/3fff::, 6to4 2002::, ULA, link-local, deprecated
+ *      site-local fec0::/10, NAT64, multicast, …);
  *   3. THEN anything not inside global-unicast 2000::/3 is rejected outright, so
  *      an unlisted / future non-global range can never slip through as allowed.
  * Only a 2000::/3 address matching NO special-purpose block is allowed.
@@ -974,6 +1032,11 @@ function ipv6BytesDisallowed(b) {
   // embedded v4 (:: → 0.0.0.0 and ::1 → 0.0.0.1 both land in 0.0.0.0/8).
   if (b.slice(0, 12).every((x) => x === 0)) {
     return ipv4BytesDisallowed([b[12], b[13], b[14], b[15]]);
+  }
+  // Explicit GR=True carve-outs (longest-prefix ALLOW) override the broader deny
+  // block that would otherwise swallow them (all sit inside 2001::/23).
+  for (const [netBytes, len] of IPV6_ALLOWED_EXCEPTIONS) {
+    if (inCidr(b, netBytes, len)) return false;
   }
   // Special-purpose / non-globally-reachable CIDR table.
   for (const [netBytes, len] of IPV6_DISALLOWED_CIDRS) {
