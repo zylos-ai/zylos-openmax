@@ -21,11 +21,41 @@
  *   node src/cli/kb.js kb.search '{"query":"周会纪要","limit":10}'
  */
 
-import { get, post, patch, put, del, apiPath } from '../lib/client.js';
+import { getForOrg, postForOrg, patchForOrg, putForOrg, delForOrg, apiPath } from '../lib/client.js';
+import { resolveDefaultOrgId } from '../lib/config.js';
 import { uploadMedia } from './as.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
+
+// Org resolution (mirrors conn.js PR#127). v5 dropped X-Org-Id ("org from JWT
+// principal"), so every KB route — kbs, tree nodes, files, pages, search —
+// requires an org-scoped JWT; an identity-only token 403s. A bare get()/post()
+// would silently fall through to resolveDefaultOrgId(), which returns '' when
+// >1 org is enabled and no org is given — producing that opaque 403. Resolve
+// the operating org (explicit {org} or the single enabled org) and FAIL FAST
+// with an actionable 400 otherwise. Single-org / COCO_ORG_ID unchanged.
+function resolveOrgId() {
+  return params.org || params.orgId || params.org_id || resolveDefaultOrgId();
+}
+function requireOrgId() {
+  const orgId = resolveOrgId();
+  if (!orgId) {
+    throw Object.assign(
+      new Error('cannot resolve org: multiple orgs enabled and no org given — pass {"org":"<org_id>"} or set COCO_ORG_ID'),
+      { status: 400 },
+    );
+  }
+  return orgId;
+}
+
+// Org-scoped shadows of the bare verbs: each call carries the operating org's
+// JWT. Resolved lazily per call so `help` / usage never require an org.
+const get   = (path, query) => getForOrg(requireOrgId(), path, query);
+const post  = (path, body)  => postForOrg(requireOrgId(), path, body);
+const patch = (path, body)  => patchForOrg(requireOrgId(), path, body);
+const put   = (path, body)  => putForOrg(requireOrgId(), path, body);
+const del   = (path)        => delForOrg(requireOrgId(), path);
 
 function requireKbId() {
   const id = params.kbId || params.kb_id;
@@ -268,6 +298,7 @@ const COMMANDS = {
       parentId:    params.parentId,
       mimeType:    params.contentType,
       filename:    params.filename,
+      orgId:       requireOrgId(),
     });
   },
 };

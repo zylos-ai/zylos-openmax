@@ -34,10 +34,10 @@
  *
  *   1. Library exports (imported by scripts/send.js, src/comm-bridge.js,
  *      src/cli/kb.js):
- *        - uploadMedia(localPath, opts)   — IM if conversationId, else KB
- *        - downloadMedia(uriOrId, file?)  — fetch bytes from artifact://<id>
- *        - getMediaUrl(uriOrId)           — resolve artifact://<id> → URL
- *        - resolveUris(uris)              — batch /artifacts/resolve
+ *        - uploadMedia(localPath, opts)        — IM if conversationId, else KB (opts.orgId scopes it)
+ *        - downloadMedia(uriOrId, file?, orgId?) — fetch bytes from artifact://<id>
+ *        - getMediaUrl(uriOrId, orgId?)        — resolve artifact://<id> → URL
+ *        - resolveUris(uris, orgId?)           — batch /artifacts/resolve
  *
  *   2. CLI dispatcher (when invoked as
  *      `node src/cli/as.js <cmd> '<json>'`):
@@ -50,7 +50,31 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { post, apiPath, putBytes, getBytes } from '../lib/client.js';
+import { postForOrg, apiPath, putBytes, getBytes } from '../lib/client.js';
+import { resolveDefaultOrgId } from '../lib/config.js';
+
+// Org resolution for the artifact surface (mirrors conn.js PR#127). Every
+// /artifacts and /uploads route is org-owned: cws-core resolves the org from
+// the JWT principal and 403s ("org membership required") on an identity-only
+// token. A bare post() would silently fall through to resolveDefaultOrgId(),
+// which returns '' when >1 org is enabled and no org is given — producing that
+// opaque 403. Callers thread an explicit orgId (comm-bridge passes
+// orgConfig.org_id; the CLI resolves {org}); the library funcs below carry it
+// into the org-scoped postForOrg. Single-org / COCO_ORG_ID deployments resolve
+// the one org exactly as before.
+function resolveOrgIdFrom(params = {}) {
+  return params.org || params.orgId || params.org_id || resolveDefaultOrgId();
+}
+function requireOrgIdFrom(params = {}) {
+  const orgId = resolveOrgIdFrom(params);
+  if (!orgId) {
+    throw Object.assign(
+      new Error('cannot resolve org: multiple orgs enabled and no org given — pass {"org":"<org_id>"} or set COCO_ORG_ID'),
+      { status: 400 },
+    );
+  }
+  return orgId;
+}
 
 const HOME = process.env.HOME || '/tmp';
 const TMP_DIR = path.join(HOME, 'zylos/components/openmax/media');
@@ -154,7 +178,8 @@ export async function uploadMedia(localPath, opts = {}) {
     ? { filename: fileName, content_type: contentType, size_bytes: sizeBytes }
     : { parent_id: opts.parentId, filename: fileName, content_type: contentType, size_bytes: sizeBytes };
 
-  const prep = await post(apiPath(prepPath), prepBody);
+  const orgId = requireOrgIdFrom(opts);
+  const prep = await postForOrg(orgId, apiPath(prepPath), prepBody);
 
   const uploadToken   = prep?.upload_token;
   const uploadUrl     = prep?.upload_url;
@@ -175,7 +200,7 @@ export async function uploadMedia(localPath, opts = {}) {
   const finalizePath = isIm
     ? '/conversations/uploads/finalize'
     : '/uploads/finalize';
-  const finalized = await post(apiPath(finalizePath), { upload_token: uploadToken });
+  const finalized = await postForOrg(orgId, apiPath(finalizePath), { upload_token: uploadToken });
 
   if (isIm) {
     // finalized: {media_id, artifact_id}
@@ -206,13 +231,19 @@ export async function uploadMedia(localPath, opts = {}) {
 /**
  * Resolve one artifact id or URI to a presigned URL.
  *
- *   getMediaUrl('artifact://abc-123')     → {url, expiresAt, contentType, name, sizeBytes}
- *   getMediaUrl('abc-123', { inline:1 })  → same, inline disposition
+ *   getMediaUrl('artifact://abc-123', orgId)            → {url, expiresAt, contentType, name, sizeBytes}
+ *   getMediaUrl('abc-123', orgId, { inline:1 })         → same, inline disposition
+ *
+ * Bug A fix (#13): the org id is now a real positional parameter routed through
+ * postForOrg, not an ignored `opts` field. comm-bridge already calls
+ * getMediaUrl(attId, orgConfig.org_id); previously that org_id landed in `opts`
+ * and was silently dropped, so a multi-org media resolve went out identity-only
+ * and 403'd. `orgId` omitted → resolveDefaultOrgId() (single-org unchanged).
  */
-export async function getMediaUrl(idOrUri, opts = {}) {
+export async function getMediaUrl(idOrUri, orgId, opts = {}) {
   const uri = toArtifactUri(idOrUri);
   const inline = opts.inline === true || opts.mode === 'preview';
-  const res = await post(apiPath('/artifacts/resolve'), { uris: [uri], inline });
+  const res = await postForOrg(orgId || resolveDefaultOrgId(), apiPath('/artifacts/resolve'), { uris: [uri], inline });
   const entry = res?.resolved?.[uri];
   if (!entry || !entry.download_url) {
     const failed = res?.failed || [];
@@ -231,11 +262,11 @@ export async function getMediaUrl(idOrUri, opts = {}) {
 /**
  * Batch-resolve `artifact://` URIs to short-lived download URLs.
  */
-export async function resolveUris(uris, opts = {}) {
+export async function resolveUris(uris, orgId, opts = {}) {
   if (!Array.isArray(uris) || uris.length === 0) {
     throw new Error('resolveUris: uris must be a non-empty array');
   }
-  return post(apiPath('/artifacts/resolve'), {
+  return postForOrg(orgId || resolveDefaultOrgId(), apiPath('/artifacts/resolve'), {
     uris,
     inline: opts.inline === true,
   });
@@ -249,11 +280,11 @@ export async function resolveUris(uris, opts = {}) {
  *   await downloadMedia('artifact://abc-123', 'cat.png')             → resolves first
  *   await downloadMedia('abc-123', 'cat.png')                        → resolves first
  */
-export async function downloadMedia(urlOrIdOrUri, filename) {
+export async function downloadMedia(urlOrIdOrUri, filename, orgId) {
   let url = urlOrIdOrUri;
   let resolvedName;
   if (!/^https?:\/\//i.test(urlOrIdOrUri)) {
-    const meta = await getMediaUrl(urlOrIdOrUri);
+    const meta = await getMediaUrl(urlOrIdOrUri, orgId);
     url = meta.url;
     resolvedName = meta.name;
   }
@@ -280,19 +311,20 @@ const COMMANDS = {
       mediaType:      params.mediaType,
       mimeType:       params.contentType,
       filename:       params.filename,
+      orgId:          requireOrgIdFrom(params),
     });
   },
 
   'as.url': async (params) => {
     const id = params.uri || params.artifactId;
     if (!id) throw new Error('artifactId or uri is required');
-    return getMediaUrl(id, { inline: params.inline === true });
+    return getMediaUrl(id, requireOrgIdFrom(params), { inline: params.inline === true });
   },
 
   'as.download': async (params) => {
     const id = params.uri || params.artifactId;
     if (!id) throw new Error('artifactId or uri is required');
-    const localPath = await downloadMedia(id, params.filename);
+    const localPath = await downloadMedia(id, params.filename, requireOrgIdFrom(params));
     return { localPath };
   },
 
@@ -300,7 +332,7 @@ const COMMANDS = {
     if (!Array.isArray(params.uris) || params.uris.length === 0) {
       throw new Error('uris (non-empty array) is required');
     }
-    return resolveUris(params.uris, { inline: params.inline === true });
+    return resolveUris(params.uris, requireOrgIdFrom(params), { inline: params.inline === true });
   },
 };
 

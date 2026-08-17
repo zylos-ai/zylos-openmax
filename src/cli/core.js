@@ -16,12 +16,43 @@
  *      surface is ready when core adds the endpoint
  */
 
-import { get, post, del, patch, apiPath, frontendUrl } from '../lib/client.js';
-import { enabledOrgs, updateConfig } from '../lib/config.js';
+import { get, post, patch, apiPath, frontendUrl, getForOrg, postForOrg, delForOrg } from '../lib/client.js';
+import { enabledOrgs, updateConfig, resolveDefaultOrgId } from '../lib/config.js';
 import { resolveAgentBaseUrl } from '../lib/agent-domain.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
+
+// Org resolution for the ORG-OWNED commands (mirrors conn.js PR#127). cws-core
+// resolves the org from the JWT principal and 403s ("org membership required")
+// on an identity-only token for these routes. A bare get()/post() would silently
+// fall through to resolveDefaultOrgId(), which returns '' when >1 org is enabled
+// and no org is given — producing that opaque 403. The org-scoped helpers below
+// FAIL FAST with an actionable 400 instead. Single-org / COCO_ORG_ID unchanged.
+//
+// NOTE: this is used ONLY by the org-owned commands (oget/opost/odel). The
+// identity / bootstrap commands (me, self_rename, org_list, org_create,
+// org_switch, invitation_accept, agent_domain) DELIBERATELY keep the bare
+// get/post/patch — they are identity-scoped by definition and must NOT be forced
+// org (doing so would break cross-org / bootstrap flows). For org_get the {orgId}
+// path param doubles as the operating org, so reading a specific org uses that
+// org's own JWT.
+function resolveOrgId() {
+  return params.org || params.orgId || params.org_id || resolveDefaultOrgId();
+}
+function requireOrgId() {
+  const orgId = resolveOrgId();
+  if (!orgId) {
+    throw Object.assign(
+      new Error('cannot resolve org: multiple orgs enabled and no org given — pass {"org":"<org_id>"} or set COCO_ORG_ID'),
+      { status: 400 },
+    );
+  }
+  return orgId;
+}
+const oget  = (path, query) => getForOrg(requireOrgId(), path, query);
+const opost = (path, body)  => postForOrg(requireOrgId(), path, body);
+const odel  = (path)        => delForOrg(requireOrgId(), path);
 
 /** Normalize a scalar-or-array param into an array (drops null/undefined). */
 const toArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
@@ -117,7 +148,7 @@ const COMMANDS = {
   // ✅ Members directory.
   // cws-core uses PageParams (envelope.go) — `page` + `page_size`, NOT cursor/limit.
   // Legacy callers passing `limit` continue to work via the alias.
-  'core.member_list': () => get(apiPath('/members'), {
+  'core.member_list': () => oget(apiPath('/members'), {
     kind:      params.kind || params.type,
     status:    params.status,
     search:    params.search || params.q,
@@ -125,10 +156,10 @@ const COMMANDS = {
     page_size: params.pageSize ?? params.limit,
     order_by:  params.orderBy,
   }),
-  'core.member_get': () => get(apiPath(`/members/${params.memberId}`)),
+  'core.member_get': () => oget(apiPath(`/members/${params.memberId}`)),
 
   // ✅ Project member list
-  'core.project_members': () => get(apiPath(`/projects/${params.projectId}/members`)),
+  'core.project_members': () => oget(apiPath(`/projects/${params.projectId}/members`)),
 
   // ✅ Agent capability profiles — cws-core BFF aggregation a Lead reads to
   // pick a candidate agent for dispatch. A scope is REQUIRED: pass projectId
@@ -137,7 +168,7 @@ const COMMANDS = {
   // `capabilities:true` shorthand) loads skills (agent self-reported) + tags
   // (human-declared); omit for the lightweight view. online_status is always
   // enriched. Open-ended org-wide capability search is intentionally NOT here.
-  'core.agent_profiles': () => get(apiPath('/agent-profiles'), {
+  'core.agent_profiles': () => oget(apiPath('/agent-profiles'), {
     project_id: params.projectId || params.project_id,
     member_id:  toArray(params.memberIds ?? params.memberId ?? params.member_id),
     include:    params.capabilities
@@ -148,19 +179,19 @@ const COMMANDS = {
   // ✅ Platform agents — manage agent member lifecycle.
   // POST /api/v1/platform-agents      body {display_name, ...}
   // DELETE /api/v1/platform-agents/{member_id}
-  'core.platform_agent_create': () => post(apiPath('/platform-agents'), {
+  'core.platform_agent_create': () => opost(apiPath('/platform-agents'), {
     display_name: params.displayName || params.name,
     description:  params.description,
     metadata:     params.metadata,
   }),
-  'core.platform_agent_delete': () => del(apiPath(`/platform-agents/${params.memberId}`)),
+  'core.platform_agent_delete': () => odel(apiPath(`/platform-agents/${params.memberId}`)),
 
   // ✅ Onboarding session — the org's onboarding lifecycle record. A Lead
   // agent woken by the welcome DM reads this to locate the onboarding
   // structure: `core_issue_id` is the guided-conversation Issue to drive
   // (read it + its blueprint via tm.js), `project_id` the onboarding project.
   // 404 = this org never started onboarding.
-  'core.onboarding_session': () => get(apiPath('/onboarding/session')),
+  'core.onboarding_session': () => oget(apiPath('/onboarding/session')),
 
   // ✅ Onboarding funnel event report. Caller must be the in-flight session's
   // lead agent. Self-reportable types: d1_activation (user replied ≥1 round
@@ -168,7 +199,7 @@ const COMMANDS = {
   // Duplicates are absorbed server-side (idempotent 200, recorded=false) —
   // safe to fire without checking first. d7_first_delivery is server-observed
   // on issue accept and cannot be self-reported.
-  'core.onboarding_event': () => post(apiPath('/onboarding/events'), {
+  'core.onboarding_event': () => opost(apiPath('/onboarding/events'), {
     event_type:  params.eventType || params.event_type,
     occurred_at: params.occurredAt || params.occurred_at,
     meta:        params.meta,
@@ -179,7 +210,7 @@ const COMMANDS = {
   // human refers to a live project, and archived duplicates would make the match
   // ambiguous. Pass status:"archived" explicitly to list archived projects.
   // cws-core uses PageParams — `page` + `page_size`, NOT cursor/limit.
-  'core.project_list': () => get(apiPath('/projects'), {
+  'core.project_list': () => oget(apiPath('/projects'), {
     status:    params.status ?? 'active',
     page:      params.page,
     page_size: params.pageSize ?? params.limit,
@@ -190,7 +221,7 @@ const COMMANDS = {
   'core.org_list':   () => get(apiPath('/organizations'), {
     order_by: params.orderBy,
   }),
-  'core.org_get':    () => get(apiPath(`/organizations/${params.orgId}`)),
+  'core.org_get':    () => oget(apiPath(`/organizations/${params.orgId}`)),
   // POST /api/v1/organizations  — create a new org and become its owner.
   // Server requires {name, slug, display_name}: display_name is the
   // caller's display name *within the new org* (the caller is auto-added
@@ -212,7 +243,7 @@ const COMMANDS = {
   'core.org_switch': () => post(apiPath(`/organizations/${params.orgId}/switch`), {}),
 
   // ✅ Roles
-  'core.role_list': () => get(apiPath('/roles'), { scope: params.scope }),
+  'core.role_list': () => oget(apiPath('/roles'), { scope: params.scope }),
 
   // ✅ Invitations
   // POST /api/v1/invitations — body {email?, display_name, role_id, message?}
@@ -221,7 +252,7 @@ const COMMANDS = {
   //   cws-core #86 / MR !138 moved naming to create-time: the name is stored
   //   on the invitation and becomes members.display_name on accept. Server
   //   rejects a blank display_name with 400. Accept either camel or snake.
-  'core.invitation_create': () => post(apiPath('/invitations'), {
+  'core.invitation_create': () => opost(apiPath('/invitations'), {
     email:        params.email,
     display_name: params.displayName ?? params.display_name,
     role_id:      params.roleId,
@@ -230,7 +261,7 @@ const COMMANDS = {
   // GET /api/v1/invitations — query {status?, page?, page_size?, order_by?}
   //   org_id is resolved server-side from the caller's JWT — do NOT send it.
   //   cws-core uses PageParams — `page` + `page_size`, NOT cursor/limit.
-  'core.invitation_list': () => get(apiPath('/invitations'), {
+  'core.invitation_list': () => oget(apiPath('/invitations'), {
     status:    params.status,
     page:      params.page,
     page_size: params.pageSize ?? params.limit,
@@ -244,7 +275,7 @@ const COMMANDS = {
     token: params.token,
   }),
   // DELETE /api/v1/invitations/{invitation_id}
-  'core.invitation_revoke': () => del(apiPath(`/invitations/${params.invitationId}`)),
+  'core.invitation_revoke': () => odel(apiPath(`/invitations/${params.invitationId}`)),
 
   // Local helper — build a browser-navigable frontend URL. Not an API call.
   // Uses server.frontend_base_path (default /cws) + bff_url origin.

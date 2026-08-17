@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { get, post, del, getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
+import { getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
 import { buildMentions } from '../lib/mention.js';
 import { loadConfig, updateConfig, enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
@@ -59,30 +59,47 @@ function resolveOrgConfig(p) {
     throw new Error(`org not found in config: "${key}" (known: ${names || 'none'})`);
   }
   if (enabled.length === 1) return enabled[0];
-  if (enabled.length === 0) throw new Error('no enabled orgs in config.orgs');
+  if (enabled.length === 0) throw Object.assign(new Error('no enabled orgs in config.orgs'), { status: 400 });
   const names = enabled.map((o) => o.org_name || o.slug).join(', ');
-  throw new Error(`multiple enabled orgs — pass {"org":"<name>"} (one of: ${names})`);
+  throw Object.assign(
+    new Error(`multiple enabled orgs — pass {"org":"<name>"} (one of: ${names})`),
+    { status: 400 },
+  );
 }
 
 /**
- * HTTP helpers for a conversation-scoped op. cws-core derives org + caller
- * member from the JWT, so by default we use the ambient (single-org) token —
- * exactly like comm.send / comm.get_messages. For multi-org installs pass
- * `{org}` (config key / org UUID / org_name) and we route through that org's
- * cached JWT via the *ForOrg helpers, avoiding the identity-only-token 401 that
- * `resolveDefaultOrgId()` yields when more than one org is enabled.
+ * HTTP helpers for an org-owned IM op. Every cws-core IM route is org-scoped:
+ * cws-core resolves the org from the JWT principal and 403s on an identity-only
+ * token. We ALWAYS route through the operating org's cached JWT via the *ForOrg
+ * helpers — `resolveOrgConfig(p)` picks the explicit `{org}` (config key / org
+ * UUID / org_name) or the single enabled org, and FAILS FAST (400) on a
+ * multi-org install with no `{org}` instead of silently dropping to a bare,
+ * identity-only call. Single-org / `COCO_ORG_ID` deployments resolve the one
+ * org exactly as before.
+ *
+ * Bug B fix (#13): the previous no-`{org}` branch returned bare
+ * `{ get, post, del }`, so on a multi-org agent the 6 conversation-member
+ * commands (and the 10 formerly-bare commands below) went out identity-only and
+ * 403'd. Resolving a default org here closes that leak.
  */
 function convClient(p) {
-  if (p.org || p.orgSlug || p.orgId || p.org_id) {
-    const org = resolveOrgConfig(p);
-    return {
-      get:  (path, query) => getForOrg(org.org_id, path, query),
-      post: (path, body)  => postForOrg(org.org_id, path, body),
-      del:  (path)        => delForOrg(org.org_id, path),
-    };
-  }
-  return { get, post, del };
+  const org = resolveOrgConfig(p);
+  return {
+    get:  (path, query) => getForOrg(org.org_id, path, query),
+    post: (path, body)  => postForOrg(org.org_id, path, body),
+    del:  (path)        => delForOrg(org.org_id, path),
+  };
 }
+
+// Org-scoped shadows of the bare verbs. Every IM REST command is org-owned, so
+// each resolves the operating org (fail-fast in multi-org) and carries that
+// org's JWT — see convClient above. This converts the 10 formerly-unconditionally
+// -bare commands (list_conversations / create_dm / create_group / get_messages /
+// send / get_message / unread / mark_read / search / sync) without touching each
+// call site.
+const get  = (path, query) => convClient(params).get(path, query);
+const post = (path, body)  => convClient(params).post(path, body);
+const del  = (path)        => convClient(params).del(path);
 
 // Read this agent's own member record from cws-core for the given org; the
 // authoritative owner_member_id lives here.
