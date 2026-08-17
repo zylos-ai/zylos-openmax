@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.4] — 2026-08-17
+
+### Added
+
+- Add the Lead runbook for `issue.idle`: inspect the Issue execution context,
+  decide how to unblock or follow up with Workers, and record the action through
+  normal Work operations without replying to the write-only Scheduler member.
+
+### Changed
+
+- Make dependency-ready handoff follow the visible System Member message contract:
+  resolve upstream Task IDs from the referenced downstream Task's authoritative
+  `depends_on` field instead of relying on hidden `upstreamTaskIds` metadata.
+
 ## [2.14.3] — 2026-08-14
 
 ### Added
