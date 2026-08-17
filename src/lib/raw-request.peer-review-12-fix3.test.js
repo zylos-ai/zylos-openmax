@@ -117,9 +117,13 @@ test('#2 isDisallowedAddress: fail-closed global-only — 2001:db8 doc + 2002 6t
   assert.equal(isDisallowedAddress('2400:cb00:2048:1::c629:d7a2'), false, 'real Cloudflare global v6 allowed');
 });
 
-test('#2 isDisallowedAddress: 2000::/3 boundary — just-inside allowed, just-outside blocked', () => {
+test('#2 isDisallowedAddress: 2000::/3 boundary + reserved carve-outs inside it', () => {
   assert.equal(isDisallowedAddress('2000::1'), false, '2000::1 (first address of 2000::/3) is global');
-  assert.equal(isDisallowedAddress('3fff:ffff::1'), false, '3fff::/16 (top of 2000::/3) is global');
+  assert.equal(isDisallowedAddress('2606:4700:4700::1111'), false, 'real global unicast inside 2000::/3 allowed');
+  // 3fff::/16 is IANA-reserved (RFC 9637 documentation 3fff::/20 lives here); it
+  // is INSIDE 2000::/3 numerically but NOT globally reachable → must be blocked.
+  assert.equal(isDisallowedAddress('3fff::1'), true, '3fff::/20 documentation (RFC 9637) must be blocked');
+  assert.equal(isDisallowedAddress('3fff:ffff::1'), true, '3fff::/16 is IANA-reserved, NOT global → blocked');
   assert.equal(isDisallowedAddress('1fff:ffff::1'), true, '1fff:: (just below 2000::/3) is NOT global → blocked');
   assert.equal(isDisallowedAddress('4000::1'), true, '4000:: (just above 2000::/3) is NOT global → blocked');
 });
@@ -159,6 +163,9 @@ test('#3 assertPathHasNoDelimiter: single/double/triple-encoded ? and # all reje
     '/v1/%2523frag',           // double-encoded #
     '/v1/items?x=1',           // literal ?
     '/v1/items#f',             // literal #
+    '/100%discount',           // malformed %-escape → FAIL CLOSED (cannot decode)
+    '/x/%ZZ/%253Fapi_key%253DS', // poison prefix ahead of a double-encoded ? — malformed → reject
+    '/x/%E0%A4%A/%253Fsecret',   // truncated UTF-8 escape ahead of a double-encoded ? → reject
   ];
   for (const p of bad) {
     assert.throws(
@@ -171,7 +178,7 @@ test('#3 assertPathHasNoDelimiter: single/double/triple-encoded ? and # all reje
   assert.equal(assertPathHasNoDelimiter('/v1/users/me/messages'), '/v1/users/me/messages');
   assert.equal(assertPathHasNoDelimiter('/v1/a%20b'), '/v1/a%20b');       // encoded space
   assert.equal(assertPathHasNoDelimiter('/v1/a%2Fb'), '/v1/a%2Fb');       // encoded slash (not a delimiter)
-  assert.equal(assertPathHasNoDelimiter('/100%discount'), '/100%discount'); // malformed %-escape kept raw, no delimiter
+  assert.equal(assertPathHasNoDelimiter('/v1/caf%C3%A9'), '/v1/caf%C3%A9'); // WELL-FORMED UTF-8 escape decodes cleanly → accepted
   assert.equal(assertPathHasNoDelimiter('rel'), '/rel');                  // leading slash added
 });
 
@@ -273,4 +280,161 @@ test('#4 assertRawMethodAllowed: rejects TRACE/CONNECT/TRACK, accepts the RAW ve
   for (const ok of ['get', 'POST', 'Put', 'patch', 'DELETE', 'head', 'OPTIONS']) {
     assert.equal(assertRawMethodAllowed(ok), ok.toUpperCase());
   }
+});
+
+// ===========================================================================
+//  Peer-review NEEDS-FIX #4 regressions (auto-task #12, PR #129). Two remaining
+//  "make the hardening COMPLETE / fail-closed" blockers from zylos0t:
+//   B1 [P1] special-purpose / global-reachability IP table was incomplete —
+//           198.18/15 (benchmarking), 192.0.0/24, TEST-NETs, 2001:2::/48,
+//           3fff:: documentation etc. leaked through as "global".
+//   B2 [P2] a malformed %-escape made the path fixed-point gate fail-OPEN
+//           (catch → return p), hiding a double-encoded delimiter behind a
+//           poison prefix.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+//  B1 — COMPLETE special-purpose / global-reachability classifier (v4 + v6).
+//  Data-driven CIDR table (IANA Special-Purpose registries; Globally
+//  Reachable=False ⇒ reject) shared by isDisallowedAddress / isDisallowedHost.
+// ---------------------------------------------------------------------------
+
+const B1_ADDR_MATRIX = [
+  // --- IPv4 special-purpose blocks that previously leaked through as global ---
+  ['198.18.0.1', true, 'benchmarking 198.18.0.0/15'],
+  ['198.19.255.254', true, 'benchmarking 198.18.0.0/15 (upper half)'],
+  ['192.0.0.1', true, 'IETF protocol assignments 192.0.0.0/24'],
+  ['192.0.2.5', true, 'TEST-NET-1 192.0.2.0/24'],
+  ['198.51.100.5', true, 'TEST-NET-2 198.51.100.0/24'],
+  ['203.0.113.5', true, 'TEST-NET-3 203.0.113.0/24'],
+  ['192.88.99.1', true, '6to4 relay anycast 192.88.99.0/24'],
+  ['192.31.196.1', true, 'AS112-v4 192.31.196.0/24'],
+  ['192.52.193.1', true, 'AMT 192.52.193.0/24'],
+  ['240.0.0.1', true, 'reserved 240.0.0.0/4'],
+  ['255.255.255.255', true, 'limited broadcast 255.255.255.255/32'],
+  ['224.0.0.1', true, 'multicast 224.0.0.0/4'],
+  // classic private / loopback / link-local / CGNAT still blocked
+  ['10.0.0.5', true, 'private 10/8'],
+  ['127.0.0.1', true, 'loopback 127/8'],
+  ['169.254.169.254', true, 'cloud metadata 169.254/16'],
+  ['100.64.0.1', true, 'CGNAT 100.64/10'],
+  // --- IPv6 special-purpose blocks ---
+  ['2001:2::1', true, 'benchmarking 2001:2::/48 (within 2001::/23)'],
+  ['2001:db8::1', true, 'documentation 2001:db8::/32'],
+  ['2001:20::1', true, 'ORCHIDv2 2001:20::/28'],
+  ['3fff::1', true, 'documentation 3fff::/20 (RFC 9637)'],
+  ['3fff:ffff::1', true, 'IANA-reserved 3fff::/16'],
+  ['2002:c0a8:0101::1', true, '6to4 2002::/16'],
+  ['64:ff9b::808:808', true, 'NAT64 well-known 64:ff9b::/96'],
+  ['100::1', true, 'discard-only 100::/64'],
+  ['5f00::1', true, 'SRv6 SIDs 5f00::/16'],
+  ['fec0::1', true, 'deprecated site-local fec0::/10'],
+  ['fe80::1', true, 'link-local fe80::/10'],
+  ['fc00::1', true, 'ULA fc00::/7'],
+  ['::ffff:10.0.0.1', true, 'v4-mapped private (dotted)'],
+  ['::ffff:a00:1', true, 'v4-mapped private (hex form)'],
+  // --- genuine globally-reachable unicast that MUST stay allowed ---
+  ['8.8.8.8', false, 'Google public DNS (global v4)'],
+  ['1.1.1.1', false, 'Cloudflare public DNS (global v4)'],
+  ['142.250.72.14', false, 'Google global v4'],
+  ['2606:4700:4700::1111', false, 'Cloudflare global v6'],
+  ['2607:f8b0:4004:800::200e', false, 'Google global v6'],
+  ['2000::1', false, 'first address of global-unicast 2000::/3'],
+  ['::ffff:8.8.8.8', false, 'v4-mapped GLOBAL address is allowed'],
+];
+
+test('B1 isDisallowedAddress: complete special-purpose table — blocked vs. genuine global', () => {
+  for (const [addr, disallowed, why] of B1_ADDR_MATRIX) {
+    assert.equal(isDisallowedAddress(addr), disallowed, `${addr} — ${why}`);
+  }
+});
+
+test('B1 isDisallowedHost: same verdicts for literal-IP host strings (incl. bracketed v6)', () => {
+  assert.equal(isDisallowedHost('198.18.0.1'), true, '198.18/15 blocked as host literal');
+  assert.equal(isDisallowedHost('203.0.113.5'), true, 'TEST-NET-3 blocked as host literal');
+  assert.equal(isDisallowedHost('[2001:2::1]'), true, 'benchmarking v6 blocked as bracketed host literal');
+  assert.equal(isDisallowedHost('[3fff::1]'), true, 'documentation v6 blocked as bracketed host literal');
+  assert.equal(isDisallowedHost('8.8.8.8'), false, 'global v4 allowed as host literal');
+  assert.equal(isDisallowedHost('[2606:4700:4700::1111]'), false, 'global v6 allowed as bracketed host literal');
+});
+
+// requestDirect: a host RESOLVING to any newly-covered special-purpose address is
+// refused (403) with the credential getter NEVER called and nothing sent.
+const B1_BLOCKED_DNS = [
+  ['198.18.0.1', 4],
+  ['192.0.0.1', 4],
+  ['203.0.113.5', 4],
+  ['2001:2::1', 6],
+  ['3fff::1', 6],
+  ['3fff:ffff::1', 6],
+];
+for (const [addr, family] of B1_BLOCKED_DNS) {
+  test(`B1 requestDirect: DNS answer ${addr} → 403, getter=0, send=0`, async () => {
+    const { sendImpl, calls } = captureSend({ status: 200 });
+    let getterCalls = 0;
+    await assert.rejects(
+      () => requestDirect(
+        { orgId: 'o', connection: { id: 'c1' }, catalog: CATALOG, catalogFetchedAt: FRESH, domain: 'gmail.googleapis.com', path: '/x', method: 'GET' },
+        { sendImpl, resolve: async () => [{ address: addr, family }], now: nowFn, audit: quietAudit, getCredential: async () => { getterCalls += 1; return CRED; } },
+      ),
+      (err) => { assert.equal(err.status, 403); return true; },
+    );
+    assert.equal(getterCalls, 0, `${addr}: credential getter must never be called`);
+    assert.equal(calls.length, 0, `${addr}: nothing sent`);
+  });
+}
+
+// requestDirect: a host resolving to a GENUINE global address is still allowed —
+// getter called exactly once, request sent (proves the tighter table did not
+// over-block real public destinations).
+for (const [addr, family] of [['8.8.8.8', 4], ['2606:4700:4700::1111', 6]]) {
+  test(`B1 requestDirect: genuine global DNS answer ${addr} → sent, getter=1`, async () => {
+    const { sendImpl, calls } = captureSend({ status: 200, body: { ok: true } });
+    let getterCalls = 0;
+    const res = await requestDirect(
+      { orgId: 'o', connection: { id: 'c1' }, catalog: CATALOG, catalogFetchedAt: FRESH, domain: 'gmail.googleapis.com', path: '/gmail/v1/users/me/messages', method: 'GET' },
+      { sendImpl, resolve: async () => [{ address: addr, family }], now: nowFn, audit: quietAudit, getCredential: async () => { getterCalls += 1; return CRED; } },
+    );
+    assert.equal(res.status_code, 200);
+    assert.equal(getterCalls, 1, `${addr}: getter called exactly once on the allowed global path`);
+    assert.equal(calls.length, 1, `${addr}: request sent to the pinned global IP`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+//  B2 — a malformed %-escape must FAIL CLOSED (400), never return the raw path.
+//  Poison prefix ("%ZZ" / truncated UTF-8) ahead of a double-encoded delimiter
+//  must NOT be able to hide the delimiter. Legal escapes still work.
+// ---------------------------------------------------------------------------
+
+for (const [label, p] of [
+  ['poison "%ZZ" prefix + double-encoded ?', '/x/%ZZ/%253Fapi_key%253DCALLER-SECRET'],
+  ['truncated UTF-8 prefix + double-encoded ?', '/x/%E0%A4%A/%253Fsecret'],
+  ['bare trailing "%"', '/x/100%'],
+]) {
+  test(`B2 requestDirect: ${label} → 400, getter=0, send=0, secret NEVER audited`, async () => {
+    const { sendImpl, calls } = captureSend({ status: 200 });
+    const logged = [];
+    let getterCalls = 0;
+    await assert.rejects(
+      () => requestDirect(
+        { orgId: 'o', connection: { id: 'c1' }, catalog: CATALOG, catalogFetchedAt: FRESH, domain: 'gmail.googleapis.com', path: p, method: 'GET' },
+        { sendImpl, resolve: publicResolve(), now: nowFn, audit: (l) => logged.push(l), getCredential: async () => { getterCalls += 1; return CRED; } },
+      ),
+      (err) => { assert.equal(err.status, 400); return true; },
+    );
+    assert.equal(getterCalls, 0, 'malformed-escape path rejected before the credential getter');
+    assert.equal(calls.length, 0, 'nothing sent');
+    assert.ok(!logged.some((l) => /CALLER-SECRET|api_key|secret/i.test(l)), 'no secret substring in any audit line');
+  });
+}
+
+test('B2 assertPathHasNoDelimiter: malformed escapes throw 400; well-formed escapes still succeed', () => {
+  for (const bad of ['/x/%ZZ/%253F', '/x/%E0%A4%A/y', '/100%discount', '/trailing%']) {
+    assert.throws(() => assertPathHasNoDelimiter(bad), (e) => e.status === 400, `${bad} must fail closed`);
+  }
+  // Well-formed escapes that reach a delimiter-free fixed point are accepted.
+  assert.equal(assertPathHasNoDelimiter('/v1/a%20b'), '/v1/a%20b');
+  assert.equal(assertPathHasNoDelimiter('/v1/caf%C3%A9'), '/v1/caf%C3%A9');
+  assert.equal(assertPathHasNoDelimiter('/v1/a%2Fb'), '/v1/a%2Fb');
 });

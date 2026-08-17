@@ -674,7 +674,10 @@ export function assertRawMethodAllowed(method) {
  * iteration cap is hit; a "?" / "#" surfacing at the literal layer OR at any
  * decoded layer is rejected — so "%3F"/"%23", double "%253F"/"%2523", triple
  * "%25253F", … all fail exactly like a literal "?"/"#". A path that never
- * stabilizes within the cap is rejected too (fail closed). This closes the
+ * stabilizes within the cap is rejected too (fail closed), AND a malformed
+ * percent-escape (decodeURIComponent throws) is rejected rather than trusted —
+ * otherwise a poison prefix like "%ZZ" would halt decoding and hide a
+ * double-encoded delimiter deeper in the string. This closes the
  * double-/triple-encoding bypass a single decode misses. Credential-free.
  * Returns the normalized path (leading "/") when clean; throws 400 otherwise.
  */
@@ -692,7 +695,10 @@ export function assertPathHasNoDelimiter(path) {
   for (let i = 0; i < MAX_PATH_DECODE_ITERS; i++) {
     let next;
     try { next = decodeURIComponent(cur); }
-    catch { return p; } // malformed %-escape: cannot decode further; every layer so far is delimiter-clean
+    catch { reject(); } // malformed %-escape: FAIL CLOSED. A decode error halts
+    // decoding, so we cannot prove the deeper layers are delimiter-free — a
+    // poison prefix like "%ZZ" ahead of a double-encoded "%253F" would otherwise
+    // hide the delimiter. Reject rather than trust the partially-decoded string.
     if (next.includes('?') || next.includes('#')) reject();
     if (next === cur) return p; // stable fixed point — no delimiter at any layer
     cur = next;
@@ -827,16 +833,55 @@ function parseIPv4(str) {
   return parts;
 }
 
-/** Classify 4 IPv4 octets. true ⇒ disallowed (non-public / internal). */
-function ipv4BytesDisallowed([a, b]) {
-  if (a === 0) return true;                          // 0.0.0.0/8 "this host"
-  if (a === 127) return true;                        // loopback 127/8
-  if (a === 10) return true;                         // private 10/8
-  if (a === 172 && b >= 16 && b <= 31) return true;  // private 172.16/12
-  if (a === 192 && b === 168) return true;           // private 192.168/16
-  if (a === 169 && b === 254) return true;           // link-local 169.254/16 (+ metadata .169.254)
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
-  if (a >= 224) return true;                         // multicast / reserved 224+/3
+/**
+ * Bit-prefix CIDR membership: do the first `prefixLen` bits of `bytes` equal
+ * those of `netBytes`? The single primitive every range verdict below is built
+ * on — works for both 4-byte (IPv4) and 16-byte (IPv6) arrays. Any extra
+ * trailing elements on `netBytes` (e.g. a packed prefix length) are ignored,
+ * since only indices touched by the prefix are read.
+ */
+function inCidr(bytes, netBytes, prefixLen) {
+  const full = prefixLen >> 3;                   // whole bytes to compare exactly
+  for (let i = 0; i < full; i++) if (bytes[i] !== netBytes[i]) return false;
+  const rem = prefixLen & 7;                     // leftover high bits in the next byte
+  if (rem) {
+    const mask = (0xff << (8 - rem)) & 0xff;
+    if ((bytes[full] & mask) !== (netBytes[full] & mask)) return false;
+  }
+  return true;
+}
+
+// IANA IPv4 Special-Purpose Address Registry — EVERY block with
+// "Globally Reachable = False" — plus multicast. This is the complete set of
+// ranges that are NOT genuine public-unicast destinations. Data-driven so a new
+// IANA carve-out is a one-line addition; ipv4BytesDisallowed (and, via
+// classifyIpLiteral, BOTH isDisallowedHost and isDisallowedAddress) consult
+// exactly this table. Each entry is [a, b, c, d, prefixLen].
+const IPV4_DISALLOWED_CIDRS = [
+  [0, 0, 0, 0, 8],        // "this host" (0.0.0.0/8)
+  [10, 0, 0, 0, 8],       // private
+  [100, 64, 0, 0, 10],    // CGNAT (100.64/10)
+  [127, 0, 0, 0, 8],      // loopback
+  [169, 254, 0, 0, 16],   // link-local (incl. cloud metadata 169.254.169.254)
+  [172, 16, 0, 0, 12],    // private
+  [192, 0, 0, 0, 24],     // IETF protocol assignments
+  [192, 0, 2, 0, 24],     // TEST-NET-1 (documentation)
+  [192, 31, 196, 0, 24],  // AS112-v4 direct delegation
+  [192, 52, 193, 0, 24],  // AMT
+  [192, 88, 99, 0, 24],   // 6to4 relay anycast (deprecated)
+  [192, 168, 0, 0, 16],   // private
+  [198, 18, 0, 0, 15],    // benchmarking (198.18/15)
+  [198, 51, 100, 0, 24],  // TEST-NET-2 (documentation)
+  [203, 0, 113, 0, 24],   // TEST-NET-3 (documentation)
+  [224, 0, 0, 0, 4],      // multicast (224/4)
+  [240, 0, 0, 0, 4],      // reserved (240/4, incl. 255.255.255.255 limited broadcast)
+];
+
+/** Classify 4 IPv4 octets against the special-purpose table. true ⇒ disallowed. */
+function ipv4BytesDisallowed(bytes) {
+  for (const c of IPV4_DISALLOWED_CIDRS) {
+    if (inCidr(bytes, c, c[4])) return true;
+  }
   return false;
 }
 
@@ -880,38 +925,63 @@ function parseIPv6(str) {
   return bytes;
 }
 
+// IANA IPv6 Special-Purpose Address Registry — the "Globally Reachable = False"
+// blocks — plus 6to4/documentation/multicast, as [addressString, prefixLen].
+// Parsed to 16 canonical bytes ONCE at load (parseIPv6 is a hoisted declaration,
+// so this runs safely at module init). This is the maintainable companion to the
+// v4 table: a new carve-out is a one-line addition. Note several of these ranges
+// also sit OUTSIDE global-unicast 2000::/3 and would be rejected by the
+// fail-closed gate below regardless — they are listed for completeness and
+// defense in depth so the intent is explicit and self-documenting.
+const IPV6_DISALLOWED_CIDRS = [
+  ['::1', 128],          // loopback
+  ['::', 128],           // unspecified
+  ['64:ff9b::', 96],     // NAT64 well-known prefix (IPv4/IPv6 translation)
+  ['64:ff9b:1::', 48],   // NAT64 local-use
+  ['100::', 64],         // discard-only sink
+  ['2001::', 23],        // IETF protocol assignments (incl. 2001:2::/48 benchmarking, 2001:20::/28)
+  ['2001:20::', 28],     // ORCHIDv2 (subsumed by 2001::/23 but explicit)
+  ['2001:db8::', 32],    // documentation (NOT inside 2001::/23 — needs its own entry)
+  ['2002::', 16],        // 6to4 (embeds an arbitrary v4 relay)
+  ['3fff::', 16],        // RFC 9637 documentation is 3fff::/20; the whole 3fff::/16 is IANA-reserved, not globally reachable
+  ['5f00::', 16],        // SRv6 SIDs
+  ['fc00::', 7],         // unique-local (ULA)
+  ['fe80::', 10],        // link-local
+  ['fec0::', 10],        // deprecated site-local (fec0/fedf/feff)
+  ['ff00::', 8],         // multicast
+].map(([addr, len]) => [parseIPv6(addr), len]);
+
 /**
- * Classify 16 IPv6 bytes. true ⇒ disallowed. FAIL-CLOSED, GLOBAL-UNICAST-ONLY:
- * rather than enumerate every bad range (error-prone — a missed carve-out like
- * the deprecated site-local fec0::/10 silently ALLOWS an internal address), this
- * ALLOWS only what is provably global-unicast and REJECTS everything else.
- *
- * The only IPv6 space that is global unicast is 2000::/3 (leading 3 bits 001 ⇒
- * top byte 0x20–0x3f). So link-local fe80::/10, deprecated site-local fec0::/10
- * (fec0/fedf/feff), ULA fc00::/7, multicast ff00::/8, loopback ::1, unspecified
- * ::, and every other reserved range fall OUTSIDE 2000::/3 and are rejected
- * automatically — no enumeration required. Within 2000::/3 a couple of
- * special-purpose carve-outs (documentation, 6to4) are still rejected.
+ * Classify 16 IPv6 bytes. true ⇒ disallowed. FAIL-CLOSED and
+ * GLOBAL-UNICAST-ONLY, in three layers:
+ *   1. a v4-mapped (::ffff:0:0/96) or v4-compatible (::/96, incl. :: and ::1)
+ *      address is classified by its EMBEDDED IPv4 (dotted OR hex form) — the real
+ *      v4 destination's public/private verdict governs;
+ *   2. any address matching the IPV6_DISALLOWED_CIDRS special-purpose table is
+ *      rejected (documentation 2001:db8::/2001:2::/3fff::, 6to4 2002::, ULA,
+ *      link-local, deprecated site-local fec0::/10, NAT64, multicast, …);
+ *   3. THEN anything not inside global-unicast 2000::/3 is rejected outright, so
+ *      an unlisted / future non-global range can never slip through as allowed.
+ * Only a 2000::/3 address matching NO special-purpose block is allowed.
  */
 function ipv6BytesDisallowed(b) {
   const first10Zero = b.slice(0, 10).every((x) => x === 0);
-  // v4-mapped ::ffff:x.x.x.x — classify by the embedded v4 (dotted OR hex form),
-  // so the real v4 destination's public/private verdict governs.
+  // v4-mapped ::ffff:x.x.x.x — classify by the embedded v4.
   if (first10Zero && b[10] === 0xff && b[11] === 0xff) {
     return ipv4BytesDisallowed([b[12], b[13], b[14], b[15]]);
   }
-  // v4-compatible ::a.b.c.d (deprecated) — also classify by the embedded v4. This
-  // subsumes unspecified :: (→ 0.0.0.0) and loopback ::1 (→ 0.0.0.1), both of
-  // which the v4 classifier rejects (a===0), and blocks ::10.0.0.1 / ::127.0.0.1.
+  // v4-compatible ::a.b.c.d (deprecated, subsumes :: and ::1) — classify by the
+  // embedded v4 (:: → 0.0.0.0 and ::1 → 0.0.0.1 both land in 0.0.0.0/8).
   if (b.slice(0, 12).every((x) => x === 0)) {
     return ipv4BytesDisallowed([b[12], b[13], b[14], b[15]]);
   }
+  // Special-purpose / non-globally-reachable CIDR table.
+  for (const [netBytes, len] of IPV6_DISALLOWED_CIDRS) {
+    if (inCidr(b, netBytes, len)) return true;
+  }
   // FAIL-CLOSED: anything not in global-unicast 2000::/3 is disallowed.
-  if ((b[0] & 0xe0) !== 0x20) return true;                         // outside 2000::/3
-  // Special-purpose carve-outs WITHIN 2000::/3 that are not usable global hosts:
-  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x0d && b[3] === 0xb8) return true; // 2001:db8::/32 documentation
-  if (b[0] === 0x20 && b[1] === 0x02) return true;                 // 2002::/16 6to4 (embeds an arbitrary v4 relay)
-  return false;                                                    // genuine global unicast
+  if ((b[0] & 0xe0) !== 0x20) return true;
+  return false; // genuine global unicast
 }
 
 /**
