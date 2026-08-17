@@ -380,28 +380,14 @@ const COMMANDS = {
       throw Object.assign(new Error('applicationId unresolved for this connection (run conn.index {refresh:true})'), { status: 400 });
     }
 
-    // Resolve the credential + mode (re-acquire on a cache miss, same as
-    // conn.invoke). conn.request is DIRECT-ONLY — a proxy connection holds no
-    // local token, so we refuse rather than downgrade.
-    const { credential, mode } = await resolveCredential(
-      { orgId, connectionId: entry.id, cached: readCredentialCache(entry.id) },
-      {
-        acquire: (oid, connId) => acquireCredential(oid, connId),
-        saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
-      },
-    );
-    if (mode !== 'direct') {
-      throw Object.assign(
-        new Error('conn.request requires a direct-mode connection (a proxy connection keeps no local token) — use conn.invoke for a curated action instead'),
-        { status: 400 },
-      );
-    }
-
-    // The allowlist is derived from this app's local action catalog (warmed on
-    // authorize; refetched here on a miss/TTL — readCatalog now treats a record
-    // with no fetchedAt as stale, so a missing timestamp forces a fresh fetch
-    // rather than authorizing off an eternal cache). requestDirect enforces the
-    // gate AND fails closed on a missing/stale catalogFetchedAt.
+    // CREDENTIAL-FREE VALIDATION FIRST. The allowlist is derived from this app's
+    // local action catalog (warmed on authorize; refetched here on a miss/TTL —
+    // readCatalog treats a record with no/future fetchedAt as stale, so a missing
+    // or forged timestamp forces a fresh fetch rather than authorizing off an
+    // eternal cache). requestDirect runs ALL structural gates (freshness, origin
+    // allowlist, routing-header, path, DNS resolve+public-validate) BEFORE it
+    // reads any credential — so an illegal request never triggers a credential
+    // read/fetch. Loading the catalog is not a credential operation.
     const catalogRec = await getCatalog(orgId, entry.applicationId, {});
     return await requestDirect(
       {
@@ -409,7 +395,6 @@ const COMMANDS = {
         connection: entry,
         catalog: catalogRec.actions,
         catalogFetchedAt: catalogRec.fetchedAt,
-        credential,
         domain: params.domain,
         path: params.path,
         method: params.method,
@@ -420,6 +405,26 @@ const COMMANDS = {
       {
         acquire: (oid, connId) => acquireCredential(oid, connId),
         saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+        // Lazy credential resolution — invoked by requestDirect ONLY after every
+        // structural gate has passed. conn.request is DIRECT-ONLY: a proxy
+        // connection holds no local token, so we refuse rather than downgrade.
+        // This runs (and can re-acquire on a cache miss) strictly AFTER validation.
+        getCredential: async () => {
+          const { credential, mode } = await resolveCredential(
+            { orgId, connectionId: entry.id, cached: readCredentialCache(entry.id) },
+            {
+              acquire: (oid, connId) => acquireCredential(oid, connId),
+              saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+            },
+          );
+          if (mode !== 'direct') {
+            throw Object.assign(
+              new Error('conn.request requires a direct-mode connection (a proxy connection keeps no local token) — use conn.invoke for a curated action instead'),
+              { status: 400 },
+            );
+          }
+          return credential;
+        },
       },
     );
   },

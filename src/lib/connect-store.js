@@ -44,6 +44,13 @@ export function indexPathForOrg(orgId, dir = CONNECT_DIR) {
 /** Default catalog freshness window: 24h. */
 export const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Max tolerated clock skew for freshness. A fetchedAt in the FUTURE beyond this
+ * bound is treated as stale (broken/forged clock) rather than "fresh forever" —
+ * a future timestamp must never infinitely authorize a cached catalog.
+ */
+export const CATALOG_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
 export function ensureConnectDir(dir = CONNECT_DIR) {
   fs.mkdirSync(dir, { recursive: true });
 }
@@ -152,14 +159,19 @@ export function catalogPath(applicationId, dir = CATALOG_DIR) {
  * Is a catalog record fresh under `ttlMs`? FAIL-CLOSED: a null record, or one
  * whose `fetchedAt` is missing / not a finite number, is treated as STALE (never
  * eternal — the old bug let a record with no fetchedAt pass the TTL check
- * forever). A record older than the window is stale too. `ttlMs == null` means
- * "no freshness requirement" (freshness not being asked about) → fresh.
+ * forever). A record older than the window is stale too. A record whose
+ * `fetchedAt` is in the FUTURE beyond `skewMs` is ALSO stale — a future timestamp
+ * must not infinitely authorize (age would be negative and slip under any TTL).
+ * `ttlMs == null` means "no freshness requirement" (freshness not being asked
+ * about) → fresh.
  */
-export function isCatalogFresh(rec, { ttlMs, now = Date.now() } = {}) {
+export function isCatalogFresh(rec, { ttlMs, now = Date.now(), skewMs = CATALOG_CLOCK_SKEW_MS } = {}) {
   if (!rec || !Array.isArray(rec.actions)) return false;
   if (ttlMs == null) return true;
   if (typeof rec.fetchedAt !== 'number' || !Number.isFinite(rec.fetchedAt)) return false;
-  return (now - rec.fetchedAt) <= ttlMs;
+  const age = now - rec.fetchedAt;
+  if (age < -skewMs) return false; // future timestamp → refuse
+  return age <= ttlMs;
 }
 
 /**

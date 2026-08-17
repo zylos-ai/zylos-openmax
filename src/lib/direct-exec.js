@@ -44,6 +44,7 @@
 
 import dns from 'node:dns';
 import https from 'node:https';
+import net from 'node:net';
 
 import { redactSecrets } from './redact.js';
 
@@ -636,6 +637,12 @@ export async function invokeDirect(
 // lacking a numeric fetchedAt) rather than authorizing off a stale host set.
 export const RAW_CATALOG_FRESHNESS_MS = 24 * 60 * 60 * 1000;
 
+// Maximum tolerated clock skew for freshness. A fetchedAt in the FUTURE beyond
+// this small bound is not "fresh forever" — it is a broken/forged timestamp and
+// is refused (fail-closed). Freshness therefore requires a NON-NEGATIVE age
+// (within this skew), not merely age ≤ window.
+export const CATALOG_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
 // Methods conn.request accepts (a superset of BODY_METHODS; the read verbs carry
 // no body).
 const RAW_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
@@ -746,45 +753,136 @@ export function parseRequestTarget(domain) {
   return { hostname, port, authority: u.port ? `${hostname}:${u.port}` : hostname };
 }
 
-function isDisallowedIPv4(ip) {
-  const parts = ip.split('.').map((n) => Number(n));
-  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
-  const [a, b] = parts;
-  if (a === 0) return true;                          // 0.0.0.0/8
-  if (a === 127) return true;                        // loopback
-  if (a === 10) return true;                         // private
-  if (a === 172 && b >= 16 && b <= 31) return true;  // private
-  if (a === 192 && b === 168) return true;           // private
-  if (a === 169 && b === 254) return true;           // link-local + metadata 169.254.169.254
+// ---------------------------------------------------------------------------
+//  IP parsing + CIDR classification (SSRF guard)
+//
+//  Every IP verdict below works on the PARSED, canonical bytes of the address —
+//  never on a string prefix or a single spelling. This defeats the encoding
+//  bypasses a prefix match misses: link-local written as fe90::/fea0::/febf::
+//  (all inside fe80::/10), a v4-mapped private address written in hex
+//  (::ffff:a00:1) rather than dotted (::ffff:10.0.0.1), an expanded loopback
+//  (0:0:0:0:0:0:0:1), and v4-compatible ::10.0.0.1 forms. We parse to bytes with
+//  net.isIP as the validity gate, then classify by full CIDR ranges.
+// ---------------------------------------------------------------------------
+
+/** Parse a dotted-quad IPv4 string to its 4 octets, or null when not valid v4. */
+function parseIPv4(str) {
+  if (net.isIPv4(str) !== true) return null;
+  const parts = String(str).split('.').map((n) => Number(n));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return parts;
+}
+
+/** Classify 4 IPv4 octets. true ⇒ disallowed (non-public / internal). */
+function ipv4BytesDisallowed([a, b]) {
+  if (a === 0) return true;                          // 0.0.0.0/8 "this host"
+  if (a === 127) return true;                        // loopback 127/8
+  if (a === 10) return true;                         // private 10/8
+  if (a === 172 && b >= 16 && b <= 31) return true;  // private 172.16/12
+  if (a === 192 && b === 168) return true;           // private 192.168/16
+  if (a === 169 && b === 254) return true;           // link-local 169.254/16 (+ metadata .169.254)
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
-  if (a >= 224) return true;                         // multicast / reserved
+  if (a >= 224) return true;                         // multicast / reserved 224+/3
   return false;
 }
 
 /**
- * SSRF guard: reject loopback / link-local / private / CGNAT / cloud-metadata
- * targets so a real credential can never be coaxed onto an internal address.
- * Defense-in-depth BEHIND the allowlist (catalog hosts are public providers).
- * Literal-IP ranges (v4 + a pragmatic v6 subset) are checked structurally; a few
- * hostname suffixes (localhost / .localhost / .internal / .local) are blocked by
- * name. Full DNS-rebinding defense (resolve-then-pin) is out of scope and noted
- * in the reference doc.
+ * Parse an IPv6 string to its 16 canonical bytes, or null when not valid v6.
+ * Uses net.isIPv6 as the validity gate, then expands "::" and any embedded IPv4
+ * tail (e.g. "::ffff:1.2.3.4") into the full byte array. Zone id / brackets must
+ * be stripped by the caller.
+ */
+function parseIPv6(str) {
+  if (net.isIPv6(str) !== true) return null;
+  let s = String(str);
+  // Fold a trailing embedded IPv4 (v4-mapped / v4-compatible) into two hextets.
+  if (s.includes('.')) {
+    const idx = s.lastIndexOf(':');
+    const v4 = parseIPv4(s.slice(idx + 1));
+    if (!v4) return null;
+    const hi = ((v4[0] << 8) | v4[1]).toString(16);
+    const lo = ((v4[2] << 8) | v4[3]).toString(16);
+    s = `${s.slice(0, idx + 1)}${hi}:${lo}`;
+  }
+  const halves = s.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  let groups;
+  if (halves.length === 2) {
+    const missing = 8 - (head.length + tail.length);
+    if (missing < 0) return null;
+    groups = [...head, ...Array(missing).fill('0'), ...tail];
+  } else {
+    groups = head;
+  }
+  if (groups.length !== 8) return null;
+  const bytes = [];
+  for (const g of groups) {
+    if (!/^[0-9a-f]{1,4}$/i.test(g)) return null;
+    const n = parseInt(g, 16);
+    bytes.push((n >> 8) & 0xff, n & 0xff);
+  }
+  return bytes;
+}
+
+/** Classify 16 IPv6 bytes. true ⇒ disallowed (non-global-unicast / internal). */
+function ipv6BytesDisallowed(b) {
+  const first10Zero = b.slice(0, 10).every((x) => x === 0);
+  // v4-mapped ::ffff:x.x.x.x — classify by the embedded v4 (dotted OR hex form).
+  if (first10Zero && b[10] === 0xff && b[11] === 0xff) {
+    return ipv4BytesDisallowed([b[12], b[13], b[14], b[15]]);
+  }
+  if (b.every((x) => x === 0)) return true;                        // unspecified ::
+  if (b.slice(0, 15).every((x) => x === 0) && b[15] === 1) return true; // loopback ::1 (any spelling)
+  // v4-compatible ::a.b.c.d (deprecated) — classify by the embedded v4 too, so
+  // ::10.0.0.1 / ::127.0.0.1 style forms cannot slip a private v4 through.
+  if (b.slice(0, 12).every((x) => x === 0)) {
+    return ipv4BytesDisallowed([b[12], b[13], b[14], b[15]]);
+  }
+  if (b[0] === 0xfe && (b[1] & 0xc0) === 0x80) return true;        // link-local fe80::/10 (fe80–febf)
+  if ((b[0] & 0xfe) === 0xfc) return true;                         // ULA fc00::/7
+  if (b[0] === 0xff) return true;                                  // multicast ff00::/8
+  return false;                                                    // global unicast
+}
+
+/**
+ * Classify an IP LITERAL string on its parsed bytes. Returns true (disallowed),
+ * false (public / global-unicast), or null when the string is not an IP literal
+ * at all (so callers can decide how to treat a non-IP hostname).
+ */
+function classifyIpLiteral(str) {
+  const a = String(str).toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/%.*$/, '');
+  const v4 = parseIPv4(a);
+  if (v4) return ipv4BytesDisallowed(v4);
+  const v6 = parseIPv6(a);
+  if (v6) return ipv6BytesDisallowed(v6);
+  return null;
+}
+
+/** Back-compat helper: is a dotted-quad IPv4 string disallowed? Invalid → true. */
+function isDisallowedIPv4(ip) {
+  const parts = parseIPv4(String(ip));
+  if (!parts) return true;
+  return ipv4BytesDisallowed(parts);
+}
+
+/**
+ * SSRF guard on a host STRING: reject loopback / link-local / private / CGNAT /
+ * cloud-metadata targets so a real credential can never be coaxed onto an
+ * internal address. Defense-in-depth BEHIND the allowlist (catalog hosts are
+ * public providers). A few hostname SUFFIXES (localhost / .localhost / .internal
+ * / .local) are blocked by name; a literal IP (v4 or v6, any encoding) is
+ * classified structurally on its parsed bytes. An ordinary DNS NAME is left to
+ * resolveAndPin, which validates every RESOLVED address.
  */
 export function isDisallowedHost(hostname) {
   if (!hostname) return true;
   const h = String(hostname).toLowerCase().replace(/\.$/, '');
   if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.internal') || h.endsWith('.local')) return true;
-  if (h.includes(':')) { // IPv6 literal
-    const ip = h.replace(/^\[/, '').replace(/\]$/, '');
-    if (ip === '::1' || ip === '::') return true;
-    if (/^fe80:/i.test(ip)) return true;                 // link-local
-    if (/^f[cd][0-9a-f]{2}:/i.test(ip)) return true;     // unique-local fc00::/7
-    const mapped = /::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
-    if (mapped) return isDisallowedIPv4(mapped[1]);
-    return false;
-  }
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return isDisallowedIPv4(h);
-  return false;
+  const verdict = classifyIpLiteral(h);
+  if (verdict === null) return false; // a non-IP hostname → resolved & validated in resolveAndPin
+  return verdict;
 }
 
 /**
@@ -792,24 +890,16 @@ export function isDisallowedHost(hostname) {
  * resolves to (see resolveAndPin). Unlike isDisallowedHost (which reasons about a
  * host STRING and lets an unknown hostname through to DNS), this reasons about a
  * concrete literal IP and FAILS CLOSED: anything that is not a recognizable
- * public/global-unicast literal is rejected. Blocks loopback / private / CGNAT /
- * link-local / ULA / multicast / metadata for both v4 and v6 (incl. v4-mapped v6).
+ * public/global-unicast literal is rejected. Classification is on the PARSED
+ * bytes (not a string prefix), so every encoding of loopback / private / CGNAT /
+ * link-local (fe80::/10 incl. fe90/fea0/febf) / ULA / multicast / metadata /
+ * v4-mapped-private (dotted OR hex) is blocked, for both v4 and v6.
  */
 export function isDisallowedAddress(address) {
   if (!address) return true;
-  const a = String(address).toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/%.*$/, '');
-  if (a.includes(':')) { // IPv6
-    if (a === '::1' || a === '::') return true;                 // loopback / unspecified
-    if (/^fe80:/i.test(a)) return true;                         // link-local fe80::/10
-    if (/^f[cd][0-9a-f]{2}:/i.test(a)) return true;             // unique-local fc00::/7
-    if (/^ff[0-9a-f]{2}:/i.test(a)) return true;                // multicast ff00::/8
-    const mapped = /::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(a);
-    if (mapped) return isDisallowedIPv4(mapped[1]);
-    if (!/^[0-9a-f:]+$/i.test(a)) return true;                  // not a v6 literal → reject
-    return false;                                               // other global-unicast v6
-  }
-  if (/^\d+\.\d+\.\d+\.\d+$/.test(a)) return isDisallowedIPv4(a);
-  return true; // not a recognizable IP literal → fail closed
+  const verdict = classifyIpLiteral(address);
+  if (verdict === null) return true; // not a recognizable IP literal → fail closed
+  return verdict;
 }
 
 /**
@@ -912,9 +1002,16 @@ export function assembleRawRequest(
   // field; a "?"/"#" embedded in `path` is rejected so a caller-supplied secret
   // (e.g. "/v1/items?api_key=SECRET") can never ride in via the path and reach a
   // log or the wire un-owned. Query params MUST go through `query`.
-  if (p.includes('?') || p.includes('#')) {
+  //
+  // CANONICALIZATION-AWARE: a percent-encoded "%3F"(?) / "%23"(#) decodes to the
+  // same delimiter and would otherwise slip a query/secret ("/v1/%3Fapi_key%3D…")
+  // past the literal check and into the audit line verbatim. Decode ONCE and
+  // reject the encoded forms exactly like their literal counterparts.
+  let decodedPath = p;
+  try { decodedPath = decodeURIComponent(p); } catch { /* malformed %-escape → keep raw */ }
+  if (p.includes('?') || p.includes('#') || decodedPath.includes('?') || decodedPath.includes('#')) {
     throw Object.assign(
-      new Error('path must not contain "?" or "#" — pass query parameters via the dedicated `query` field'),
+      new Error('path must not contain "?" or "#" (encoded "%3F"/"%23" included) — pass query parameters via the dedicated `query` field'),
       { status: 400 },
     );
   }
@@ -1001,7 +1098,29 @@ async function readCappedStream(res) {
  * node:https does NOT auto-follow redirects, so a 3xx is returned as-is (parity
  * with the former `redirect:'manual'`), never forwarding the Authorization header.
  */
-function sendPinnedHttps(assembled, pin) {
+/**
+ * Build the custom node:https `lookup` that ALWAYS returns the pinned IP and
+ * never performs a real DNS query. It MUST handle BOTH callback shapes Node uses:
+ *   - happyeyeballs / autoSelectFamily (default true on Node ≥ v20) calls it with
+ *     `{ all: true }` and expects an ARRAY `[{ address, family }]`;
+ *   - the legacy scalar path expects `(err, address, family)`.
+ * Returning only the scalar shape breaks the array-expecting path with
+ * `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined` — the real production
+ * failure that made the pinned transport unusable. Honour whichever shape the
+ * caller asked for so the pinned IP is used on every Node version.
+ */
+export function pinnedLookup(pin) {
+  const family = pin && pin.family ? pin.family : (pin && pin.pinnedIp && pin.pinnedIp.includes(':') ? 6 : 4);
+  return (_hostname, opts, cb) => {
+    // Node also permits lookup(hostname, cb) — 2-arg — where `opts` is the cb.
+    const callback = typeof opts === 'function' ? opts : cb;
+    const options = typeof opts === 'function' ? {} : (opts || {});
+    if (options.all) callback(null, [{ address: pin.pinnedIp, family }]);
+    else callback(null, pin.pinnedIp, family);
+  };
+}
+
+export function sendPinnedHttps(assembled, pin, tlsOptions = {}) {
   if (!pin || !pin.pinnedIp) {
     return Promise.reject(Object.assign(new Error('sendPinnedHttps: a validated pinned IP is required'), { status: 500 }));
   }
@@ -1017,7 +1136,12 @@ function sendPinnedHttps(assembled, pin) {
         method: assembled.method,
         headers,
         servername: url.hostname, // SNI = real host (cert validated against it)
-        lookup: (_h, _opts, cb) => cb(null, pin.pinnedIp, pin.family || (pin.pinnedIp.includes(':') ? 6 : 4)),
+        lookup: pinnedLookup(pin),
+        // TLS trust anchors are default (rejectUnauthorized:true) in production;
+        // tests may inject a self-signed loopback CA here without weakening the
+        // real path. Only whitelisted TLS knobs are threaded through.
+        ...(tlsOptions.ca !== undefined ? { ca: tlsOptions.ca } : {}),
+        ...(tlsOptions.rejectUnauthorized !== undefined ? { rejectUnauthorized: tlsOptions.rejectUnauthorized } : {}),
       },
       (res) => {
         readCappedStream(res)
@@ -1045,7 +1169,7 @@ function sendPinnedHttps(assembled, pin) {
  * `body` is already serialized so it is passed verbatim (never re-encoded). Same
  * server-parity shape as sendDirect: `{ status_code, headers, body }`.
  */
-export async function sendRawDirect(assembled, { fetchImpl, pin } = {}) {
+export async function sendRawDirect(assembled, { fetchImpl, pin, tlsOptions } = {}) {
   if (fetchImpl) {
     const res = await fetchImpl(assembled.url, {
       method: assembled.method,
@@ -1058,17 +1182,20 @@ export async function sendRawDirect(assembled, { fetchImpl, pin } = {}) {
     try { body = JSON.parse(text); } catch { body = text; }
     return { status_code: res.status, headers: headersToObject(res.headers), body };
   }
-  return sendPinnedHttps(assembled, pin);
+  return sendPinnedHttps(assembled, pin, tlsOptions || {});
 }
 
 // Audit a raw call: method + host + REDACTED PATHNAME only. Headers (where
 // Authorization lives), the query string, the fragment, and the body are NEVER
 // logged — any of them could carry a caller-supplied secret. The pathname is
-// defensively stripped of any "?"/"#" tail (assembleRawRequest already rejects
-// those in `path`, so this is belt-and-suspenders) so a secret can never reach
-// the audit line via the URL. One short line, tagged for grep.
+// defensively DECODED FIRST (canonicalization-aware) and then stripped of any
+// "?"/"#" tail — so an encoded "%3F…"(?) query smuggled into `path` cannot reach
+// the audit line verbatim (assembleRawRequest already rejects both literal and
+// encoded forms, so this is belt-and-suspenders). One short line, tagged for grep.
 function auditRawCall(method, authority, normPath, audit) {
-  const pathnameOnly = String(normPath == null ? '/' : normPath).split(/[?#]/)[0] || '/';
+  let decoded = String(normPath == null ? '/' : normPath);
+  try { decoded = decodeURIComponent(decoded); } catch { /* malformed %-escape → use raw */ }
+  const pathnameOnly = decoded.split(/[?#]/)[0] || '/';
   audit(`[conn.request] → ${method} https://${authority}${pathnameOnly}`);
 }
 
@@ -1122,18 +1249,33 @@ export async function requestDirect(
     acquire, saveCache = () => {}, now = Date.now,
     skewMs = DEFAULT_EXPIRY_SKEW_MS, catalogFreshnessMs = RAW_CATALOG_FRESHNESS_MS,
     audit = defaultAudit, log = () => {}, warn = () => {},
+    // Lazy credential provider. When supplied, the credential is resolved/fetched
+    // by calling this ONLY at step 6 — AFTER every credential-free gate below has
+    // passed. This structurally guarantees an illegal request (stale catalog,
+    // off-origin, bad path, private DNS resolution, …) never triggers a credential
+    // read or fetch. When absent, the pre-supplied `credential` arg is used (the
+    // unit-test path). getCredential may also enforce mode (throw on a proxy
+    // connection) since that requires resolving the credential.
+    getCredential,
   } = deps;
 
   // 0. Freshness FAIL-CLOSED. The allowlist is only as trustworthy as the catalog
-  // it is derived from. A record with no numeric fetchedAt, or one older than the
-  // freshness window, is treated as stale — REFUSE rather than authorize off a
-  // stale host set (a host removed upstream must not stay allowed).
-  if (typeof catalogFetchedAt !== 'number' || !Number.isFinite(catalogFetchedAt)
-      || (now() - catalogFetchedAt) > catalogFreshnessMs) {
-    throw Object.assign(
-      new Error('connection catalog is missing or stale — refusing conn.request (fail-closed). Run conn.catalog {refresh:true} first, then retry.'),
-      { status: 409 },
-    );
+  // it is derived from. A record with no numeric fetchedAt, one older than the
+  // freshness window, OR one whose fetchedAt is in the FUTURE beyond a small
+  // clock-skew tolerance is treated as stale/forged — REFUSE rather than
+  // authorize off a stale (or a never-expiring future-stamped) host set. Freshness
+  // requires a NON-NEGATIVE age within CATALOG_CLOCK_SKEW_MS, not merely
+  // age ≤ window (a future timestamp would otherwise authorize forever).
+  {
+    const age = typeof catalogFetchedAt === 'number' && Number.isFinite(catalogFetchedAt)
+      ? now() - catalogFetchedAt
+      : null;
+    if (age == null || age > catalogFreshnessMs || age < -CATALOG_CLOCK_SKEW_MS) {
+      throw Object.assign(
+        new Error('connection catalog is missing, stale, or has a future timestamp — refusing conn.request (fail-closed). Run conn.catalog {refresh:true} first, then retry.'),
+        { status: 409 },
+      );
+    }
   }
 
   // 1. Allowed-ORIGIN set (host + port) from the local catalog.
@@ -1176,8 +1318,13 @@ export async function requestDirect(
   // a rebind) is refused and the credential is never attached or sent.
   const pin = await resolveAndPin(target.hostname, resolve);
 
-  // 6. Only NOW read the credential token (every gate has passed).
+  // 6. Only NOW resolve/read the credential token (every credential-free gate has
+  // passed). The lazy provider — when injected — is invoked HERE and nowhere
+  // earlier, so an illegal request never triggers a credential resolution/fetch.
   let cred = credential;
+  if (cred == null && typeof getCredential === 'function') {
+    cred = await getCredential();
+  }
   if (!cred || !cred.access_token) {
     throw Object.assign(
       new Error('no local direct-mode credential/access_token for this connection — conn.request requires a direct connection'),
