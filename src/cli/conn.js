@@ -228,7 +228,7 @@ const COMMANDS = {
   // the local connections index. Returns { applicationId, actions, fetchedAt,
   // source }.
   'conn.catalog': async () => {
-    const orgId = resolveOrgId();
+    const orgId = requireOrgId();
     let appId = params.applicationId || params.application_id;
     if (!appId && params.app) {
       const agentId = resolveSelfMemberId(orgId);
@@ -255,7 +255,7 @@ const COMMANDS = {
     const app = params.app || params.applicationId || params.application_id || params.slug;
     if (!app) throw Object.assign(new Error('app (slug or applicationId) is required'), { status: 400 });
     if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
-    const orgId = resolveOrgId();
+    const orgId = requireOrgId();
     const agentId = resolveSelfMemberId(orgId);
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
 
@@ -330,7 +330,7 @@ const COMMANDS = {
   // Show the local connections index for an org (observability). {refresh}
   // rebuilds it from conn.list first; {org} selects the org (default otherwise).
   'conn.index': async () => {
-    const orgId = resolveOrgId();
+    const orgId = requireOrgId();
     if (params.refresh) {
       const agentId = resolveSelfMemberId(orgId);
       if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
