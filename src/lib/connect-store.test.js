@@ -6,7 +6,7 @@ import path from 'node:path';
 
 import {
   readIndex, upsertConnection, removeConnection, replaceIndexFromList, findConnectionByApp,
-  readCatalog, writeCatalog, invalidateCatalog, catalogPath, indexPathForOrg,
+  readCatalog, writeCatalog, invalidateCatalog, isCatalogFresh, catalogPath, indexPathForOrg,
 } from './connect-store.js';
 
 function tmpIndex() {
@@ -115,6 +115,32 @@ test('TTL 过期视为 miss（返回 null），未过期正常返回', () => {
   assert.ok(readCatalog('app-1', { dir, ttlMs: 10000, now: 6000 }));
   // now=1000+20000, ttl=10000 → 过期
   assert.equal(readCatalog('app-1', { dir, ttlMs: 10000, now: 21000 }), null);
+});
+
+// P2 fail-closed: a record with NO fetchedAt used to pass the TTL check forever
+// (the `rec.fetchedAt &&` short-circuit skipped the expiry test), so a host
+// removed upstream stayed authorized. Now a missing/non-numeric fetchedAt is
+// treated as STALE whenever a ttlMs is being enforced.
+test('缺失 fetchedAt 在启用 TTL 时视为过期（fail-closed，不再永鲜）', () => {
+  const dir = tmpCatalogDir();
+  // Hand-write a record with actions but NO fetchedAt.
+  fs.writeFileSync(catalogPath('app-nf', dir), JSON.stringify({ applicationId: 'app-nf', actions: [{ action: 'a' }] }));
+  // No ttl asked → returned (freshness not being enforced).
+  assert.ok(readCatalog('app-nf', { dir }));
+  // ttl enforced, even with `now` far in the future and a tiny ttl → STALE (null),
+  // NOT eternally fresh.
+  assert.equal(readCatalog('app-nf', { dir, ttlMs: 1, now: 9_999_999_999_999 }), null);
+  assert.equal(readCatalog('app-nf', { dir, ttlMs: 10_000, now: 6000 }), null);
+});
+
+test('isCatalogFresh: fail-closed on null / missing / non-numeric fetchedAt; honors window', () => {
+  assert.equal(isCatalogFresh(null, { ttlMs: 1000, now: 100 }), false);
+  assert.equal(isCatalogFresh({ actions: [] }, { ttlMs: 1000, now: 100 }), false); // no fetchedAt
+  assert.equal(isCatalogFresh({ actions: [], fetchedAt: 'x' }, { ttlMs: 1000, now: 100 }), false); // non-numeric
+  assert.equal(isCatalogFresh({ actions: [], fetchedAt: 1000 }, { ttlMs: 500, now: 1200 }), true);  // 200 <= 500
+  assert.equal(isCatalogFresh({ actions: [], fetchedAt: 1000 }, { ttlMs: 500, now: 2000 }), false); // 1000 > 500
+  assert.equal(isCatalogFresh({ actions: [], fetchedAt: 1000 }, {}), true); // ttlMs null → not asking
+  assert.equal(isCatalogFresh({ notActions: true }, { ttlMs: 500, now: 1 }), false); // no actions array
 });
 
 test('invalidateCatalog 幂等删除', () => {

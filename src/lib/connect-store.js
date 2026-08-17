@@ -149,15 +149,30 @@ export function catalogPath(applicationId, dir = CATALOG_DIR) {
 }
 
 /**
+ * Is a catalog record fresh under `ttlMs`? FAIL-CLOSED: a null record, or one
+ * whose `fetchedAt` is missing / not a finite number, is treated as STALE (never
+ * eternal — the old bug let a record with no fetchedAt pass the TTL check
+ * forever). A record older than the window is stale too. `ttlMs == null` means
+ * "no freshness requirement" (freshness not being asked about) → fresh.
+ */
+export function isCatalogFresh(rec, { ttlMs, now = Date.now() } = {}) {
+  if (!rec || !Array.isArray(rec.actions)) return false;
+  if (ttlMs == null) return true;
+  if (typeof rec.fetchedAt !== 'number' || !Number.isFinite(rec.fetchedAt)) return false;
+  return (now - rec.fetchedAt) <= ttlMs;
+}
+
+/**
  * Read a cached catalog for an application. Returns { applicationId, actions,
- * fetchedAt } when present, else null. When `ttlMs` is given, a record older
- * than it is treated as a miss (returns null) so the caller refetches.
+ * fetchedAt } when present AND fresh, else null. When `ttlMs` is given, a record
+ * that is expired OR lacks a numeric `fetchedAt` is treated as a miss (returns
+ * null) so the caller refetches — a record with no `fetchedAt` is NOT eternal.
  */
 export function readCatalog(applicationId, { ttlMs, dir = CATALOG_DIR, now = Date.now() } = {}) {
   try {
     const rec = JSON.parse(fs.readFileSync(catalogPath(applicationId, dir), 'utf8'));
     if (!rec || !Array.isArray(rec.actions)) return null;
-    if (ttlMs != null && rec.fetchedAt && now - rec.fetchedAt > ttlMs) return null;
+    if (ttlMs != null && !isCatalogFresh(rec, { ttlMs, now })) return null;
     return rec;
   } catch {
     return null;

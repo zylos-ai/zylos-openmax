@@ -335,13 +335,17 @@ const COMMANDS = {
   // rejected (no downgrade).
   //
   // SECURITY (all enforced here on the agent side — the data plane does not pass
-  // through cws-connect/cws-core, so nothing else can): the requested `domain`
-  // MUST be in this connection's allowed-host set, which is the union of the
-  // hosts extracted from the local action-catalog's url_templates (EXACT host
-  // match, no wildcards). A domain outside that set is rejected and the token is
-  // NEVER attached or sent. Also: HTTPS-only, Authorization is CLI-owned (a
-  // caller `authorization` header can never override it), no cross-domain
-  // redirect follow, no token in logs, and internal/metadata IPs are blocked.
+  // through cws-connect/cws-core, so nothing else can). Each boundary is
+  // STRUCTURAL (it constrains the credential's real destination, not just a
+  // hostname string): the requested `(host, port)` MUST exactly match an ORIGIN
+  // derived from the local action-catalog url_templates (port defaulting to 443,
+  // EXACT match, no wildcards); a caller `Host` header is rejected (CLI owns
+  // routing); the target host is resolved and EVERY address must be public before
+  // one is PINNED for the connection (DNS-rebind defense). The allowlist fails
+  // CLOSED on a missing/stale catalog. On any failure the token is NEVER attached
+  // or sent. Also: HTTPS-only, Authorization is CLI-owned (a caller header can
+  // never override it), no cross-domain redirect follow, and no token/secret in
+  // logs (audit is method + host + redacted pathname; `?`/`#` in `path` rejected).
   'conn.request': async () => {
     const app = params.app || params.applicationId || params.application_id || params.slug;
     const connIdParam = params.connectionId || params.connection_id;
@@ -394,13 +398,17 @@ const COMMANDS = {
     }
 
     // The allowlist is derived from this app's local action catalog (warmed on
-    // authorize; refetched here on a miss/TTL). requestDirect enforces the gate.
+    // authorize; refetched here on a miss/TTL — readCatalog now treats a record
+    // with no fetchedAt as stale, so a missing timestamp forces a fresh fetch
+    // rather than authorizing off an eternal cache). requestDirect enforces the
+    // gate AND fails closed on a missing/stale catalogFetchedAt.
     const catalogRec = await getCatalog(orgId, entry.applicationId, {});
     return await requestDirect(
       {
         orgId,
         connection: entry,
         catalog: catalogRec.actions,
+        catalogFetchedAt: catalogRec.fetchedAt,
         credential,
         domain: params.domain,
         path: params.path,
@@ -459,7 +467,7 @@ Applications
 
 Capability cache (runtime/connect/)
   conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
-  conn.request        {app|connectionId, domain, path, method?, headers?, query?, body?}  # raw direct HTTPS call (domain must be in the connector's catalog-derived allowlist)
+  conn.request        {app|connectionId, domain, path, method?, headers?, query?, body?}  # raw direct HTTPS call (host+port must match a catalog-derived origin; query via {query}, not path)
   conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
   conn.index          {refresh?}                                # show the local connections index (connection → application)
 

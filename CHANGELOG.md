@@ -37,6 +37,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new `conn.request` unit-test file (`src/lib/raw-request.test.js`) plus a
   `conn.request` org fail-fast case added to `conn.org-scoping.test.js`.
 
+### Security
+
+- **Peer-review hardening of the `conn.request` boundary (task #12).** Made the
+  raw escape-hatch boundary *structural* — it now constrains the credential's real
+  destination, not just a hostname string:
+  - **Origin allowlist (host + port).** The gate matches the requested
+    **`(host, port)`** against normalized origins derived from the catalog
+    `url_template`s (port defaulting to 443), so an allowed host on an off-catalog
+    port (e.g. `:8443`) is rejected — the port is no longer discarded.
+  - **CLI-owned routing.** A caller-supplied `Host` / `:authority` header is
+    rejected (previously forwarded verbatim), so a header cannot steer the token to
+    a different vhost than the origin the allowlist authorized.
+  - **DNS resolve-validate-and-pin.** The target is resolved to **all** addresses;
+    every address must be public/global-unicast, and one validated address is
+    **pinned** for the actual TLS connection (SNI + Host = the real hostname) via a
+    `node:https` custom `lookup` — defeating DNS-rebinding (no second, unvalidated
+    lookup). IPv4 + IPv6 (incl. v4-mapped, CGNAT `100.64/10`, ULA, link-local).
+  - **Freshness fail-closed.** A missing/stale catalog (or a cache record with no
+    `fetchedAt`) now refuses `conn.request` and asks for `conn.catalog {refresh:true}`
+    instead of authorizing off a stale host set. Fixed a `connect-store.readCatalog`
+    TTL bug where a record lacking `fetchedAt` was treated as eternally fresh.
+  - **No secret in logs.** A `?`/`#` in `path` is rejected (query params must use the
+    dedicated `query` field), and the audit line logs only the **redacted pathname**
+    (never query/fragment/headers/body).
+- **2nd peer-review follow-up (task #12).** Closed the remaining bypasses:
+  the pinned `node:https` transport now honours **both** custom-`lookup` callback
+  shapes (`{all:true}` array *and* scalar) so the pinned IP is actually used on
+  Node ≥ v20 (was `ERR_INVALID_IP_ADDRESS`); IP classification now **parses the
+  address to canonical bytes** and matches full CIDR ranges (link-local
+  `fe80::/10` incl. `fe90`/`fea0`/`febf`, v4-mapped private in hex *and* dotted,
+  expanded loopback, v4-compatible) instead of string prefixes; a **future**
+  `fetchedAt` no longer authorizes forever (freshness requires a non-negative age
+  within a small clock-skew); URL-**encoded** `%3F`/`%23` in `path` is rejected and
+  the audit decodes-then-strips so an encoded query/secret can never be logged; and
+  credential resolution now runs **strictly after** every structural gate.
+
 > Stacked on #128 (2.14.6, task #13): this branch is rebased directly on top of
 > `fix/cli-org-scoping`, so 2.14.7 builds on 2.14.6 with no release-file conflict.
 > Merge order: #128 → main, then #129 → main.

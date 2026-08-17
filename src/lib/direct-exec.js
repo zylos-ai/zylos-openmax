@@ -42,6 +42,9 @@
  * testable without network or disk. No import-time side effects.
  */
 
+import dns from 'node:dns';
+import https from 'node:https';
+
 import { redactSecrets } from './redact.js';
 
 // Cap on the provider response we read into memory (mirrors the server-side
@@ -595,15 +598,43 @@ export async function invokeDirect(
 //  calls the provider directly over HTTPS.
 //
 //  Because the data plane no longer passes through cws-connect/cws-core, EVERY
-//  boundary is enforced here on the agent side. The core boundary is the DOMAIN
-//  ALLOWLIST: the set of hosts extracted from the connection's action-catalog
-//  url_templates (already warmed locally). A requested domain outside that set is
-//  rejected and the token is NEVER attached to a header and NEVER sent. Match is
-//  EXACT host (no *.domain wildcard). Additional boundaries: HTTPS-only,
-//  Authorization is CLI-owned (a caller header can never override it), no
-//  cross-domain redirect follow (redirect:'manual'), no token in logs, and an
-//  internal/metadata-IP SSRF block.
+//  boundary is enforced here on the agent side, and each boundary is STRUCTURAL —
+//  it constrains the credential's REAL destination (host + port + resolved IP),
+//  not just a hostname string:
+//
+//   1. ORIGIN ALLOWLIST (the core gate). The allowed set is a set of normalized
+//      origins (scheme=https, host, port) derived from the connection's
+//      action-catalog url_templates (port defaults to 443 when a template omits
+//      it). A request is allowed only when its (host, port) EXACTLY matches an
+//      allowed origin — an off-catalog port (e.g. api.example.com:8443 when the
+//      catalog only warrants :443) is rejected. Exact host, no *.domain wildcard.
+//   2. CLI-OWNED ROUTING. Host and other routing-override headers are the CLI's,
+//      derived from the validated target; a caller-supplied Host / :authority is
+//      REJECTED (never forwarded), so a header cannot redirect the token to a
+//      different vhost/tenant than the origin the allowlist authorized.
+//   3. DNS RESOLVE-VALIDATE-AND-PIN. Before connecting, the target host is
+//      resolved to ALL its addresses; every address must be a public /
+//      global-unicast IP (private / CGNAT / loopback / link-local / ULA /
+//      metadata are rejected). One validated address is then PINNED and the
+//      actual TLS connection is made to that pinned IP (SNI + Host = the real
+//      hostname), so a DNS-rebind between validation and connect cannot swing the
+//      token onto an internal address — there is no second, unvalidated lookup.
+//   4. FRESHNESS FAIL-CLOSED. The allowlist is only as trustworthy as the catalog
+//      it is derived from; a missing / stale catalog (or a record with no
+//      fetchedAt) refuses the request and asks for `conn.catalog {refresh:true}`
+//      rather than authorizing off a stale host set.
+//
+//  On ANY gate failure the token is NEVER attached to a header and NEVER sent.
+//  Additional boundaries: HTTPS-only, Authorization is CLI-owned (a caller header
+//  can never override it), no cross-domain redirect follow, and no token/secret
+//  in logs (audit is method + host + redacted pathname only).
 // ===========================================================================
+
+// Raw-egress catalog freshness window. The allowlist is derived from the local
+// action catalog, so a stale catalog means a host removed upstream stays
+// authorized. conn.request fails CLOSED beyond this window (and on any record
+// lacking a numeric fetchedAt) rather than authorizing off a stale host set.
+export const RAW_CATALOG_FRESHNESS_MS = 24 * 60 * 60 * 1000;
 
 // Methods conn.request accepts (a superset of BODY_METHODS; the read verbs carry
 // no body).
@@ -646,12 +677,60 @@ export function allowedHostsFromCatalog(catalog) {
 }
 
 /**
+ * Extract the normalized ORIGIN (host + port) from an action url_template. Like
+ * hostFromUrlTemplate but PRESERVES the port so the allowlist can constrain the
+ * credential's real destination and not just its hostname. HTTPS is implicit
+ * (conn.request is HTTPS-only), so the port DEFAULTS TO 443 when the template
+ * omits it. Returns { host, port } or null (non-https / placeholder authority).
+ */
+export function originFromUrlTemplate(urlTemplate) {
+  if (typeof urlTemplate !== 'string' || !urlTemplate) return null;
+  if (!/^https:\/\//i.test(urlTemplate)) return null;
+  const m = /^https:\/\/([^/?#]+)/i.exec(urlTemplate);
+  if (!m) return null;
+  let authority = m[1];
+  if (authority.includes('{') || authority.includes('}')) return null; // placeholder authority
+  const at = authority.lastIndexOf('@');
+  if (at >= 0) authority = authority.slice(at + 1); // strip userinfo
+  const portMatch = /:(\d+)$/.exec(authority);
+  const port = portMatch ? Number(portMatch[1]) : 443;
+  const host = authority.replace(/:\d+$/, '').toLowerCase().replace(/\.$/, '');
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { host, port };
+}
+
+/** Stable key for an origin: "host:port" (port always explicit, 443 default). */
+export function originKey(host, port) {
+  return `${String(host).toLowerCase().replace(/\.$/, '')}:${port}`;
+}
+
+/**
+ * Derive the allowed-ORIGIN set for a connection = the UNION of (host, port)
+ * origins from every action's url_template in the local catalog, each as an
+ * "host:port" key (port defaulting to 443). This is the structural policy the
+ * conn.request gate enforces: a requested (host, port) MUST match one of these
+ * exactly, so a caller cannot keep the allowed host but swing the port to an
+ * unintended service. Placeholder / non-https templates contribute nothing.
+ */
+export function allowedOriginsFromCatalog(catalog) {
+  const set = new Set();
+  for (const a of Array.isArray(catalog) ? catalog : []) {
+    const o = originFromUrlTemplate(a && a.url_template);
+    if (o) set.add(originKey(o.host, o.port));
+  }
+  return set;
+}
+
+/**
  * Parse + validate a caller-supplied `domain`: it MUST be a bare host (optionally
  * host:port) — never a scheme, path, query, or userinfo. Returns
- * { hostname, authority } (hostname lowercased, no port; authority = host[:port])
- * or null. Rejecting anything with "://", "/", "@", "?", "#", or whitespace stops
- * a caller from smuggling "evil.com/@good" / "good.com/../evil" style values past
- * the allowlist gate.
+ * { hostname, port, authority } (hostname lowercased; port is the explicit port
+ * or 443 by default — HTTPS is implicit; authority = host[:port] as given) or
+ * null. Rejecting anything with "://", "/", "@", "?", "#", or whitespace stops a
+ * caller from smuggling "evil.com/@good" / "good.com/../evil" style values past
+ * the allowlist gate. The port is surfaced so the origin gate can enforce
+ * (host, port) — a caller cannot keep an allowed host but swing to an off-catalog
+ * port to reach a different service with the credential.
  */
 export function parseRequestTarget(domain) {
   if (typeof domain !== 'string') return null;
@@ -662,7 +741,9 @@ export function parseRequestTarget(domain) {
   if (u.username || u.password || u.pathname !== '/' || u.search || u.hash) return null;
   const hostname = (u.hostname || '').toLowerCase().replace(/\.$/, '');
   if (!hostname) return null;
-  return { hostname, authority: u.port ? `${hostname}:${u.port}` : hostname };
+  const port = u.port ? Number(u.port) : 443;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { hostname, port, authority: u.port ? `${hostname}:${u.port}` : hostname };
 }
 
 function isDisallowedIPv4(ip) {
@@ -704,6 +785,82 @@ export function isDisallowedHost(hostname) {
   }
   if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return isDisallowedIPv4(h);
   return false;
+}
+
+/**
+ * Is a RESOLVED IP address disallowed? Applied to every address a hostname
+ * resolves to (see resolveAndPin). Unlike isDisallowedHost (which reasons about a
+ * host STRING and lets an unknown hostname through to DNS), this reasons about a
+ * concrete literal IP and FAILS CLOSED: anything that is not a recognizable
+ * public/global-unicast literal is rejected. Blocks loopback / private / CGNAT /
+ * link-local / ULA / multicast / metadata for both v4 and v6 (incl. v4-mapped v6).
+ */
+export function isDisallowedAddress(address) {
+  if (!address) return true;
+  const a = String(address).toLowerCase().replace(/^\[/, '').replace(/\]$/, '').replace(/%.*$/, '');
+  if (a.includes(':')) { // IPv6
+    if (a === '::1' || a === '::') return true;                 // loopback / unspecified
+    if (/^fe80:/i.test(a)) return true;                         // link-local fe80::/10
+    if (/^f[cd][0-9a-f]{2}:/i.test(a)) return true;             // unique-local fc00::/7
+    if (/^ff[0-9a-f]{2}:/i.test(a)) return true;                // multicast ff00::/8
+    const mapped = /::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(a);
+    if (mapped) return isDisallowedIPv4(mapped[1]);
+    if (!/^[0-9a-f:]+$/i.test(a)) return true;                  // not a v6 literal → reject
+    return false;                                               // other global-unicast v6
+  }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(a)) return isDisallowedIPv4(a);
+  return true; // not a recognizable IP literal → fail closed
+}
+
+/**
+ * The default DNS resolver used by resolveAndPin: resolve a hostname to ALL of
+ * its A/AAAA addresses. `verbatim:true` keeps the resolver order (we validate ALL
+ * addresses regardless, so order only affects which public IP we pin). Injectable
+ * so unit tests never touch real DNS. Returns [{ address, family }].
+ */
+async function defaultResolve(hostname) {
+  return dns.promises.lookup(hostname, { all: true, verbatim: true });
+}
+
+/**
+ * Resolve `hostname` to all its addresses, require EVERY address to be a public /
+ * global-unicast IP, then PIN one validated address for the actual connection.
+ * This is the structural DNS-rebinding defense: the same resolution that is
+ * validated is the one connected to (the pinned IP is handed to the transport,
+ * which does NOT resolve again) — so a rebind that flips the record to an internal
+ * address between validation and connect has no unvalidated second lookup to
+ * exploit. Throws (403) with the token never attached if ANY address is
+ * disallowed, or (502) if resolution yields nothing.
+ *
+ * @returns {Promise<{ pinnedIp: string, family: number, addresses: string[] }>}
+ */
+export async function resolveAndPin(hostname, resolve = defaultResolve) {
+  let records;
+  try {
+    records = await resolve(hostname);
+  } catch (e) {
+    throw Object.assign(new Error(`DNS resolution failed for "${hostname}": ${e.message}`), { status: 502 });
+  }
+  const list = (Array.isArray(records) ? records : [records])
+    .map((r) => (typeof r === 'string' ? { address: r, family: r.includes(':') ? 6 : 4 } : r))
+    .filter((r) => r && r.address);
+  if (list.length === 0) {
+    throw Object.assign(new Error(`DNS returned no addresses for "${hostname}"`), { status: 502 });
+  }
+  for (const r of list) {
+    if (isDisallowedAddress(r.address)) {
+      throw Object.assign(
+        new Error(`domain "${hostname}" resolves to a blocked internal / private address (${r.address}) — refusing; the credential is never attached or sent`),
+        { status: 403 },
+      );
+    }
+  }
+  const pinned = list[0];
+  return {
+    pinnedIp: pinned.address,
+    family: pinned.family || (pinned.address.includes(':') ? 6 : 4),
+    addresses: list.map((r) => r.address),
+  };
 }
 
 function buildRawQuery(query) {
@@ -751,18 +908,33 @@ export function assembleRawRequest(
   }
   let p = path == null ? '/' : String(path);
   if (!p.startsWith('/')) p = `/${p}`;
+  // The query string and fragment are CLI-assembled from the dedicated `query`
+  // field; a "?"/"#" embedded in `path` is rejected so a caller-supplied secret
+  // (e.g. "/v1/items?api_key=SECRET") can never ride in via the path and reach a
+  // log or the wire un-owned. Query params MUST go through `query`.
+  if (p.includes('?') || p.includes('#')) {
+    throw Object.assign(
+      new Error('path must not contain "?" or "#" — pass query parameters via the dedicated `query` field'),
+      { status: 400 },
+    );
+  }
 
   const qs = buildRawQuery(query);
   let url = `https://${authority}${p}`;
-  if (qs) url += `${p.includes('?') ? '&' : '?'}${qs}`;
+  if (qs) url += `?${qs}`;
 
   // Caller headers first — but Authorization is CLI-owned and stripped here so it
-  // can NEVER be overridden by a caller-supplied header.
+  // can NEVER be overridden by a caller-supplied header, and routing-override
+  // headers (Host / :authority) are dropped: the CLI owns Host, derived from the
+  // validated authority, so a caller header cannot steer the token to a different
+  // vhost than the origin the allowlist authorized.
   const outHeaders = {};
   const src = (headers && typeof headers === 'object' && !Array.isArray(headers)) ? headers : {};
   for (const [k, v] of Object.entries(src)) {
     if (typeof k !== 'string') continue;
-    if (k.toLowerCase() === 'authorization') continue; // non-overridable
+    const lk = k.toLowerCase();
+    if (lk === 'authorization') continue;                 // non-overridable
+    if (lk === 'host' || lk === ':authority') continue;   // CLI-owned routing
     if (v === undefined || v === null) continue;
     outHeaders[k] = String(v);
   }
@@ -800,88 +972,211 @@ export function assembleRawRequest(
 }
 
 /**
- * Send one assembled RAW request. `body` is already serialized so it is passed
- * verbatim (never re-encoded). `redirect: 'manual'` means a cross-domain 3xx is
- * NEVER auto-followed — auto-following would forward the Authorization header to
- * the redirect target (potentially off-allowlist) and leak the token; instead the
- * 3xx is returned to the caller as-is. Same server-parity shape as sendDirect.
+ * Read a Node IncomingMessage (node:https response) with the same STREAMING byte
+ * cap as readCappedText — an over-cap body throws (502) instead of buffering
+ * whole. Used by the pinned-HTTPS transport (which yields a Node stream, not a
+ * fetch Response).
  */
-export async function sendRawDirect(assembled, { fetchImpl = fetch } = {}) {
-  const res = await fetchImpl(assembled.url, {
-    method: assembled.method,
-    headers: assembled.headers,
-    body: assembled.body !== undefined ? assembled.body : undefined,
-    redirect: 'manual',
-  });
-  const text = await readCappedText(res);
-  let body;
-  try { body = JSON.parse(text); } catch { body = text; }
-  return { status_code: res.status, headers: headersToObject(res.headers), body };
-}
-
-// Audit a raw call: method + host + path ONLY. Headers (where Authorization
-// lives), the query string, and the body are NEVER logged — any of them could
-// carry a caller-supplied secret. One short line, tagged for grep.
-function auditRawCall(method, authority, normPath, audit) {
-  audit(`[conn.request] → ${method} https://${authority}${normPath}`);
+async function readCappedStream(res) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of res) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > MAX_RESPONSE_BYTES) {
+      res.destroy();
+      throw Object.assign(new Error(`provider response exceeds the ${MAX_RESPONSE_BYTES}-byte cap`), { status: 502 });
+    }
+    chunks.push(buf);
+  }
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 /**
- * conn.request orchestration: derive allowlist → GATE the domain → (only then)
- * read the token → proactive OAuth refresh → assemble (attach token) → send (no
- * cross-domain redirect follow) → reactive-401 refresh once.
- *
- * SECURITY RED LINE: the domain allowlist gate runs BEFORE the credential token
- * is read into the request. On ANY gate failure this throws and the token is
- * NEVER attached to a header and NEVER sent. The allowed-host set is the union of
- * the hosts from the connection's action-catalog url_templates (exact host match,
- * no wildcards).
+ * The production RAW transport: send one assembled request over node:https to a
+ * PINNED IP. The socket connects to `pin.pinnedIp` (via a custom `lookup` that
+ * ignores any fresh DNS answer), while TLS SNI (`servername`) and the `Host`
+ * header are the real hostname — so the certificate is validated against the real
+ * host AND a DNS-rebind cannot move the connection off the validated address.
+ * node:https does NOT auto-follow redirects, so a 3xx is returned as-is (parity
+ * with the former `redirect:'manual'`), never forwarding the Authorization header.
+ */
+function sendPinnedHttps(assembled, pin) {
+  if (!pin || !pin.pinnedIp) {
+    return Promise.reject(Object.assign(new Error('sendPinnedHttps: a validated pinned IP is required'), { status: 500 }));
+  }
+  const url = new URL(assembled.url);
+  const port = url.port ? Number(url.port) : 443;
+  const headers = { ...assembled.headers, Host: url.host }; // CLI-owned Host
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        port,
+        path: `${url.pathname}${url.search}`,
+        method: assembled.method,
+        headers,
+        servername: url.hostname, // SNI = real host (cert validated against it)
+        lookup: (_h, _opts, cb) => cb(null, pin.pinnedIp, pin.family || (pin.pinnedIp.includes(':') ? 6 : 4)),
+      },
+      (res) => {
+        readCappedStream(res)
+          .then((text) => {
+            let body;
+            try { body = JSON.parse(text); } catch { body = text; }
+            resolve({ status_code: res.statusCode, headers: { ...res.headers }, body });
+          })
+          .catch(reject);
+      },
+    );
+    req.on('error', reject);
+    if (assembled.body !== undefined && assembled.body !== null) req.write(assembled.body);
+    req.end();
+  });
+}
+
+/**
+ * Send one assembled RAW request. Two transports:
+ *   - default (production): pinned node:https (see sendPinnedHttps) — connects to
+ *     the pre-validated PINNED IP, defeating DNS-rebinding. Requires `pin`.
+ *   - injected `fetchImpl` (unit tests): the fetch path, with `redirect:'manual'`
+ *     so a cross-domain 3xx is never auto-followed (which would forward the
+ *     Authorization header off-allowlist). No real socket/DNS is touched.
+ * `body` is already serialized so it is passed verbatim (never re-encoded). Same
+ * server-parity shape as sendDirect: `{ status_code, headers, body }`.
+ */
+export async function sendRawDirect(assembled, { fetchImpl, pin } = {}) {
+  if (fetchImpl) {
+    const res = await fetchImpl(assembled.url, {
+      method: assembled.method,
+      headers: assembled.headers,
+      body: assembled.body !== undefined ? assembled.body : undefined,
+      redirect: 'manual',
+    });
+    const text = await readCappedText(res);
+    let body;
+    try { body = JSON.parse(text); } catch { body = text; }
+    return { status_code: res.status, headers: headersToObject(res.headers), body };
+  }
+  return sendPinnedHttps(assembled, pin);
+}
+
+// Audit a raw call: method + host + REDACTED PATHNAME only. Headers (where
+// Authorization lives), the query string, the fragment, and the body are NEVER
+// logged — any of them could carry a caller-supplied secret. The pathname is
+// defensively stripped of any "?"/"#" tail (assembleRawRequest already rejects
+// those in `path`, so this is belt-and-suspenders) so a secret can never reach
+// the audit line via the URL. One short line, tagged for grep.
+function auditRawCall(method, authority, normPath, audit) {
+  const pathnameOnly = String(normPath == null ? '/' : normPath).split(/[?#]/)[0] || '/';
+  audit(`[conn.request] → ${method} https://${authority}${pathnameOnly}`);
+}
+
+/**
+ * Reject caller-supplied routing-override headers (Host / :authority). The CLI
+ * owns Host — it is derived from the validated target — so a caller header could
+ * only try to steer the credential to a different vhost/tenant than the origin
+ * the allowlist authorized. We REJECT (rather than silently drop) so the failure
+ * is visible; assembleRawRequest additionally drops them as belt-and-suspenders.
+ */
+function assertNoRoutingHeaders(headers) {
+  const src = (headers && typeof headers === 'object' && !Array.isArray(headers)) ? headers : {};
+  for (const k of Object.keys(src)) {
+    const lk = String(k).toLowerCase();
+    if (lk === 'host' || lk === ':authority') {
+      throw Object.assign(
+        new Error(`caller-supplied "${k}" header is not allowed — the CLI owns Host (derived from the validated target); remove it`),
+        { status: 400 },
+      );
+    }
+  }
+}
+
+/**
+ * conn.request orchestration. STRUCTURAL boundaries, each enforced BEFORE the
+ * credential token is ever read/attached (so on ANY gate failure the token is
+ * NEVER attached to a header and NEVER sent):
+ *   1. freshness fail-closed — a missing/stale catalog refuses the request;
+ *   2. origin allowlist — requested (host, PORT) must exactly match an origin
+ *      derived from the catalog url_templates (port defaulting to 443);
+ *   3. routing headers — a caller Host / :authority is rejected (CLI owns Host);
+ *   4. literal-IP SSRF block on the requested host;
+ *   5. DNS resolve-validate-and-PIN — every resolved address must be public, and
+ *      one validated address is pinned for the actual connection (rebind-proof).
+ * Only THEN is the token read, (proactively) refreshed, attached, and sent (no
+ * cross-domain redirect follow), with a single reactive-401 refresh+retry.
  *
  * @param {object} args
  *   - orgId, connection ({id, ...}), catalog (local action array), credential
- *   - domain (bare host), path, method, headers, query, body (caller-supplied)
- * @param {object} deps  fetchImpl, acquire, saveCache, now, skewMs, audit, log, warn
+ *   - catalogFetchedAt (ms epoch the catalog was fetched — freshness fail-closed)
+ *   - domain (bare host[:port]), path, method, headers, query, body (caller)
+ * @param {object} deps  fetchImpl, sendImpl, resolve, acquire, saveCache, now,
+ *                       skewMs, catalogFreshnessMs, audit, log, warn
  */
 export async function requestDirect(
-  { orgId, connection, catalog, credential, domain, path, method, headers, query, body },
+  { orgId, connection, catalog, credential, catalogFetchedAt, domain, path, method, headers, query, body },
   deps = {},
 ) {
   const {
-    fetchImpl = fetch, acquire, saveCache = () => {}, now = Date.now,
-    skewMs = DEFAULT_EXPIRY_SKEW_MS, audit = defaultAudit, log = () => {}, warn = () => {},
+    fetchImpl, sendImpl = sendRawDirect, resolve = defaultResolve,
+    acquire, saveCache = () => {}, now = Date.now,
+    skewMs = DEFAULT_EXPIRY_SKEW_MS, catalogFreshnessMs = RAW_CATALOG_FRESHNESS_MS,
+    audit = defaultAudit, log = () => {}, warn = () => {},
   } = deps;
 
-  // 1. Allowed-host set from the local catalog (union of url_template hosts).
-  const allowed = allowedHostsFromCatalog(catalog);
-  if (allowed.size === 0) {
+  // 0. Freshness FAIL-CLOSED. The allowlist is only as trustworthy as the catalog
+  // it is derived from. A record with no numeric fetchedAt, or one older than the
+  // freshness window, is treated as stale — REFUSE rather than authorize off a
+  // stale host set (a host removed upstream must not stay allowed).
+  if (typeof catalogFetchedAt !== 'number' || !Number.isFinite(catalogFetchedAt)
+      || (now() - catalogFetchedAt) > catalogFreshnessMs) {
     throw Object.assign(
-      new Error('no allowed hosts could be derived from the connection catalog (empty / too-old catalog) — run conn.catalog {refresh:true}'),
+      new Error('connection catalog is missing or stale — refusing conn.request (fail-closed). Run conn.catalog {refresh:true} first, then retry.'),
+      { status: 409 },
+    );
+  }
+
+  // 1. Allowed-ORIGIN set (host + port) from the local catalog.
+  const allowedOrigins = allowedOriginsFromCatalog(catalog);
+  if (allowedOrigins.size === 0) {
+    throw Object.assign(
+      new Error('no allowed origins could be derived from the connection catalog (empty / too-old catalog) — run conn.catalog {refresh:true}'),
       { status: 422 },
     );
   }
 
-  // 2. Parse + GATE the domain BEFORE the token is ever touched.
+  // 2. Parse + GATE the target BEFORE the token is ever touched.
   const target = parseRequestTarget(domain);
   if (!target) {
     throw Object.assign(
-      new Error(`invalid domain "${domain}" — expected a bare host like "api.example.com" (no scheme / path / credentials)`),
+      new Error(`invalid domain "${domain}" — expected a bare host like "api.example.com" (optionally host:port; no scheme / path / credentials)`),
       { status: 400 },
     );
   }
-  if (!allowed.has(target.hostname)) {
+  // Origin match: (host, port) must be one the catalog warrants. A caller port not
+  // in the allowed origin set (e.g. host:8443 when the catalog only warrants :443)
+  // is rejected here — the token is never attached or sent.
+  if (!allowedOrigins.has(originKey(target.hostname, target.port))) {
     throw Object.assign(
-      new Error(`domain "${target.hostname}" is not in this connection's allowed host set (derived from the action-catalog url_template hosts) — refusing; the credential is never attached or sent`),
+      new Error(`origin "${target.hostname}:${target.port}" is not in this connection's allowed origin set (host+port derived from the action-catalog url_templates; port defaults to 443) — refusing; the credential is never attached or sent`),
       { status: 403 },
     );
   }
+  // 3. Reject caller routing-override headers (CLI owns Host).
+  assertNoRoutingHeaders(headers);
+  // 4. Literal-IP SSRF block on the requested host string.
   if (isDisallowedHost(target.hostname)) {
     throw Object.assign(
       new Error(`domain "${target.hostname}" is a blocked internal / metadata address — refusing`),
       { status: 403 },
     );
   }
+  // 5. Resolve → require EVERY address public → PIN one for the connection. Still
+  // before the token: a host that resolves to a private/CGNAT/loopback address (or
+  // a rebind) is refused and the credential is never attached or sent.
+  const pin = await resolveAndPin(target.hostname, resolve);
 
-  // 3. Only NOW read the credential token (the gate has already passed).
+  // 6. Only NOW read the credential token (every gate has passed).
   let cred = credential;
   if (!cred || !cred.access_token) {
     throw Object.assign(
@@ -902,7 +1197,7 @@ export async function requestDirect(
     }
   }
 
-  // 4. Assemble (token attached HERE — after the gate) and send.
+  // 7. Assemble (token attached HERE — after every gate) and send to the PINNED IP.
   let normPath = path == null ? '/' : String(path);
   if (!normPath.startsWith('/')) normPath = `/${normPath}`;
   const build = () => assembleRawRequest(
@@ -911,16 +1206,16 @@ export async function requestDirect(
   );
   let assembled = build();
   auditRawCall(assembled.method, target.authority, normPath, audit);
-  let result = await sendRawDirect(assembled, { fetchImpl });
+  let result = await sendImpl(assembled, { fetchImpl, pin });
 
-  // 5. Reactive-401 refresh backstop (refreshable/OAuth only) — refresh once, retry.
+  // 8. Reactive-401 refresh backstop (refreshable/OAuth only) — refresh once, retry.
   if (result.status_code === 401 && acquire && isTokenRefreshable(cred)) {
     log(`[conn.request] provider 401 conn=${connId}; reactive refresh + retry once`);
     const fresh = await acquire(orgId, connId);
     if (fresh && fresh.access_token) {
       saveCache(connId, fresh); cred = fresh;
       assembled = build();
-      result = await sendRawDirect(assembled, { fetchImpl });
+      result = await sendImpl(assembled, { fetchImpl, pin });
     }
   }
 
