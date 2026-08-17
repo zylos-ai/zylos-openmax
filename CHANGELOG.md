@@ -34,6 +34,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no `{org}` was passed, a latent multi-org 403 in the 6 conversation-member
   commands. It now always resolves the operating org (fail-fast on multi-org
   with no `{org}`).
+- Bug B follow-up (review #13): `comm.js` `resolveOrgConfig` now preserves the
+  `COCO_ORG_ID` env fallback on the no-`{org}` path — a deployment that selects
+  its operating org purely via `COCO_ORG_ID` (org not present in `config.orgs`)
+  again resolves and sends, matching the pre-PR bare-client behavior, while the
+  multi/zero-org fail-fast is unchanged.
 
 ### Unchanged (deliberate)
 

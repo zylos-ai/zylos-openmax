@@ -39,9 +39,11 @@ function ensureClientMsgId(id) {
 /**
  * Resolve the target org block. Accepts `org` as a config key (org_id),
  * org UUID, or org_name (case-insensitive); with neither, defaults to the
- * single enabled org.
+ * env-selected org (COCO_ORG_ID) or the single enabled org.
  * Returns { slug, org_id, org_name, self, owner, ... } where `slug` is the
- * config key (used for config writes).
+ * config key (used for config writes). For an env-only org that is not in
+ * config.orgs, returns a minimal { org_id } block carrying just the id for
+ * JWT routing (no slug/self — config-backed member/owner ops need config).
  */
 function resolveOrgConfig(p) {
   const key = p.org || p.orgSlug || p.orgId || p.org_id;
@@ -58,7 +60,17 @@ function resolveOrgConfig(p) {
     const names = enabled.map((o) => o.org_name || o.slug).join(', ');
     throw new Error(`org not found in config: "${key}" (known: ${names || 'none'})`);
   }
+  // No explicit {org}. Honor the env-selected operating org first — parity
+  // with the bare cws-core client / config.resolveDefaultOrgId(), so
+  // single-org and COCO_ORG_ID-only deployments keep resolving the one org
+  // exactly as before this PR (see reviewer regression #13). Prefer the
+  // matching config block so slug/name/self stay populated for config-backed
+  // ops; otherwise carry a minimal { org_id } block for JWT routing.
+  const envOrgId = process.env.COCO_ORG_ID;
+  if (envOrgId) return getOrgByOrgId(envOrgId) || { org_id: envOrgId };
   if (enabled.length === 1) return enabled[0];
+  // Nothing (arg, env, or a lone enabled org) determines the operating org.
+  // Fail fast (400) instead of dropping to a bare, identity-only call.
   if (enabled.length === 0) throw Object.assign(new Error('no enabled orgs in config.orgs'), { status: 400 });
   const names = enabled.map((o) => o.org_name || o.slug).join(', ');
   throw Object.assign(
