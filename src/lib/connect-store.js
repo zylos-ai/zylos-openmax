@@ -79,7 +79,12 @@ function toEntry(conn) {
     id,
     applicationId: conn.application_id || conn.applicationId || null,
     slug: conn.application_slug || conn.slug || conn.provider || null,
+    // `name` is the APPLICATION name (e.g. "Gmail"); `displayName` is the
+    // connection's user-given label (e.g. "工作邮箱") — the ONLY human-readable
+    // way to tell two same-app connections apart, so multi-connection
+    // disambiguation asks the user by displayName (never the connection id).
     name: conn.application_name || conn.name || null,
+    displayName: conn.display_name || conn.displayName || null,
     status: conn.status || 'active',
   };
 }
@@ -99,6 +104,10 @@ export function upsertConnection(conn, indexPath = INDEX_PATH) {
     applicationId: entry.applicationId ?? prev.applicationId ?? null,
     slug: entry.slug ?? prev.slug ?? null,
     name: entry.name ?? prev.name ?? null,
+    // Additive, like the other fields: a sparse event (slug only, no
+    // display_name) must never null a display_name a richer conn.list record
+    // already captured.
+    displayName: entry.displayName ?? prev.displayName ?? null,
     status: entry.status ?? prev.status ?? 'active',
   };
   writeIndex(index, indexPath);
@@ -138,6 +147,22 @@ export function findConnectionByApp(app, indexPath = INDEX_PATH) {
   const matches = entries.filter((e) => e.slug === app || e.applicationId === app);
   if (matches.length === 0) return null;
   return matches.find((e) => e.status === 'active') || matches[0];
+}
+
+/**
+ * Resolve an application → ALL of its ACTIVE connection entries (an array). Like
+ * findConnectionByApp but returns every active match instead of collapsing to
+ * one — the input to multi-connection disambiguation: 0 → resolve/404, exactly
+ * 1 → use it, >1 → the caller must ask the user which one (by display_name).
+ * Non-active entries (e.g. needs_reauth) are excluded so they never count as a
+ * selectable candidate. `app` may be a slug or an applicationId.
+ */
+export function findActiveConnectionsByApp(app, indexPath = INDEX_PATH) {
+  if (!app) return [];
+  const entries = Object.values(readIndex(indexPath).connections);
+  return entries.filter(
+    (e) => (e.slug === app || e.applicationId === app) && e.status === 'active',
+  );
 }
 
 // ---------------------------------------------------------------------------

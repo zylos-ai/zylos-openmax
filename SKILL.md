@@ -131,6 +131,8 @@ Whenever a request needs a **third-party app or account** — sending or reading
 3. **`conn.catalog {app}`** — that app's available actions, each with an `input_schema` describing its parameters.
 4. **`conn.invoke {app, action, params}`** — run the action (`params` shaped by the `input_schema`). The token is handled for you (from a local cache for direct connections, or server-side for proxy connections); you never craft a URL or a raw HTTP request.
 
+If an owner authorized **more than one connection of the same app** (e.g. two Gmail accounts), `conn.invoke {app, ...}` returns `needs_selection` (a normal result, not an error) with a `candidates` list instead of silently picking one. **Ask the user which one — in the user's own language — referring to each by its `display_name`, never the `connection_id`** — then retry with `conn.invoke {connectionId, action, params}` (the `connectionId` targets that connection directly and skips app-resolution). See `references/conn-operations.md` → "Multiple connections for one app".
+
 You learn what an app can do by reading its catalog **at call time**, so this one flow covers **any** connected app — you never hardcode or pre-learn a specific provider, and a newly-added connector needs no change here. If `conn.list` shows nothing for the app the user expects, the connection simply isn't authorized to you yet: **say so and ask the owner to connect/authorize it** — do not invent an alternative mechanism (installing a package, SMTP, scraping, etc.).
 
 When an owner authorizes a new connection to you, you also receive a proactive **`🔌 [Connection authorized]`** session notice naming the app — that is your cue it is ready; act on it with the same `conn.*` flow (no need to wait to be asked again).

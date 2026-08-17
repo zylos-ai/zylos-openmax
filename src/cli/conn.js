@@ -9,11 +9,13 @@
  *   node src/cli/conn.js conn.acquire  '{"connectionId":"..."}'
  */
 
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { apiPath, getForOrg, postForOrg } from '../lib/client.js';
 import { loadConfig, enabledOrgs, resolveDefaultOrgId } from '../lib/config.js';
 import { listCachedCredentials, clearCachedCredentials, readCredentialCache, saveCredentialCache } from '../lib/credential-cache.js';
 import {
-  readIndex, replaceIndexFromList, findConnectionByApp, indexPathForOrg,
+  readIndex, replaceIndexFromList, findConnectionByApp, findActiveConnectionsByApp, indexPathForOrg,
   readCatalog, writeCatalog, invalidateCatalog, CATALOG_TTL_MS,
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
@@ -101,6 +103,74 @@ async function resolveConnectionForApp(app, orgId, agentId) {
     entry = findConnectionByApp(app, idxPath);
   }
   return entry;
+}
+
+// Build the `needs_selection` result for the >1-active-connections case. This is
+// a NORMAL return value (printed to stdout, exit 0) — NOT an error — so the
+// agent can act on it. i18n contract: `agent_instruction` is LANGUAGE-NEUTRAL
+// English guidance telling the agent to localize its question into the USER'S
+// language; it deliberately contains NO ready-made zh/en user-facing sentence.
+// `display_name` passes through as-is (it is the only human-readable way to tell
+// two same-app connections apart); the raw connection_id is never shown to the
+// user, only echoed back on retry via `connectionId`.
+export function buildNeedsSelection(app, action, candidates) {
+  return {
+    needs_selection: true,
+    reason: 'multiple_connections',
+    app,
+    agent_instruction:
+      "Multiple connections match this app. Ask the user which one to use, phrasing your "
+      + "question in the USER'S language (they may write Chinese or English). Refer to each "
+      + "connection by its display_name, never the connection_id. Then retry with the chosen connectionId.",
+    candidates: (candidates || []).map((e) => ({
+      connection_id: e.id,
+      display_name: e.displayName ?? null,
+      status: e.status,
+    })),
+    retry_hint: `conn.invoke {"connectionId":"<chosen>","action":"${action}","params":{...}}`,
+  };
+}
+
+// Count-aware resolution of a conn.invoke target. Returns either { entry } (use
+// it directly; entry may be null → caller 404s) or { needsSelection } (return
+// it verbatim). Pure/injectable (deps: findActives, findAny, readEntryById,
+// refresh) so the 0/1/>1 branching and the connectionId bypass are unit-testable
+// without network or config. Branching:
+//   - connectionId given → SKIP app-resolution, use that connection (refresh
+//     once if it is unknown or lacks an applicationId).
+//   - 0 active → refresh once (already done if the sole candidate lacked an
+//     applicationId); still 0 → fall back to any (non-active, e.g. needs_reauth)
+//     entry so its actionable hint surfaces, else null → 404.
+//   - exactly 1 active → use it.
+//   - >1 active → needs_selection (never silently pick the first).
+export async function resolveInvokeEntry(
+  { app, connectionId, action },
+  { findActives, findAny, readEntryById, refresh },
+) {
+  if (connectionId) {
+    let entry = readEntryById(connectionId);
+    if (!entry || !entry.applicationId) {
+      await refresh();
+      entry = readEntryById(connectionId);
+    }
+    // Even if still unknown locally, honor the explicit id — cws-core re-checks
+    // the connection-agent boundary server-side. applicationId stays null (the
+    // direct path guards on it and errors with an actionable hint).
+    return { entry: entry || { id: connectionId, status: 'active', applicationId: null, slug: null, name: null, displayName: null } };
+  }
+
+  let actives = findActives(app);
+  // Refresh once when nothing matches, OR the sole candidate lacks an
+  // applicationId (slug-only event before any conn.list) — mirrors the old
+  // resolveConnectionForApp trigger, now count-aware (a refresh may also reveal
+  // a second active, correctly routing to needs_selection).
+  if (actives.length === 0 || (actives.length === 1 && !actives[0].applicationId)) {
+    await refresh();
+    actives = findActives(app);
+  }
+  if (actives.length > 1) return { needsSelection: buildNeedsSelection(app, action, actives) };
+  if (actives.length === 1) return { entry: actives[0] };
+  return { entry: findAny(app) || null };
 }
 
 // Return an application's action catalog, reading the cache first and filling it
@@ -252,15 +322,36 @@ const COMMANDS = {
   // On an action/schema-shaped failure it invalidates the cached catalog once so
   // the next conn.catalog is fresh, then resurfaces the error.
   'conn.invoke': async () => {
+    // An explicit connectionId (alias connection_id) SKIPS app-resolution and
+    // targets that connection directly — the one-command retry after a
+    // needs_selection prompt (the user picked, we re-invoke by id). When absent,
+    // resolution is app-driven and count-aware (0/1/>1).
+    const explicitConnId = params.connectionId || params.connection_id;
     const app = params.app || params.applicationId || params.application_id || params.slug;
-    if (!app) throw Object.assign(new Error('app (slug or applicationId) is required'), { status: 400 });
+    if (!explicitConnId && !app) throw Object.assign(new Error('app (slug or applicationId) is required unless connectionId is given'), { status: 400 });
     if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
     const orgId = requireOrgId();
     const agentId = resolveSelfMemberId(orgId);
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
 
-    const entry = await resolveConnectionForApp(app, orgId, agentId);
+    const idxPath = indexPathForOrg(orgId);
+    const { entry, needsSelection } = await resolveInvokeEntry(
+      { app, connectionId: explicitConnId, action: params.action },
+      {
+        findActives: (a) => findActiveConnectionsByApp(a, idxPath),
+        findAny: (a) => findConnectionByApp(a, idxPath),
+        readEntryById: (id) => readIndex(idxPath).connections[id] || null,
+        refresh: () => refreshIndex(orgId, agentId),
+      },
+    );
+    // >1 active for the app: return the candidate list (normal result, exit 0)
+    // so the agent asks the user which one — never silently pick the first.
+    if (needsSelection) return needsSelection;
     if (!entry) throw Object.assign(new Error(`no connection found for app "${app}" (org ${orgId}, agent ${agentId})`), { status: 404 });
+
+    // Prefer the caller's app for messages; when they invoked by connectionId
+    // (no app), fall back to the resolved slug/id so hints stay meaningful.
+    const appLabel = app || entry.slug || entry.id;
 
     // A reauth_needed event has flagged this connection and cleared its cached
     // credential (see connection-events.js). Surface an actionable hint instead
@@ -269,7 +360,7 @@ const COMMANDS = {
     // the owner was notified — only that re-authorization is required.)
     if (entry.status === 'needs_reauth') {
       throw Object.assign(
-        new Error(`connection for app "${app}" needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
+        new Error(`connection for app "${appLabel}" needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
         { status: 409 },
       );
     }
@@ -288,7 +379,7 @@ const COMMANDS = {
 
     if (mode === 'direct') {
       if (!entry.applicationId) {
-        throw Object.assign(new Error(`cannot run direct action for app "${app}": applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
+        throw Object.assign(new Error(`cannot run direct action for app "${appLabel}": applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
       }
       try {
         // The local catalog now carries per-action url_template/headers_template;
@@ -370,6 +461,9 @@ Applications
 
 Capability cache (runtime/connect/)
   conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
+                      {connectionId, action, params?}           #   or target a specific connection (skips app-resolution)
+                                                                 #   >1 connections for an app → returns needs_selection (ask
+                                                                 #   the user by display_name, retry with connectionId)
   conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
   conn.index          {refresh?}                                # show the local connections index (connection → application)
 
@@ -407,4 +501,9 @@ async function main() {
   }
 }
 
-main();
+// Only run the CLI when invoked directly (node src/cli/conn.js …). Guarding this
+// lets the module be imported by tests to exercise the pure helpers
+// (buildNeedsSelection / resolveInvokeEntry) without executing a command.
+if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) {
+  main();
+}
