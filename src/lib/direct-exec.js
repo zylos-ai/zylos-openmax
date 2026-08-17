@@ -584,3 +584,345 @@ export async function invokeDirect(
 
   return result;
 }
+
+// ===========================================================================
+//  conn.request — raw / fully-custom direct request (Task #12)
+//
+//  A generalization of the direct-mode executor above. Where invokeDirect drives
+//  the URL from a catalog url_template + schema-checked params, conn.request lets
+//  the caller supply the whole request (domain + path + method + headers + query
+//  + body) and the CLI attaches the connection's LOCAL direct-mode token and
+//  calls the provider directly over HTTPS.
+//
+//  Because the data plane no longer passes through cws-connect/cws-core, EVERY
+//  boundary is enforced here on the agent side. The core boundary is the DOMAIN
+//  ALLOWLIST: the set of hosts extracted from the connection's action-catalog
+//  url_templates (already warmed locally). A requested domain outside that set is
+//  rejected and the token is NEVER attached to a header and NEVER sent. Match is
+//  EXACT host (no *.domain wildcard). Additional boundaries: HTTPS-only,
+//  Authorization is CLI-owned (a caller header can never override it), no
+//  cross-domain redirect follow (redirect:'manual'), no token in logs, and an
+//  internal/metadata-IP SSRF block.
+// ===========================================================================
+
+// Methods conn.request accepts (a superset of BODY_METHODS; the read verbs carry
+// no body).
+const RAW_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+
+/**
+ * Extract the static HOST from an action url_template. Returns the lowercased
+ * hostname (userinfo + port + trailing dot stripped) or null when the template
+ * is not an absolute https URL, or its authority is itself a {placeholder} (a
+ * self-hosted "{base_url}/..." template — its host is connection-owned and not
+ * catalog-derivable, so it contributes NO allowed host). A non-https template
+ * never widens the allowlist either (conn.request is HTTPS-only).
+ */
+export function hostFromUrlTemplate(urlTemplate) {
+  if (typeof urlTemplate !== 'string' || !urlTemplate) return null;
+  if (!/^https:\/\//i.test(urlTemplate)) return null;
+  const m = /^https:\/\/([^/?#]+)/i.exec(urlTemplate);
+  if (!m) return null;
+  let authority = m[1];
+  if (authority.includes('{') || authority.includes('}')) return null; // placeholder host
+  const at = authority.lastIndexOf('@');
+  if (at >= 0) authority = authority.slice(at + 1); // strip userinfo
+  const host = authority.replace(/:\d+$/, '').toLowerCase().replace(/\.$/, '');
+  return host || null;
+}
+
+/**
+ * Derive the allowed-host set for a connection = the UNION of the hosts extracted
+ * from every action's url_template in the local (already-warmed) action catalog.
+ * Exact hosts only — NO wildcards. New connectors/actions extend the set
+ * automatically; nothing about the allowlist is hardcoded into openmax.
+ */
+export function allowedHostsFromCatalog(catalog) {
+  const set = new Set();
+  for (const a of Array.isArray(catalog) ? catalog : []) {
+    const h = hostFromUrlTemplate(a && a.url_template);
+    if (h) set.add(h);
+  }
+  return set;
+}
+
+/**
+ * Parse + validate a caller-supplied `domain`: it MUST be a bare host (optionally
+ * host:port) — never a scheme, path, query, or userinfo. Returns
+ * { hostname, authority } (hostname lowercased, no port; authority = host[:port])
+ * or null. Rejecting anything with "://", "/", "@", "?", "#", or whitespace stops
+ * a caller from smuggling "evil.com/@good" / "good.com/../evil" style values past
+ * the allowlist gate.
+ */
+export function parseRequestTarget(domain) {
+  if (typeof domain !== 'string') return null;
+  const d = domain.trim();
+  if (!d || d.includes('://') || /[\s/\\@?#]/.test(d)) return null;
+  let u;
+  try { u = new URL(`https://${d}`); } catch { return null; }
+  if (u.username || u.password || u.pathname !== '/' || u.search || u.hash) return null;
+  const hostname = (u.hostname || '').toLowerCase().replace(/\.$/, '');
+  if (!hostname) return null;
+  return { hostname, authority: u.port ? `${hostname}:${u.port}` : hostname };
+}
+
+function isDisallowedIPv4(ip) {
+  const parts = ip.split('.').map((n) => Number(n));
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b] = parts;
+  if (a === 0) return true;                          // 0.0.0.0/8
+  if (a === 127) return true;                        // loopback
+  if (a === 10) return true;                         // private
+  if (a === 172 && b >= 16 && b <= 31) return true;  // private
+  if (a === 192 && b === 168) return true;           // private
+  if (a === 169 && b === 254) return true;           // link-local + metadata 169.254.169.254
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+  if (a >= 224) return true;                         // multicast / reserved
+  return false;
+}
+
+/**
+ * SSRF guard: reject loopback / link-local / private / CGNAT / cloud-metadata
+ * targets so a real credential can never be coaxed onto an internal address.
+ * Defense-in-depth BEHIND the allowlist (catalog hosts are public providers).
+ * Literal-IP ranges (v4 + a pragmatic v6 subset) are checked structurally; a few
+ * hostname suffixes (localhost / .localhost / .internal / .local) are blocked by
+ * name. Full DNS-rebinding defense (resolve-then-pin) is out of scope and noted
+ * in the reference doc.
+ */
+export function isDisallowedHost(hostname) {
+  if (!hostname) return true;
+  const h = String(hostname).toLowerCase().replace(/\.$/, '');
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.internal') || h.endsWith('.local')) return true;
+  if (h.includes(':')) { // IPv6 literal
+    const ip = h.replace(/^\[/, '').replace(/\]$/, '');
+    if (ip === '::1' || ip === '::') return true;
+    if (/^fe80:/i.test(ip)) return true;                 // link-local
+    if (/^f[cd][0-9a-f]{2}:/i.test(ip)) return true;     // unique-local fc00::/7
+    const mapped = /::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+    if (mapped) return isDisallowedIPv4(mapped[1]);
+    return false;
+  }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return isDisallowedIPv4(h);
+  return false;
+}
+
+function buildRawQuery(query) {
+  if (query == null) return '';
+  if (typeof query === 'string') return query.replace(/^\?/, '');
+  if (typeof query !== 'object' || Array.isArray(query)) return '';
+  const parts = [];
+  for (const [k, v] of Object.entries(query)) {
+    if (v === undefined || v === null) continue;
+    const ek = encodeURIComponent(k);
+    if (Array.isArray(v)) { for (const item of v) parts.push(`${ek}=${encodeURIComponent(String(item))}`); }
+    else parts.push(`${ek}=${encodeURIComponent(String(v))}`);
+  }
+  return parts.join('&');
+}
+
+/**
+ * Assemble a fully-custom HTTPS request for conn.request from an authority
+ * (host[:port]) + path + query + method + headers + body, plus the injected
+ * token. Mirrors assembleRequest's auth-injection contract but with a
+ * caller-supplied URL instead of a catalog url_template. Returns
+ * { method, url, headers, body } where `body` is ALREADY SERIALIZED (a string or
+ * undefined) — sendRawDirect passes it verbatim (never re-encodes).
+ *
+ * SECURITY:
+ *   - HTTPS only — the URL is always built as `https://<authority>...`.
+ *   - Authorization is CLI-OWNED: a caller `authorization` header (any case) is
+ *     dropped, and the CLI auth is applied LAST so it wins over any same-named
+ *     header. Default is `Authorization: <canonicalAuthScheme(tokenType)> <token>`;
+ *     an optional auth_injection descriptor can place it in a custom header/query
+ *     (parity with assembleRequest / cws-connect).
+ */
+export function assembleRawRequest(
+  { authority, path = '/', method = 'GET', headers = {}, query, body } = {},
+  token,
+  tokenType = '',
+  authInjection = null,
+) {
+  const m = String(method || 'GET').toUpperCase();
+  if (!RAW_METHODS.has(m)) {
+    throw Object.assign(new Error(`unsupported HTTP method "${method}"`), { status: 400 });
+  }
+  if (!authority) {
+    throw Object.assign(new Error('assembleRawRequest: authority (host) is required'), { status: 400 });
+  }
+  let p = path == null ? '/' : String(path);
+  if (!p.startsWith('/')) p = `/${p}`;
+
+  const qs = buildRawQuery(query);
+  let url = `https://${authority}${p}`;
+  if (qs) url += `${p.includes('?') ? '&' : '?'}${qs}`;
+
+  // Caller headers first — but Authorization is CLI-owned and stripped here so it
+  // can NEVER be overridden by a caller-supplied header.
+  const outHeaders = {};
+  const src = (headers && typeof headers === 'object' && !Array.isArray(headers)) ? headers : {};
+  for (const [k, v] of Object.entries(src)) {
+    if (typeof k !== 'string') continue;
+    if (k.toLowerCase() === 'authorization') continue; // non-overridable
+    if (v === undefined || v === null) continue;
+    outHeaders[k] = String(v);
+  }
+
+  // CLI-owned auth injected LAST so it wins over any same-named caller header.
+  if (authInjection && typeof authInjection === 'object' && authInjection.location && authInjection.name) {
+    const vt = typeof authInjection.value_template === 'string' ? authInjection.value_template : '{token}';
+    const expanded = vt.replace(/\{token\}/g, token == null ? '' : String(token));
+    if (authInjection.location === 'query') {
+      url += `${url.includes('?') ? '&' : '?'}${authInjection.name}=${encodeURIComponent(expanded)}`;
+    } else {
+      const lower = authInjection.name.toLowerCase();
+      for (const k of Object.keys(outHeaders)) { if (k.toLowerCase() === lower) delete outHeaders[k]; }
+      outHeaders[authInjection.name] = expanded;
+    }
+  } else {
+    outHeaders.Authorization = `${canonicalAuthScheme(tokenType)} ${token}`;
+  }
+
+  // Body — only for body-bearing methods. Object → JSON (+ Content-Type unless the
+  // caller already set one); string → sent verbatim (caller owns its content type).
+  let outBody;
+  if (BODY_METHODS.has(m) && body !== undefined && body !== null) {
+    if (typeof body === 'string') {
+      outBody = body;
+    } else {
+      outBody = JSON.stringify(body);
+      if (!Object.keys(outHeaders).some((hk) => hk.toLowerCase() === 'content-type')) {
+        outHeaders['Content-Type'] = 'application/json';
+      }
+    }
+  }
+
+  return { method: m, url, headers: outHeaders, body: outBody };
+}
+
+/**
+ * Send one assembled RAW request. `body` is already serialized so it is passed
+ * verbatim (never re-encoded). `redirect: 'manual'` means a cross-domain 3xx is
+ * NEVER auto-followed — auto-following would forward the Authorization header to
+ * the redirect target (potentially off-allowlist) and leak the token; instead the
+ * 3xx is returned to the caller as-is. Same server-parity shape as sendDirect.
+ */
+export async function sendRawDirect(assembled, { fetchImpl = fetch } = {}) {
+  const res = await fetchImpl(assembled.url, {
+    method: assembled.method,
+    headers: assembled.headers,
+    body: assembled.body !== undefined ? assembled.body : undefined,
+    redirect: 'manual',
+  });
+  const text = await readCappedText(res);
+  let body;
+  try { body = JSON.parse(text); } catch { body = text; }
+  return { status_code: res.status, headers: headersToObject(res.headers), body };
+}
+
+// Audit a raw call: method + host + path ONLY. Headers (where Authorization
+// lives), the query string, and the body are NEVER logged — any of them could
+// carry a caller-supplied secret. One short line, tagged for grep.
+function auditRawCall(method, authority, normPath, audit) {
+  audit(`[conn.request] → ${method} https://${authority}${normPath}`);
+}
+
+/**
+ * conn.request orchestration: derive allowlist → GATE the domain → (only then)
+ * read the token → proactive OAuth refresh → assemble (attach token) → send (no
+ * cross-domain redirect follow) → reactive-401 refresh once.
+ *
+ * SECURITY RED LINE: the domain allowlist gate runs BEFORE the credential token
+ * is read into the request. On ANY gate failure this throws and the token is
+ * NEVER attached to a header and NEVER sent. The allowed-host set is the union of
+ * the hosts from the connection's action-catalog url_templates (exact host match,
+ * no wildcards).
+ *
+ * @param {object} args
+ *   - orgId, connection ({id, ...}), catalog (local action array), credential
+ *   - domain (bare host), path, method, headers, query, body (caller-supplied)
+ * @param {object} deps  fetchImpl, acquire, saveCache, now, skewMs, audit, log, warn
+ */
+export async function requestDirect(
+  { orgId, connection, catalog, credential, domain, path, method, headers, query, body },
+  deps = {},
+) {
+  const {
+    fetchImpl = fetch, acquire, saveCache = () => {}, now = Date.now,
+    skewMs = DEFAULT_EXPIRY_SKEW_MS, audit = defaultAudit, log = () => {}, warn = () => {},
+  } = deps;
+
+  // 1. Allowed-host set from the local catalog (union of url_template hosts).
+  const allowed = allowedHostsFromCatalog(catalog);
+  if (allowed.size === 0) {
+    throw Object.assign(
+      new Error('no allowed hosts could be derived from the connection catalog (empty / too-old catalog) — run conn.catalog {refresh:true}'),
+      { status: 422 },
+    );
+  }
+
+  // 2. Parse + GATE the domain BEFORE the token is ever touched.
+  const target = parseRequestTarget(domain);
+  if (!target) {
+    throw Object.assign(
+      new Error(`invalid domain "${domain}" — expected a bare host like "api.example.com" (no scheme / path / credentials)`),
+      { status: 400 },
+    );
+  }
+  if (!allowed.has(target.hostname)) {
+    throw Object.assign(
+      new Error(`domain "${target.hostname}" is not in this connection's allowed host set (derived from the action-catalog url_template hosts) — refusing; the credential is never attached or sent`),
+      { status: 403 },
+    );
+  }
+  if (isDisallowedHost(target.hostname)) {
+    throw Object.assign(
+      new Error(`domain "${target.hostname}" is a blocked internal / metadata address — refusing`),
+      { status: 403 },
+    );
+  }
+
+  // 3. Only NOW read the credential token (the gate has already passed).
+  let cred = credential;
+  if (!cred || !cred.access_token) {
+    throw Object.assign(
+      new Error('no local direct-mode credential/access_token for this connection — conn.request requires a direct connection'),
+      { status: 409 },
+    );
+  }
+  const connId = connection && connection.id;
+
+  // Proactive OAuth refresh — same policy as invokeDirect (api_key never touched).
+  if (acquire && isTokenRefreshable(cred) && isTokenNearExpiry(cred, now(), skewMs)) {
+    try {
+      const fresh = await acquire(orgId, connId);
+      if (fresh && fresh.access_token) { saveCache(connId, fresh); cred = fresh; }
+      log(`[conn.request] refreshed near-expiry token conn=${connId}`);
+    } catch (e) {
+      warn(`[conn.request] proactive refresh failed conn=${connId}: ${e.message}`);
+    }
+  }
+
+  // 4. Assemble (token attached HERE — after the gate) and send.
+  let normPath = path == null ? '/' : String(path);
+  if (!normPath.startsWith('/')) normPath = `/${normPath}`;
+  const build = () => assembleRawRequest(
+    { authority: target.authority, path, method, headers, query, body },
+    cred.access_token, cred.token_type, cred.auth_injection,
+  );
+  let assembled = build();
+  auditRawCall(assembled.method, target.authority, normPath, audit);
+  let result = await sendRawDirect(assembled, { fetchImpl });
+
+  // 5. Reactive-401 refresh backstop (refreshable/OAuth only) — refresh once, retry.
+  if (result.status_code === 401 && acquire && isTokenRefreshable(cred)) {
+    log(`[conn.request] provider 401 conn=${connId}; reactive refresh + retry once`);
+    const fresh = await acquire(orgId, connId);
+    if (fresh && fresh.access_token) {
+      saveCache(connId, fresh); cred = fresh;
+      assembled = build();
+      result = await sendRawDirect(assembled, { fetchImpl });
+    }
+  }
+
+  return result;
+}

@@ -17,7 +17,7 @@ import {
   readCatalog, writeCatalog, invalidateCatalog, CATALOG_TTL_MS,
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
-import { invokeDirect, resolveCredential } from '../lib/direct-exec.js';
+import { invokeDirect, requestDirect, resolveCredential } from '../lib/direct-exec.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -327,6 +327,95 @@ const COMMANDS = {
     }
   },
 
+  // Raw / fully-custom direct request — the escape hatch for a provider endpoint
+  // that has no curated action. The caller supplies the whole HTTP request
+  // (domain + path + method + headers? + query? + body?); this CLI attaches the
+  // connection's LOCAL direct-mode token and calls the provider directly over
+  // HTTPS. DIRECT MODE ONLY — a proxy connection has no local token and is
+  // rejected (no downgrade).
+  //
+  // SECURITY (all enforced here on the agent side — the data plane does not pass
+  // through cws-connect/cws-core, so nothing else can): the requested `domain`
+  // MUST be in this connection's allowed-host set, which is the union of the
+  // hosts extracted from the local action-catalog's url_templates (EXACT host
+  // match, no wildcards). A domain outside that set is rejected and the token is
+  // NEVER attached or sent. Also: HTTPS-only, Authorization is CLI-owned (a
+  // caller `authorization` header can never override it), no cross-domain
+  // redirect follow, no token in logs, and internal/metadata IPs are blocked.
+  'conn.request': async () => {
+    const app = params.app || params.applicationId || params.application_id || params.slug;
+    const connIdParam = params.connectionId || params.connection_id;
+    if (!app && !connIdParam) throw Object.assign(new Error('connectionId or app is required'), { status: 400 });
+    if (!params.domain) throw Object.assign(new Error('domain is required'), { status: 400 });
+    if (!params.path) throw Object.assign(new Error('path is required'), { status: 400 });
+    const orgId = requireOrgId();
+    const agentId = resolveSelfMemberId(orgId);
+    if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+
+    // Resolve the connection entry. Either {app} (slug/id via the index, same as
+    // conn.invoke) or an explicit {connectionId} (looked up in the index,
+    // refreshing once if its applicationId is not yet filled).
+    let entry;
+    if (app) {
+      entry = await resolveConnectionForApp(app, orgId, agentId);
+    } else {
+      entry = readIndex(indexPathForOrg(orgId)).connections[connIdParam];
+      if (!entry || !entry.applicationId) {
+        await refreshIndex(orgId, agentId);
+        entry = readIndex(indexPathForOrg(orgId)).connections[connIdParam];
+      }
+    }
+    if (!entry) throw Object.assign(new Error(`no connection found (${app ? `app "${app}"` : `connectionId "${connIdParam}"`}, org ${orgId})`), { status: 404 });
+    if (entry.status === 'needs_reauth') {
+      throw Object.assign(
+        new Error(`connection needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
+        { status: 409 },
+      );
+    }
+    if (!entry.applicationId) {
+      throw Object.assign(new Error('applicationId unresolved for this connection (run conn.index {refresh:true})'), { status: 400 });
+    }
+
+    // Resolve the credential + mode (re-acquire on a cache miss, same as
+    // conn.invoke). conn.request is DIRECT-ONLY — a proxy connection holds no
+    // local token, so we refuse rather than downgrade.
+    const { credential, mode } = await resolveCredential(
+      { orgId, connectionId: entry.id, cached: readCredentialCache(entry.id) },
+      {
+        acquire: (oid, connId) => acquireCredential(oid, connId),
+        saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+      },
+    );
+    if (mode !== 'direct') {
+      throw Object.assign(
+        new Error('conn.request requires a direct-mode connection (a proxy connection keeps no local token) — use conn.invoke for a curated action instead'),
+        { status: 400 },
+      );
+    }
+
+    // The allowlist is derived from this app's local action catalog (warmed on
+    // authorize; refetched here on a miss/TTL). requestDirect enforces the gate.
+    const catalogRec = await getCatalog(orgId, entry.applicationId, {});
+    return await requestDirect(
+      {
+        orgId,
+        connection: entry,
+        catalog: catalogRec.actions,
+        credential,
+        domain: params.domain,
+        path: params.path,
+        method: params.method,
+        headers: params.headers,
+        query: params.query,
+        body: params.body,
+      },
+      {
+        acquire: (oid, connId) => acquireCredential(oid, connId),
+        saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+      },
+    );
+  },
+
   // Show the local connections index for an org (observability). {refresh}
   // rebuilds it from conn.list first; {org} selects the org (default otherwise).
   'conn.index': async () => {
@@ -370,6 +459,7 @@ Applications
 
 Capability cache (runtime/connect/)
   conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
+  conn.request        {app|connectionId, domain, path, method?, headers?, query?, body?}  # raw direct HTTPS call (domain must be in the connector's catalog-derived allowlist)
   conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
   conn.index          {refresh?}                                # show the local connections index (connection → application)
 

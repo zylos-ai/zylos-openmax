@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.7] — 2026-08-18
+
+### Added
+
+- **`conn.request` — raw / fully-custom direct HTTPS call (escape hatch).** For a
+  provider endpoint that has no curated action, the caller supplies the whole
+  request (`domain` + `path` + `method` + `headers?` + `query?` + `body?`); the
+  CLI attaches the connection's locally-cached **direct-mode** token and calls the
+  provider directly over HTTPS (same egress as direct `conn.invoke`), returning
+  `{ status_code, headers, body }`. Generalizes the existing direct-mode executor
+  (`src/lib/direct-exec.js`) rather than rebuilding it; `conn.invoke` is unchanged.
+- Core security gate is a **per-connection domain allowlist** derived entirely
+  agent-side (the direct data plane never passes through cws-connect/cws-core, so
+  nothing downstream can re-check it): the allowed-host set is the **union of the
+  hosts extracted from the connection's action-catalog `url_template`s** (already
+  warmed locally by `warmIdentityAndCatalog`; no new cws-connect field/RPC).
+  Matching is **exact host — no `*.domain` wildcard**. A domain outside the set is
+  rejected and **the token is never attached to a header and never sent**.
+- Additional agent-side boundaries: **HTTPS-only**; **`Authorization` is
+  CLI-owned** and a caller header can never override it; **no cross-domain
+  redirect follow** (`redirect: 'manual'` — a 3xx is returned as-is so the auth
+  header is never forwarded to a redirect target); **direct mode only** (a proxy
+  connection has no local token and is refused, not downgraded); internal /
+  metadata-IP **SSRF block**; and the token is **never logged** (audit line is
+  method + host + path only).
+- New reference section (`references/conn-operations.md`) documenting
+  `conn.request`, the raw-vs-curated tradeoff, and each boundary; help text and a
+  new `conn.request` unit-test file (`src/lib/raw-request.test.js`) plus a
+  `conn.request` org fail-fast case added to `conn.org-scoping.test.js`.
+
+> Stacked on #128 (2.14.6, task #13): this branch is rebased directly on top of
+> `fix/cli-org-scoping`, so 2.14.7 builds on 2.14.6 with no release-file conflict.
+> Merge order: #128 → main, then #129 → main.
+
 ## [2.14.6] — 2026-08-18
 
 ### Fixed

@@ -73,6 +73,9 @@ for (const c of [
   // misleading empty result). invoke needs app+action to reach the org check.
   { command: 'conn.catalog', params: { applicationId: 'app-1' } },
   { command: 'conn.invoke', params: { app: 'gmail', action: 'gmail-labels/list' } },
+  // conn.request must fail-fast on the org check BEFORE it ever reads a token or
+  // touches the network (needs app+domain+path to reach the org check).
+  { command: 'conn.request', params: { app: 'gmail', domain: 'gmail.googleapis.com', path: '/gmail/v1/users/me/labels' } },
   { command: 'conn.index', params: {} },
 ]) {
   test(`org-scoping fail-fast: ${c.command} 多 org 且未给 {org} → 400（不静默走 identity-only）`, async () => {

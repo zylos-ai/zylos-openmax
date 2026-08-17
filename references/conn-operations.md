@@ -157,6 +157,29 @@ change-detected refresh yet.
 > a caller-supplied URL. If a cached catalog predates `url_template`, a direct
 > `conn.invoke` returns a clear error — run `conn.catalog {refresh:true}`.
 
+## conn.request — raw / custom direct call (escape hatch)
+
+`conn.request` is the **escape hatch** for a provider endpoint that has **no curated action** in the catalog. Instead of picking a named action, you supply the whole HTTP request; the CLI attaches the connection's locally-cached direct-mode token and calls the provider **directly over HTTPS** (same egress as direct `conn.invoke`).
+
+```bash
+node src/cli/conn.js conn.request '{"app":"gmail","domain":"gmail.googleapis.com","method":"GET","path":"/gmail/v1/users/me/labels"}'
+node src/cli/conn.js conn.request '{"connectionId":"2b0e...","domain":"api.github.com","method":"POST","path":"/repos/o/r/issues","headers":{"Accept":"application/vnd.github+json"},"body":{"title":"hi"}}'
+```
+
+Inputs: `app` **or** `connectionId` (required, one of); `domain` (bare host, required); `path` (required); `method` (default `GET`); `headers?`, `query?` (object or string), `body?` (object → JSON, string → verbatim). Returns the provider response as `{ status_code, headers, body }` — the same shape as direct `conn.invoke`, and the injected `Authorization` is **never** echoed back.
+
+**Prefer `conn.invoke` (a curated action) whenever one exists.** A curated action carries an `input_schema`, is validated, and needs no host reasoning from you. Reach for `conn.request` only when the endpoint you need is genuinely absent from `conn.catalog` — a one-off or newly-shipped provider API. If you find yourself calling the same raw endpoint repeatedly, that is a signal to add a curated action to the catalog instead.
+
+**Security (all enforced agent-side — the data plane does not pass through cws-connect/cws-core, so nothing downstream can re-check it):**
+
+- **Domain allowlist (the core gate).** `domain` must be an **exact host** in this connection's allowed-host set = the **union of the hosts** taken from every action's `url_template` in the local (warmed) action catalog. There is **no `*.domain` wildcard** — a Gmail connection permits only the specific `googleapis` hosts its catalog references, not all of `*.googleapis.com`. A domain outside the set is **rejected and the token is never attached or sent**. The set extends automatically as connectors/actions are added — nothing is hardcoded. *Caveat:* a real provider host that no curated action references (e.g. `oauth2.googleapis.com` for a typical Gmail catalog) is **not** allowed; add a catalog action that references it to open it.
+- **Direct mode only.** A proxy connection keeps no local token, so `conn.request` refuses it (no downgrade).
+- **HTTPS-only.** `domain` is a bare host; the URL is always built as `https://…`. A scheme/path/userinfo in `domain` is rejected.
+- **Authorization is CLI-owned.** A caller `authorization` header (any case) is dropped and the connection's auth is applied last, so the caller can never override or read the token.
+- **No cross-domain redirect follow.** The request uses `redirect: 'manual'`; a 3xx is returned to you as-is rather than auto-followed (auto-following would forward the `Authorization` header to the redirect target and could leak the token). Re-issue against the (allowlisted) target yourself if appropriate.
+- **SSRF block.** Loopback / private / link-local / CGNAT / cloud-metadata addresses are refused even if a catalog host resolved to one. (Full DNS-rebinding defense — resolve-then-pin — is not implemented; the allowlist + literal-IP block is the current boundary.)
+- **No token in logs.** The audit line is `method + host + path` only — never headers, query, or body.
+
 ## WS Event Flow
 
 The comm-bridge automatically maintains the index, the action-catalog cache, and (direct-mode) credentials:
