@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.14.4] — 2026-08-17
+## [2.14.5] — 2026-08-17
 
 ### Added
 
@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Make dependency-ready handoff follow the visible System Member message contract:
   resolve upstream Task IDs from the referenced downstream Task's authoritative
   `depends_on` field instead of relying on hidden `upstreamTaskIds` metadata.
+
+## [2.14.4] — 2026-08-17
+
+### Fixed
+
+- Org-scope every cws-connect CLI command so a multi-org agent never calls
+  cws-core with an identity-only token (the production connector-403 "org
+  membership required"). All 10 org-owned `conn.*` commands — the 7 low-level
+  verbs (`list`/`acquire`/`proxy`/`actions`/`execute`/`status`/`app_actions`)
+  plus the 3 agent-facing entry points (`catalog`/`invoke`/`index`) — now
+  resolve the operating org via `requireOrgId()` and route through
+  `getForOrg`/`postForOrg`. When the org cannot be resolved (multi-org with no
+  `{org}` and no `COCO_ORG_ID`) they now fail fast with an actionable HTTP 400
+  instead of sending an identity-only request that 403s, or (for `conn.index`)
+  returning a misleading empty result. Single-org / `COCO_ORG_ID` deployments
+  are unaffected.
 
 ## [2.14.3] — 2026-08-14
 
