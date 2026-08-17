@@ -997,9 +997,12 @@ const IPV6_DISALLOWED_CIDRS = [
 // a match the address is ALLOWED — a longest-prefix override of the broader deny
 // (each exception is strictly more specific than 2001::/23). A new GR=True
 // carve-out is a one-line addition.
+// NB: this table (and the deny table above) mirror the IANA IPv6/IPv4
+// Special-Purpose Address registries — re-check on registry drift.
 const IPV6_ALLOWED_EXCEPTIONS = [
   ['2001:1::1', 128],    // PCP anycast (GR=True)
   ['2001:1::2', 128],    // TURN anycast (GR=True)
+  ['2001:1::3', 128],    // DNS-SD Service Registration Protocol anycast (GR=True)
   ['2001:3::', 32],      // AMT (GR=True)
   ['2001:4:112::', 48],  // AS112-v6 (GR=True)
   ['2001:20::', 28],     // ORCHIDv2 (GR=True)

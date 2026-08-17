@@ -352,6 +352,8 @@ const B1_ADDR_MATRIX = [
   ['192.52.193.1', false, 'AMT 192.52.193.0/24 (GR=True)'],
   ['2001:1::1', false, 'PCP anycast 2001:1::1/128 (GR=True, inside 2001::/23)'],
   ['2001:1::2', false, 'TURN anycast 2001:1::2/128 (GR=True, inside 2001::/23)'],
+  ['2001:1::3', false, 'DNS-SD SRP anycast 2001:1::3/128 (GR=True, inside 2001::/23)'],
+  ['2001:1::4', true, 'adjacent 2001:1::4 has NO allow-exception — stays blocked by 2001::/23 (negative control)'],
   ['2001:3::1', false, 'AMT 2001:3::/32 (GR=True, inside 2001::/23)'],
   ['2001:4:112::1', false, 'AS112-v6 2001:4:112::/48 (GR=True, inside 2001::/23)'],
   ['2001:20::1', false, 'ORCHIDv2 2001:20::/28 (GR=True, inside 2001::/23)'],
@@ -382,6 +384,7 @@ const B1_BLOCKED_DNS = [
   ['2001:2::1', 6],
   ['3fff::1', 6],
   ['3fff:ffff::1', 6],
+  ['2001:1::4', 6],  // adjacent to the SRP allow-exception; NOT carved out — stays blocked
 ];
 for (const [addr, family] of B1_BLOCKED_DNS) {
   test(`B1 requestDirect: DNS answer ${addr} → 403, getter=0, send=0`, async () => {
@@ -426,6 +429,7 @@ const B1_ALLOWED_EXCEPTION_DNS = [
   ['192.52.193.1', 4], // AMT
   ['2001:1::1', 6],   // PCP
   ['2001:1::2', 6],   // TURN
+  ['2001:1::3', 6],   // DNS-SD SRP
   ['2001:3::1', 6],   // AMT
   ['2001:4:112::1', 6], // AS112-v6
   ['2001:20::1', 6],  // ORCHIDv2
