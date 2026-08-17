@@ -9,7 +9,7 @@
  *   node src/cli/conn.js conn.acquire  '{"connectionId":"..."}'
  */
 
-import { get, post, del, patch, apiPath, getForOrg, postForOrg } from '../lib/client.js';
+import { apiPath, getForOrg, postForOrg } from '../lib/client.js';
 import { loadConfig, enabledOrgs, resolveDefaultOrgId } from '../lib/config.js';
 import { listCachedCredentials, clearCachedCredentials, readCredentialCache, saveCredentialCache } from '../lib/credential-cache.js';
 import {
@@ -27,6 +27,25 @@ const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 // execute call must run against the same org's file, token, and member.
 function resolveOrgId() {
   return params.org || params.orgId || params.org_id || resolveDefaultOrgId();
+}
+
+// Resolve the operating org and FAIL FAST when it can't be determined. Every
+// cws-connect route below is org-scoped: cws-core requires an org-scoped JWT
+// and 403s ("org membership required") on an identity-only token. A bare
+// get()/post() would silently fall through to resolveDefaultOrgId(), which
+// returns '' when >1 org is enabled and neither {org} nor COCO_ORG_ID is set —
+// producing exactly that opaque 403. Throwing here turns "no org resolved" into
+// an actionable 400 instead. Single-org / COCO_ORG_ID deployments resolve as
+// before and never hit this.
+function requireOrgId() {
+  const orgId = resolveOrgId();
+  if (!orgId) {
+    throw Object.assign(
+      new Error('cannot resolve org: multiple orgs enabled and no org given — pass {"org":"<org_id>"} or set COCO_ORG_ID'),
+      { status: 400 },
+    );
+  }
+  return orgId;
 }
 
 // Security note: this agent's own member_id for an org — the ONLY identity
@@ -115,9 +134,10 @@ const COMMANDS = {
   // Always uses the agent's own member_id (resolveSelfMemberId) — no
   // client-supplied override; see the security note above resolveSelfMemberId.
   'conn.list': () => {
-    const agentId = resolveSelfMemberId();
+    const orgId = requireOrgId();
+    const agentId = resolveSelfMemberId(orgId);
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
-    return get(apiPath('/connect/agents/me/connections'));
+    return getForOrg(orgId, apiPath('/connect/agents/me/connections'));
   },
 
   // Acquire credential for a connection.
@@ -125,8 +145,9 @@ const COMMANDS = {
   'conn.acquire': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    if (!resolveSelfMemberId()) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
-    return post(apiPath(`/connect/connections/${connId}/credential`));
+    const orgId = requireOrgId();
+    if (!resolveSelfMemberId(orgId)) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+    return postForOrg(orgId, apiPath(`/connect/connections/${connId}/credential`));
   },
 
   // Proxy a request through a connection.
@@ -136,7 +157,8 @@ const COMMANDS = {
   'conn.proxy': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    return post(apiPath(`/connect/connections/${connId}/proxy`), {
+    const orgId = requireOrgId();
+    return postForOrg(orgId, apiPath(`/connect/connections/${connId}/proxy`), {
       method: params.method || 'GET',
       url: params.url,
       headers: params.headers,
@@ -152,8 +174,9 @@ const COMMANDS = {
   'conn.actions': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    if (!resolveSelfMemberId()) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
-    return get(apiPath(`/connect/connections/${connId}/actions`));
+    const orgId = requireOrgId();
+    if (!resolveSelfMemberId(orgId)) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+    return getForOrg(orgId, apiPath(`/connect/connections/${connId}/actions`));
   },
 
   // Execute a registered named action through a connection (proxy mode:
@@ -166,9 +189,10 @@ const COMMANDS = {
   'conn.execute': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    if (!resolveSelfMemberId()) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
+    const orgId = requireOrgId();
+    if (!resolveSelfMemberId(orgId)) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
     if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
-    return post(apiPath(`/connect/connections/${connId}/actions/execute`), {
+    return postForOrg(orgId, apiPath(`/connect/connections/${connId}/actions/execute`), {
       action: params.action,
       params: params.params || {},
     });
@@ -178,7 +202,8 @@ const COMMANDS = {
   'conn.status': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    return get(apiPath(`/connect/connections/${connId}`));
+    const orgId = requireOrgId();
+    return getForOrg(orgId, apiPath(`/connect/connections/${connId}`));
   },
 
   // Discover the app-keyed action catalog for an application — the full set of
@@ -193,7 +218,8 @@ const COMMANDS = {
   'conn.app_actions': () => {
     const appId = params.applicationId || params.application_id;
     if (!appId) throw Object.assign(new Error('applicationId is required'), { status: 400 });
-    return get(apiPath(`/connect/applications/${appId}/actions`));
+    const orgId = requireOrgId();
+    return getForOrg(orgId, apiPath(`/connect/applications/${appId}/actions`));
   },
 
   // Cache-aware, app-keyed action catalog. Reads runtime/connect/action-catalog/
