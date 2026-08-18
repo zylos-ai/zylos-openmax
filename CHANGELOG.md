@@ -22,12 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `connectionId` (alias `connection_id`) param targets a specific connection
   directly, skipping app-resolution — the one-command retry after the user picks.
   The 0-active and exactly-1-active paths are unchanged (404 / direct use).
-- `hooks/post-upgrade.js`: per-org, idempotent, best-effort backfill of
-  `display_name` onto existing connections after an upgrade — it rebuilds each
-  org's local index from the connections list so connections created before this
-  release gain a `display_name`. The backfill is best-effort and never blocks the
-  upgrade: any per-org API failure is caught and logged, and the upgrade
-  proceeds.
 
 ## [2.14.6] — 2026-08-18
 

@@ -30,7 +30,6 @@
 
 import fs from 'fs';
 import path from 'path';
-import { replaceIndexFromList, indexPathForOrg } from '../src/lib/connect-store.js';
 
 const HOME = process.env.HOME;
 const CONFIG_PATH = path.join(HOME, 'zylos/components/openmax/config.json');
@@ -251,37 +250,12 @@ if (config.agent?.api_key && config.server?.bff_url) {
       const orgRes = await fetch(`${bffUrl}/api/v1/organizations/${org.org_id}`, {
         headers: { Authorization: `Bearer ${jwt}`, ...cfH },
       });
-      if (orgRes.ok) {
-        const realName = (await orgRes.json())?.data?.name;
-        if (realName && realName !== org.org_name) {
-          const old = org.org_name || '(empty)';
-          org.org_name = realName;
-          legacyKeysSeen.push(`orgs.${key}.org_name: "${old}" → "${realName}" (from API)`);
-        }
-      }
-
-      // ── display_name backfill for existing connections ──────────────────
-      // Multi-connection disambiguation asks the user by connection display_name,
-      // but existing local index entries predate display_name capture and never
-      // refresh at runtime (findConnectionByApp hits on a cached entry, so the
-      // lazy refresh never fires). Rebuild this org's index from the authoritative
-      // connections list so those entries pick up display_name (toEntry captures
-      // it). Idempotent, best-effort: any failure logs and skips — never blocks
-      // the upgrade.
-      try {
-        const connRes = await fetch(`${bffUrl}/api/v1/connect/agents/me/connections`, {
-          headers: { Authorization: `Bearer ${jwt}`, ...cfH },
-        });
-        if (connRes.ok) {
-          const body = (await connRes.json())?.data;
-          const list = Array.isArray(body) ? body : (body?.connections || []);
-          replaceIndexFromList(list, indexPathForOrg(org.org_id));
-          console.log(`[post-upgrade] connections index rebuilt for ${org.org_id} (${list.length} connection(s)) — display_name backfilled.`);
-        } else {
-          console.log(`[post-upgrade] connections fetch for ${org.org_id}: HTTP ${connRes.status}, skip display_name backfill`);
-        }
-      } catch (e) {
-        console.log(`[post-upgrade] connections backfill for ${org.org_id}: ${e.message}`);
+      if (!orgRes.ok) continue;
+      const realName = (await orgRes.json())?.data?.name;
+      if (realName && realName !== org.org_name) {
+        const old = org.org_name || '(empty)';
+        org.org_name = realName;
+        legacyKeysSeen.push(`orgs.${key}.org_name: "${old}" → "${realName}" (from API)`);
       }
     } catch (e) {
       console.log(`[post-upgrade] org_name fetch for ${org.org_id}: ${e.message}`);
