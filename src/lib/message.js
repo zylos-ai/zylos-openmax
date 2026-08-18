@@ -182,8 +182,17 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
 
   // Tag on its own line; the `<name> said: ...` attribution now lives inside
   // the <current-message> block (semantic parity with other C4 channels).
-  const orgLabel = orgName || orgId || '';
-  const orgSuffix = orgLabel ? ` (org: ${escapeXml(orgLabel)})` : '';
+  // When both the org name and its UUID are known, expose BOTH so the agent
+  // can read org_id off the message header and prefix COCO_ORG_ID onto each
+  // task-CLI (tm/kb/as/conn) call (see SKILL.md). Middot separator, literal
+  // `org_id:` label. When only one is present, keep the single-value form.
+  let orgSuffix = '';
+  if (orgName && orgId) {
+    orgSuffix = ` (org: ${escapeXml(orgName)} · org_id: ${escapeXml(orgId)})`;
+  } else {
+    const orgLabel = orgName || orgId || '';
+    orgSuffix = orgLabel ? ` (org: ${escapeXml(orgLabel)})` : '';
+  }
   const parts = [`${tag}${orgSuffix}\n`];
 
   if (threadContext && threadContext.length > 0) {
