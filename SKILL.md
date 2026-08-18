@@ -239,9 +239,26 @@ The higher the cost of the operation, the higher the anchoring confidence requir
 ### Multi-Org Context
 
 When an agent serves multiple organizations at once, each message's label indicates the source org, e.g.
-`[COCO DM] (org: COCO)`. **You must operate within that org** — querying projects, KB,
-members, and creating Issue/Task must all use the org corresponding to the message; do not operate across orgs.
+`[COCO DM] (org: COCO · org_id: 019f6581-bd27-739e-aff1-4dd285e3324b)`. **You must operate within that org** —
+querying projects, KB, members, and creating Issue/Task must all use the org corresponding to the message; do not operate across orgs.
 CLI commands can specify the target org via the `orgId` field in the JSON parameters or the environment variable `COCO_ORG_ID`.
+
+#### HARD RULE — prefix `COCO_ORG_ID` on every org-scoped task CLI call
+
+When handling a message and invoking the org-scoped task CLIs (`tm` / `kb` / `as` / `conn`), read the `org_id`
+from the inbound message header `(org: <name> · org_id: <uuid>)` and prefix `COCO_ORG_ID=<that uuid>` on **each**
+such CLI invocation:
+
+```
+COCO_ORG_ID=<this message's org_id> node .../tm.js ...
+COCO_ORG_ID=<this message's org_id> node .../kb.js ...
+```
+
+- The `org_id` binds to the **current** message ONLY — take it fresh from the message you are handling and prefix
+  per-call. **NEVER** store it in a long-lived / shared / global slot (no global env mutation like
+  `process.env.COCO_ORG_ID=...`, no shared file such as a conv-org map): that reintroduces cross-org races. Claude
+  processes messages serially, so the current message's org is unambiguous — bind it, don't cache it.
+- **Single-org deployments need no prefix** — it resolves automatically. No wrapper script.
 
 ### Parameter Resolution
 
