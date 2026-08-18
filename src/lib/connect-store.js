@@ -167,7 +167,9 @@ export function findConnectionByApp(app, indexPath = INDEX_PATH) {
  * Resolve an application → ALL of its ACTIVE connection entries (an array). Like
  * findConnectionByApp but returns every active match instead of collapsing to
  * one — the input to multi-connection disambiguation: 0 → resolve/404, exactly
- * 1 → use it, >1 → the caller must ask the user which one (by display_name).
+ * 1 → use it, >1 → the caller must ask the user which one (by each
+ * candidate's `label`; the agent then maps the choice back to that
+ * candidate's `connection_id` and retries with `connectionId`).
  * Non-active entries (e.g. needs_reauth) are excluded so they never count as a
  * selectable candidate. `app` may be a slug or an applicationId.
  */

@@ -565,7 +565,8 @@ Capability cache (runtime/connect/)
   conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
                       {connectionId, action, params?}           #   or target a specific connection (skips app-resolution)
                                                                  #   >1 connections for an app → returns needs_selection (ask
-                                                                 #   the user by display_name, retry with connectionId)
+                                                                 #   the user by candidate label; map the choice back to its
+                                                                 #   connection_id, retry with connectionId)
   conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
   conn.index          {refresh?}                                # show the local connections index (connection → application)
 
