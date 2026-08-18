@@ -19,10 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{ status_code, headers, body }`. Generalizes the existing direct-mode executor
   (`src/lib/direct-exec.js`) rather than rebuilding it; `conn.invoke` is unchanged.
 - Core security gate is a **per-connection domain allowlist** derived entirely
-  agent-side (the direct data plane never passes through cws-connect/cws-core, so
+  agent-side (the direct data plane never passes through the backend, so
   nothing downstream can re-check it): the allowed-host set is the **union of the
   hosts extracted from the connection's action-catalog `url_template`s** (already
-  warmed locally by `warmIdentityAndCatalog`; no new cws-connect field/RPC).
+  warmed locally by `warmIdentityAndCatalog`; no new connector-service field/RPC).
   Matching is **exact host — no `*.domain` wildcard**. A domain outside the set is
   rejected and **the token is never attached to a header and never sent**.
 - Additional agent-side boundaries: **HTTPS-only**; **`Authorization` is

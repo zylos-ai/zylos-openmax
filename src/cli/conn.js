@@ -335,7 +335,7 @@ const COMMANDS = {
   // rejected (no downgrade).
   //
   // SECURITY (all enforced here on the agent side — the data plane does not pass
-  // through cws-connect/cws-core, so nothing else can). Each boundary is
+  // through the backend, so nothing else can). Each boundary is
   // STRUCTURAL (it constrains the credential's real destination, not just a
   // hostname string): the requested `(host, port)` MUST exactly match an ORIGIN
   // derived from the local action-catalog url_templates (port defaulting to 443,

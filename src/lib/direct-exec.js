@@ -598,7 +598,7 @@ export async function invokeDirect(
 //  + body) and the CLI attaches the connection's LOCAL direct-mode token and
 //  calls the provider directly over HTTPS.
 //
-//  Because the data plane no longer passes through cws-connect/cws-core, EVERY
+//  Because the data plane no longer passes through the backend, EVERY
 //  boundary is enforced here on the agent side, and each boundary is STRUCTURAL —
 //  it constrains the credential's REAL destination (host + port + resolved IP),
 //  not just a hostname string:
@@ -1185,7 +1185,7 @@ function buildRawQuery(query) {
  *     dropped, and the CLI auth is applied LAST so it wins over any same-named
  *     header. Default is `Authorization: <canonicalAuthScheme(tokenType)> <token>`;
  *     an optional auth_injection descriptor can place it in a custom header/query
- *     (parity with assembleRequest / cws-connect).
+ *     (parity with assembleRequest / the connector service).
  */
 export function assembleRawRequest(
   { authority, path = '/', method = 'GET', headers = {}, query, body } = {},
