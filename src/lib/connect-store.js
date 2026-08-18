@@ -75,12 +75,30 @@ function writeIndex(index, indexPath = INDEX_PATH) {
 function toEntry(conn) {
   const id = conn.id || conn.connection_id;
   if (!id) return null;
+  // Normalize a reauth-required connection to the local blocked state. Some
+  // cws-connect list responses express this as status:"error" + needs_reauth:true
+  // (or a bare needs_reauth flag) rather than a literal "needs_reauth" status; if
+  // we stored the raw status, an "error"+needs_reauth connection would slip past
+  // the conn.invoke reauth guard (which keys on status) after a list/backfill
+  // refresh and reach credential resolution with a dead token. Collapse any
+  // needs_reauth signal to status:"needs_reauth" so the guard always catches it.
+  let status = conn.status || 'active';
+  if (conn.needs_reauth === true || conn.needsReauth === true) status = 'needs_reauth';
   return {
     id,
     applicationId: conn.application_id || conn.applicationId || null,
     slug: conn.application_slug || conn.slug || conn.provider || null,
+    // `name` is the APPLICATION name (e.g. "Gmail"); `displayName` is the
+    // connection's user-given label (e.g. "工作邮箱") — the primary human-readable
+    // way to tell two same-app connections apart, so multi-connection
+    // disambiguation asks the user by a label built from it (never the id).
     name: conn.application_name || conn.name || null,
-    status: conn.status || 'active',
+    displayName: conn.display_name || conn.displayName || null,
+    // Creation time (ISO string or epoch ms), preserved so a stable, UNIQUE
+    // human label can still be built for legacy connections whose display_name
+    // is empty or collides with another same-app connection's.
+    createdAt: conn.created_at || conn.createdAt || null,
+    status,
   };
 }
 
@@ -99,6 +117,11 @@ export function upsertConnection(conn, indexPath = INDEX_PATH) {
     applicationId: entry.applicationId ?? prev.applicationId ?? null,
     slug: entry.slug ?? prev.slug ?? null,
     name: entry.name ?? prev.name ?? null,
+    // Additive, like the other fields: a sparse event (slug only, no
+    // display_name) must never null a display_name a richer conn.list record
+    // already captured.
+    displayName: entry.displayName ?? prev.displayName ?? null,
+    createdAt: entry.createdAt ?? prev.createdAt ?? null,
     status: entry.status ?? prev.status ?? 'active',
   };
   writeIndex(index, indexPath);
@@ -138,6 +161,24 @@ export function findConnectionByApp(app, indexPath = INDEX_PATH) {
   const matches = entries.filter((e) => e.slug === app || e.applicationId === app);
   if (matches.length === 0) return null;
   return matches.find((e) => e.status === 'active') || matches[0];
+}
+
+/**
+ * Resolve an application → ALL of its ACTIVE connection entries (an array). Like
+ * findConnectionByApp but returns every active match instead of collapsing to
+ * one — the input to multi-connection disambiguation: 0 → resolve/404, exactly
+ * 1 → use it, >1 → the caller must ask the user which one (by each
+ * candidate's `label`; the agent then maps the choice back to that
+ * candidate's `connection_id` and retries with `connectionId`).
+ * Non-active entries (e.g. needs_reauth) are excluded so they never count as a
+ * selectable candidate. `app` may be a slug or an applicationId.
+ */
+export function findActiveConnectionsByApp(app, indexPath = INDEX_PATH) {
+  if (!app) return [];
+  const entries = Object.values(readIndex(indexPath).connections);
+  return entries.filter(
+    (e) => (e.slug === app || e.applicationId === app) && e.status === 'active',
+  );
 }
 
 // ---------------------------------------------------------------------------

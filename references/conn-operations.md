@@ -157,6 +157,68 @@ change-detected refresh yet.
 > a caller-supplied URL. If a cached catalog predates `url_template`, a direct
 > `conn.invoke` returns a clear error — run `conn.catalog {refresh:true}`.
 
+### Multiple connections for one app (disambiguation)
+
+An owner can authorize **more than one connection of the same app** to you (e.g.
+two Gmail accounts). When you `conn.invoke {app, action, params}` and **more than
+one active connection matches** that app, `conn.invoke` does **not** silently pick
+one. It returns a **normal result** (stdout, exit 0 — not an error) asking you to
+disambiguate:
+
+```json
+{
+  "needs_selection": true,
+  "reason": "multiple_connections",
+  "app": "gmail",
+  "agent_instruction": "Multiple connections match this app. Ask the user which one to use, phrasing your question in the USER'S language (they may write Chinese or English). Refer to each connection by its label, never the connection_id. Then retry with the chosen connectionId.",
+  "candidates": [
+    { "connection_id": "c-8f2a4e91", "label": "工作邮箱", "display_name": "工作邮箱", "status": "active" },
+    { "connection_id": "c-1b7d0c33", "label": "个人邮箱", "display_name": "个人邮箱", "status": "active" }
+  ],
+  "retry_hint": "conn.invoke {\"connectionId\":\"<chosen>\",\"action\":\"<same>\",\"params\":{...}}"
+}
+```
+
+**What to do when you get `needs_selection`:**
+
+1. **Ask the user which connection to use, in the user's own language** (they may
+   write Chinese or English — the `agent_instruction` is language-neutral guidance
+   on purpose; localize the actual question yourself).
+2. **Refer to each candidate by its `label`, never the `connection_id`.** The id
+   is an internal handle the user never sees. Each candidate carries a
+   guaranteed-non-empty, **unique** `label`: it is the connection's `display_name`
+   when set, otherwise a human fallback built from the app name + creation time
+   (e.g. `"Gmail · 2026-01-05"`) — so even legacy connections with empty or
+   duplicate `display_name` stay distinguishable. Present the `label` as-is; you
+   may also invite the owner to name an unnamed connection.
+3. **Retry with the chosen connection's id** — pass it as `connectionId` (see
+   below). One command re-invokes the same action against the picked connection.
+
+Counts: **0** active → same as before (refresh once, then a 404 "no connection
+found" if still none); **exactly 1** → used directly (unchanged); **>1** →
+`needs_selection`. `conn.catalog {app}` is per-application and shared across an
+app's connections, so it needs **no** disambiguation.
+
+A connection that is **not active** (needs re-authorization, expired, revoked, or
+in an error state) is **never** a silent candidate and is rejected **before** any
+credential work: `conn.invoke` returns a 409 with an actionable message (for a
+reauth-required connection, a "re-authorize on the connection page" hint) — for
+both the app-resolved path and the explicit `connectionId` path.
+
+### Targeting a specific connection — `connectionId`
+
+`conn.invoke` accepts an optional **`connectionId`** (alias `connection_id`). When
+present it **skips app-resolution entirely** and runs the action against that
+connection directly:
+
+```bash
+node src/cli/conn.js conn.invoke '{"connectionId":"c-8f2a4e91","action":"gmail/messages-send","params":{...}}'
+```
+
+This is exactly the retry after a `needs_selection` prompt: the user picked by
+`label`, you map that choice back to the candidate's `connection_id` yourself, and
+re-invoke by `connectionId`. `app` is not required when `connectionId` is given.
+
 ## WS Event Flow
 
 The comm-bridge automatically maintains the index, the action-catalog cache, and (direct-mode) credentials:

@@ -9,11 +9,13 @@
  *   node src/cli/conn.js conn.acquire  '{"connectionId":"..."}'
  */
 
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { apiPath, getForOrg, postForOrg } from '../lib/client.js';
 import { loadConfig, enabledOrgs, resolveDefaultOrgId } from '../lib/config.js';
 import { listCachedCredentials, clearCachedCredentials, readCredentialCache, saveCredentialCache } from '../lib/credential-cache.js';
 import {
-  readIndex, replaceIndexFromList, findConnectionByApp, indexPathForOrg,
+  readIndex, replaceIndexFromList, findConnectionByApp, findActiveConnectionsByApp, indexPathForOrg,
   readCatalog, writeCatalog, invalidateCatalog, CATALOG_TTL_MS,
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
@@ -101,6 +103,165 @@ async function resolveConnectionForApp(app, orgId, agentId) {
     entry = findConnectionByApp(app, idxPath);
   }
   return entry;
+}
+
+// Format a connection createdAt (ISO string or epoch ms) as YYYY-MM-DD, or with
+// second precision when `time` is set. Returns null when missing/unparseable.
+function fmtCreated(ts, { time = false } = {}) {
+  if (ts == null || ts === '') return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  const iso = d.toISOString();
+  return time ? `${iso.slice(0, 10)} ${iso.slice(11, 19)}` : iso.slice(0, 10);
+}
+
+// Establish a DETERMINISTIC candidate order that is invariant to the server's
+// incidental return order. Sort key: created_at ASCENDING, tie-broken by the
+// connection id (lexicographic). The id is used ONLY as a tiebreak here and must
+// never leak into a label. Applied at the single point candidates are assembled
+// (buildNeedsSelection) so that labels[i] and candidates[i] always derive from
+// the SAME ordered list — otherwise (the P2 bug) two nameless connections in
+// reversed input order swapped "Gmail (1)"/"Gmail (2)", so the label the user
+// just picked could point to a DIFFERENT account on retry. Missing/unparseable
+// createdAt sorts last (deterministically) and still tiebreaks by id.
+function sortCandidatesDeterministically(entries) {
+  const timeOf = (e) => {
+    if (e.createdAt == null || e.createdAt === '') return Infinity;
+    const t = new Date(e.createdAt).getTime();
+    return Number.isNaN(t) ? Infinity : t;
+  };
+  return (entries || []).slice().sort((a, b) => {
+    const ta = timeOf(a);
+    const tb = timeOf(b);
+    if (ta !== tb) return ta - tb;
+    const ia = String(a.id ?? '');
+    const ib = String(b.id ?? '');
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  });
+}
+
+// Build a guaranteed-NON-EMPTY and guaranteed-UNIQUE human LABEL per candidate,
+// so the agent can refer to same-app connections unambiguously WITHOUT ever
+// exposing the raw connection_id (design §3/§5 empty-name fallback). Precedence:
+//   1. display_name when non-empty;
+//   2. else "<app name> · <created date>" (app name + creation time);
+// then collisions (duplicate/empty display_name, same-day creations) are broken
+// with finer created-time precision and, as a LAST resort, a positional ordinal
+// "(1)/(2)". A raw connection_id is NEVER used as a label.
+export function buildCandidateLabels(entries) {
+  const list = entries || [];
+  const base = list.map((e) => {
+    const dn = (e.displayName || '').trim();
+    if (dn) return dn;
+    const appName = (`${e.name || e.slug || 'connection'}`).trim() || 'connection';
+    const d = fmtCreated(e.createdAt);
+    return d ? `${appName} · ${d}` : appName;
+  });
+  // Disambiguate each group of colliding base labels.
+  const groups = new Map();
+  base.forEach((l, i) => {
+    if (!groups.has(l)) groups.set(l, []);
+    groups.get(l).push(i);
+  });
+  const labels = base.slice();
+  for (const [l, idxs] of groups) {
+    if (idxs.length < 2) continue;
+    const times = idxs.map((i) => fmtCreated(list[i].createdAt, { time: true }));
+    const distinctTimes = times.every(Boolean) && new Set(times).size === idxs.length;
+    idxs.forEach((i, n) => {
+      labels[i] = distinctTimes
+        ? `${l} · ${fmtCreated(list[i].createdAt, { time: true })}`
+        : `${l} (${n + 1})`;
+    });
+  }
+  // Belt-and-suspenders: enforce non-emptiness + global uniqueness.
+  const used = new Set();
+  return labels.map((l, i) => {
+    let label = (l && l.trim()) ? l : `connection (${i + 1})`;
+    if (used.has(label)) {
+      let k = 2;
+      while (used.has(`${label} (${k})`)) k += 1;
+      label = `${label} (${k})`;
+    }
+    used.add(label);
+    return label;
+  });
+}
+
+// Build the `needs_selection` result for the >1-active-connections case. This is
+// a NORMAL return value (printed to stdout, exit 0) — NOT an error — so the
+// agent can act on it. i18n contract: `agent_instruction` is LANGUAGE-NEUTRAL
+// English guidance telling the agent to localize its question into the USER'S
+// language; it deliberately contains NO ready-made zh/en user-facing sentence.
+// Each candidate carries a guaranteed-non-empty, unique `label` (built from
+// display_name with a created-time fallback) — the agent refers to connections
+// by label; the raw connection_id is never shown to the user, only echoed back
+// on retry via `connectionId`. `display_name` still passes through as-is.
+export function buildNeedsSelection(app, action, candidates) {
+  // Sort into a deterministic order BEFORE computing labels AND before building
+  // candidates[], so both the label ordinal fallback and the candidate position
+  // are invariant to the input (server return) order. This is the single
+  // assembly point, so labels[i] and candidates[i] cannot diverge.
+  const list = sortCandidatesDeterministically(candidates);
+  const labels = buildCandidateLabels(list);
+  return {
+    needs_selection: true,
+    reason: 'multiple_connections',
+    app,
+    agent_instruction:
+      "Multiple connections match this app. Ask the user which one to use, phrasing your "
+      + "question in the USER'S language (they may write Chinese or English). Refer to each "
+      + "connection by its label, never the connection_id. Then retry with the chosen connectionId.",
+    candidates: list.map((e, i) => ({
+      connection_id: e.id,
+      label: labels[i],
+      display_name: e.displayName ?? null,
+      status: e.status,
+    })),
+    retry_hint: `conn.invoke {"connectionId":"<chosen>","action":"${action}","params":{...}}`,
+  };
+}
+
+// Count-aware resolution of a conn.invoke target. Returns either { entry } (use
+// it directly; entry may be null → caller 404s) or { needsSelection } (return
+// it verbatim). Pure/injectable (deps: findActives, findAny, readEntryById,
+// refresh) so the 0/1/>1 branching and the connectionId bypass are unit-testable
+// without network or config. Branching:
+//   - connectionId given → SKIP app-resolution, use that connection (refresh
+//     once if it is unknown or lacks an applicationId).
+//   - 0 active → refresh once (already done if the sole candidate lacked an
+//     applicationId); still 0 → fall back to any (non-active, e.g. needs_reauth)
+//     entry so its actionable hint surfaces, else null → 404.
+//   - exactly 1 active → use it.
+//   - >1 active → needs_selection (never silently pick the first).
+export async function resolveInvokeEntry(
+  { app, connectionId, action },
+  { findActives, findAny, readEntryById, refresh },
+) {
+  if (connectionId) {
+    let entry = readEntryById(connectionId);
+    if (!entry || !entry.applicationId) {
+      await refresh();
+      entry = readEntryById(connectionId);
+    }
+    // Even if still unknown locally, honor the explicit id — cws-core re-checks
+    // the connection-agent boundary server-side. applicationId stays null (the
+    // direct path guards on it and errors with an actionable hint).
+    return { entry: entry || { id: connectionId, status: 'active', applicationId: null, slug: null, name: null, displayName: null } };
+  }
+
+  let actives = findActives(app);
+  // Refresh once when nothing matches, OR the sole candidate lacks an
+  // applicationId (slug-only event before any conn.list) — mirrors the old
+  // resolveConnectionForApp trigger, now count-aware (a refresh may also reveal
+  // a second active, correctly routing to needs_selection).
+  if (actives.length === 0 || (actives.length === 1 && !actives[0].applicationId)) {
+    await refresh();
+    actives = findActives(app);
+  }
+  if (actives.length > 1) return { needsSelection: buildNeedsSelection(app, action, actives) };
+  if (actives.length === 1) return { entry: actives[0] };
+  return { entry: findAny(app) || null };
 }
 
 // Return an application's action catalog, reading the cache first and filling it
@@ -252,24 +413,56 @@ const COMMANDS = {
   // On an action/schema-shaped failure it invalidates the cached catalog once so
   // the next conn.catalog is fresh, then resurfaces the error.
   'conn.invoke': async () => {
+    // An explicit connectionId (alias connection_id) SKIPS app-resolution and
+    // targets that connection directly — the one-command retry after a
+    // needs_selection prompt (the user picked, we re-invoke by id). When absent,
+    // resolution is app-driven and count-aware (0/1/>1).
+    const explicitConnId = params.connectionId || params.connection_id;
     const app = params.app || params.applicationId || params.application_id || params.slug;
-    if (!app) throw Object.assign(new Error('app (slug or applicationId) is required'), { status: 400 });
+    if (!explicitConnId && !app) throw Object.assign(new Error('app (slug or applicationId) is required unless connectionId is given'), { status: 400 });
     if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
     const orgId = requireOrgId();
     const agentId = resolveSelfMemberId(orgId);
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
 
-    const entry = await resolveConnectionForApp(app, orgId, agentId);
+    const idxPath = indexPathForOrg(orgId);
+    const { entry, needsSelection } = await resolveInvokeEntry(
+      { app, connectionId: explicitConnId, action: params.action },
+      {
+        findActives: (a) => findActiveConnectionsByApp(a, idxPath),
+        findAny: (a) => findConnectionByApp(a, idxPath),
+        readEntryById: (id) => readIndex(idxPath).connections[id] || null,
+        refresh: () => refreshIndex(orgId, agentId),
+      },
+    );
+    // >1 active for the app: return the candidate list (normal result, exit 0)
+    // so the agent asks the user which one — never silently pick the first.
+    if (needsSelection) return needsSelection;
     if (!entry) throw Object.assign(new Error(`no connection found for app "${app}" (org ${orgId}, agent ${agentId})`), { status: 404 });
 
-    // A reauth_needed event has flagged this connection and cleared its cached
-    // credential (see connection-events.js). Surface an actionable hint instead
-    // of letting the acquire below fail with a bare 404/401. (An owner DM is
-    // attempted separately on a best-effort basis, so we do NOT assert here that
-    // the owner was notified — only that re-authorization is required.)
-    if (entry.status === 'needs_reauth') {
+    // Prefer the caller's app for messages; when they invoked by connectionId
+    // (no app), fall back to the resolved slug/id so hints stay meaningful.
+    const appLabel = app || entry.slug || entry.id;
+
+    // Reject ANY non-active connection BEFORE credential resolution — for BOTH
+    // the app-resolved path (a 0-active fallback may surface a blocked entry) and
+    // the explicit connectionId path (app-resolution bypassed). cws-connect list
+    // responses can mark a connection needs_reauth / error / expired / revoked;
+    // proceeding to acquire a credential for one of these fails opaquely, or worse
+    // calls the provider with a dead token. needs_reauth (incl. the normalized
+    // status:"error"+needs_reauth from toEntry) gets the specific re-authorize
+    // hint; any other blocked status gets a generic actionable error. A reauth_needed
+    // event also clears the cached credential (see connection-events.js), so an
+    // acquire could not help until a human re-authorizes anyway.
+    if (entry.status && entry.status !== 'active') {
+      if (entry.status === 'needs_reauth') {
+        throw Object.assign(
+          new Error(`connection for app "${appLabel}" needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
+          { status: 409 },
+        );
+      }
       throw Object.assign(
-        new Error(`connection for app "${app}" needs re-authorization — its credential expired or was revoked. 请到连接页点「重新授权」，完成后重试。`),
+        new Error(`connection for app "${appLabel}" is not usable (status: ${entry.status}) — it may be expired, revoked, or in an error state. Re-authorize it on the connection page, then retry.`),
         { status: 409 },
       );
     }
@@ -288,7 +481,7 @@ const COMMANDS = {
 
     if (mode === 'direct') {
       if (!entry.applicationId) {
-        throw Object.assign(new Error(`cannot run direct action for app "${app}": applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
+        throw Object.assign(new Error(`cannot run direct action for app "${appLabel}": applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
       }
       try {
         // The local catalog now carries per-action url_template/headers_template;
@@ -370,6 +563,10 @@ Applications
 
 Capability cache (runtime/connect/)
   conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
+                      {connectionId, action, params?}           #   or target a specific connection (skips app-resolution)
+                                                                 #   >1 connections for an app → returns needs_selection (ask
+                                                                 #   the user by candidate label; map the choice back to its
+                                                                 #   connection_id, retry with connectionId)
   conn.catalog        {app|applicationId, refresh?}             # cached action catalog (fills from conn.app_actions on miss/TTL)
   conn.index          {refresh?}                                # show the local connections index (connection → application)
 
@@ -407,4 +604,9 @@ async function main() {
   }
 }
 
-main();
+// Only run the CLI when invoked directly (node src/cli/conn.js …). Guarding this
+// lets the module be imported by tests to exercise the pure helpers
+// (buildNeedsSelection / resolveInvokeEntry) without executing a command.
+if (process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1])) {
+  main();
+}
