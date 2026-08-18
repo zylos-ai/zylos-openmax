@@ -31,7 +31,7 @@ const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
 // Org resolution (mirrors conn.js PR#127). Every TM route — projects, issues,
-// tasks, comments, blueprints, attempts, event-bindings — is org-owned: cws-core
+// tasks, comments, blueprints, attempts, event-bindings — is org-owned: the backend
 // resolves the org from the JWT principal and 403s ("org membership required")
 // on an identity-only token. A bare get()/post() would silently fall through to
 // resolveDefaultOrgId(), which returns '' when >1 org is enabled and no org is

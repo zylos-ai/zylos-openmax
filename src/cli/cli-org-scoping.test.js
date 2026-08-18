@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 // Repo-wide CLI org-scoping (auto-task #13). Mirrors conn.org-scoping.test.js
 // (PR#127) for the remaining CLI surface: as / comm / tm / kb / core.
 //
-// Every ORG-OWNED route is org-scoped: cws-core resolves the org from the JWT
+// Every ORG-OWNED route is org-scoped: the backend resolves the org from the JWT
 // principal and 403s ("org membership required") on an identity-only token. On
 // a MULTI-org agent with no {org} and no COCO_ORG_ID the default-org resolver
 // returns '' — a bare get()/post() would then go out identity-only and hit that

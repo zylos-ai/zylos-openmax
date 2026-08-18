@@ -54,7 +54,7 @@ import { postForOrg, apiPath, putBytes, getBytes } from '../lib/client.js';
 import { resolveDefaultOrgId } from '../lib/config.js';
 
 // Org resolution for the artifact surface (mirrors conn.js PR#127). Every
-// /artifacts and /uploads route is org-owned: cws-core resolves the org from
+// /artifacts and /uploads route is org-owned: the backend resolves the org from
 // the JWT principal and 403s ("org membership required") on an identity-only
 // token. A bare post() would silently fall through to resolveDefaultOrgId(),
 // which returns '' when >1 org is enabled and no org is given — producing that

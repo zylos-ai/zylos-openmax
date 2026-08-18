@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Org-scope the remaining CLI surface (`as` / `comm` / `tm` / `kb` / `core`) so a
-  multi-org agent never calls cws-core with an identity-only token — the same
+  multi-org agent never calls the backend with an identity-only token — the same
   connector-403 "org membership required" root cause fixed for `conn` in 2.14.4
   (PR#127). Every org-owned command now resolves the operating org (explicit
   `{org}` or the single enabled org) and routes through

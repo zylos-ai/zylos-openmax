@@ -68,7 +68,7 @@ function resolveOrgConfig(p) {
     throw new Error(`org not found in config: "${key}" (known: ${names || 'none'})`);
   }
   // No explicit {org}. Honor the env-selected operating org first — parity
-  // with the bare cws-core client / config.resolveDefaultOrgId(), so
+  // with the bare backend client / config.resolveDefaultOrgId(), so
   // single-org and COCO_ORG_ID-only deployments keep resolving the one org
   // exactly as before this PR (see reviewer regression #13). Prefer the
   // matching config block so slug/name/self stay populated for config-backed
@@ -116,8 +116,8 @@ function resolveConfiguredOrg(p) {
 }
 
 /**
- * HTTP helpers for an org-owned IM op. Every cws-core IM route is org-scoped:
- * cws-core resolves the org from the JWT principal and 403s on an identity-only
+ * HTTP helpers for an org-owned IM op. Every backend IM route is org-scoped:
+ * the backend resolves the org from the JWT principal and 403s on an identity-only
  * token. We ALWAYS route through the operating org's cached JWT via the *ForOrg
  * helpers — `resolveOrgConfig(p)` picks the explicit `{org}` (config key / org
  * UUID / org_name) or the single enabled org, and FAILS FAST (400) on a
@@ -149,7 +149,7 @@ const get  = (path, query) => convClient(params).get(path, query);
 const post = (path, body)  => convClient(params).post(path, body);
 const del  = (path)        => convClient(params).del(path);
 
-// Read this agent's own member record from cws-core for the given org; the
+// Read this agent's own member record from the backend for the given org; the
 // authoritative owner_member_id lives here.
 async function fetchSelfMember(org) {
   const selfId = org.self?.member_id;

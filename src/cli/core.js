@@ -23,7 +23,7 @@ import { resolveAgentBaseUrl } from '../lib/agent-domain.js';
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
-// Org resolution for the ORG-OWNED commands (mirrors conn.js PR#127). cws-core
+// Org resolution for the ORG-OWNED commands (mirrors conn.js PR#127). The backend
 // resolves the org from the JWT principal and 403s ("org membership required")
 // on an identity-only token for these routes. A bare get()/post() would silently
 // fall through to resolveDefaultOrgId(), which returns '' when >1 org is enabled
@@ -146,7 +146,7 @@ const COMMANDS = {
   'core.self_rename': () => selfRename(params.name || params.displayName || params.display_name),
 
   // ✅ Members directory.
-  // cws-core uses PageParams (envelope.go) — `page` + `page_size`, NOT cursor/limit.
+  // The backend uses PageParams (envelope.go) — `page` + `page_size`, NOT cursor/limit.
   // Legacy callers passing `limit` continue to work via the alias.
   'core.member_list': () => oget(apiPath('/members'), {
     kind:      params.kind || params.type,
@@ -161,7 +161,7 @@ const COMMANDS = {
   // ✅ Project member list
   'core.project_members': () => oget(apiPath(`/projects/${params.projectId}/members`)),
 
-  // ✅ Agent capability profiles — cws-core BFF aggregation a Lead reads to
+  // ✅ Agent capability profiles — the backend BFF aggregation a Lead reads to
   // pick a candidate agent for dispatch. A scope is REQUIRED: pass projectId
   // (resolved to the project's agents via cws-work) and/or memberIds
   // (repeatable agent member IDs). `include:["capabilities"]` (or the
@@ -209,7 +209,7 @@ const COMMANDS = {
   // (e.g. picking where to register an Issue) must not match ARCHIVED ones — a
   // human refers to a live project, and archived duplicates would make the match
   // ambiguous. Pass status:"archived" explicitly to list archived projects.
-  // cws-core uses PageParams — `page` + `page_size`, NOT cursor/limit.
+  // The backend uses PageParams — `page` + `page_size`, NOT cursor/limit.
   'core.project_list': () => oget(apiPath('/projects'), {
     status:    params.status ?? 'active',
     page:      params.page,
@@ -249,7 +249,7 @@ const COMMANDS = {
   // POST /api/v1/invitations — body {email?, display_name, role_id, message?}
   //   org_id is resolved server-side from the caller's JWT — do NOT send it.
   //   `display_name` (the invitee's org-level member name) is REQUIRED since
-  //   cws-core #86 / MR !138 moved naming to create-time: the name is stored
+  //   backend #86 / MR !138 moved naming to create-time: the name is stored
   //   on the invitation and becomes members.display_name on accept. Server
   //   rejects a blank display_name with 400. Accept either camel or snake.
   'core.invitation_create': () => opost(apiPath('/invitations'), {
@@ -260,7 +260,7 @@ const COMMANDS = {
   }),
   // GET /api/v1/invitations — query {status?, page?, page_size?, order_by?}
   //   org_id is resolved server-side from the caller's JWT — do NOT send it.
-  //   cws-core uses PageParams — `page` + `page_size`, NOT cursor/limit.
+  //   The backend uses PageParams — `page` + `page_size`, NOT cursor/limit.
   'core.invitation_list': () => oget(apiPath('/invitations'), {
     status:    params.status,
     page:      params.page,
