@@ -228,15 +228,62 @@ export function getOrgByOrgId(orgId) {
   return null;
 }
 
+// Quiet, opt-in resolution trace. Bad-value branches WARN unconditionally
+// (below); the happy path stays silent unless COCO_ORG_LOG=1 so normal
+// single-org operation isn't noisy. Always stderr — CLIs emit JSON on stdout.
+function orgDebug(msg) {
+  if (process.env.COCO_ORG_LOG === '1') console.error(`[config] ${msg}`);
+}
+
 /**
  * Default org resolver for callers (CLIs, REST clients) that don't pass an
- * explicit orgId: returns the single enabled org if there's exactly one,
- * otherwise null. Callers should fall back to COCO_ORG_ID env var or fail.
+ * explicit orgId. Resolution (owner 2026-08-18):
+ *   - COCO_ORG_ID set + matches an ENABLED config org → use it (quiet log).
+ *   - COCO_ORG_ID set + NO enabled config orgs → trust env and return it
+ *     (env-only deployment: nothing to validate against — unchanged behavior).
+ *   - COCO_ORG_ID set but NOT in a NON-EMPTY enabled config set (bad value):
+ *     single enabled org → WARN and fall back to it; multiple enabled → WARN
+ *     and return '' so the caller's requireOrgId throws a clean 400 (never
+ *     silently guess an org).
+ *   - COCO_ORG_ID unset → single enabled org → that org; else ''.
+ * The enabled check uses enabledOrgs().find(...), NOT getOrgByOrgId(), which
+ * matches regardless of the `enabled` flag. All logs go to STDERR only.
  */
 export function resolveDefaultOrgId() {
-  if (process.env.COCO_ORG_ID) return process.env.COCO_ORG_ID;
+  const envOrg = process.env.COCO_ORG_ID;
   const enabled = enabledOrgs();
-  if (enabled.length === 1) return enabled[0].org_id;
+  if (envOrg) {
+    const match = enabled.find((o) => o.org_id === envOrg);
+    if (match) {
+      orgDebug(`resolved org ${envOrg} via COCO_ORG_ID (valid, enabled)`);
+      return envOrg;
+    }
+    // Env-only deployment (no config.orgs to validate against): there is
+    // nothing to call the env value "bad" relative to, so trust it — this is a
+    // pre-existing supported deployment shape. The bad-value semantics below
+    // apply ONLY when a non-empty enabled config set exists to validate against.
+    if (enabled.length === 0) {
+      orgDebug(`COCO_ORG_ID=${envOrg} with no enabled config orgs; trusting env (env-only deployment)`);
+      return envOrg;
+    }
+    if (enabled.length === 1) {
+      console.warn(
+        `[config] COCO_ORG_ID=${envOrg} is not an enabled org; `
+        + `falling back to sole enabled org ${enabled[0].org_id}`,
+      );
+      return enabled[0].org_id;
+    }
+    console.warn(
+      `[config] COCO_ORG_ID=${envOrg} is not an enabled org and multiple orgs `
+      + `are enabled; refusing to guess (-> 400)`,
+    );
+    return '';
+  }
+  if (enabled.length === 1) {
+    orgDebug(`resolved sole enabled org ${enabled[0].org_id} (no COCO_ORG_ID)`);
+    return enabled[0].org_id;
+  }
+  orgDebug(`no COCO_ORG_ID and ${enabled.length} enabled orgs; returning '' (caller decides)`);
   return '';
 }
 
