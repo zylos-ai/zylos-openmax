@@ -24,10 +24,41 @@
  *   - Comment list follows its backend contract and uses {cursor, limit}.
  */
 
-import { get, post, patch, put, del, apiPath } from '../lib/client.js';
+import { getForOrg, postForOrg, patchForOrg, putForOrg, delForOrg, apiPath } from '../lib/client.js';
+import { resolveDefaultOrgId } from '../lib/config.js';
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
+
+// Org resolution (mirrors conn.js PR#127). Every TM route — projects, issues,
+// tasks, comments, blueprints, attempts, event-bindings — is org-owned: the backend
+// resolves the org from the JWT principal and 403s ("org membership required")
+// on an identity-only token. A bare get()/post() would silently fall through to
+// resolveDefaultOrgId(), which returns '' when >1 org is enabled and no org is
+// given — producing that opaque 403. Resolve the operating org (explicit {org}
+// or the single enabled org) and FAIL FAST with an actionable 400 when it can't
+// be determined. Single-org / COCO_ORG_ID deployments resolve exactly as before.
+function resolveOrgId() {
+  return params.org || params.orgId || params.org_id || resolveDefaultOrgId();
+}
+function requireOrgId() {
+  const orgId = resolveOrgId();
+  if (!orgId) {
+    throw Object.assign(
+      new Error('cannot resolve org: multiple orgs enabled and no org given — pass {"org":"<org_id>"} or set COCO_ORG_ID'),
+      { status: 400 },
+    );
+  }
+  return orgId;
+}
+
+// Org-scoped shadows of the bare verbs: each call carries the operating org's
+// JWT. Resolved lazily per call so `help` / usage never require an org.
+const get   = (path, query) => getForOrg(requireOrgId(), path, query);
+const post  = (path, body)  => postForOrg(requireOrgId(), path, body);
+const patch = (path, body)  => patchForOrg(requireOrgId(), path, body);
+const put   = (path, body)  => putForOrg(requireOrgId(), path, body);
+const del   = (path)        => delForOrg(requireOrgId(), path);
 
 // Build the standard PageParams query block from user-supplied camelCase.
 function pageParams(p) {

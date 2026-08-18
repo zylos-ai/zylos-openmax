@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { get, post, del, getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
+import { getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
 import { buildMentions } from '../lib/mention.js';
 import { loadConfig, updateConfig, enabledOrgs, getOrgByOrgId, setOwner } from '../lib/config.js';
@@ -37,11 +37,20 @@ function ensureClientMsgId(id) {
 }
 
 /**
- * Resolve the target org block. Accepts `org` as a config key (org_id),
- * org UUID, or org_name (case-insensitive); with neither, defaults to the
- * single enabled org.
+ * Resolve the target org for HTTP/JWT ROUTING. Accepts `org` as a config key
+ * (org_id), org UUID, or org_name (case-insensitive); with neither, defaults to
+ * the env-selected org (COCO_ORG_ID) or the single enabled org.
  * Returns { slug, org_id, org_name, self, owner, ... } where `slug` is the
- * config key (used for config writes).
+ * config key (used for config writes). For an env-only org that is not in
+ * config.orgs, returns a MINIMAL { org_id } block carrying just the id for
+ * JWT routing (no slug/self).
+ *
+ * This minimal env-only block is ONLY safe for routing (getForOrg/postForOrg/
+ * delForOrg key off org_id alone). Commands that read/write config-backed
+ * fields (slug/self/access/owner) must instead call resolveConfiguredOrg(),
+ * which rejects the slug-less minimal block with an actionable 400 rather than
+ * fabricating success on / crashing over a non-existent org (reviewer zylos0t
+ * sibling blocker, auto-task #13).
  */
 function resolveOrgConfig(p) {
   const key = p.org || p.orgSlug || p.orgId || p.org_id;
@@ -58,33 +67,120 @@ function resolveOrgConfig(p) {
     const names = enabled.map((o) => o.org_name || o.slug).join(', ');
     throw new Error(`org not found in config: "${key}" (known: ${names || 'none'})`);
   }
+  // No explicit {org}. Honor the env-selected operating org next, kept
+  // consistent with config.resolveDefaultOrgId(): the env-only passthrough
+  // requires a TRULY EMPTY config.orgs map; a POPULATED map (even one whose
+  // orgs are all disabled) makes a non-enabled COCO_ORG_ID a BAD VALUE that
+  // FAILS CLOSED (owner 2026-08-18). Match on the enabled set (not
+  // getOrgByOrgId, which ignores the `enabled` flag) so slug/name/self stay
+  // populated for config-backed ops.
+  const envOrgId = process.env.COCO_ORG_ID;
+  if (envOrgId) {
+    const byEnv = enabled.find((o) => o.org_id === envOrgId);
+    if (byEnv) return byEnv;
+    // Env-only deployment = truly empty config.orgs map (nothing to validate
+    // against): carry a minimal { org_id } routing block (the pre-existing
+    // supported env-only path, Bug B). A populated-but-all-disabled map does
+    // NOT take this path — it falls through to the fail-closed handling below.
+    const configuredCount = Object.keys(loadConfig().orgs || {}).length;
+    if (configuredCount === 0) return { org_id: envOrgId };
+    // Bad value RELATIVE TO a populated config set. Single enabled org → fall
+    // back to it (WARN, stderr only — this CLI emits JSON on stdout). Otherwise
+    // (all disabled = 0 enabled, or >1 enabled) → fail fast with a 400 before
+    // any network call, noting COCO_ORG_ID is not an enabled org.
+    if (enabled.length === 1) {
+      console.error(
+        `[comm] COCO_ORG_ID=${envOrgId} is not an enabled org `
+        + `(${enabled.length} enabled / ${configuredCount} configured); `
+        + `falling back to sole enabled org ${enabled[0].org_id}`,
+      );
+      return enabled[0];
+    }
+    const names = enabled.map((o) => o.org_name || o.slug).join(', ');
+    throw Object.assign(
+      new Error(
+        `COCO_ORG_ID=${envOrgId} is not an enabled org `
+        + `(${enabled.length} enabled / ${configuredCount} configured) — `
+        + `pass {"org":"<name>"}${names ? ` (one of: ${names})` : ''}`,
+      ),
+      { status: 400 },
+    );
+  }
   if (enabled.length === 1) return enabled[0];
-  if (enabled.length === 0) throw new Error('no enabled orgs in config.orgs');
+  // Nothing (arg, env, or a lone enabled org) determines the operating org.
+  // Fail fast (400) instead of dropping to a bare, identity-only call.
+  if (enabled.length === 0) throw Object.assign(new Error('no enabled orgs in config.orgs'), { status: 400 });
   const names = enabled.map((o) => o.org_name || o.slug).join(', ');
-  throw new Error(`multiple enabled orgs — pass {"org":"<name>"} (one of: ${names})`);
+  throw Object.assign(
+    new Error(`multiple enabled orgs — pass {"org":"<name>"} (one of: ${names})`),
+    { status: 400 },
+  );
 }
 
 /**
- * HTTP helpers for a conversation-scoped op. cws-core derives org + caller
- * member from the JWT, so by default we use the ambient (single-org) token —
- * exactly like comm.send / comm.get_messages. For multi-org installs pass
- * `{org}` (config key / org UUID / org_name) and we route through that org's
- * cached JWT via the *ForOrg helpers, avoiding the identity-only-token 401 that
- * `resolveDefaultOrgId()` yields when more than one org is enabled.
+ * Resolve the target org for CONFIG-BACKED commands (sync_owner, dm_policy,
+ * dm_list, dm_allow, dm_revoke). These read/write slug/self/access/owner, which
+ * only exist on a real config.orgs block — they cannot operate on the minimal
+ * env-only { org_id } routing block resolveOrgConfig() returns for a
+ * COCO_ORG_ID that is not in config.orgs.
+ *
+ * Delegates org SELECTION to resolveOrgConfig() (so explicit {org}, single-org,
+ * multi-org fail-fast and env-selection all stay identical), then REQUIRES the
+ * result to be a real config block (identified by `slug`). If selection landed
+ * on the slug-less env-only fallback, fail fast with an actionable 400 instead
+ * of returning fake success (dm_list / read-only dm_policy) or crashing on
+ * undefined config (dm_policy write / dm_allow / dm_revoke / sync_owner).
  */
-function convClient(p) {
-  if (p.org || p.orgSlug || p.orgId || p.org_id) {
-    const org = resolveOrgConfig(p);
-    return {
-      get:  (path, query) => getForOrg(org.org_id, path, query),
-      post: (path, body)  => postForOrg(org.org_id, path, body),
-      del:  (path)        => delForOrg(org.org_id, path),
-    };
+function resolveConfiguredOrg(p) {
+  const org = resolveOrgConfig(p);
+  if (!org.slug) {
+    throw Object.assign(
+      new Error(
+        `org ${org.org_id} selected via COCO_ORG_ID has no block in config.orgs; `
+        + `these commands require a configured org (add an orgs.<key> block with `
+        + `slug/self/access, or pass {"org":"<configured org>"})`,
+      ),
+      { status: 400 },
+    );
   }
-  return { get, post, del };
+  return org;
 }
 
-// Read this agent's own member record from cws-core for the given org; the
+/**
+ * HTTP helpers for an org-owned IM op. Every backend IM route is org-scoped:
+ * the backend resolves the org from the JWT principal and 403s on an identity-only
+ * token. We ALWAYS route through the operating org's cached JWT via the *ForOrg
+ * helpers — `resolveOrgConfig(p)` picks the explicit `{org}` (config key / org
+ * UUID / org_name) or the single enabled org, and FAILS FAST (400) on a
+ * multi-org install with no `{org}` instead of silently dropping to a bare,
+ * identity-only call. Single-org / `COCO_ORG_ID` deployments resolve the one
+ * org exactly as before.
+ *
+ * Bug B fix (#13): the previous no-`{org}` branch returned bare
+ * `{ get, post, del }`, so on a multi-org agent the 6 conversation-member
+ * commands (and the 10 formerly-bare commands below) went out identity-only and
+ * 403'd. Resolving a default org here closes that leak.
+ */
+function convClient(p) {
+  const org = resolveOrgConfig(p);
+  return {
+    get:  (path, query) => getForOrg(org.org_id, path, query),
+    post: (path, body)  => postForOrg(org.org_id, path, body),
+    del:  (path)        => delForOrg(org.org_id, path),
+  };
+}
+
+// Org-scoped shadows of the bare verbs. Every IM REST command is org-owned, so
+// each resolves the operating org (fail-fast in multi-org) and carries that
+// org's JWT — see convClient above. This converts the 10 formerly-unconditionally
+// -bare commands (list_conversations / create_dm / create_group / get_messages /
+// send / get_message / unread / mark_read / search / sync) without touching each
+// call site.
+const get  = (path, query) => convClient(params).get(path, query);
+const post = (path, body)  => convClient(params).post(path, body);
+const del  = (path)        => convClient(params).del(path);
+
+// Read this agent's own member record from the backend for the given org; the
 // authoritative owner_member_id lives here.
 async function fetchSelfMember(org) {
   const selfId = org.self?.member_id;
@@ -303,7 +399,7 @@ const COMMANDS = {
 
   // ---- Owner ------------------------------------------------------------------
   'comm.sync_owner': async () => {
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const member = await fetchSelfMember(org);
     const coreOwnerId = member?.owner_member_id || '';
     const localOwnerId = org.owner?.member_id || '';
@@ -325,7 +421,7 @@ const COMMANDS = {
   // ---- DM access control (local config, hot-reloaded) -----------------------
 
   'comm.dm_policy': () => {
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const access = org.access || {};
     if (params.policy) {
       const valid = ['open', 'allowlist', 'owner'];
@@ -337,7 +433,7 @@ const COMMANDS = {
   },
 
   'comm.dm_list': () => {
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const access = org.access || {};
     return { org: org.org_name || org.slug, dmPolicy: access.dmPolicy || 'owner', dmAllowFrom: access.dmAllowFrom || [] };
   },
@@ -347,7 +443,7 @@ const COMMANDS = {
       ? [].concat(params.memberIds || params.memberId)
       : [];
     if (!ids.length) throw new Error('memberIds (or memberId) required');
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const result = updateConfig(cfg => {
       const access = cfg.orgs[org.slug].access = cfg.orgs[org.slug].access || {};
       const list = new Set(access.dmAllowFrom || []);
@@ -362,7 +458,7 @@ const COMMANDS = {
       ? [].concat(params.memberIds || params.memberId)
       : [];
     if (!ids.length) throw new Error('memberIds (or memberId) required');
-    const org = resolveOrgConfig(params);
+    const org = resolveConfiguredOrg(params);
     const result = updateConfig(cfg => {
       const access = cfg.orgs[org.slug].access = cfg.orgs[org.slug].access || {};
       const remove = new Set(ids.map(String));

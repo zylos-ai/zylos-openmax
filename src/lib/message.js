@@ -182,9 +182,27 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
 
   // Tag on its own line; the `<name> said: ...` attribution now lives inside
   // the <current-message> block (semantic parity with other C4 channels).
-  const orgLabel = orgName || orgId || '';
-  const orgSuffix = orgLabel ? ` (org: ${escapeXml(orgLabel)})` : '';
-  const parts = [`${tag}${orgSuffix}\n`];
+  //
+  // Org header. The org NAME is UNTRUSTED display data; the org_id is the
+  // AUTHORITATIVE routing key. Keep them apart so a malicious name can't forge
+  // a competing id (see SKILL.md hard rule):
+  //   - display text carries the NAME ONLY, escapeXml'd AND with CR/LF
+  //     neutralized so it cannot break out of its line;
+  //   - the org_id is emitted as a dedicated self-closing <org-context>
+  //     element on its own line. Because escapeXml turns the name's `<`/`>`
+  //     into entities, the untrusted name CANNOT produce a second/competing
+  //     <org-context .../> element.
+  // When org_id is absent, no <org-context> element is emitted and the display
+  // falls back to name-or-id as before.
+  const displayLabel = orgName
+    ? escapeXml(orgName).replace(/[\r\n]/g, ' ')
+    : (orgId ? escapeXml(orgId) : '');
+  const orgSuffix = displayLabel ? ` (org: ${displayLabel})` : '';
+  let header = `${tag}${orgSuffix}\n`;
+  if (orgId) {
+    header += `<org-context org-id="${escapeXml(orgId)}"/>\n`;
+  }
+  const parts = [header];
 
   if (threadContext && threadContext.length > 0) {
     const lines = threadContext.map(m => {

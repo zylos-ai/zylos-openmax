@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.6] — 2026-08-18
+
+### Fixed
+
+- Org-scope the remaining CLI surface (`as` / `comm` / `tm` / `kb` / `core`) so a
+  multi-org agent never calls the backend with an identity-only token — the same
+  connector-403 "org membership required" root cause fixed for `conn` in 2.14.4
+  (PR#127). Every org-owned command now resolves the operating org (explicit
+  `{org}` or the single enabled org) and routes through
+  `getForOrg`/`postForOrg`/`patchForOrg`/`putForOrg`/`delForOrg`, failing fast
+  with an actionable HTTP 400 when the org cannot be resolved (multi-org with no
+  `{org}` and no `COCO_ORG_ID`) instead of sending an identity-only request that
+  403s. Covers all 45 `tm.js` commands, all 38 `kb.js` commands, the 3 `as.js`
+  network functions (`uploadMedia`/`getMediaUrl`/`resolveUris`) + 4 `as.*`
+  commands, all 16 `comm.js` IM commands, and the 14 org-owned `core.js`
+  commands. Single-org / `COCO_ORG_ID` deployments are unaffected.
+- The 4 previously-ambiguous `core.js` commands are now org-scoped:
+  `platform_agent_create`, `platform_agent_delete`, `org_get`, `role_list`.
+- Bug A — `as.js` `getMediaUrl` dropped the org: it ran a bare
+  `post('/artifacts/resolve')`, so the `org_id` comm-bridge already passed
+  (`getMediaUrl(attId, orgConfig.org_id)`) landed in an ignored `opts` argument
+  and multi-org media resolve/download went out identity-only and 403'd. The org
+  id is now a real positional parameter routed through `postForOrg`.
+- Bug B — `comm.js` `convClient` silently fell back to bare `get/post/del` when
+  no `{org}` was passed, a latent multi-org 403 in the 6 conversation-member
+  commands. It now always resolves the operating org (fail-fast on multi-org
+  with no `{org}`).
+- `COCO_ORG_ID` on the no-`{org}` path is now validated consistently by both
+  `config.resolveDefaultOrgId` and `comm.js` `resolveOrgConfig`, but only
+  against a *populated* config set: a value matching an enabled org is used; a
+  value that is not enabled while `config.orgs` is populated is treated as a
+  bad value — a single-enabled deployment falls back to its sole org (with a
+  stderr warning) and any other case (multiple enabled, or a
+  populated-but-all-disabled tenant) fails fast with an actionable HTTP 400
+  rather than guessing. The env-only passthrough is gated on a *truly empty*
+  `config.orgs` map (zero configured orgs): only then is there nothing to
+  validate against and the env value is trusted. A populated-but-all-disabled
+  config **fails closed** (400 before any network call), not routes by env.
+  Resolution outcomes are logged to stderr only (never stdout, which carries
+  CLI JSON); the happy path stays quiet unless `COCO_ORG_LOG=1`.
+
+### Added
+
+- Deliver the message's `org_id` into task-CLI calls so a multi-org agent runs
+  each `tm` / `kb` / `as` / `conn` invocation against the org the message
+  belongs to. The inbound message header now carries the org_id as a dedicated,
+  unforgeable structural element — `<org-context org-id="<uuid>"/>` on its own
+  line — separate from the human-readable `(org: <name>)` display text, so an
+  untrusted/adversarial org name cannot forge a competing routing id. `SKILL.md`
+  documents the hard rule to read the authoritative `org_id` from the
+  `<org-context>` `org-id` attribute (not the display text) and prefix
+  `COCO_ORG_ID=<uuid>` on each such call, bound to the current message only
+  (never stored in a shared/global slot). Single-org deployments need no prefix
+  and are unaffected.
+
+### Unchanged (deliberate)
+
+- Identity / bootstrap commands stay identity-scoped: `core.me`, `core.org_list`,
+  `core.org_switch`, `core.org_create`, `core.self_rename`,
+  `core.invitation_accept`, and the agent-domain resolvers. `invitation`
+  create/list/revoke are org-scoped; `accept` stays identity (pre-membership).
+- `metrics-reporter.js` and `channel-liveness-reporter.js` were already
+  org-scoped (`putForOrg`) and are untouched.
+
 ## [2.14.5] — 2026-08-17
 
 ### Added

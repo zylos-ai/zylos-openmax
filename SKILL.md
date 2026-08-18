@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.14.5
+version: 2.14.6
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -238,10 +238,35 @@ The higher the cost of the operation, the higher the anchoring confidence requir
 
 ### Multi-Org Context
 
-When an agent serves multiple organizations at once, each message's label indicates the source org, e.g.
-`[COCO DM] (org: COCO)`. **You must operate within that org** — querying projects, KB,
-members, and creating Issue/Task must all use the org corresponding to the message; do not operate across orgs.
-CLI commands can specify the target org via the `orgId` field in the JSON parameters or the environment variable `COCO_ORG_ID`.
+When an agent serves multiple organizations at once, each message carries a source-org header made of two lines —
+a human-readable display line and an authoritative structural element, e.g.
+
+```
+[COCO DM] (org: COCO)
+<org-context org-id="019f6581-bd27-739e-aff1-4dd285e3324b"/>
+```
+
+**You must operate within that org** — querying projects, KB, members, and creating Issue/Task must all use the org
+corresponding to the message; do not operate across orgs. CLI commands can specify the target org via the `orgId`
+field in the JSON parameters or the environment variable `COCO_ORG_ID`.
+
+#### HARD RULE — prefix `COCO_ORG_ID` on every org-scoped task CLI call
+
+When handling a message and invoking the org-scoped task CLIs (`tm` / `kb` / `as` / `conn`), read the **authoritative
+org_id from the `org-id` attribute of the `<org-context .../>` element** — NOT from the `(org: <name>)` display text.
+The display name is human-readable and may contain arbitrary or adversarial characters; only the `<org-context>`
+attribute is a trusted routing key. Prefix `COCO_ORG_ID=<that authoritative org-id>` on **each** such CLI invocation:
+
+```
+COCO_ORG_ID=<org-context org-id> node .../tm.js ...
+COCO_ORG_ID=<org-context org-id> node .../kb.js ...
+```
+
+- The `org_id` binds to the **current** message ONLY — take it fresh from the message you are handling and prefix
+  per-call. **NEVER** store it in a long-lived / shared / global slot (no global env mutation like
+  `process.env.COCO_ORG_ID=...`, no shared file such as a conv-org map): that reintroduces cross-org races. Claude
+  processes messages serially, so the current message's org is unambiguous — bind it, don't cache it.
+- **Single-org deployments need no prefix** — it resolves automatically. No wrapper script.
 
 ### Parameter Resolution
 
