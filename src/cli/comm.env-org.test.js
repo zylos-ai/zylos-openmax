@@ -35,16 +35,17 @@ function setupEmptyHome() {
   return home;
 }
 
-// HOME with N enabled config orgs (keyed by org_id, each with a slug/self so
-// they are real config blocks). Used to exercise the enabled-match and
-// single-org bad-value fallback branches.
-function setupHomeWithOrgs(orgIds) {
+// HOME with N config orgs (keyed by org_id, each with a slug/self so they are
+// real config blocks). `enabled` (default true) applies to every org — pass
+// false to build a POPULATED-but-all-disabled config. Exercises the
+// enabled-match, single-org bad-value fallback, and fail-closed branches.
+function setupHomeWithOrgs(orgIds, { enabled = true } = {}) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'comm-envorg-'));
   const compDir = path.join(home, 'zylos/components/openmax');
   fs.mkdirSync(path.join(compDir, 'runtime/tokens'), { recursive: true });
   const orgs = {};
   for (const id of orgIds) {
-    orgs[id] = { org_id: id, enabled: true, self: { member_id: `self-${id}` } };
+    orgs[id] = { org_id: id, enabled, self: { member_id: `self-${id}` } };
   }
   fs.writeFileSync(
     path.join(compDir, 'config.json'),
@@ -162,7 +163,7 @@ test('NEW semantics: bad-value COCO_ORG_ID + exactly ONE enabled org → falls b
     assert.equal(r.code, 0, `expected success (fallback send), got stderr: ${r.stderr}`);
     assert.equal(seen.hit, true, 'must send using the sole enabled org');
     assert.equal(seen.auth, 'Bearer tok-org-A', 'must carry the sole enabled org\'s JWT, not the bogus env value');
-    assert.match(r.stderr, /not an enabled org; falling back to sole enabled org org-A/, 'expected a WARN on stderr');
+    assert.match(r.stderr, /not an enabled org \(1 enabled \/ 1 configured\); falling back to sole enabled org org-A/, 'expected a WARN on stderr');
   } finally {
     await new Promise((r) => server.close(r));
   }
@@ -181,8 +182,32 @@ test('NEW semantics: bad-value COCO_ORG_ID + MULTIPLE enabled orgs → fail-fast
     assert.equal(r.code, 1, `expected fail-fast, got stdout: ${r.stdout}`);
     const err = JSON.parse(r.stderr);
     assert.equal(err.status, 400, `expected 400, got: ${r.stderr}`);
-    assert.match(err.error, /COCO_ORG_ID=bogus-org is not an enabled org and multiple orgs are enabled/);
+    assert.match(err.error, /COCO_ORG_ID=bogus-org is not an enabled org \(2 enabled \/ 2 configured\)/);
     assert.equal(seen.hit, false, 'must NOT send when it cannot safely pick an org');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('P1 fail-closed: POPULATED-but-all-disabled config.orgs + COCO_ORG_ID (even the disabled org) → 400 BEFORE any network call, NOTHING sent', async () => {
+  // A populated config whose orgs are all disabled is a deliberately-disabled
+  // tenant, NOT an env-only deployment. The env value must not be trusted and
+  // the request must 400 before touching the network — even when COCO_ORG_ID
+  // points at the disabled org itself.
+  const home = setupHomeWithOrgs(['org-A', 'org-B'], { enabled: false });
+  const { server, seen } = orgTokenHarness('/api/v1/');
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const r = await run(home, 'comm.list_conversations', {}, {
+      COCO_ORG_ID: 'org-A', // the disabled org itself
+      COCO_AUTH_TOKEN: '', COCO_USER_TOKEN: '', COCO_API_KEY: '',
+    }, `http://127.0.0.1:${port}`);
+    assert.equal(r.code, 1, `expected fail-closed, got stdout: ${r.stdout}`);
+    const err = JSON.parse(r.stderr);
+    assert.equal(err.status, 400, `expected 400, got: ${r.stderr}`);
+    assert.match(err.error, /COCO_ORG_ID=org-A is not an enabled org \(0 enabled \/ 2 configured\)/);
+    assert.equal(seen.hit, false, 'must NOT hit the network for a populated-but-all-disabled config (no request-before-400)');
   } finally {
     await new Promise((r) => server.close(r));
   }

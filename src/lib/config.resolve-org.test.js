@@ -61,16 +61,29 @@ test('single enabled + COCO_ORG_ID bad value → falls back to sole org, WARN', 
   assert.equal(result, A);
   assert.match(
     stderr,
-    /COCO_ORG_ID=bogus-org is not an enabled org; falling back to sole enabled org 019f0000-0000-0000-0000-00000000000a/,
+    /COCO_ORG_ID=bogus-org is not an enabled org \(1 enabled \/ 1 configured\); falling back to sole enabled org 019f0000-0000-0000-0000-00000000000a/,
   );
 });
 
-test('ZERO enabled config orgs + COCO_ORG_ID set → trusts env (env-only deployment passthrough), no WARN', () => {
-  // No config.orgs to validate against → the env value is NOT a bad value; it
-  // is a supported env-only deployment. Restores the pre-refactor behavior.
+test('TRULY-EMPTY config.orgs map + COCO_ORG_ID set → trusts env (env-only deployment passthrough), no WARN', () => {
+  // 0 CONFIGURED orgs → nothing to validate against → the env value is NOT a
+  // bad value; it is a supported env-only deployment. (Contrast the
+  // populated-but-all-disabled case below, which fails closed.)
   const { result, stderr } = resolve(setupHome([]), { COCO_ORG_ID: 'org-env-only' });
   assert.equal(result, 'org-env-only');
   assert.doesNotMatch(stderr, /not an enabled org/, 'env-only passthrough must not WARN');
+});
+
+test('P1: POPULATED-but-all-disabled config.orgs + COCO_ORG_ID (even the disabled org) → FAIL CLOSED, returns "" (→400)', () => {
+  // configuredCount > 0 with 0 enabled is a deliberately-disabled tenant, NOT
+  // an env-only deployment. The env value must NOT be trusted — even when it
+  // points at the disabled org itself.
+  const { result, stderr } = resolve(
+    setupHome([{ org_id: A, enabled: false }, { org_id: B, enabled: false }]),
+    { COCO_ORG_ID: A },
+  );
+  assert.equal(result, '', 'must NOT trust env for a populated-but-all-disabled config');
+  assert.match(stderr, /COCO_ORG_ID=019f0000-0000-0000-0000-00000000000a is not an enabled org \(0 enabled \/ 2 configured\); refusing to guess \(-> 400\)/);
 });
 
 test('multi enabled + COCO_ORG_ID matches one → returns that one, no WARN', () => {
@@ -84,17 +97,17 @@ test('multi enabled + COCO_ORG_ID bad value → returns "" (→400), WARN refusi
   assert.equal(result, '');
   assert.match(
     stderr,
-    /COCO_ORG_ID=bogus-org is not an enabled org and multiple orgs are enabled; refusing to guess \(-> 400\)/,
+    /COCO_ORG_ID=bogus-org is not an enabled org \(2 enabled \/ 2 configured\); refusing to guess \(-> 400\)/,
   );
 });
 
-test('env names a DISABLED org → treated as bad value (uses enabledOrgs, not getOrgByOrgId)', () => {
+test('env names a DISABLED org (with another enabled) → bad value, falls back to sole enabled org', () => {
   const { result, stderr } = resolve(
     setupHome([{ org_id: A, enabled: false }, { org_id: B }]),
     { COCO_ORG_ID: A },
   );
   assert.equal(result, B, 'disabled env org is a bad value; sole enabled org B is used');
-  assert.match(stderr, /is not an enabled org; falling back to sole enabled org 019f0000-0000-0000-0000-00000000000b/);
+  assert.match(stderr, /is not an enabled org \(1 enabled \/ 2 configured\); falling back to sole enabled org 019f0000-0000-0000-0000-00000000000b/);
 });
 
 test('no COCO_ORG_ID + single enabled → returns sole org', () => {

@@ -239,15 +239,18 @@ function orgDebug(msg) {
  * Default org resolver for callers (CLIs, REST clients) that don't pass an
  * explicit orgId. Resolution (owner 2026-08-18):
  *   - COCO_ORG_ID set + matches an ENABLED config org → use it (quiet log).
- *   - COCO_ORG_ID set + NO enabled config orgs → trust env and return it
- *     (env-only deployment: nothing to validate against — unchanged behavior).
- *   - COCO_ORG_ID set but NOT in a NON-EMPTY enabled config set (bad value):
- *     single enabled org → WARN and fall back to it; multiple enabled → WARN
- *     and return '' so the caller's requireOrgId throws a clean 400 (never
- *     silently guess an org).
+ *   - COCO_ORG_ID set + TRULY EMPTY config.orgs map (0 configured) → trust env
+ *     and return it (env-only deployment: nothing to validate against).
+ *   - COCO_ORG_ID set but NOT enabled while config.orgs IS populated (bad
+ *     value — includes a populated-but-all-disabled tenant): single enabled
+ *     org → WARN and fall back to it; otherwise (0 enabled/all-disabled, or >1
+ *     enabled) → WARN and return '' so the caller's requireOrgId throws a clean
+ *     400 (FAIL CLOSED, never guess).
  *   - COCO_ORG_ID unset → single enabled org → that org; else ''.
  * The enabled check uses enabledOrgs().find(...), NOT getOrgByOrgId(), which
- * matches regardless of the `enabled` flag. All logs go to STDERR only.
+ * matches regardless of the `enabled` flag. The env-only passthrough keys on
+ * the CONFIGURED count (Object.keys(orgs)), not the enabled count. All logs go
+ * to STDERR only.
  */
 export function resolveDefaultOrgId() {
   const envOrg = process.env.COCO_ORG_ID;
@@ -258,24 +261,31 @@ export function resolveDefaultOrgId() {
       orgDebug(`resolved org ${envOrg} via COCO_ORG_ID (valid, enabled)`);
       return envOrg;
     }
-    // Env-only deployment (no config.orgs to validate against): there is
-    // nothing to call the env value "bad" relative to, so trust it — this is a
-    // pre-existing supported deployment shape. The bad-value semantics below
-    // apply ONLY when a non-empty enabled config set exists to validate against.
-    if (enabled.length === 0) {
-      orgDebug(`COCO_ORG_ID=${envOrg} with no enabled config orgs; trusting env (env-only deployment)`);
+    // Env-only deployment = a TRULY EMPTY config.orgs map (nothing to validate
+    // against) → trust the env value. This must key on the CONFIGURED count,
+    // not the enabled count: a POPULATED map whose orgs are all disabled is a
+    // deliberately-disabled tenant and must FAIL CLOSED, not fall through to
+    // trusting the env value.
+    const configuredCount = Object.keys(loadConfig().orgs || {}).length;
+    if (configuredCount === 0) {
+      orgDebug(`COCO_ORG_ID=${envOrg} with no configured orgs; trusting env (env-only deployment)`);
       return envOrg;
     }
+    // Bad value RELATIVE TO a populated config.orgs. Exactly one enabled org →
+    // fall back to it; otherwise (all disabled = 0 enabled, or >1 enabled) →
+    // return '' so the caller's requireOrgId throws a clean 400. Never guess.
     if (enabled.length === 1) {
       console.warn(
-        `[config] COCO_ORG_ID=${envOrg} is not an enabled org; `
+        `[config] COCO_ORG_ID=${envOrg} is not an enabled org `
+        + `(${enabled.length} enabled / ${configuredCount} configured); `
         + `falling back to sole enabled org ${enabled[0].org_id}`,
       );
       return enabled[0].org_id;
     }
     console.warn(
-      `[config] COCO_ORG_ID=${envOrg} is not an enabled org and multiple orgs `
-      + `are enabled; refusing to guess (-> 400)`,
+      `[config] COCO_ORG_ID=${envOrg} is not an enabled org `
+      + `(${enabled.length} enabled / ${configuredCount} configured); `
+      + `refusing to guess (-> 400)`,
     );
     return '';
   }

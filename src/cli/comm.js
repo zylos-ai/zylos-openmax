@@ -68,41 +68,43 @@ function resolveOrgConfig(p) {
     throw new Error(`org not found in config: "${key}" (known: ${names || 'none'})`);
   }
   // No explicit {org}. Honor the env-selected operating org next, kept
-  // consistent with config.resolveDefaultOrgId(): a COCO_ORG_ID that is not in
-  // a NON-EMPTY enabled config set is a BAD VALUE (owner 2026-08-18); an
-  // env-only deployment with no config.orgs still routes by env (nothing to
-  // validate against). Match on the enabled set (not getOrgByOrgId, which
-  // ignores the `enabled` flag) so slug/name/self stay populated for
-  // config-backed ops.
+  // consistent with config.resolveDefaultOrgId(): the env-only passthrough
+  // requires a TRULY EMPTY config.orgs map; a POPULATED map (even one whose
+  // orgs are all disabled) makes a non-enabled COCO_ORG_ID a BAD VALUE that
+  // FAILS CLOSED (owner 2026-08-18). Match on the enabled set (not
+  // getOrgByOrgId, which ignores the `enabled` flag) so slug/name/self stay
+  // populated for config-backed ops.
   const envOrgId = process.env.COCO_ORG_ID;
   if (envOrgId) {
     const byEnv = enabled.find((o) => o.org_id === envOrgId);
     if (byEnv) return byEnv;
-    // Env-only deployment (no config.orgs to validate against): nothing to
-    // call the env value "bad" relative to, so carry a minimal { org_id }
-    // routing block — the pre-existing supported env-only path (Bug B).
-    if (enabled.length === 0) return { org_id: envOrgId };
+    // Env-only deployment = truly empty config.orgs map (nothing to validate
+    // against): carry a minimal { org_id } routing block (the pre-existing
+    // supported env-only path, Bug B). A populated-but-all-disabled map does
+    // NOT take this path — it falls through to the fail-closed handling below.
+    const configuredCount = Object.keys(loadConfig().orgs || {}).length;
+    if (configuredCount === 0) return { org_id: envOrgId };
     // Bad value RELATIVE TO a populated config set. Single enabled org → fall
-    // back to it (WARN, stderr only — this CLI emits JSON on stdout). Multiple
-    // enabled → fail fast like the no-{org} multi-org branch, noting
-    // COCO_ORG_ID is not an enabled org.
+    // back to it (WARN, stderr only — this CLI emits JSON on stdout). Otherwise
+    // (all disabled = 0 enabled, or >1 enabled) → fail fast with a 400 before
+    // any network call, noting COCO_ORG_ID is not an enabled org.
     if (enabled.length === 1) {
       console.error(
-        `[comm] COCO_ORG_ID=${envOrgId} is not an enabled org; `
+        `[comm] COCO_ORG_ID=${envOrgId} is not an enabled org `
+        + `(${enabled.length} enabled / ${configuredCount} configured); `
         + `falling back to sole enabled org ${enabled[0].org_id}`,
       );
       return enabled[0];
     }
-    if (enabled.length > 1) {
-      const names = enabled.map((o) => o.org_name || o.slug).join(', ');
-      throw Object.assign(
-        new Error(
-          `COCO_ORG_ID=${envOrgId} is not an enabled org and multiple orgs are `
-          + `enabled — pass {"org":"<name>"} (one of: ${names})`,
-        ),
-        { status: 400 },
-      );
-    }
+    const names = enabled.map((o) => o.org_name || o.slug).join(', ');
+    throw Object.assign(
+      new Error(
+        `COCO_ORG_ID=${envOrgId} is not an enabled org `
+        + `(${enabled.length} enabled / ${configuredCount} configured) — `
+        + `pass {"org":"<name>"}${names ? ` (one of: ${names})` : ''}`,
+      ),
+      { status: 400 },
+    );
   }
   if (enabled.length === 1) return enabled[0];
   // Nothing (arg, env, or a lone enabled org) determines the operating org.
