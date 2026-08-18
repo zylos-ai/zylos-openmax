@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.7] — 2026-08-18
+
+### Added
+
+- Multi-connection disambiguation by `display_name`. When an owner has authorized
+  more than one connection of the same app to a single agent (e.g. two Gmail
+  accounts), `conn.invoke` no longer silently uses the first match: when >1 active
+  connection matches the app it returns a `needs_selection` result — a normal
+  value printed to stdout with exit 0, **not** a thrown error — carrying
+  `candidates[]` (each with `connection_id`, `display_name`, `status`) and a
+  language-neutral `agent_instruction` telling the agent to ask the user which
+  connection to use by its `display_name` and retry. A new optional
+  `connectionId` (alias `connection_id`) param targets a specific connection
+  directly, skipping app-resolution — the one-command retry after the user picks.
+  The 0-active and exactly-1-active paths are unchanged (404 / direct use).
+- `hooks/post-upgrade.js`: per-org, idempotent, best-effort backfill of
+  `display_name` onto existing connections after an upgrade — it rebuilds each
+  org's local index from the connections list so connections created before this
+  release gain a `display_name`. The backfill is best-effort and never blocks the
+  upgrade: any per-org API failure is caught and logged, and the upgrade
+  proceeds.
+
 ## [2.14.6] — 2026-08-18
 
 ### Fixed
