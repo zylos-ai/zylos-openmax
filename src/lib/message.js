@@ -182,18 +182,27 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
 
   // Tag on its own line; the `<name> said: ...` attribution now lives inside
   // the <current-message> block (semantic parity with other C4 channels).
-  // When both the org name and its UUID are known, expose BOTH so the agent
-  // can read org_id off the message header and prefix COCO_ORG_ID onto each
-  // task-CLI (tm/kb/as/conn) call (see SKILL.md). Middot separator, literal
-  // `org_id:` label. When only one is present, keep the single-value form.
-  let orgSuffix = '';
-  if (orgName && orgId) {
-    orgSuffix = ` (org: ${escapeXml(orgName)} · org_id: ${escapeXml(orgId)})`;
-  } else {
-    const orgLabel = orgName || orgId || '';
-    orgSuffix = orgLabel ? ` (org: ${escapeXml(orgLabel)})` : '';
+  //
+  // Org header. The org NAME is UNTRUSTED display data; the org_id is the
+  // AUTHORITATIVE routing key. Keep them apart so a malicious name can't forge
+  // a competing id (see SKILL.md hard rule):
+  //   - display text carries the NAME ONLY, escapeXml'd AND with CR/LF
+  //     neutralized so it cannot break out of its line;
+  //   - the org_id is emitted as a dedicated self-closing <org-context>
+  //     element on its own line. Because escapeXml turns the name's `<`/`>`
+  //     into entities, the untrusted name CANNOT produce a second/competing
+  //     <org-context .../> element.
+  // When org_id is absent, no <org-context> element is emitted and the display
+  // falls back to name-or-id as before.
+  const displayLabel = orgName
+    ? escapeXml(orgName).replace(/[\r\n]/g, ' ')
+    : (orgId ? escapeXml(orgId) : '');
+  const orgSuffix = displayLabel ? ` (org: ${displayLabel})` : '';
+  let header = `${tag}${orgSuffix}\n`;
+  if (orgId) {
+    header += `<org-context org-id="${escapeXml(orgId)}"/>\n`;
   }
-  const parts = [`${tag}${orgSuffix}\n`];
+  const parts = [header];
 
   if (threadContext && threadContext.length > 0) {
     const lines = threadContext.map(m => {

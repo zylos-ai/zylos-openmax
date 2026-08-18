@@ -36,27 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with no `{org}`).
 - `COCO_ORG_ID` on the no-`{org}` path is now validated consistently by both
   `config.resolveDefaultOrgId` and `comm.js` `resolveOrgConfig`, but only
-  against a *populated* enabled config set: a value matching an enabled org is
-  used; a value that is NOT in a non-empty enabled config set is treated as a
+  against a *populated* config set: a value matching an enabled org is used; a
+  value that is not enabled while `config.orgs` is populated is treated as a
   bad value — a single-enabled deployment falls back to its sole org (with a
-  stderr warning) and a multi-org deployment fails fast with an actionable HTTP
-  400 rather than guessing. Env-only deployments (no `config.orgs` at all) are
-  unchanged — with nothing to validate against, the env value is trusted and
-  routes as before. Resolution outcomes are logged to stderr only (never
-  stdout, which carries CLI JSON); the happy path stays quiet unless
-  `COCO_ORG_LOG=1`.
+  stderr warning) and any other case (multiple enabled, or a
+  populated-but-all-disabled tenant) fails fast with an actionable HTTP 400
+  rather than guessing. The env-only passthrough is gated on a *truly empty*
+  `config.orgs` map (zero configured orgs): only then is there nothing to
+  validate against and the env value is trusted. A populated-but-all-disabled
+  config **fails closed** (400 before any network call), not routes by env.
+  Resolution outcomes are logged to stderr only (never stdout, which carries
+  CLI JSON); the happy path stays quiet unless `COCO_ORG_LOG=1`.
 
 ### Added
 
 - Deliver the message's `org_id` into task-CLI calls so a multi-org agent runs
   each `tm` / `kb` / `as` / `conn` invocation against the org the message
-  belongs to. The inbound message header now exposes the org UUID alongside the
-  name — `(org: <name> · org_id: <uuid>)` — and `SKILL.md` documents the hard
-  rule to read that `org_id` and prefix `COCO_ORG_ID=<uuid>` on each such call,
-  bound to the current message only (never stored in a shared/global slot).
-  Single-org deployments need no prefix and are unaffected; the header still
-  renders the existing single-value form when only the name or only the id is
-  known.
+  belongs to. The inbound message header now carries the org_id as a dedicated,
+  unforgeable structural element — `<org-context org-id="<uuid>"/>` on its own
+  line — separate from the human-readable `(org: <name>)` display text, so an
+  untrusted/adversarial org name cannot forge a competing routing id. `SKILL.md`
+  documents the hard rule to read the authoritative `org_id` from the
+  `<org-context>` `org-id` attribute (not the display text) and prefix
+  `COCO_ORG_ID=<uuid>` on each such call, bound to the current message only
+  (never stored in a shared/global slot). Single-org deployments need no prefix
+  and are unaffected.
 
 ### Unchanged (deliberate)
 
