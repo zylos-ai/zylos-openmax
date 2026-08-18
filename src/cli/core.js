@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * Core CLI — read-mostly directory queries against cws-core
- * (paths and params per the live OpenAPI at
- *  https://zylos01.jinglever.com/cws-core/openapi.json).
+ * Core CLI — read-mostly directory queries against the core service
+ * (paths and params per the core service's live OpenAPI spec).
  *
  * Usage:
  *   node src/cli/core.js <command> '<json-params>'
@@ -11,8 +10,8 @@
  *   node src/cli/core.js core.member_list   '{"kind":"agent","limit":50}'
  *
  * Status:
- *   ✅  available in cws-core today
- *   ⏳  not exposed by cws-core yet (call will 404); kept here so the
+ *   ✅  available in the core service today
+ *   ⏳  not exposed by the core service yet (call will 404); kept here so the
  *      surface is ready when core adds the endpoint
  */
 
@@ -61,15 +60,15 @@ const toArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
  * Rename the agent itself (self-service display name change).
  *
  * Two sides are kept in sync:
- *   1. cws-core — `PATCH /api/v1/me {display_name}`. display_name is an
- *      identity-level attribute (managed by cws-core Identities, per D15),
+ *   1. the core service — `PATCH /api/v1/me {display_name}`. display_name is an
+ *      identity-level attribute (managed by the core service's Identities, per D15),
  *      so a single /me PATCH updates how the agent appears in EVERY org it
  *      has joined. We deliberately do NOT use the admin-only
  *      `PATCH /api/v1/members/{id}` here — the agent runs as an org-member,
  *      not an org-admin, so that route would 403.
  *   2. local config — mirror the new name into `orgs.<slug>.self.name` for
  *      every enabled org so the runtime's notion of its own name stays
- *      consistent with cws-core.
+ *      consistent with the core service.
  *
  * Prints only the new name + which orgs were synced. No tokens/secrets are
  * ever emitted (the RPC logger logs body+url only, never auth headers).
@@ -105,7 +104,7 @@ async function selfRename(newName) {
 /**
  * Thin CLI wrapper over resolveAgentBaseUrl() (src/lib/agent-domain.js).
  * Resolves the agent's OWN public base URL for webhook-channel URL building:
- *   1. cws-core bound domain → base_url = "https://" + full_domain
+ *   1. core service bound domain → base_url = "https://" + full_domain
  *   2. AGENT_PUBLIC_BASE_URL env fallback — ONLY when core answers 404
  *      (agent has no bound domain)
  *
@@ -132,7 +131,7 @@ const COMMANDS = {
 
   // ✅ Self public base URL — resolve THIS agent's publicly-reachable base URL
   // for webhook-channel URL construction (WhatsApp Business / LINE / Teams).
-  // Two-tier: (1) cws-core GET /platform-agents/{identity_id}/domain →
+  // Two-tier: (1) core service GET /platform-agents/{identity_id}/domain →
   // {ok,source:"core",full_domain,label,root_suffix,base_url}; (2) ONLY on a
   // core 404 fall back to AGENT_PUBLIC_BASE_URL → {ok,source:"env",base_url};
   // neither → {ok:false,error} + exit 1. Non-404 errors and malformed 200s
@@ -140,7 +139,7 @@ const COMMANDS = {
   // falling back to env. See src/lib/agent-domain.js.
   'core.agent_domain': () => agentDomainCommand(),
 
-  // ✅ Rename self (display name). Updates cws-core identity via PATCH /me
+  // ✅ Rename self (display name). Updates the core service identity via PATCH /me
   // (works for org-member agents — no admin needed) AND mirrors the new
   // name into local config's per-org `self.name`. See selfRename() above.
   'core.self_rename': () => selfRename(params.name || params.displayName || params.display_name),
@@ -248,10 +247,10 @@ const COMMANDS = {
   // ✅ Invitations
   // POST /api/v1/invitations — body {email?, display_name, role_id, message?}
   //   org_id is resolved server-side from the caller's JWT — do NOT send it.
-  //   `display_name` (the invitee's org-level member name) is REQUIRED since
-  //   backend #86 / MR !138 moved naming to create-time: the name is stored
-  //   on the invitation and becomes members.display_name on accept. Server
-  //   rejects a blank display_name with 400. Accept either camel or snake.
+  //   `display_name` (the invitee's org-level member name) is REQUIRED: naming
+  //   happens at create-time — the name is stored on the invitation and becomes
+  //   members.display_name on accept. Server rejects a blank display_name with
+  //   400. Accept either camel or snake.
   'core.invitation_create': () => opost(apiPath('/invitations'), {
     email:        params.email,
     display_name: params.displayName ?? params.display_name,
@@ -268,9 +267,9 @@ const COMMANDS = {
     order_by:  params.orderBy,
   }),
   // POST /api/v1/invitations/{invitation_id}/accept
-  // Body is just `{token}` since cws-core #86 / MR !138: the invitee display
-  // name now comes from the invitation (set at create time), so accept no
-  // longer takes display_name — sending it would be schema-invalid.
+  // Body is just `{token}`: the invitee display name now comes from the
+  // invitation (set at create time), so accept no longer takes display_name —
+  // sending it would be schema-invalid.
   'core.invitation_accept': () => post(apiPath(`/invitations/${params.invitationId}/accept`), {
     token: params.token,
   }),
