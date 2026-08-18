@@ -216,7 +216,7 @@ node src/cli/conn.js conn.invoke '{"connectionId":"c-8f2a4e91","action":"gmail/m
 ```
 
 This is exactly the retry after a `needs_selection` prompt: the user picked by
-`display_name`, you map that back to the candidate's `connection_id`, and
+`label`, you map that choice back to the candidate's `connection_id` yourself, and
 re-invoke by `connectionId`. `app` is not required when `connectionId` is given.
 
 ## WS Event Flow

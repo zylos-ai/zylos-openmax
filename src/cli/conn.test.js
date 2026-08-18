@@ -27,9 +27,12 @@ test('buildNeedsSelection 结构：candidates(connection_id/label/display_name/s
   assert.equal(res.needs_selection, true);
   assert.equal(res.reason, 'multiple_connections');
   assert.equal(res.app, 'gmail');
+  // Deterministic order: neither has createdAt, so the id tiebreak applies —
+  // 'c-1b7d' < 'c-8f2a' lexicographically, so it comes first regardless of the
+  // input order (see the P2 order-invariance test below).
   assert.deepEqual(res.candidates, [
-    { connection_id: 'c-8f2a', label: '工作邮箱', display_name: '工作邮箱', status: 'active' },
     { connection_id: 'c-1b7d', label: '个人邮箱', display_name: '个人邮箱', status: 'active' },
+    { connection_id: 'c-8f2a', label: '工作邮箱', display_name: '工作邮箱', status: 'active' },
   ]);
   // retry_hint carries BOTH the connectionId placeholder and the same action.
   assert.match(res.retry_hint, /connectionId/);
@@ -116,6 +119,63 @@ test('buildNeedsSelection through-labeling: 两个 null display_name → 每个 
   assert.notEqual(a.label, b.label);
   assert.notEqual(a.label, a.connection_id);
   assert.notEqual(b.label, b.connection_id);
+});
+
+// --- P2 negative control: candidate label + position are order-invariant -----
+//
+// The reviewer's repro: the SAME set of same-app connections, fed in a different
+// (server-incidental) order, must produce the SAME label for each connection id
+// AND land each id at the SAME candidate position. Otherwise the "(1)/(2)"
+// ordinal fallback and the candidates[] order tracked the input order, so the
+// label the user just picked could map to a DIFFERENT account on retry.
+//
+// This test FAILS against the pre-fix index-based ordering (buildNeedsSelection
+// used `candidates` as-is): reversing the input reverses positions and swaps the
+// ordinals. It passes once candidates are sorted deterministically (created_at
+// asc, id tiebreak) at the single assembly point.
+test('buildNeedsSelection P2 负例：候选 label 与位置对输入顺序不变（乱序/反序结果一致）', () => {
+  // Hard case: two nameless connections with MISSING createdAt (pure ordinal
+  // path), two nameless with the SAME-SECOND createdAt (also ordinal path), plus
+  // a named + a distinct-time one (the mix).
+  const conns = [
+    { id: 'c-eee', name: 'Gmail', displayName: '工作邮箱', createdAt: '2026-02-01T08:30:00Z', status: 'active' },
+    { id: 'c-ccc', name: 'Gmail', displayName: null,       createdAt: '2026-01-05T10:00:00Z', status: 'active' },
+    { id: 'c-ddd', name: 'Gmail', displayName: '',         createdAt: '2026-01-05T10:00:00Z', status: 'active' }, // same second
+    { id: 'c-aaa', name: 'Gmail', displayName: null,       status: 'active' },                                    // missing createdAt
+    { id: 'c-bbb', name: 'Gmail', displayName: '',         status: 'active' },                                    // missing createdAt
+  ];
+
+  const mapsFor = (list) => {
+    const res = buildNeedsSelection('gmail', 'gmail/send', list);
+    const idToLabel = new Map();
+    const idToPos = new Map();
+    res.candidates.forEach((c, i) => {
+      idToLabel.set(c.connection_id, c.label);
+      idToPos.set(c.connection_id, i);
+    });
+    return { res, idToLabel, idToPos };
+  };
+
+  const forward = mapsFor(conns);
+  const reversed = mapsFor(conns.slice().reverse());
+  const shuffled = mapsFor([conns[3], conns[0], conns[4], conns[2], conns[1]]);
+
+  // Sanity: the ordinal fallback is actually exercised (labels aren't all unique
+  // display_names), and every label is non-empty and never the raw id.
+  forward.res.candidates.forEach((c) => {
+    assert.ok(c.label && c.label.trim().length > 0);
+    assert.notEqual(c.label, c.connection_id);
+  });
+  assert.ok(forward.res.candidates.some((c) => /\(\d+\)$/.test(c.label))); // ordinal path hit
+
+  for (const id of conns.map((c) => c.id)) {
+    // (a) same id → same label regardless of input order
+    assert.equal(reversed.idToLabel.get(id), forward.idToLabel.get(id), `label for ${id} must be order-invariant`);
+    assert.equal(shuffled.idToLabel.get(id), forward.idToLabel.get(id), `label for ${id} must be order-invariant`);
+    // (b) same id → same candidate position regardless of input order
+    assert.equal(reversed.idToPos.get(id), forward.idToPos.get(id), `position for ${id} must be order-invariant`);
+    assert.equal(shuffled.idToPos.get(id), forward.idToPos.get(id), `position for ${id} must be order-invariant`);
+  }
 });
 
 // --- resolveInvokeEntry: three-branch (0 / 1 / >1) --------------------------

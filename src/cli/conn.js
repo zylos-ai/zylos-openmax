@@ -115,6 +115,31 @@ function fmtCreated(ts, { time = false } = {}) {
   return time ? `${iso.slice(0, 10)} ${iso.slice(11, 19)}` : iso.slice(0, 10);
 }
 
+// Establish a DETERMINISTIC candidate order that is invariant to the server's
+// incidental return order. Sort key: created_at ASCENDING, tie-broken by the
+// connection id (lexicographic). The id is used ONLY as a tiebreak here and must
+// never leak into a label. Applied at the single point candidates are assembled
+// (buildNeedsSelection) so that labels[i] and candidates[i] always derive from
+// the SAME ordered list — otherwise (the P2 bug) two nameless connections in
+// reversed input order swapped "Gmail (1)"/"Gmail (2)", so the label the user
+// just picked could point to a DIFFERENT account on retry. Missing/unparseable
+// createdAt sorts last (deterministically) and still tiebreaks by id.
+function sortCandidatesDeterministically(entries) {
+  const timeOf = (e) => {
+    if (e.createdAt == null || e.createdAt === '') return Infinity;
+    const t = new Date(e.createdAt).getTime();
+    return Number.isNaN(t) ? Infinity : t;
+  };
+  return (entries || []).slice().sort((a, b) => {
+    const ta = timeOf(a);
+    const tb = timeOf(b);
+    if (ta !== tb) return ta - tb;
+    const ia = String(a.id ?? '');
+    const ib = String(b.id ?? '');
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  });
+}
+
 // Build a guaranteed-NON-EMPTY and guaranteed-UNIQUE human LABEL per candidate,
 // so the agent can refer to same-app connections unambiguously WITHOUT ever
 // exposing the raw connection_id (design §3/§5 empty-name fallback). Precedence:
@@ -173,7 +198,11 @@ export function buildCandidateLabels(entries) {
 // by label; the raw connection_id is never shown to the user, only echoed back
 // on retry via `connectionId`. `display_name` still passes through as-is.
 export function buildNeedsSelection(app, action, candidates) {
-  const list = candidates || [];
+  // Sort into a deterministic order BEFORE computing labels AND before building
+  // candidates[], so both the label ordinal fallback and the candidate position
+  // are invariant to the input (server return) order. This is the single
+  // assembly point, so labels[i] and candidates[i] cannot diverge.
+  const list = sortCandidatesDeterministically(candidates);
   const labels = buildCandidateLabels(list);
   return {
     needs_selection: true,

@@ -11,14 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Multi-connection disambiguation by `display_name`. When an owner has authorized
+- Multi-connection disambiguation by `label`. When an owner has authorized
   more than one connection of the same app to a single agent (e.g. two Gmail
   accounts), `conn.invoke` no longer silently uses the first match: when >1 active
   connection matches the app it returns a `needs_selection` result — a normal
   value printed to stdout with exit 0, **not** a thrown error — carrying
-  `candidates[]` (each with `connection_id`, `display_name`, `status`) and a
-  language-neutral `agent_instruction` telling the agent to ask the user which
-  connection to use by its `display_name` and retry. A new optional
+  `candidates[]` (each with `connection_id`, `label`, `display_name` (nullable),
+  `status`) and a language-neutral `agent_instruction`. Each candidate carries a
+  guaranteed-non-empty, unique `label` (the connection's `display_name` when set,
+  else a fallback built from the app name + creation time) — legacy connections
+  have `display_name: null` (explicitly supported, not backfilled), so only the
+  `label` reliably distinguishes them. The agent asks the user to pick **by
+  `label`** (never the `connection_id`, which is internal), maps the choice back
+  to its `connection_id` itself, and retries. Candidates are returned in a
+  **deterministic order** (created_at ascending, id tiebreak) so a given label and
+  candidate position are invariant to the server's return order. A new optional
   `connectionId` (alias `connection_id`) param targets a specific connection
   directly, skipping app-resolution — the one-command retry after the user picks.
   The 0-active and exactly-1-active paths are unchanged (404 / direct use).
