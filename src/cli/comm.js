@@ -67,14 +67,43 @@ function resolveOrgConfig(p) {
     const names = enabled.map((o) => o.org_name || o.slug).join(', ');
     throw new Error(`org not found in config: "${key}" (known: ${names || 'none'})`);
   }
-  // No explicit {org}. Honor the env-selected operating org first — parity
-  // with the bare backend client / config.resolveDefaultOrgId(), so
-  // single-org and COCO_ORG_ID-only deployments keep resolving the one org
-  // exactly as before this PR (see reviewer regression #13). Prefer the
-  // matching config block so slug/name/self stay populated for config-backed
-  // ops; otherwise carry a minimal { org_id } block for JWT routing.
+  // No explicit {org}. Honor the env-selected operating org next, kept
+  // consistent with config.resolveDefaultOrgId(): a COCO_ORG_ID that is not in
+  // a NON-EMPTY enabled config set is a BAD VALUE (owner 2026-08-18); an
+  // env-only deployment with no config.orgs still routes by env (nothing to
+  // validate against). Match on the enabled set (not getOrgByOrgId, which
+  // ignores the `enabled` flag) so slug/name/self stay populated for
+  // config-backed ops.
   const envOrgId = process.env.COCO_ORG_ID;
-  if (envOrgId) return getOrgByOrgId(envOrgId) || { org_id: envOrgId };
+  if (envOrgId) {
+    const byEnv = enabled.find((o) => o.org_id === envOrgId);
+    if (byEnv) return byEnv;
+    // Env-only deployment (no config.orgs to validate against): nothing to
+    // call the env value "bad" relative to, so carry a minimal { org_id }
+    // routing block — the pre-existing supported env-only path (Bug B).
+    if (enabled.length === 0) return { org_id: envOrgId };
+    // Bad value RELATIVE TO a populated config set. Single enabled org → fall
+    // back to it (WARN, stderr only — this CLI emits JSON on stdout). Multiple
+    // enabled → fail fast like the no-{org} multi-org branch, noting
+    // COCO_ORG_ID is not an enabled org.
+    if (enabled.length === 1) {
+      console.error(
+        `[comm] COCO_ORG_ID=${envOrgId} is not an enabled org; `
+        + `falling back to sole enabled org ${enabled[0].org_id}`,
+      );
+      return enabled[0];
+    }
+    if (enabled.length > 1) {
+      const names = enabled.map((o) => o.org_name || o.slug).join(', ');
+      throw Object.assign(
+        new Error(
+          `COCO_ORG_ID=${envOrgId} is not an enabled org and multiple orgs are `
+          + `enabled — pass {"org":"<name>"} (one of: ${names})`,
+        ),
+        { status: 400 },
+      );
+    }
+  }
   if (enabled.length === 1) return enabled[0];
   // Nothing (arg, env, or a lone enabled org) determines the operating org.
   // Fail fast (400) instead of dropping to a bare, identity-only call.
