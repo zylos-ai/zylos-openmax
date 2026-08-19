@@ -197,8 +197,15 @@ One action-def row = one HTTP action published for agents to execute.
   params. `{"type":"object","properties":{},"additionalProperties":false}` means the
   action takes no request body.
 - **`headers`** — static or templated headers. **The `Authorization` header is
-  forbidden**: the connection token is injected server-side and any caller-supplied
-  `Authorization` is stripped. Do not put credentials in `headers`.
+  forbidden.** Provider auth comes from the *connection* (the credential is injected
+  from the connection at call time), **not** from action headers — a stored
+  `Authorization` would override the per-connection auth, so it must never be
+  authored. The CLI **rejects it locally, case-insensitively** (`Authorization` /
+  `authorization` / `AUTHORIZATION`): `conn.actiondef_create` / `conn.actiondef_update`
+  fail with `{status:400, error:"headers.Authorization is forbidden — the connection
+  credential is injected server-side"}`, and `conn.app_import` records the offending
+  action as a per-action failure (that row is never created). Do not put credentials
+  in `headers`.
 
 ### conn.cached
 List locally cached credentials (from WS event auto-acquire).

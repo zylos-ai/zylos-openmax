@@ -490,6 +490,24 @@ test('planActionDefCreate: POST .../action-defs，body allowlist（含 headers/e
   assert.equal(plan.body.bogus, undefined);
 });
 
+test('planActionDefCreate: headers.Authorization 禁止（大小写不敏感）→ 400', () => {
+  for (const key of ['Authorization', 'authorization', 'AUTHORIZATION', 'AuThOrIzAtIoN']) {
+    assert.throws(
+      () => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', method: 'GET', url_template: 'u', headers: { [key]: 'Bearer x' } }),
+      (e) => e.status === 400 && /headers\.Authorization is forbidden/.test(e.message),
+      `expected rejection for header key ${key}`,
+    );
+  }
+  // A benign header alongside is irrelevant — the Authorization key still trips.
+  assert.throws(
+    () => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', method: 'GET', url_template: 'u', headers: { 'X-Trace': '1', authorization: 'Bearer x' } }),
+    (e) => e.status === 400 && /Authorization is forbidden/.test(e.message),
+  );
+  // Non-Authorization headers pass through untouched.
+  const plan = planActionDefCreate({ applicationId: APP_UUID, name: 't/a', method: 'GET', url_template: 'u', headers: { 'X-Trace': '1' } });
+  assert.deepEqual(plan.body.headers, { 'X-Trace': '1' });
+});
+
 // --- planActionDefUpdate ----------------------------------------------------
 
 test('planActionDefUpdate: 缺/非 UUID actionId → 400；无字段 → 400', () => {
@@ -504,6 +522,19 @@ test('planActionDefUpdate: PATCH .../action-defs/{action_id}', () => {
   assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}/action-defs/${ACTION_UUID}$`));
   assert.equal(plan.body.method, 'POST');
   assert.equal(plan.body.encoding, '');
+});
+
+test('planActionDefUpdate: headers.Authorization 禁止（大小写不敏感）→ 400', () => {
+  for (const key of ['Authorization', 'authorization', 'AUTHORIZATION']) {
+    assert.throws(
+      () => planActionDefUpdate({ applicationId: APP_UUID, actionId: ACTION_UUID, headers: { [key]: 'Bearer x' } }),
+      (e) => e.status === 400 && /headers\.Authorization is forbidden/.test(e.message),
+      `expected rejection for header key ${key}`,
+    );
+  }
+  // headers alone (non-Authorization) is a valid updatable field.
+  const plan = planActionDefUpdate({ applicationId: APP_UUID, actionId: ACTION_UUID, headers: { 'X-Trace': '1' } });
+  assert.deepEqual(plan.body.headers, { 'X-Trace': '1' });
 });
 
 // --- planActionDefDelete ----------------------------------------------------
@@ -599,6 +630,35 @@ test('runAppImport: 某个 action-def 失败 → 部分成功报告（不中断�
   assert.equal(out.results[1].status, 400); // local validation failure (url_template)
   assert.equal(out.results[2].ok, false);
   assert.equal(out.results[2].status, 500); // server failure surfaced
+});
+
+test('runAppImport: action-def 带 Authorization 头 → 本地拒绝为该 action 的失败（不创建该行）', async () => {
+  const actionBodies = [];
+  const out = await runAppImport(
+    {
+      application: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' },
+      actions: [
+        { name: 'ok/one', method: 'GET', url_template: '{base_url}/a' },
+        { name: 'bad/auth', method: 'GET', url_template: '{base_url}/b', headers: { Authorization: 'Bearer leaked' } },
+        { name: 'bad/auth-lower', method: 'GET', url_template: '{base_url}/c', headers: { authorization: 'Bearer leaked' } },
+      ],
+    },
+    {
+      createApp: async () => ({ id: APP_UUID }),
+      createActionDef: async (_appId, body) => { actionBodies.push(body); return { id: 'a-ok' }; },
+    },
+  );
+  assert.equal(out.actions_total, 3);
+  assert.equal(out.actions_created, 1);
+  assert.equal(out.actions_failed, 2);
+  assert.equal(out.results[1].ok, false);
+  assert.equal(out.results[1].status, 400);
+  assert.match(out.results[1].error, /Authorization is forbidden/);
+  assert.equal(out.results[2].ok, false);
+  assert.equal(out.results[2].status, 400);
+  // The offending rows were never sent to createActionDef — only the clean one.
+  assert.equal(actionBodies.length, 1);
+  assert.equal(actionBodies[0].name, 'ok/one');
 });
 
 test('runAppImport: app 创建未返回 id → 502', async () => {

@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   strict field allowlist rather than by spreading caller params, so those fields
   (and any unknown key) cannot leak through even when supplied. (`org_id` is still
   honored only as an operating-org selector, never written to a body.)
+- Action-def `headers` reject a caller-supplied `Authorization` key locally,
+  **case-insensitively** (`Authorization` / `authorization` / `AUTHORIZATION`), in
+  the pure planner shared by `conn.actiondef_create`, `conn.actiondef_update`, and
+  the `conn.app_import` action loop — throwing
+  `{status:400, error:"headers.Authorization is forbidden — the connection credential
+  is injected server-side"}` (in `app_import` the offending action is recorded as a
+  per-action failure and never created). Provider auth comes from the connection,
+  not from action headers; a stored `Authorization` on a DB-backed custom action-def
+  is applied after credential injection on the execution path and would override the
+  per-connection auth, so the CLI must not author such a row.
 - `references/conn-operations.md`: a "Custom connector management" section
   documenting the new verbs and the action-def schema semantics (method set;
   `url_template` `{placeholder}` slots; `encoding` `""`=JSON / `form` / `none`;

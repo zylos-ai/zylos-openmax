@@ -131,6 +131,23 @@ function pick(src, allowed) {
   return out;
 }
 
+// An action-def's stored `headers` are applied by cws-connect on the DB-backed
+// custom-action execution path AFTER the per-connection credential is injected,
+// and (unlike discovery) that path does NOT strip them — so a stored
+// `Authorization` header would override the connection's own auth. Reject any
+// caller-supplied Authorization key locally (case-insensitive) so the CLI never
+// authors a row that violates the "provider auth comes from the connection, not
+// from action headers" contract. Lives in the pure planner so every path
+// (create / update / app_import) is covered and can't bypass it.
+function assertNoAuthorizationHeader(headers) {
+  if (!headers || typeof headers !== 'object') return;
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === 'authorization') {
+      throw bad('headers.Authorization is forbidden — the connection credential is injected server-side');
+    }
+  }
+}
+
 function requireAppId(p) {
   const applicationId = p.applicationId || p.application_id;
   if (!applicationId) throw bad('applicationId is required');
@@ -179,6 +196,7 @@ export function planActionDefCreate(p) {
   if (!p.name) throw bad('name is required (format: toolkit-slug/action-name)');
   if (!p.method) throw bad('method is required (GET|POST|PUT|PATCH|DELETE)');
   if (!p.url_template) throw bad('url_template is required');
+  assertNoAuthorizationHeader(p.headers);
   return {
     method: 'POST',
     path: apiPath(`/connect/applications/${applicationId}/action-defs`),
@@ -190,6 +208,7 @@ export function planActionDefCreate(p) {
 export function planActionDefUpdate(p) {
   const applicationId = requireAppId(p);
   const actionId = requireActionId(p);
+  assertNoAuthorizationHeader(p.headers);
   const body = pick(p, ACTIONDEF_UPDATE_FIELDS);
   if (Object.keys(body).length === 0) throw bad('no updatable fields provided');
   return {
