@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.15.0] — 2026-08-19
+## [2.15.0-beta.1] — 2026-08-19
+
+*Beta / experimental release. The custom-connector CLI verbs (`conn.app_*` /
+`conn.actiondef_*` / `conn.app_import`) ship as a beta preview — the command
+surface and parameters may change before the stable 2.15.0.*
 
 ### Added
 
