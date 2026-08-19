@@ -69,6 +69,137 @@ node src/cli/conn.js conn.app_actions '{"applicationId":"cb4e4f15-..."}'
 
 Returns an array of `{ toolkit, action, method, description, params[], input_schema }` (same shape as `conn.actions`). Resolved strictly by `applicationId` — the BFF route keys on the path id and does not accept a slug override, so the requested resource identity always matches the returned catalog.
 
+## Custom connector management (applications + action-defs)
+
+The verbs above **use** connections an owner already authorized to you. The verbs
+in this section **onboard and manage the connector applications themselves** — you
+create a custom connector application, then define the HTTP **action definitions**
+(the DB-backed action catalog) it exposes. These are org-scoped and ownership-gated
+server-side: you can only update/delete an application (and its action-defs) that
+belongs to your own org.
+
+Two invariants hold for every verb here (they mirror the rest of `conn.*`):
+
+- **You never supply `org_id`.** cws-core derives the owning org from your
+  authenticated principal. (`{org}` still selects *which* enabled org's token to
+  use on a multi-org agent — it is not written into any request body.)
+- **You never supply `oauth_callback_url`.** cws-core injects the provider-facing
+  redirect URI on create/update and returns it read-only on the item — register
+  that value at your OAuth provider.
+
+### conn.app_create
+Create a custom connector application.
+
+```bash
+node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key","visibility":"org","category":"crm"}'
+```
+
+Required: `slug`, `display_name`, `provider_type` (`oauth2` | `api_key`). Optional:
+`description`, `credential_source` (`managed` | `custom`), `credential_mode`
+(`proxy` | `direct`), `visibility` (`public` | `org`), `icon_url`, `category`,
+`tags[]`, `default_ttl_seconds`, and the auth-shape fields —
+API-key: `api_key_location` (`header` | `query`), `api_key_header_name`;
+OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
+`oauth_client_secret`, `oauth_scopes_default[]`, `oauth_pkce` (bool),
+`oauth_token_auth_method` (`basic` | `post`), `oauth_token_body_format`
+(`form` | `json`). Returns the created `application` item (its `source` is a
+read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
+
+### conn.app_update
+Update your own custom connector application (ownership-gated).
+
+```bash
+node src/cli/conn.js conn.app_update '{"applicationId":"cb4e4f15-...","display_name":"Acme CRM","category":"sales","is_enabled":false}'
+```
+
+`applicationId` (UUID) required plus at least one updatable field. `slug` and
+`provider_type` are **immutable** and not accepted; the same custom fields as
+create are updatable, plus `is_enabled`.
+
+### conn.app_delete
+Soft-delete your own custom connector application (ownership-gated).
+
+```bash
+node src/cli/conn.js conn.app_delete '{"applicationId":"cb4e4f15-..."}'
+```
+
+### conn.actiondef_list
+List an application's HTTP **action definitions** (the DB-backed action catalog you
+publish for agents). Distinct from `conn.app_actions` / `conn.actions`, which return
+the *resolved capability catalog* agents execute.
+
+```bash
+node src/cli/conn.js conn.actiondef_list '{"applicationId":"cb4e4f15-..."}'
+```
+
+Returns an array of `{ id, application_id, name, method, url_template, headers?,
+encoding, input_schema, created_at?, updated_at? }`.
+
+### conn.actiondef_create
+Create one HTTP action definition on an application (ownership-gated).
+
+```bash
+node src/cli/conn.js conn.actiondef_create '{"applicationId":"cb4e4f15-...","name":"repos/list","method":"GET","url_template":"{base_url}/user/repos","encoding":"","input_schema":"{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"}'
+```
+
+Required: `applicationId` (UUID), `name`, `method`, `url_template`. Optional:
+`headers` (map), `encoding`, `input_schema`. See **Action-def schema semantics**
+below for the field rules.
+
+### conn.actiondef_update
+Partial-update one action definition (ownership-gated; parent-scoped by
+`applicationId`).
+
+```bash
+node src/cli/conn.js conn.actiondef_update '{"applicationId":"cb4e4f15-...","actionId":"7d2a...","method":"POST","url_template":"{base_url}/user/repos"}'
+```
+
+`applicationId` + `actionId` (both UUID) required, plus at least one of `method`,
+`url_template`, `encoding`, `input_schema`, `headers`. Note the server rule for
+`headers`: a **non-empty** map replaces the stored headers; an empty map leaves
+them unchanged.
+
+### conn.actiondef_delete
+Delete one action definition (ownership-gated).
+
+```bash
+node src/cli/conn.js conn.actiondef_delete '{"applicationId":"cb4e4f15-...","actionId":"7d2a..."}'
+```
+
+### conn.app_import
+Bulk-onboard a custom connector from an import JSON: create the application, then
+loop-create each action-def, reporting **per-action** success/failure so a partial
+import is visible (mirrors the cws-fe "actions JSON import" flow).
+
+```bash
+node src/cli/conn.js conn.app_import '{"application":{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key"},"actions":[{"name":"repos/list","method":"GET","url_template":"{base_url}/user/repos"},{"name":"repos/get","method":"GET","url_template":"{base_url}/repos/{id}"}]}'
+```
+
+`application` (same fields as `conn.app_create`) is validated **before** any network
+call; an invalid app body fails fast without creating anything. Returns
+`{ application, applicationId, actions_total, actions_created, actions_failed,
+results[] }` where each `results[i]` is `{ index, name, ok, id? , error?, status? }`.
+Action-def failures do **not** abort the remaining actions — the app and its
+succeeding action-defs stand, and you fix/retry the failed ones with
+`conn.actiondef_create`.
+
+### Action-def schema semantics
+
+One action-def row = one HTTP action published for agents to execute.
+
+- **`name`** — `"toolkit-slug/action-name"` (e.g. `"repos/list"`); the same naming
+  agents pass to `conn.invoke`.
+- **`method`** — one of `GET` | `POST` | `PUT` | `PATCH` | `DELETE`.
+- **`url_template`** — absolute, or `{base_url}`-prefixed. `{placeholder}` slots are
+  filled from params (path/query); an **unfilled query placeholder is dropped**.
+- **`encoding`** — `""` (empty) = JSON body · `form` = urlencoded · `none` = no body.
+- **`input_schema`** — a JSON Schema **draft-07** string describing the action's
+  params. `{"type":"object","properties":{},"additionalProperties":false}` means the
+  action takes no request body.
+- **`headers`** — static or templated headers. **The `Authorization` header is
+  forbidden**: the connection token is injected server-side and any caller-supplied
+  `Authorization` is stripped. Do not put credentials in `headers`.
+
 ### conn.cached
 List locally cached credentials (from WS event auto-acquire).
 
@@ -266,8 +397,17 @@ Notes:
 | GET | `/connect/connections/{id}/actions` | conn.actions |
 | POST | `/connect/connections/{id}/actions/execute` | conn.invoke (proxy mode) |
 | GET | `/connect/applications/{id}/actions` | conn.app_actions / conn.catalog |
+| POST | `/connect/applications` | conn.app_create / conn.app_import |
+| PATCH | `/connect/applications/{id}` | conn.app_update |
+| DELETE | `/connect/applications/{id}` | conn.app_delete |
+| GET | `/connect/applications/{id}/action-defs` | conn.actiondef_list |
+| POST | `/connect/applications/{id}/action-defs` | conn.actiondef_create / conn.app_import |
+| PATCH | `/connect/applications/{id}/action-defs/{action_id}` | conn.actiondef_update |
+| DELETE | `/connect/applications/{id}/action-defs/{action_id}` | conn.actiondef_delete |
 
-None of these endpoints accept a client-supplied `agent_member_id` — cws-core
+None of the connection/action *usage* endpoints accept a client-supplied
+`agent_member_id`, and none of the application/action-def *management* endpoints
+accept a client-supplied `org_id` or `oauth_callback_url` — cws-core
 derives the caller's identity from the authenticated principal on every one of
 them (security fix, 2026-08-04). The CLI never had a way to target a
 connection/action that doesn't belong to the calling agent.

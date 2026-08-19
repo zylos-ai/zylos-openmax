@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0] — 2026-08-19
+
+### Added
+
+- Custom-connector management verbs on `conn.js` — onboard and manage custom
+  connector **applications** and their DB-backed HTTP **action definitions**
+  against the cws-core BFF `/connect/applications*` surface (REST contract
+  alpha.90). New verbs: `conn.app_create` (`POST /connect/applications`),
+  `conn.app_update` (`PATCH …/{id}`), `conn.app_delete` (`DELETE …/{id}`),
+  `conn.actiondef_list` (`GET …/{id}/action-defs`), `conn.actiondef_create`
+  (`POST …/action-defs`), `conn.actiondef_update`
+  (`PATCH …/action-defs/{action_id}`), `conn.actiondef_delete`
+  (`DELETE …/action-defs/{action_id}`), plus `conn.app_import` — a bulk verb that
+  creates the application then loop-creates each action-def from an import JSON,
+  returning a per-action success/failure report (`actions_total` /
+  `actions_created` / `actions_failed` / `results[]`) so a partial import is
+  visible and never aborts the remaining actions.
+- Every management verb is org-scoped like the rest of `conn.*`: it resolves the
+  operating org via `requireOrgId()` and routes through the org-scoped
+  `getForOrg`/`postForOrg`/`patchForOrg`/`delForOrg` helpers, failing fast with an
+  actionable HTTP 400 on a multi-org agent with no `{org}` / `COCO_ORG_ID`.
+  Required params are validated locally (400) and `applicationId`/`actionId` must
+  be UUIDs.
+- Security: `org_id` and `oauth_callback_url` are **never** forwarded in a request
+  body — both are server-derived (org from the authenticated principal; callback
+  URL injected by cws-core on create/update). Request bodies are built from a
+  strict field allowlist rather than by spreading caller params, so those fields
+  (and any unknown key) cannot leak through even when supplied. (`org_id` is still
+  honored only as an operating-org selector, never written to a body.)
+- `references/conn-operations.md`: a "Custom connector management" section
+  documenting the new verbs and the action-def schema semantics (method set;
+  `url_template` `{placeholder}` slots; `encoding` `""`=JSON / `form` / `none`;
+  `input_schema` = JSON Schema draft-07; the **`Authorization` header is
+  forbidden** — the connection token is injected server-side). `printUsage()` gains
+  an "Applications (custom connector management)" section.
+
 ## [2.14.7] — 2026-08-18
 
 ### Added

@@ -74,6 +74,18 @@ for (const c of [
   { command: 'conn.catalog', params: { applicationId: 'app-1' } },
   { command: 'conn.invoke', params: { app: 'gmail', action: 'gmail-labels/list' } },
   { command: 'conn.index', params: {} },
+  // Custom-connector management verbs must fail-fast too. Params are valid enough
+  // to pass local validation so the requireOrgId() gate is what trips (UUIDs where
+  // required). The multi-org home enables org-1 + org-2 with no default, so
+  // {org} (also not set here) can't be resolved → 400.
+  { command: 'conn.app_create', params: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' } },
+  { command: 'conn.app_update', params: { applicationId: '11111111-1111-1111-1111-111111111111', display_name: 'X' } },
+  { command: 'conn.app_delete', params: { applicationId: '11111111-1111-1111-1111-111111111111' } },
+  { command: 'conn.actiondef_list', params: { applicationId: '11111111-1111-1111-1111-111111111111' } },
+  { command: 'conn.actiondef_create', params: { applicationId: '11111111-1111-1111-1111-111111111111', name: 't/a', method: 'GET', url_template: '{base_url}/x' } },
+  { command: 'conn.actiondef_update', params: { applicationId: '11111111-1111-1111-1111-111111111111', actionId: '22222222-2222-2222-2222-222222222222', method: 'GET' } },
+  { command: 'conn.actiondef_delete', params: { applicationId: '11111111-1111-1111-1111-111111111111', actionId: '22222222-2222-2222-2222-222222222222' } },
+  { command: 'conn.app_import', params: { application: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' }, actions: [] } },
 ]) {
   test(`org-scoping fail-fast: ${c.command} 多 org 且未给 {org} → 400（不静默走 identity-only）`, async () => {
     const home = setupMultiOrgHome();

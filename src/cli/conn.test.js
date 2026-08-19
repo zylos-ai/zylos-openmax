@@ -7,7 +7,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { buildNeedsSelection, buildCandidateLabels, resolveInvokeEntry } from './conn.js';
+import {
+  buildNeedsSelection, buildCandidateLabels, resolveInvokeEntry,
+  planAppCreate, planAppUpdate, planAppDelete,
+  planActionDefList, planActionDefCreate, planActionDefUpdate, planActionDefDelete,
+  runAppImport,
+} from './conn.js';
 
 // buildNeedsSelection / buildCandidateLabels / resolveInvokeEntry are pure (no
 // network/config), so the three-branch resolution, the connectionId bypass, and
@@ -364,6 +369,294 @@ test('conn.invoke guard (app path): list 返回 error+needs_reauth → 刷新规
     const err = JSON.parse(stderr);
     assert.equal(err.status, 409);
     assert.match(err.error, /re-authorization|重新授权/); // normalized to needs_reauth, guarded
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// ============================================================================
+//  Custom-connector management: pure request planners
+// ============================================================================
+//
+// planApp* / planActionDef* are pure (no network/config — only apiPath + isUuid),
+// so required-param validation, method+path building, and the security invariant
+// (org_id / oauth_callback_url never placed in the body) are unit-testable here.
+
+const APP_UUID = '11111111-1111-1111-1111-111111111111';
+const ACTION_UUID = '22222222-2222-2222-2222-222222222222';
+
+// --- planAppCreate ----------------------------------------------------------
+
+test('planAppCreate: 缺 slug/display_name/provider_type → 400', () => {
+  assert.throws(() => planAppCreate({ display_name: 'X', provider_type: 'api_key' }), (e) => e.status === 400 && /slug/.test(e.message));
+  assert.throws(() => planAppCreate({ slug: 'x', provider_type: 'api_key' }), (e) => e.status === 400 && /display_name/.test(e.message));
+  assert.throws(() => planAppCreate({ slug: 'x', display_name: 'X' }), (e) => e.status === 400 && /provider_type/.test(e.message));
+});
+
+test('planAppCreate: POST /connect/applications，body 走 allowlist 且不含 org_id/oauth_callback_url', () => {
+  const plan = planAppCreate({
+    slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+    api_key_location: 'header', api_key_header_name: 'X-Api-Key',
+    visibility: 'org', credential_source: 'custom', category: 'crm', tags: ['a', 'b'],
+    // Forbidden / server-derived — must NOT appear in the body:
+    org_id: 'evil-org', oauth_callback_url: 'https://evil/cb',
+    // Unknown key — allowlist drops it too:
+    bogus: 'nope',
+  });
+  assert.equal(plan.method, 'POST');
+  assert.match(plan.path, /\/connect\/applications$/);
+  assert.equal(plan.body.slug, 'acme');
+  assert.equal(plan.body.display_name, 'Acme');
+  assert.equal(plan.body.provider_type, 'api_key');
+  assert.equal(plan.body.api_key_header_name, 'X-Api-Key');
+  assert.deepEqual(plan.body.tags, ['a', 'b']);
+  assert.equal(plan.body.org_id, undefined);
+  assert.equal(plan.body.oauth_callback_url, undefined);
+  assert.equal(plan.body.bogus, undefined);
+});
+
+// --- planAppUpdate ----------------------------------------------------------
+
+test('planAppUpdate: 缺 applicationId / 非 UUID → 400', () => {
+  assert.throws(() => planAppUpdate({ display_name: 'X' }), (e) => e.status === 400 && /applicationId is required/.test(e.message));
+  assert.throws(() => planAppUpdate({ applicationId: 'not-a-uuid', display_name: 'X' }), (e) => e.status === 400 && /UUID/.test(e.message));
+});
+
+test('planAppUpdate: 无可更新字段 → 400', () => {
+  assert.throws(() => planAppUpdate({ applicationId: APP_UUID }), (e) => e.status === 400 && /no updatable fields/.test(e.message));
+});
+
+test('planAppUpdate: PATCH，忽略 slug/provider_type/org_id/oauth_callback_url', () => {
+  const plan = planAppUpdate({
+    applicationId: APP_UUID, display_name: 'New', category: 'ops', is_enabled: false,
+    slug: 'changed', provider_type: 'oauth2', org_id: 'evil', oauth_callback_url: 'https://evil/cb',
+  });
+  assert.equal(plan.method, 'PATCH');
+  assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}$`));
+  assert.equal(plan.body.display_name, 'New');
+  assert.equal(plan.body.category, 'ops');
+  assert.equal(plan.body.is_enabled, false);
+  assert.equal(plan.body.slug, undefined);
+  assert.equal(plan.body.provider_type, undefined);
+  assert.equal(plan.body.org_id, undefined);
+  assert.equal(plan.body.oauth_callback_url, undefined);
+});
+
+// --- planAppDelete ----------------------------------------------------------
+
+test('planAppDelete: DELETE /connect/applications/{id}；非 UUID → 400', () => {
+  assert.throws(() => planAppDelete({}), (e) => e.status === 400);
+  assert.throws(() => planAppDelete({ applicationId: 'x' }), (e) => e.status === 400 && /UUID/.test(e.message));
+  const plan = planAppDelete({ applicationId: APP_UUID });
+  assert.equal(plan.method, 'DELETE');
+  assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}$`));
+});
+
+// --- planActionDefList ------------------------------------------------------
+
+test('planActionDefList: GET .../action-defs；缺/非 UUID applicationId → 400', () => {
+  assert.throws(() => planActionDefList({}), (e) => e.status === 400);
+  assert.throws(() => planActionDefList({ applicationId: 'x' }), (e) => e.status === 400 && /UUID/.test(e.message));
+  const plan = planActionDefList({ applicationId: APP_UUID });
+  assert.equal(plan.method, 'GET');
+  assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}/action-defs$`));
+});
+
+// --- planActionDefCreate ----------------------------------------------------
+
+test('planActionDefCreate: 缺 name/method/url_template → 400', () => {
+  assert.throws(() => planActionDefCreate({ applicationId: APP_UUID, method: 'GET', url_template: 'u' }), (e) => e.status === 400 && /name/.test(e.message));
+  assert.throws(() => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', url_template: 'u' }), (e) => e.status === 400 && /method/.test(e.message));
+  assert.throws(() => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', method: 'GET' }), (e) => e.status === 400 && /url_template/.test(e.message));
+});
+
+test('planActionDefCreate: POST .../action-defs，body allowlist（含 headers/encoding/input_schema）', () => {
+  const plan = planActionDefCreate({
+    applicationId: APP_UUID,
+    name: 'repos/list', method: 'GET', url_template: '{base_url}/repos',
+    headers: { 'X-Trace': '1' }, encoding: 'form',
+    input_schema: '{"type":"object","properties":{},"additionalProperties":false}',
+    org_id: 'evil', bogus: 'nope',
+  });
+  assert.equal(plan.method, 'POST');
+  assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}/action-defs$`));
+  assert.equal(plan.body.name, 'repos/list');
+  assert.equal(plan.body.method, 'GET');
+  assert.equal(plan.body.url_template, '{base_url}/repos');
+  assert.deepEqual(plan.body.headers, { 'X-Trace': '1' });
+  assert.equal(plan.body.encoding, 'form');
+  assert.ok(plan.body.input_schema.includes('additionalProperties'));
+  assert.equal(plan.body.org_id, undefined);
+  assert.equal(plan.body.bogus, undefined);
+});
+
+// --- planActionDefUpdate ----------------------------------------------------
+
+test('planActionDefUpdate: 缺/非 UUID actionId → 400；无字段 → 400', () => {
+  assert.throws(() => planActionDefUpdate({ applicationId: APP_UUID, method: 'GET' }), (e) => e.status === 400 && /actionId is required/.test(e.message));
+  assert.throws(() => planActionDefUpdate({ applicationId: APP_UUID, actionId: 'x', method: 'GET' }), (e) => e.status === 400 && /UUID/.test(e.message));
+  assert.throws(() => planActionDefUpdate({ applicationId: APP_UUID, actionId: ACTION_UUID }), (e) => e.status === 400 && /no updatable fields/.test(e.message));
+});
+
+test('planActionDefUpdate: PATCH .../action-defs/{action_id}', () => {
+  const plan = planActionDefUpdate({ applicationId: APP_UUID, actionId: ACTION_UUID, method: 'POST', encoding: '' });
+  assert.equal(plan.method, 'PATCH');
+  assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}/action-defs/${ACTION_UUID}$`));
+  assert.equal(plan.body.method, 'POST');
+  assert.equal(plan.body.encoding, '');
+});
+
+// --- planActionDefDelete ----------------------------------------------------
+
+test('planActionDefDelete: DELETE .../action-defs/{action_id}；两个 id 都需 UUID', () => {
+  assert.throws(() => planActionDefDelete({ applicationId: APP_UUID }), (e) => e.status === 400 && /actionId/.test(e.message));
+  const plan = planActionDefDelete({ applicationId: APP_UUID, actionId: ACTION_UUID });
+  assert.equal(plan.method, 'DELETE');
+  assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}/action-defs/${ACTION_UUID}$`));
+});
+
+// ============================================================================
+//  runAppImport: injectable bulk create (app + loop action-defs)
+// ============================================================================
+
+test('runAppImport: 缺 application 对象 → 400（无网络）', async () => {
+  await assert.rejects(
+    () => runAppImport({ actions: [] }, { createApp: async () => { throw new Error('should not call'); }, createActionDef: async () => {} }),
+    (e) => e.status === 400 && /application object is required/.test(e.message),
+  );
+});
+
+test('runAppImport: app body 无效（缺 slug）→ 400 且不发起任何创建', async () => {
+  let createAppCalls = 0;
+  await assert.rejects(
+    () => runAppImport(
+      { application: { display_name: 'X', provider_type: 'api_key' }, actions: [] },
+      { createApp: async () => { createAppCalls += 1; return { id: APP_UUID }; }, createActionDef: async () => {} },
+    ),
+    (e) => e.status === 400 && /slug/.test(e.message),
+  );
+  assert.equal(createAppCalls, 0);
+});
+
+test('runAppImport: 成功创建 app 再逐个创建 action-def；org_id/oauth_callback_url 不落入任何 body', async () => {
+  const appBodies = [];
+  const actionBodies = [];
+  const out = await runAppImport(
+    {
+      application: {
+        slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+        org_id: 'evil', oauth_callback_url: 'https://evil/cb',
+      },
+      actions: [
+        { name: 'repos/list', method: 'GET', url_template: '{base_url}/repos', org_id: 'evil' },
+        { name: 'repos/get', method: 'GET', url_template: '{base_url}/repos/{id}' },
+      ],
+    },
+    {
+      createApp: async (body) => { appBodies.push(body); return { id: APP_UUID, slug: body.slug }; },
+      createActionDef: async (appId, body) => { actionBodies.push({ appId, body }); return { id: `${ACTION_UUID}-${actionBodies.length}` }; },
+    },
+  );
+  assert.equal(out.applicationId, APP_UUID);
+  assert.equal(out.actions_total, 2);
+  assert.equal(out.actions_created, 2);
+  assert.equal(out.actions_failed, 0);
+  assert.equal(out.results.length, 2);
+  assert.ok(out.results.every((r) => r.ok === true));
+  // app body scrubbed
+  assert.equal(appBodies[0].org_id, undefined);
+  assert.equal(appBodies[0].oauth_callback_url, undefined);
+  assert.equal(appBodies[0].slug, 'acme');
+  // every action-def created under the returned application id, org_id scrubbed
+  assert.ok(actionBodies.every((a) => a.appId === APP_UUID));
+  assert.equal(actionBodies[0].body.org_id, undefined);
+  assert.equal(actionBodies[0].body.name, 'repos/list');
+});
+
+test('runAppImport: 某个 action-def 失败 → 部分成功报告（不中断其余）', async () => {
+  const out = await runAppImport(
+    {
+      application: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' },
+      actions: [
+        { name: 'ok/one', method: 'GET', url_template: '{base_url}/a' },
+        { name: 'bad/two', method: 'GET' }, // missing url_template → local 400, never sent
+        { name: 'ok/three', method: 'GET', url_template: '{base_url}/c' },
+      ],
+    },
+    {
+      createApp: async () => ({ id: APP_UUID }),
+      createActionDef: async (_appId, body) => {
+        if (body.name === 'ok/three') { const e = new Error('boom'); e.status = 500; throw e; }
+        return { id: 'a-ok' };
+      },
+    },
+  );
+  assert.equal(out.actions_total, 3);
+  assert.equal(out.actions_created, 1);
+  assert.equal(out.actions_failed, 2);
+  assert.equal(out.results[0].ok, true);
+  assert.equal(out.results[1].ok, false);
+  assert.equal(out.results[1].status, 400); // local validation failure (url_template)
+  assert.equal(out.results[2].ok, false);
+  assert.equal(out.results[2].status, 500); // server failure surfaced
+});
+
+test('runAppImport: app 创建未返回 id → 502', async () => {
+  await assert.rejects(
+    () => runAppImport(
+      { application: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' }, actions: [] },
+      { createApp: async () => ({}), createActionDef: async () => {} },
+    ),
+    (e) => e.status === 502,
+  );
+});
+
+// ============================================================================
+//  conn.app_create end-to-end (subprocess): server captures method/path/body
+// ============================================================================
+//
+// Strongest proof that org_id / oauth_callback_url never reach the wire body:
+// run the real CLI against a local server and inspect the received request.
+
+test('conn.app_create (subprocess): POST /connect/applications；服务端收到的 body 不含 org_id/oauth_callback_url', async () => {
+  const home = setupHome({ orgId: 'org-1' });
+  const seen = {};
+  const server = createServer((req, res) => {
+    if (req.method === 'POST' && req.url.includes('/connect/applications')) {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        seen.method = req.method;
+        seen.url = req.url;
+        try { seen.body = JSON.parse(body); } catch { seen.body = body; }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ data: { id: APP_UUID, slug: 'acme', source: 'custom' }, request_id: 'r1' }));
+      });
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(home, 'conn.app_create', {
+      slug: 'acme', display_name: 'Acme', provider_type: 'api_key', category: 'crm',
+      // `org` selects the operating org; `org_id`/`oauth_callback_url` are
+      // forbidden body fields the allowlist must drop.
+      org: 'org-1', org_id: 'evil-org', oauth_callback_url: 'https://evil/cb',
+    }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    assert.equal(seen.method, 'POST');
+    assert.match(seen.url, /\/connect\/applications$/);
+    assert.equal(seen.body.slug, 'acme');
+    assert.equal(seen.body.category, 'crm');
+    assert.equal(seen.body.org_id, undefined);
+    assert.equal(seen.body.oauth_callback_url, undefined);
+    assert.equal(seen.body.org, undefined);
+    // The returned application item is echoed as the result.
+    const out = JSON.parse(stdout);
+    assert.equal(out.id, APP_UUID);
   } finally {
     await new Promise((r) => server.close(r));
   }
