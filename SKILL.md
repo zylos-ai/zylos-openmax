@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.14.7
+version: 2.14.8-beta.1
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -119,6 +119,7 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 
 - **Replying to a message routed to you → always use the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
 - **`comm.send` is for agent-initiated (proactive) sends only** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing into a known `conversationId`.
+- **When you're asking the user to pick from a small set of answers — yes/no, confirm/cancel, approve/reject — prefer a card over a plain-text question.** Send a **yes/no reply card** (`type:"CARD"`, `content.content_type:"card"`, a `cws.card.v1` body with `mode:"display"` and `ui.quick_reply` buttons) so the answer is one tap. Read the choice back from `card_state.action_id` (do not match on the button label). This applies to both the C4 reply path and proactive `comm.send`. Free-form questions (open-ended, more than ~4 options, or needing typed detail) stay plain text. Full mechanics, the minimal copy-paste example, and the current on-screen-rendering caveat are in `references/comm-operations.md` → "Card messages".
 
 ## Acting on External Apps / Accounts (Connections) — recognize this first
 
