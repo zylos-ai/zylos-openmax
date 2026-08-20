@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.8-beta.1] — 2026-08-20
+
+### Added
+
+- Card message (`type: "CARD"`) documentation. `comm.send` already supported
+  cards (`content.content_type: "card"` + a `cws.card.v1` body) via
+  `buildSendBody`; the skill docs never described it. `references/comm-operations.md`
+  gains a "Card messages" section covering the two card kinds (`display`
+  yes/no reply cards vs `interactive` business cards), the three distinct
+  `type` levels (message `CARD` / content `card` / block type), a minimal
+  copy-paste yes/no card, the `cws.card.v1` top-level key table, `ui.quick_reply`,
+  reading the answer back from `card_state.action_id`, and the current
+  limitations (cws-fe rendering not yet merged → cards degrade to
+  `fallback_text`; some deployed images may reject the `CARD` enum with 422).
+
+### Changed
+
+- `SKILL.md` "How to Send a Message" gains a behavioral rule: when asking the
+  user to pick from a small set of answers (yes/no, confirm/cancel,
+  approve/reject), prefer a `display`-mode card with `ui.quick_reply` buttons
+  over a plain-text question, and read the choice from `card_state.action_id`
+  (not the button label). Open-ended questions stay plain text.
+
+Docs only — no code or runtime behavior change.
+
 ## [2.14.7] — 2026-08-18
 
 ### Added
