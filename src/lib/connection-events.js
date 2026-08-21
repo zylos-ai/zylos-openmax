@@ -209,6 +209,49 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
 }
 
 /**
+ * Build the proactive `🔌 [Connection authorized]` session-notice text.
+ *
+ * Pure string builder (no I/O) so it is unit-testable; comm-bridge.js wraps it
+ * with the control-queue enqueue. The notice MUST match the direct-only runtime:
+ * only a `direct` connection is invokable, so only a direct connection gets a
+ * "ready to use via conn.invoke" notice.
+ *
+ *   - direct → self-trigger: the token is already cached locally and the agent
+ *     makes the request from its OWN egress (conn.invoke assembles + sends it).
+ *     Tell the agent it is ready to use now.
+ *   - non-direct (legacy proxy, or unknown mode) → NOT invokable. Proxy is
+ *     deprecated/unsupported and conn.invoke will reject it, so we must NOT tell
+ *     the agent it is ready or hint conn.invoke. Instead say it is a legacy
+ *     non-direct connection that must be recreated / re-authorized as a direct
+ *     connection before it can be used.
+ *
+ * @param {object} orgConfig - needs slug
+ * @param {object} info      - { connectionId, provider, actionCount, mode }
+ * @returns {string} the notice body
+ */
+export function buildConnectionAuthorizedNotice(orgConfig, info = {}) {
+  const { connectionId, provider, actionCount, mode } = info;
+  const app = provider || 'a third-party app';
+  const modeNote = mode && mode !== '?' ? `, ${mode} mode` : '';
+  const appHint = provider ? ` {app:"${provider}"}` : '';
+  if (mode === 'direct') {
+    const actionsNote = Number.isInteger(actionCount) && actionCount > 0 ? `, ~${actionCount} actions` : '';
+    const callNote = `the token is ready locally — conn.catalog${appHint} to find actions and conn.invoke {app, action, params} to call; you make the request from your own egress`;
+    return (
+      `🔌 [Connection authorized] A new third-party connection was authorized to you: ${app} (org ${orgConfig.slug}${modeNote}${actionsNote}). `
+      + `You can use it now — no install needed: conn.list to see it, ${callNote}. connection_id=${connectionId || '?'}.`
+    );
+  }
+  // Non-direct: deprecated/unsupported. Do NOT present it as usable and do NOT
+  // hint conn.invoke — it will be rejected by the direct-only runtime.
+  return (
+    `🔌 [Connection authorized] A legacy non-direct connection was authorized to you: ${app} (org ${orgConfig.slug}${modeNote}). `
+    + `Proxy connections are deprecated and are NOT usable — conn.invoke will reject it. `
+    + `To use ${app}, it must be recreated / re-authorized as a direct connection. connection_id=${connectionId || '?'}.`
+  );
+}
+
+/**
  * DM the org owner that a connection needs re-authorization (P0 reauth handling).
  *
  * A real DM (not a session-level control inject like notifyConnectionAuthorized):
