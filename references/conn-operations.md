@@ -130,13 +130,6 @@ node src/cli/conn.js conn.app_update '{"applicationId":"cb4e4f15-...","display_n
 `provider_type` are **immutable** and not accepted; the same custom fields as
 create are updatable, plus `is_enabled`.
 
-### conn.app_delete
-Soft-delete your own custom connector application (ownership-gated).
-
-```bash
-node src/cli/conn.js conn.app_delete '{"applicationId":"cb4e4f15-..."}'
-```
-
 ### conn.actiondef_list
 List an application's HTTP **action definitions** (the DB-backed action catalog you
 publish for agents). Distinct from `conn.app_actions` / `conn.actions`, which return
@@ -411,7 +404,6 @@ agent's **local cleanup is identical** (unindex + delete the cached credential).
 | GET | `/connect/oauth-callback-url` | conn.callback |
 | POST | `/connect/applications` | conn.app_create / conn.app_import |
 | PATCH | `/connect/applications/{id}` | conn.app_update |
-| DELETE | `/connect/applications/{id}` | conn.app_delete |
 | GET | `/connect/applications/{id}/action-defs` | conn.actiondef_list |
 | POST | `/connect/applications/{id}/action-defs` | conn.actiondef_create / conn.app_import |
 | PATCH | `/connect/applications/{id}/action-defs/{action_id}` | conn.actiondef_update |

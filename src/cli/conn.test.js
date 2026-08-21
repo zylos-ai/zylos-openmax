@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   buildNeedsSelection, buildCandidateLabels, resolveInvokeEntry,
-  planAppCreate, planAppUpdate, planAppDelete,
+  planAppCreate, planAppUpdate,
   planActionDefList, planActionDefCreate, planActionDefUpdate, planActionDefDelete,
   runAppImport,
 } from './conn.js';
@@ -612,16 +612,6 @@ test('planAppUpdate: PATCH，忽略 slug/provider_type/org_id/oauth_callback_url
   assert.equal(plan.body.credential_source, undefined);
   assert.equal(plan.body.visibility, undefined);
   assert.equal(plan.body.credential_mode, undefined);
-});
-
-// --- planAppDelete ----------------------------------------------------------
-
-test('planAppDelete: DELETE /connect/applications/{id}；非 UUID → 400', () => {
-  assert.throws(() => planAppDelete({}), (e) => e.status === 400);
-  assert.throws(() => planAppDelete({ applicationId: 'x' }), (e) => e.status === 400 && /UUID/.test(e.message));
-  const plan = planAppDelete({ applicationId: APP_UUID });
-  assert.equal(plan.method, 'DELETE');
-  assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}$`));
 });
 
 // --- planActionDefList ------------------------------------------------------

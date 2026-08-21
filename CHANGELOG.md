@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OAuth app **before** creating a connector. The endpoint is authed (bearer) but
   not org-scoped; the CLI authenticates it with the operating org's token.
 
+### Removed
+
+- Dropped the card-message docs (reverted #131 on this branch): removed the
+  `SKILL.md` "prefer a card for a yes/no choice" behavioral bullet and the
+  `references/comm-operations.md` "Card messages" section.
+- Removed the `conn.app_delete` CLI verb (handler, `planAppDelete` helper, usage
+  line, tests) and its `references/conn-operations.md` documentation.
+
 ## [2.15.0-beta.1] — 2026-08-19
 
 *Beta / experimental release. The custom-connector CLI verbs (`conn.app_*` /

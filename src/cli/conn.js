@@ -196,12 +196,6 @@ export function planAppUpdate(p) {
   return { method: 'PATCH', path: apiPath(`/connect/applications/${applicationId}`), body };
 }
 
-// DELETE /connect/applications/{id} — soft-delete the caller's own connector.
-export function planAppDelete(p) {
-  const applicationId = requireAppId(p);
-  return { method: 'DELETE', path: apiPath(`/connect/applications/${applicationId}`) };
-}
-
 // GET /connect/applications/{id}/action-defs — list the app's HTTP action defs.
 export function planActionDefList(p) {
   const applicationId = requireAppId(p);
@@ -617,13 +611,6 @@ const COMMANDS = {
     return patchForOrg(orgId, path, body);
   },
 
-  // Soft-delete the caller's own custom connector application.
-  'conn.app_delete': () => {
-    const { path } = planAppDelete(params);
-    const orgId = requireOrgId();
-    return delForOrg(orgId, path);
-  },
-
   // --- Custom-connector management: action definitions ----------------------
   // DB-backed HTTP action definitions (distinct from the resolved capability
   // catalog conn.app_actions returns). See references/conn-operations.md for the
@@ -845,7 +832,6 @@ Applications
 Applications (custom connector management)
   conn.app_create     {slug, display_name, provider_type, ...}  # create a custom connector application (POST /connect/applications)
   conn.app_update     {applicationId, ...optional}              # update your own custom connector (slug/provider_type immutable)
-  conn.app_delete     {applicationId}                           # soft-delete your own custom connector
   conn.actiondef_list   {applicationId}                         # list an app's HTTP action definitions
   conn.actiondef_create {applicationId, name, method, url_template, headers?, encoding?, input_schema?}
   conn.actiondef_update {applicationId, actionId, method?, url_template?, headers?, encoding?, input_schema?}
