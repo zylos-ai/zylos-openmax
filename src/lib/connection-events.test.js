@@ -75,7 +75,13 @@ test('connection.authorized (direct mode): acquires credential + warms identity/
   assert.ok(fs.existsSync(path.join(credentialsDir, 'conn-1.json')), 'direct credential was not cached locally');
 });
 
-test('connection.authorized (proxy mode): no credential acquire, but still warms identity/catalog via the NEW endpoint', async () => {
+test('connection.authorized (non-direct / legacy proxy): no credential acquire or cache (direct-only), and the handler stays robust (does not crash) — no proxy semantics', async () => {
+  // Direct-only runtime: proxy is deprecated/removed, so a non-direct connection
+  // arriving from the backend is a legacy anomaly. It must NOT be credential-
+  // acquired or cached (no proxy semantics), yet an unexpected legacy connection
+  // must never crash the event handler — it is skipped + logged, and the rest of
+  // the best-effort path (identity/catalog warm) still runs. The await resolving
+  // (never rejecting) below is itself the robustness assertion.
   const { connectDir, credentialsDir, catalogDir } = tmpDirs();
   const { calls, get, post } = recordingHttp();
 
@@ -86,9 +92,9 @@ test('connection.authorized (proxy mode): no credential acquire, but still warms
   await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir });
 
   const paths = calls.map((c) => c.path);
-  assert.ok(!paths.some((p) => p.includes('/credential')), `proxy mode must never acquire a credential: ${JSON.stringify(paths)}`);
+  assert.ok(!paths.some((p) => p.includes('/credential')), `a non-direct connection must never acquire a credential: ${JSON.stringify(paths)}`);
   assert.ok(paths.includes('/api/v1/connect/agents/me/connections'), `missing warm-list call: ${JSON.stringify(paths)}`);
-  assert.ok(!fs.existsSync(path.join(credentialsDir, 'conn-2.json')), 'proxy mode must not cache a local credential file');
+  assert.ok(!fs.existsSync(path.join(credentialsDir, 'conn-2.json')), 'a non-direct connection must not cache a local credential file');
 });
 
 test('connection.credential_updated: re-acquires via the bare path when a cached credential already exists', async () => {

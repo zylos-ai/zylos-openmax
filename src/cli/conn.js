@@ -127,6 +127,13 @@ const ACTIONDEF_UPDATE_FIELDS = ['method', 'url_template', 'headers', 'encoding'
 
 function bad(message) { return Object.assign(new Error(message), { status: 400 }); }
 
+// Direct-only tombstone error for the removed proxy verbs (conn.proxy /
+// conn.execute) and any other would-be proxy path. Proxy mode is deprecated/
+// removed; only direct connections can be invoked (via conn.invoke).
+function proxyDeprecatedError(verb) {
+  return bad(`unsupported: ${verb} is removed — proxy mode is deprecated/removed; only direct connections can be invoked. Use conn.invoke {app|connectionId, action, params} instead.`);
+}
+
 // Copy only the allowlisted keys that are actually present (skip `undefined`).
 // Absent keys stay absent so cws-core applies its own defaults; `null` passes
 // through so an update can explicitly clear a field.
@@ -510,8 +517,10 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath('/connect/agents/me/connections'));
   },
 
-  // Acquire credential for a connection.
-  // Returns credential_mode + access_token (direct) or proxy_ref (proxy).
+  // Acquire credential for a connection. Direct-only: returns credential_mode:
+  // 'direct' + access_token (proxy is deprecated/removed). A legacy proxy
+  // connection would return credential_mode: 'proxy' with no local token — such
+  // connections are not invokable (see conn.invoke).
   'conn.acquire': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
@@ -520,27 +529,18 @@ const COMMANDS = {
     return postForOrg(orgId, apiPath(`/connect/connections/${connId}/credential`));
   },
 
-  // Proxy a request through a connection.
-  // NOTE: proxy-mode only; hidden from the agent surface (help text + reference
-  // doc), retained here for proxy connections and future use. Not reachable via
-  // conn.invoke (which does direct locally / proxy via conn.execute).
-  'conn.proxy': () => {
-    const connId = params.connectionId || params.connection_id;
-    if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const orgId = requireOrgId();
-    return postForOrg(orgId, apiPath(`/connect/connections/${connId}/proxy`), {
-      method: params.method || 'GET',
-      url: params.url,
-      headers: params.headers,
-      body: params.body,
-    });
-  },
+  // conn.proxy — REMOVED (direct-only). Proxy execution is deprecated/removed:
+  // the backend forces `direct` on custom-connector create and is deleting legacy
+  // proxy connections. Kept only as an explicit tombstone so an old caller gets
+  // an actionable error instead of silently proxying — there is NO proxy HTTP
+  // path left in this module. Use conn.invoke (direct) instead.
+  'conn.proxy': () => { throw proxyDeprecatedError('conn.proxy'); },
 
   // Discover the named actions available for a connection (action discovery).
   // Returns [{toolkit, action, method, description, params, input_schema}];
-  // pair with conn.execute to invoke one by "toolkit-slug/action-name". cws-core
+  // pair with conn.invoke to run one by "toolkit-slug/action-name". cws-core
   // scopes discovery to the caller's own connection-agent authorization
-  // boundary (derived server-side), same as conn.execute/conn.proxy.
+  // boundary (derived server-side).
   'conn.actions': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
@@ -549,24 +549,12 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath(`/connect/connections/${connId}/actions`));
   },
 
-  // Execute a registered named action through a connection (proxy mode:
-  // cws-connect resolves the action, injects the token server-side, and calls
-  // the provider — the agent needs neither the token nor the provider URL).
-  // action format: "toolkit-slug/action-name" (e.g. "github-repos/list").
-  // NOTE: proxy-mode only; hidden from the agent surface (help text + reference
-  // doc), retained here. conn.invoke routes proxy connections through this same
-  // server-side execute endpoint internally.
-  'conn.execute': () => {
-    const connId = params.connectionId || params.connection_id;
-    if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const orgId = requireOrgId();
-    if (!resolveSelfMemberId(orgId)) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
-    if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
-    return postForOrg(orgId, apiPath(`/connect/connections/${connId}/actions/execute`), {
-      action: params.action,
-      params: params.params || {},
-    });
-  },
+  // conn.execute — REMOVED (direct-only). This used to POST to the server-side
+  // proxy execute endpoint (cws-connect resolves the action, injects the token,
+  // calls the provider). Proxy is deprecated/removed, so it is kept only as an
+  // explicit tombstone — no server-side execute HTTP path remains here. Run
+  // actions via conn.invoke (direct local egress) instead.
+  'conn.execute': () => { throw proxyDeprecatedError('conn.execute'); },
 
   // Get connection details (status, owner, scopes, etc.).
   'conn.status': () => {
@@ -684,13 +672,13 @@ const COMMANDS = {
   // One-call app-keyed execute: resolve the connection for an application from
   // the local index (refreshing from conn.list on a miss), then run the named
   // action. This is the cache-aware entry meant for agents — it removes the
-  // per-call discovery round-trip. Internally it splits on credential_mode
-  // (transparent to the caller — same command, same result shape):
+  // per-call discovery round-trip. Direct-only runtime (proxy is deprecated/
+  // removed):
   //   - direct → LOCAL EGRESS: assemble the request from the local catalog's
   //     url_template + params, inject the locally-cached token (refreshing it on
   //     near-expiry / a provider 401), and call the provider from THIS host.
-  //   - proxy  → server-side execute (cws-connect resolves the action, injects
-  //     the token, and calls the provider; connection_agents re-checked there).
+  //   - anything else (a legacy proxy connection) → an explicit "unsupported"
+  //     error; we never silently fall back to server-side proxy execute.
   // On an action/schema-shaped failure it invalidates the cached catalog once so
   // the next conn.catalog is fresh, then resurfaces the error.
   'conn.invoke': async () => {
@@ -784,21 +772,16 @@ const COMMANDS = {
       }
     }
 
-    // proxy mode — server-side execute (existing behavior, unchanged).
-    try {
-      // Execute against the resolved connection using the SAME org's JWT — a
-      // multi-org agent must not run one org's connection with another's token.
-      return await postForOrg(orgId, apiPath(`/connect/connections/${entry.id}/actions/execute`), {
-        action: params.action,
-        params: params.params || {},
-      });
-    } catch (err) {
-      // Stale catalog is a plausible cause of an unknown-action/schema error —
-      // drop it so the agent's next conn.catalog refetches. Does not auto-retry
-      // (a wrong action name won't fix itself); the error is re-thrown as-is.
-      if (looksLikeActionOrSchemaError(err) && entry.applicationId) invalidateCatalog(entry.applicationId);
-      throw err;
-    }
+    // Direct-only runtime: a non-`direct` credential_mode means this is a legacy
+    // proxy connection. Proxy is deprecated/removed — the backend now forces
+    // `direct` on custom-connector create and is deleting old proxy connections.
+    // We DO NOT silently fall back to server-side proxy execute; surface an
+    // explicit, actionable error so the direct-only doc/contract and the runtime
+    // agree (no silent-proxy path).
+    throw Object.assign(
+      new Error(`unsupported: connection ${entry.id} is not a direct connection (credential_mode: ${mode}) — proxy mode is deprecated/removed; only direct connections can be invoked. Re-create this connection (custom connectors are now created direct-only).`),
+      { status: 400 },
+    );
   },
 
   // Show the local connections index for an org (observability). {refresh}
@@ -835,7 +818,7 @@ Usage: node src/cli/conn.js <command> '<json-params>'
 
 Connections
   conn.list           {}                                        # list connections available to this agent (self only)
-  conn.acquire        {connectionId}                            # acquire credential (returns access_token or proxy_ref)
+  conn.acquire        {connectionId}                            # acquire the direct access_token for a connection
   conn.actions        {connectionId}                            # discover named actions for a connection
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)
 

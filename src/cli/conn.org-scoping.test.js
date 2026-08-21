@@ -65,9 +65,10 @@ for (const c of [
   { command: 'conn.status', params: { connectionId: 'c1' } },
   { command: 'conn.acquire', params: { connectionId: 'c1' } },
   { command: 'conn.actions', params: { connectionId: 'c1' } },
-  { command: 'conn.execute', params: { connectionId: 'c1', action: 'toolkit/act' } },
+  // conn.execute / conn.proxy are direct-only tombstones now (proxy deprecated/
+  // removed) — they throw BEFORE any org resolution, so they are covered by a
+  // dedicated test below rather than this org-scoping loop.
   { command: 'conn.app_actions', params: { applicationId: 'app-1' } },
-  { command: 'conn.proxy', params: { connectionId: 'c1', url: 'https://example.test' } },
   // The three agent-facing entry points must fail-fast too (they previously
   // used bare resolveOrgId() and would go out identity-only / return a
   // misleading empty result). invoke needs app+action to reach the org check.
@@ -94,6 +95,26 @@ for (const c of [
     const err = JSON.parse(stderr);
     assert.equal(err.status, 400);
     assert.match(err.error, /cannot resolve org|multiple orgs/i);
+  });
+}
+
+// Direct-only: the removed proxy verbs must fail with an explicit "unsupported /
+// deprecated" error (status 400) and never make a network call — even in a
+// multi-org home with no {org}. The unroutable COCO_API_URL means any stray
+// proxy/execute HTTP call would surface a DIFFERENT (connection) error, so a
+// clean deprecated message proves no network happened.
+for (const c of [
+  { command: 'conn.execute', params: { connectionId: 'c1', action: 'toolkit/act' } },
+  { command: 'conn.proxy', params: { connectionId: 'c1', url: 'https://example.test' } },
+]) {
+  test(`direct-only tombstone: ${c.command} → 400 unsupported（proxy 已废弃，无网络调用）`, async () => {
+    const home = setupMultiOrgHome();
+    const { code, stderr } = await runConnMultiOrg(home, c.command, c.params);
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 400);
+    assert.match(err.error, /unsupported|deprecated|removed/i);
+    assert.match(err.error, /conn\.invoke/); // points to the direct replacement
   });
 }
 

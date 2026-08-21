@@ -102,10 +102,14 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
       const mode = data.credential_mode || '?';
       log(`[${slug}] connection.authorized conn=${connectionId} mode=${mode}`);
       upsertConnection(indexConn, idxPath);
-      // Only direct/token-mode connections cache a real access_token locally.
-      // Proxy-mode connections need no local credential (token is injected
-      // server-side by cws-connect at call time), so we skip the acquire+store
-      // entirely and just record the connection in the index.
+      // Direct-only runtime: only direct/token-mode connections cache a real
+      // access_token locally, which is the only mode conn.invoke can execute.
+      // A non-direct connection is a legacy/deprecated proxy connection (proxy
+      // is deprecated/removed — the backend now forces `direct` on create and is
+      // deleting old proxy connections). We do NOT treat it as a working proxy
+      // path: skip the credential acquire+cache and log it as unsupported. An
+      // unexpected legacy proxy connection from the backend must never crash the
+      // event handler — just skip + log.
       if (data.credential_mode === 'direct') {
         try {
           const cred = await acquireCredential(orgId, connectionId, { post });
@@ -115,7 +119,7 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
           warn(`[${slug}] credential acquire failed conn=${connectionId}: ${e.message}`);
         }
       } else {
-        log(`[${slug}] proxy connection indexed (no local credential) conn=${connectionId} provider=${data.provider || '?'}`);
+        warn(`[${slug}] non-direct connection conn=${connectionId} mode=${data.credential_mode || '?'} provider=${data.provider || '?'} — proxy is deprecated/unsupported; skipping local credential (this connection is not invokable via conn.invoke)`);
       }
       // Best-effort: any failure here never breaks the credential/index path above.
       let applicationId = null;

@@ -374,6 +374,113 @@ test('conn.invoke guard (app path): list 返回 error+needs_reauth → 刷新规
   }
 });
 
+// --- conn.invoke direct-only: non-direct connections are unsupported ---------
+//
+// Direct-only runtime (proxy deprecated/removed): invoking a connection whose
+// acquired credential_mode is not `direct` must fail with an explicit
+// "unsupported" error and must NEVER silently fall back to the server-side proxy
+// execute endpoint. Exercised via subprocess with a local server that answers the
+// credential-acquire with a legacy proxy credential and records every path hit.
+
+test('conn.invoke direct-only: a non-direct (legacy proxy) connection → explicit unsupported error, NEVER a proxy execute call', async () => {
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/connections/c1/credential')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // cws-connect returns a legacy proxy credential (no local access_token).
+      res.end(JSON.stringify({ data: { credential_mode: 'proxy', proxy_ref: 'pr-1' }, request_id: 'r1' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 400);
+    assert.match(err.error, /unsupported/i);
+    assert.match(err.error, /not a direct connection|proxy.*deprecated|deprecated\/removed/i);
+    // The critical direct-only guarantee: NEVER a silent fall-back to the
+    // server-side proxy execute (or proxy) endpoint.
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), `must not call proxy execute: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => u.includes('/proxy')), `must not call the proxy endpoint: ${JSON.stringify(seen)}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.invoke direct-only: a direct connection takes the DIRECT path (local egress), NOT the unsupported-proxy branch', async () => {
+  // A direct credential routes into the DIRECT branch, which fetches the local
+  // catalog (GET /connect/applications/<appId>/actions) to assemble the request.
+  // The catalog-endpoint hit proves the direct path was taken; the proxy branch
+  // would instead POST /connections/<id>/actions/execute (never reached). We
+  // serve an empty catalog so it stops at "unknown action" — a direct-path
+  // outcome, distinctly NOT the unsupported-proxy error.
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/connections/c1/credential')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { credential_mode: 'direct', access_token: 'tok' }, request_id: 'r1' }));
+      return;
+    }
+    if (req.url.includes('/connect/applications/app-1/actions')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [], request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    // The direct path's own downstream error — NOT the unsupported-proxy branch.
+    assert.match(err.error, /unknown action|not in local catalog/);
+    assert.doesNotMatch(err.error, /proxy|unsupported/i);
+    // Direct path proof: the local catalog was fetched, and the proxy execute
+    // endpoint was NEVER called.
+    assert.ok(seen.some((u) => u.includes('/connect/applications/app-1/actions')), `direct path must fetch the local catalog: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), `direct path must not call proxy execute: ${JSON.stringify(seen)}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// --- conn.proxy / conn.execute: direct-only tombstones ----------------------
+//
+// The two proxy verbs are removed (proxy deprecated/removed). They must throw an
+// explicit unsupported/deprecated error pointing to conn.invoke — never make a
+// proxy/execute network call. COCO_API_URL defaults to an unroutable port, so a
+// clean deprecated message also proves no network happened.
+
+for (const command of ['conn.proxy', 'conn.execute']) {
+  test(`${command} tombstone: direct-only → 400 unsupported/deprecated, points to conn.invoke`, async () => {
+    const home = setupHome({ connections: {
+      c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active' },
+    } });
+    const { code, stderr } = await runConn(home, command, { connectionId: 'c1', action: 'toolkit/act', url: 'https://example.test' });
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 400);
+    assert.match(err.error, /unsupported|deprecated|removed/i);
+    assert.match(err.error, /conn\.invoke/);
+  });
+}
+
 // ============================================================================
 //  Custom-connector management: pure request planners
 // ============================================================================
