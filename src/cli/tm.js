@@ -158,12 +158,19 @@ const COMMANDS = {
   // Flat path, no project prefix.
   'issue.get': () => get(apiPath(`/issues/${params.id}`)),
 
-  // create-issue body: requires title*, lead_agent_id*, owner_member_id*;
-  // optional priority (default medium), origin_conversation_id,
-  // origin_message_id, backlog. Context for the work goes in description
+  // create-issue body: requires title*, lead_agent_id*, owner_member_id*,
+  // origin_conversation_id*, origin_message_id*; optional priority (default
+  // medium) and backlog. Context for the work goes in description
   // (natural language) and later in task comments — not in id lists.
   'issue.create': () => {
-    requireParams('issue.create', ['projectId', 'title', 'leadAgentId', 'ownerMemberId']);
+    requireParams('issue.create', [
+      'projectId',
+      'title',
+      'leadAgentId',
+      'ownerMemberId',
+      'originConversationId',
+      'originMessageId',
+    ]);
     return post(apiPath(`/projects/${params.projectId}/issues`), {
       title:                  params.title,
       description:            params.description || '',
@@ -458,7 +465,7 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
   issue.get              {id}
   issue.create           {projectId, title, leadAgentId,
                           ownerMemberId, priority?,
-                          description?, originConversationId?, originMessageId?,
+                          description?, originConversationId, originMessageId,
                           backlog?}                                          # backlog default true; set false to start in_progress
   issue.update           {id, title?, description?, priority?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system

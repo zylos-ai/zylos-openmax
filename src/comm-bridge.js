@@ -29,6 +29,7 @@ import { createSelfNameHydrator } from './lib/self-name-hydration.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
+import { extractProjectContext } from './lib/project-context.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
@@ -1082,6 +1083,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
     // want a direct reply, not a "should I respond?" deliberation.
     const smartHint = decision.mode === 'smart' && !decision.mentioned;
     const groupName = decision.groupCfg?.name || conv?.name;
+    const projectContext = extractProjectContext(msg);
 
     // Record the display name + member_id seen in this conversation (sender +
     // group context) so an outbound `@name` can both be canonicalized to the
@@ -1168,7 +1170,16 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
         mediaItems,
       },
       recent,
-      { groupName, smartHint, quotedContent, orgId: orgConfig.org_id, orgName: orgConfig.org_name },
+      {
+        groupName,
+        smartHint,
+        quotedContent,
+        orgId: orgConfig.org_id,
+        orgName: orgConfig.org_name,
+        projectContext,
+        originConversationId: msg.conversation_id,
+        originMessageId: msg.id,
+      },
     );
 
     try {
