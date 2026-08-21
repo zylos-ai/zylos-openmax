@@ -415,6 +415,56 @@ test('planAppCreate: POST /connect/applications，body 走 allowlist 且不含 o
   assert.equal(plan.body.bogus, undefined);
 });
 
+// credential_mode is NOT a create field: cws-connect forces `direct` for custom
+// connectors server-side (proxy is deprecated), so the CLI must never forward it
+// on create — even if the caller passes one. Applies to BOTH custom and managed,
+// and to the import path (runAppImport builds its app body via planAppCreate).
+
+test('planAppCreate: custom + caller-sent credential_mode → 不落 body（服务端定夺 direct）', () => {
+  const plan = planAppCreate({
+    slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+    credential_source: 'custom', credential_mode: 'proxy', // must be dropped
+  });
+  assert.equal(plan.body.credential_source, 'custom');
+  assert.equal(plan.body.credential_mode, undefined);
+});
+
+test('planAppCreate: custom 无 credential_mode → 依旧不出现在 body', () => {
+  const plan = planAppCreate({
+    slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+    credential_source: 'custom',
+  });
+  assert.equal(plan.body.credential_mode, undefined);
+});
+
+test('planAppCreate: managed 也不转发 credential_mode（create 路径统一不接受）', () => {
+  const plan = planAppCreate({
+    slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+    credential_source: 'managed', credential_mode: 'direct',
+  });
+  assert.equal(plan.body.credential_source, 'managed');
+  assert.equal(plan.body.credential_mode, undefined);
+});
+
+test('runAppImport: app body 不转发 credential_mode（走 planAppCreate allowlist）', async () => {
+  const appBodies = [];
+  await runAppImport(
+    {
+      application: {
+        slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+        credential_source: 'custom', credential_mode: 'proxy',
+      },
+      actions: [],
+    },
+    {
+      createApp: async (body) => { appBodies.push(body); return { id: APP_UUID }; },
+      createActionDef: async () => ({ id: 'a' }),
+    },
+  );
+  assert.equal(appBodies[0].credential_source, 'custom');
+  assert.equal(appBodies[0].credential_mode, undefined); // server forces direct on create
+});
+
 // --- planAppUpdate ----------------------------------------------------------
 
 test('planAppUpdate: 缺 applicationId / 非 UUID → 400', () => {

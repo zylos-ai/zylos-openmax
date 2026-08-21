@@ -96,8 +96,15 @@ function isUuid(s) { return typeof s === 'string' && UUID_RE.test(s); }
 
 // Application create body — the custom-connector superset (§1.2). `org_id` and
 // `oauth_callback_url` are intentionally absent from this allowlist.
+//
+// `credential_mode` is DELIBERATELY not accepted on create: cws-connect decides
+// it server-side (custom connectors are created `direct`; proxy is deprecated), so
+// a client-sent value would be ignored at best and misleading at worst. Not
+// forwarding it keeps the CLI from implying the caller gets to choose the mode.
+// (It stays in APP_UPDATE_FIELDS so an existing connector's mode can still be
+// changed via conn.app_update if ever needed.)
 const APP_CREATE_FIELDS = [
-  'slug', 'display_name', 'description', 'provider_type', 'credential_mode', 'credential_source',
+  'slug', 'display_name', 'description', 'provider_type', 'credential_source',
   'visibility', 'icon_url', 'category', 'tags',
   'api_key_location', 'api_key_header_name',
   'oauth_authorize_url', 'oauth_token_url', 'oauth_client_id', 'oauth_client_secret',
