@@ -208,7 +208,7 @@ One action-def row = one HTTP action published for agents to execute.
   authored. The CLI **rejects it locally, case-insensitively** (`Authorization` /
   `authorization` / `AUTHORIZATION`): `conn.actiondef_create` / `conn.actiondef_update`
   fail with `{status:400, error:"headers.Authorization is forbidden — the connection
-  credential is injected server-side"}`, and `conn.app_import` records the offending
+  credential is injected at call time"}`, and `conn.app_import` records the offending
   action as a per-action failure (that row is never created). Do not put credentials
   in `headers`.
 

@@ -157,7 +157,7 @@ function assertNoAuthorizationHeader(headers) {
   if (!headers || typeof headers !== 'object') return;
   for (const k of Object.keys(headers)) {
     if (k.toLowerCase() === 'authorization') {
-      throw bad('headers.Authorization is forbidden — the connection credential is injected server-side');
+      throw bad('headers.Authorization is forbidden — the connection credential is injected at call time');
     }
   }
 }
