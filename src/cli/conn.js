@@ -590,6 +590,22 @@ const COMMANDS = {
     return getForOrg(requireOrgId(), apiPath('/connect/oauth-callback-url'));
   },
 
+  // List the caller's org custom connector applications — the way to enumerate
+  // applicationIds WITHOUT an existing connection (contrast conn.list, which is
+  // connection-scoped). Org-scoped exactly like the sibling read verbs: the org
+  // is derived server-side from the authenticated principal (requireOrgId only
+  // selects which org's JWT to use — org_id is NEVER sent as a client param).
+  // Optional {category} is appended as a query filter. The D8 envelope's `data`
+  // is an ARRAY of application items (same item shape conn.app_create/app_get
+  // return); the client unwraps it, so this resolves to that array as-is.
+  'conn.app_list': () => {
+    let path = apiPath('/connect/applications');
+    if (params.category !== undefined && params.category !== null && params.category !== '') {
+      path += `?category=${encodeURIComponent(params.category)}`;
+    }
+    return getForOrg(requireOrgId(), path);
+  },
+
   // --- Custom-connector management: applications ----------------------------
   // Each verb validates its params locally (pure planner, throws 400), then
   // resolves the operating org and routes through the org-scoped helper. Param
@@ -827,6 +843,7 @@ Connections
 
 Applications
   conn.app_actions    {applicationId}                           # app-keyed action catalog (incl. input_schema; no connection needed)
+  conn.app_list       {category?}                                   # list your org's custom connector applications (GET /connect/applications)
   conn.callback       {}                                        # platform OAuth callback URL to register in the provider's OAuth app
 
 Applications (custom connector management)

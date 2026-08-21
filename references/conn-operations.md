@@ -119,6 +119,25 @@ OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
 (`form` | `json`). Returns the created `application` item (its `source` is a
 read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
 
+### conn.app_list
+List the connector applications visible to your org — the public catalog **∪**
+your own org's custom connectors. This is **how you enumerate `applicationId`s
+without an existing connection** (contrast `conn.list`, which is
+connection-scoped and only returns apps you already have a connection to).
+
+```bash
+node src/cli/conn.js conn.app_list '{}'
+```
+
+Optional `category` filters the result (e.g. `{"category":"crm"}`). The owning
+org is derived **server-side** from your authenticated principal — you never pass
+`org_id` (and `{org}` only selects which enabled org's token to use on a
+multi-org agent). Returns an **array** of application items, each with
+`applicationId` / `id`, `slug`, `display_name`, `provider_type`, `source`,
+`visibility`, `credential_source`, `credential_mode`, `category`, the auth-shape
+fields (`oauth_*` / `api_key_*`), `is_enabled`, `oauth_callback_url`,
+`created_at`, … (same item shape `conn.app_create` / `conn.app_update` return).
+
 ### conn.app_update
 Update your own custom connector application (ownership-gated).
 
@@ -402,6 +421,7 @@ agent's **local cleanup is identical** (unindex + delete the cached credential).
 | GET | `/connect/connections/{id}/actions` | conn.actions |
 | GET | `/connect/applications/{id}/actions` | conn.app_actions / conn.catalog |
 | GET | `/connect/oauth-callback-url` | conn.callback |
+| GET | `/connect/applications` | conn.app_list |
 | POST | `/connect/applications` | conn.app_create / conn.app_import |
 | PATCH | `/connect/applications/{id}` | conn.app_update |
 | GET | `/connect/applications/{id}/action-defs` | conn.actiondef_list |

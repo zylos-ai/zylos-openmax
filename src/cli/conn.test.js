@@ -885,6 +885,88 @@ test('conn.app_create (subprocess): POST /connect/applications；服务端收到
 });
 
 // ============================================================================
+//  conn.app_list end-to-end (subprocess): GET the org's applications
+// ============================================================================
+//
+// conn.app_list enumerates the org's custom connector applications
+// (GET /api/v1/connect/applications) WITHOUT needing an existing connection.
+// It is org-scoped (org derived server-side from the principal), so the request
+// must carry NO org_id — neither in the path nor the query. `category` is
+// appended as ?category=<encoded> when provided and omitted otherwise. The D8
+// envelope's `data` is an ARRAY of application items, unwrapped by the client.
+
+test('conn.app_list (subprocess): GET /connect/applications，无 org_id，无 category 时无查询串，返回 data 数组', async () => {
+  const home = setupHome({ orgId: 'org-1' });
+  const seen = {};
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url.includes('/connect/applications')) {
+      seen.method = req.method;
+      seen.url = req.url;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        data: [
+          { id: APP_UUID, slug: 'acme', provider_type: 'api_key', source: 'custom' },
+        ],
+        request_id: 'r1',
+      }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    // `org` only selects the operating org's token; `org_id` is a forbidden
+    // param the handler must never place on the wire.
+    const { code, stdout } = await runConn(home, 'conn.app_list', { org: 'org-1', org_id: 'evil-org' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    assert.equal(seen.method, 'GET');
+    // Path is exactly /connect/applications — no query string at all when no category.
+    assert.match(seen.url, /\/api\/v1\/connect\/applications$/);
+    assert.doesNotMatch(seen.url, /\?/);
+    // org_id must not leak into the URL (path or query).
+    assert.doesNotMatch(seen.url, /org_id/);
+    assert.doesNotMatch(seen.url, /evil-org/);
+    // The D8 array is unwrapped to the command result.
+    const out = JSON.parse(stdout);
+    assert.ok(Array.isArray(out));
+    assert.equal(out[0].id, APP_UUID);
+    assert.equal(out[0].slug, 'acme');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.app_list (subprocess): 传 category → 作为 ?category=<encoded> 查询串附加，仍无 org_id', async () => {
+  const home = setupHome({ orgId: 'org-1' });
+  const seen = {};
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url.includes('/connect/applications')) {
+      seen.method = req.method;
+      seen.url = req.url;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [], request_id: 'r1' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    // A category needing URL-encoding proves the value is encoded, not raw.
+    const { code, stdout } = await runConn(home, 'conn.app_list', { org: 'org-1', category: 'crm tools' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    assert.equal(seen.method, 'GET');
+    assert.match(seen.url, /\/connect\/applications\?category=crm(%20|\+)tools$/);
+    assert.doesNotMatch(seen.url, /org_id/);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// ============================================================================
 //  conn.callback end-to-end (subprocess): GET the platform OAuth callback URL
 // ============================================================================
 //

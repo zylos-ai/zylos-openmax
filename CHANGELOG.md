@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `conn.app_list` — list the org's custom connector applications
+  (`GET /connect/applications`), optional `category` filter. Enumerates
+  `applicationId`s **without** an existing connection (contrast connection-scoped
+  `conn.list`); org is derived server-side (never a client param).
 - New `conn.callback` command — returns the platform's OAuth **callback URL**
   (`GET /api/v1/connect/oauth-callback-url`, D8 envelope `{ data: { callback_url } }`,
   unwrapped to `{ callback_url }`). Register this redirect URI in the provider's
