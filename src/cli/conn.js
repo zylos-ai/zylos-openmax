@@ -167,7 +167,18 @@ export function planAppCreate(p) {
   if (!p.slug) throw bad('slug is required');
   if (!p.display_name) throw bad('display_name is required');
   if (!p.provider_type) throw bad('provider_type is required (oauth2 | api_key)');
-  return { method: 'POST', path: apiPath('/connect/applications'), body: pick(p, APP_CREATE_FIELDS) };
+  const body = pick(p, APP_CREATE_FIELDS);
+  // Custom connectors default to DIRECT credential mode (proxy is deprecated).
+  // cws-core 400s when credential_mode is omitted on a custom connector, and
+  // callers tend to copy `proxy` from older docs — so when a custom connector
+  // leaves credential_mode absent/empty, default it to 'direct'. An explicitly
+  // provided value (including 'proxy') is preserved as-is, and managed
+  // connectors (credential_source !== 'custom') are never touched. This runs on
+  // BOTH create paths since runAppImport builds its app body via planAppCreate.
+  if (body.credential_source === 'custom' && !body.credential_mode) {
+    body.credential_mode = 'direct';
+  }
+  return { method: 'POST', path: apiPath('/connect/applications'), body };
 }
 
 // PATCH /connect/applications/{id} — update the caller's own custom connector.

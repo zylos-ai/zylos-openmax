@@ -96,7 +96,7 @@ node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","prov
 
 Required: `slug`, `display_name`, `provider_type` (`oauth2` | `api_key`). Optional:
 `description`, `credential_source` (`managed` | `custom`), `credential_mode`
-(`proxy` | `direct`), `visibility` (`public` | `org`), `icon_url`, `category`,
+(`direct` | `proxy`), `visibility` (`public` | `org`), `icon_url`, `category`,
 `tags[]`, `default_ttl_seconds`, and the auth-shape fields —
 API-key: `api_key_location` (`header` | `query`), `api_key_header_name`;
 OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
@@ -104,6 +104,12 @@ OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
 `oauth_token_auth_method` (`basic` | `post`), `oauth_token_body_format`
 (`form` | `json`). Returns the created `application` item (its `source` is a
 read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
+
+> **Custom connectors default to `direct`.** When `credential_source` is
+> `custom` and you omit `credential_mode`, the CLI sends `credential_mode:
+> "direct"` for you (proxy is deprecated). Pass `credential_mode` explicitly
+> only to override that — e.g. an existing `proxy` connector. Managed
+> connectors are unaffected.
 
 ### conn.app_update
 Update your own custom connector application (ownership-gated).

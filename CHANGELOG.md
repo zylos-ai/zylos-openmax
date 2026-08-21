@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `conn.app_create` / `conn.app_import` now default `credential_mode` to
+  `direct` when a **custom** connector (`credential_source: "custom"`) omits it.
+  Previously the field was passed through untouched, so a caller who left it out
+  got a cws-core 400, and callers copying `proxy` from older examples created
+  deprecated proxy connectors. An explicitly provided `credential_mode`
+  (including `proxy`) is preserved, and managed connectors are unaffected.
+  Reference doc updated to list `credential_mode (direct | proxy)` with the
+  direct default called out.
+
 ## [2.15.0-beta.1] — 2026-08-19
 
 *Beta / experimental release. The custom-connector CLI verbs (`conn.app_*` /

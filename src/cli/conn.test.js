@@ -415,6 +415,61 @@ test('planAppCreate: POST /connect/applications，body 走 allowlist 且不含 o
   assert.equal(plan.body.bogus, undefined);
 });
 
+test('planAppCreate: custom 连接器缺省 credential_mode → 默认 direct（proxy 已弃用）', () => {
+  const plan = planAppCreate({
+    slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+    credential_source: 'custom',
+  });
+  assert.equal(plan.body.credential_source, 'custom');
+  assert.equal(plan.body.credential_mode, 'direct');
+});
+
+test('planAppCreate: custom + credential_mode 为空串 → 补默认 direct', () => {
+  const plan = planAppCreate({
+    slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+    credential_source: 'custom', credential_mode: '',
+  });
+  assert.equal(plan.body.credential_mode, 'direct');
+});
+
+test('planAppCreate: custom + 显式 credential_mode=proxy → 原样保留（不覆盖）', () => {
+  const plan = planAppCreate({
+    slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+    credential_source: 'custom', credential_mode: 'proxy',
+  });
+  assert.equal(plan.body.credential_mode, 'proxy');
+});
+
+test('planAppCreate: managed 连接器不受影响（不注入 credential_mode）', () => {
+  const managed = planAppCreate({
+    slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+    credential_source: 'managed',
+  });
+  assert.equal(managed.body.credential_mode, undefined);
+  // No credential_source at all → also not treated as custom, no default injected.
+  const none = planAppCreate({ slug: 'acme', display_name: 'Acme', provider_type: 'api_key' });
+  assert.equal(none.body.credential_mode, undefined);
+});
+
+test('runAppImport: custom app body 无 credential_mode → 落库前补默认 direct', async () => {
+  const appBodies = [];
+  await runAppImport(
+    {
+      application: {
+        slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
+        credential_source: 'custom',
+      },
+      actions: [],
+    },
+    {
+      createApp: async (body) => { appBodies.push(body); return { id: APP_UUID }; },
+      createActionDef: async () => ({ id: 'a' }),
+    },
+  );
+  assert.equal(appBodies[0].credential_source, 'custom');
+  assert.equal(appBodies[0].credential_mode, 'direct'); // planAppCreate default applied on the import path too
+});
+
 // --- planAppUpdate ----------------------------------------------------------
 
 test('planAppUpdate: 缺 applicationId / 非 UUID → 400', () => {
