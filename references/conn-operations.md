@@ -92,7 +92,7 @@ create a custom connector application, then define the HTTP **action definitions
 server-side: you can only update/delete an application (and its action-defs) that
 belongs to your own org.
 
-Three invariants hold for every verb here (they mirror the rest of `conn.*`):
+Two invariants hold for every verb here (they mirror the rest of `conn.*`):
 
 - **You never supply `org_id`.** cws-core derives the owning org from your
   authenticated principal. (`{org}` still selects *which* enabled org's token to
@@ -101,10 +101,6 @@ Three invariants hold for every verb here (they mirror the rest of `conn.*`):
   redirect URI on create/update and returns it read-only on the item — register
   that value at your OAuth provider. (Use **`conn.callback`** to fetch it *before*
   creating the connector so you can register it in the provider's OAuth app first.)
-- **You never supply `credential_source`, `visibility`, or `credential_mode`.**
-  cws-core forces them server-side (`custom` / `org` / `direct`), and the
-  create/update schema **rejects them (HTTP 422) if present**, so the CLI drops
-  them from every request body.
 
 ### conn.app_create
 Create a custom connector application.
@@ -122,13 +118,6 @@ OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
 `oauth_token_auth_method` (`basic` | `post`), `oauth_token_body_format`
 (`form` | `json`). Returns the created `application` item (its `source` is a
 read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
-
-> **You do not set `credential_source`, `visibility`, or `credential_mode`.**
-> cws-core forces these server-side (`custom` / `org` / `direct`) and its
-> custom-connector create/update schema now **rejects them (HTTP 422) if sent**, so
-> the CLI never forwards them — any value you pass is dropped before the request,
-> exactly like `org_id` / `oauth_callback_url`. The created connector uses the
-> single local-egress credential model described under **Credential Handling**.
 
 ### conn.app_update
 Update your own custom connector application (ownership-gated).
