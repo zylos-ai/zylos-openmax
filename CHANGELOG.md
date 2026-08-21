@@ -45,7 +45,7 @@ surface and parameters may change before the stable 2.15.0.*
   the pure planner shared by `conn.actiondef_create`, `conn.actiondef_update`, and
   the `conn.app_import` action loop — throwing
   `{status:400, error:"headers.Authorization is forbidden — the connection credential
-  is injected server-side"}` (in `app_import` the offending action is recorded as a
+  is injected at call time"}` (in `app_import` the offending action is recorded as a
   per-action failure and never created). Provider auth comes from the connection,
   not from action headers; a stored `Authorization` on a DB-backed custom action-def
   is applied after credential injection on the execution path and would override the
@@ -54,7 +54,7 @@ surface and parameters may change before the stable 2.15.0.*
   documenting the new verbs and the action-def schema semantics (method set;
   `url_template` `{placeholder}` slots; `encoding` `""`=JSON / `form` / `none`;
   `input_schema` = JSON Schema draft-07; the **`Authorization` header is
-  forbidden** — the connection token is injected server-side). `printUsage()` gains
+  forbidden** — the connection token is injected at call time). `printUsage()` gains
   an "Applications (custom connector management)" section.
 
 ## [2.14.7] — 2026-08-18
