@@ -69,6 +69,9 @@ for (const c of [
   // removed) — they throw BEFORE any org resolution, so they are covered by a
   // dedicated test below rather than this org-scoping loop.
   { command: 'conn.app_actions', params: { applicationId: 'app-1' } },
+  // conn.callback authenticates with the org token (endpoint is authed but not
+  // org-scoped) — it still resolves the operating org, so it fails-fast too.
+  { command: 'conn.callback', params: {} },
   // The three agent-facing entry points must fail-fast too (they previously
   // used bare resolveOrgId() and would go out identity-only / return a
   // misleading empty result). invoke needs app+action to reach the org check.

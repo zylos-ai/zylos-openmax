@@ -85,37 +85,41 @@ function isUuid(s) { return typeof s === 'string' && UUID_RE.test(s); }
 // method, and the request body are unit-testable in isolation. The COMMANDS
 // handlers below just wire the plan to the matching *ForOrg helper.
 //
-// SECURITY: `org_id` and `oauth_callback_url` are NEVER forwarded to cws-core in
-// the body — both are server-derived (org from the authenticated principal;
-// callback URL injected by cws-core on create/update). We build bodies with a
-// strict ALLOWLIST (`pick`) rather than spreading the caller's params, so those
-// two fields (and any other unknown key) cannot leak through even if supplied.
+// SECURITY: a set of fields is NEVER forwarded to cws-core in the request body —
+// they are all server-decided, so we build bodies with a strict ALLOWLIST (`pick`)
+// rather than spreading the caller's params, and any field outside the allowlist
+// (or any unknown key) cannot leak through even if supplied:
+//   - `org_id`             — derived from the authenticated principal (still honored
+//                            as an OPERATING-org selector via resolveOrgId — that
+//                            picks which org's JWT to use, never written to a body).
+//   - `oauth_callback_url` — injected by cws-core on create/update, returned read-only.
+//   - `credential_source`  — server-FORCED to `custom` for these CLI-created connectors.
+//   - `visibility`         — server-FORCED to `org`.
+//   - `credential_mode`    — server-FORCED to `direct` (proxy is deprecated/removed).
+// The last three were removed from the cws-core custom-connector create/update
+// request schema (strict huma): sending ANY of them now returns HTTP 422. So the
+// CLI planner drops them exactly the way it already drops `org_id`/`oauth_callback_url`.
 // This mirrors conn.js's existing "no client-supplied identity override" posture.
-// (`org_id` is still honored as an OPERATING-org selector via resolveOrgId — that
-// selects which org's JWT to use, it is not written into any request body.)
 
-// Application create body — the custom-connector superset (§1.2). `org_id` and
-// `oauth_callback_url` are intentionally absent from this allowlist.
-//
-// `credential_mode` is DELIBERATELY not accepted on create: cws-connect decides
-// it server-side (custom connectors are created `direct`; proxy is deprecated), so
-// a client-sent value would be ignored at best and misleading at worst. Not
-// forwarding it keeps the CLI from implying the caller gets to choose the mode.
-// (It stays in APP_UPDATE_FIELDS so an existing connector's mode can still be
-// changed via conn.app_update if ever needed.)
+// Application create body — the custom-connector superset (§1.2). `org_id`,
+// `oauth_callback_url`, `credential_source`, `visibility`, and `credential_mode`
+// are intentionally absent from this allowlist: cws-core forces
+// custom/org/direct server-side and REJECTS (422) any of them in the body.
 const APP_CREATE_FIELDS = [
-  'slug', 'display_name', 'description', 'provider_type', 'credential_source',
-  'visibility', 'icon_url', 'category', 'tags',
+  'slug', 'display_name', 'description', 'provider_type',
+  'icon_url', 'category', 'tags',
   'api_key_location', 'api_key_header_name',
   'oauth_authorize_url', 'oauth_token_url', 'oauth_client_id', 'oauth_client_secret',
   'oauth_scopes_default', 'oauth_pkce', 'oauth_token_auth_method', 'oauth_token_body_format',
   'default_ttl_seconds',
 ];
 // Application update body — pointer/optional fields (§1.2). `slug` and
-// `provider_type` are immutable server-side, so they are NOT accepted here
-// (alongside the always-forbidden `org_id` / `oauth_callback_url`).
+// `provider_type` are immutable server-side, so they are NOT accepted here.
+// `credential_source` / `visibility` / `credential_mode` are likewise NOT
+// accepted: they are server-forced (custom/org/direct) and REJECTED (422) if
+// sent — same treatment as the always-forbidden `org_id` / `oauth_callback_url`.
 const APP_UPDATE_FIELDS = [
-  'display_name', 'description', 'credential_mode', 'credential_source', 'visibility',
+  'display_name', 'description',
   'icon_url', 'category', 'tags', 'is_enabled',
   'api_key_location', 'api_key_header_name',
   'oauth_authorize_url', 'oauth_token_url', 'oauth_client_id', 'oauth_client_secret',
@@ -580,6 +584,18 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath(`/connect/applications/${appId}/actions`));
   },
 
+  // Return the platform's OAuth callback URL — the redirect URI to register in
+  // your provider's OAuth app BEFORE creating a connector. cws-core forces the
+  // callback URL server-side, so a user needs this value up-front. The endpoint
+  // is authed (bearer) but NOT org-scoped; we call it via getForOrg so the org's
+  // JWT authenticates the request (the org scoping is harmless — the route
+  // ignores it). The D8 envelope is unwrapped by the client, so this resolves to
+  // the inner `{ callback_url }` object, which we return as-is (matching how the
+  // sibling read verbs echo their unwrapped data).
+  'conn.callback': () => {
+    return getForOrg(requireOrgId(), apiPath('/connect/oauth-callback-url'));
+  },
+
   // --- Custom-connector management: applications ----------------------------
   // Each verb validates its params locally (pure planner, throws 400), then
   // resolves the operating org and routes through the org-scoped helper. Param
@@ -824,6 +840,7 @@ Connections
 
 Applications
   conn.app_actions    {applicationId}                           # app-keyed action catalog (incl. input_schema; no connection needed)
+  conn.callback       {}                                        # platform OAuth callback URL to register in the provider's OAuth app
 
 Applications (custom connector management)
   conn.app_create     {slug, display_name, provider_type, ...}  # create a custom connector application (POST /connect/applications)

@@ -500,7 +500,7 @@ test('planAppCreate: 缺 slug/display_name/provider_type → 400', () => {
   assert.throws(() => planAppCreate({ slug: 'x', display_name: 'X' }), (e) => e.status === 400 && /provider_type/.test(e.message));
 });
 
-test('planAppCreate: POST /connect/applications，body 走 allowlist 且不含 org_id/oauth_callback_url', () => {
+test('planAppCreate: POST /connect/applications，body 走 allowlist 且不含 org_id/oauth_callback_url/credential_source/visibility', () => {
   const plan = planAppCreate({
     slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
     api_key_location: 'header', api_key_header_name: 'X-Api-Key',
@@ -520,46 +520,54 @@ test('planAppCreate: POST /connect/applications，body 走 allowlist 且不含 o
   assert.equal(plan.body.org_id, undefined);
   assert.equal(plan.body.oauth_callback_url, undefined);
   assert.equal(plan.body.bogus, undefined);
+  // credential_source / visibility are now server-FORCED (custom/org) and rejected
+  // (422) if sent — the allowlist must drop them just like org_id/oauth_callback_url.
+  assert.equal(plan.body.credential_source, undefined);
+  assert.equal(plan.body.visibility, undefined);
 });
 
-// credential_mode is NOT a create field: cws-connect forces `direct` for custom
-// connectors server-side (proxy is deprecated), so the CLI must never forward it
-// on create — even if the caller passes one. Applies to BOTH custom and managed,
-// and to the import path (runAppImport builds its app body via planAppCreate).
+// credential_source / visibility / credential_mode are NOT create fields:
+// cws-core forces them server-side (custom / org / direct) and now REJECTS (422)
+// any of them in the request body, so the CLI must never forward them on create —
+// even if the caller passes one. Applies to BOTH custom and managed callers, and
+// to the import path (runAppImport builds its app body via planAppCreate).
 
-test('planAppCreate: custom + caller-sent credential_mode → 不落 body（服务端定夺 direct）', () => {
+test('planAppCreate: caller-sent credential_source/visibility/credential_mode → 全部不落 body（服务端强制 custom/org/direct）', () => {
   const plan = planAppCreate({
     slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
-    credential_source: 'custom', credential_mode: 'proxy', // must be dropped
+    credential_source: 'custom', visibility: 'org', credential_mode: 'proxy', // all dropped
   });
-  assert.equal(plan.body.credential_source, 'custom');
+  assert.equal(plan.body.credential_source, undefined);
+  assert.equal(plan.body.visibility, undefined);
   assert.equal(plan.body.credential_mode, undefined);
 });
 
-test('planAppCreate: custom 无 credential_mode → 依旧不出现在 body', () => {
+test('planAppCreate: 无这些字段 → 依旧不出现在 body', () => {
   const plan = planAppCreate({
     slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
-    credential_source: 'custom',
   });
+  assert.equal(plan.body.credential_source, undefined);
+  assert.equal(plan.body.visibility, undefined);
   assert.equal(plan.body.credential_mode, undefined);
 });
 
-test('planAppCreate: managed 也不转发 credential_mode（create 路径统一不接受）', () => {
+test('planAppCreate: 即使 caller 传 managed 也不转发（create 路径一律不接受这三个字段）', () => {
   const plan = planAppCreate({
     slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
-    credential_source: 'managed', credential_mode: 'direct',
+    credential_source: 'managed', visibility: 'public', credential_mode: 'direct',
   });
-  assert.equal(plan.body.credential_source, 'managed');
+  assert.equal(plan.body.credential_source, undefined);
+  assert.equal(plan.body.visibility, undefined);
   assert.equal(plan.body.credential_mode, undefined);
 });
 
-test('runAppImport: app body 不转发 credential_mode（走 planAppCreate allowlist）', async () => {
+test('runAppImport: app body 不转发 credential_source/visibility/credential_mode（走 planAppCreate allowlist）', async () => {
   const appBodies = [];
   await runAppImport(
     {
       application: {
         slug: 'acme', display_name: 'Acme', provider_type: 'api_key',
-        credential_source: 'custom', credential_mode: 'proxy',
+        credential_source: 'custom', visibility: 'org', credential_mode: 'proxy',
       },
       actions: [],
     },
@@ -568,8 +576,10 @@ test('runAppImport: app body 不转发 credential_mode（走 planAppCreate allow
       createActionDef: async () => ({ id: 'a' }),
     },
   );
-  assert.equal(appBodies[0].credential_source, 'custom');
-  assert.equal(appBodies[0].credential_mode, undefined); // server forces direct on create
+  // server forces custom/org/direct on create; none of them may be sent.
+  assert.equal(appBodies[0].credential_source, undefined);
+  assert.equal(appBodies[0].visibility, undefined);
+  assert.equal(appBodies[0].credential_mode, undefined);
 });
 
 // --- planAppUpdate ----------------------------------------------------------
@@ -583,10 +593,12 @@ test('planAppUpdate: 无可更新字段 → 400', () => {
   assert.throws(() => planAppUpdate({ applicationId: APP_UUID }), (e) => e.status === 400 && /no updatable fields/.test(e.message));
 });
 
-test('planAppUpdate: PATCH，忽略 slug/provider_type/org_id/oauth_callback_url', () => {
+test('planAppUpdate: PATCH，忽略 slug/provider_type/org_id/oauth_callback_url/credential_source/visibility/credential_mode', () => {
   const plan = planAppUpdate({
     applicationId: APP_UUID, display_name: 'New', category: 'ops', is_enabled: false,
     slug: 'changed', provider_type: 'oauth2', org_id: 'evil', oauth_callback_url: 'https://evil/cb',
+    // server-forced (custom/org/direct) and rejected (422) if sent — must be dropped:
+    credential_source: 'custom', visibility: 'org', credential_mode: 'direct',
   });
   assert.equal(plan.method, 'PATCH');
   assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}$`));
@@ -597,6 +609,9 @@ test('planAppUpdate: PATCH，忽略 slug/provider_type/org_id/oauth_callback_url
   assert.equal(plan.body.provider_type, undefined);
   assert.equal(plan.body.org_id, undefined);
   assert.equal(plan.body.oauth_callback_url, undefined);
+  assert.equal(plan.body.credential_source, undefined);
+  assert.equal(plan.body.visibility, undefined);
+  assert.equal(plan.body.credential_mode, undefined);
 });
 
 // --- planAppDelete ----------------------------------------------------------
@@ -874,6 +889,45 @@ test('conn.app_create (subprocess): POST /connect/applications；服务端收到
     // The returned application item is echoed as the result.
     const out = JSON.parse(stdout);
     assert.equal(out.id, APP_UUID);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// ============================================================================
+//  conn.callback end-to-end (subprocess): GET the platform OAuth callback URL
+// ============================================================================
+//
+// conn.callback hits the read-only, authed-but-NOT-org-scoped endpoint
+// GET /api/v1/connect/oauth-callback-url and returns the D8-unwrapped
+// { callback_url } object. Prove the exact request method+path and that the
+// client unwraps the envelope down to the inner data object.
+
+test('conn.callback (subprocess): GET /connect/oauth-callback-url，返回 unwrap 后的 { callback_url }', async () => {
+  const home = setupHome({ orgId: 'org-1' });
+  const seen = {};
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url.includes('/connect/oauth-callback-url')) {
+      seen.method = req.method;
+      seen.url = req.url;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { callback_url: 'https://platform.test/oauth/callback' }, request_id: 'r1' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(home, 'conn.callback', { org: 'org-1' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    assert.equal(seen.method, 'GET');
+    assert.match(seen.url, /\/api\/v1\/connect\/oauth-callback-url$/);
+    // The D8 envelope is unwrapped by the client → the command result is the
+    // inner data object.
+    const out = JSON.parse(stdout);
+    assert.equal(out.callback_url, 'https://platform.test/oauth/callback');
   } finally {
     await new Promise((r) => server.close(r));
   }

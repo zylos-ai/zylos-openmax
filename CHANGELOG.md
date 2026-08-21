@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0-beta.2] — 2026-08-21
+
+*Beta / experimental release — continues the custom-connector CLI preview.*
+
+### Changed
+
+- `conn.js` **no longer sends `credential_source`, `visibility`, or
+  `credential_mode`** on `conn.app_create` / `conn.app_update` (and the
+  `conn.app_import` app body, which reuses the create planner). cws-core now
+  forces these three server-side (`custom` / `org` / `direct`) and its
+  custom-connector create/update request schema (strict huma) **rejects them with
+  HTTP 422 if present**. They were removed from the `APP_CREATE_FIELDS`
+  (`credential_source`, `visibility`) and `APP_UPDATE_FIELDS`
+  (`credential_source`, `visibility`, `credential_mode`) allowlists, so the request
+  planner drops them exactly the way it already drops the server-injected
+  `org_id` / `oauth_callback_url`. `references/conn-operations.md` updated to match.
+
+### Added
+
+- New `conn.callback` command — returns the platform's OAuth **callback URL**
+  (`GET /api/v1/connect/oauth-callback-url`, D8 envelope `{ data: { callback_url } }`,
+  unwrapped to `{ callback_url }`). Register this redirect URI in the provider's
+  OAuth app **before** creating a connector. The endpoint is authed (bearer) but
+  not org-scoped; the CLI authenticates it with the operating org's token.
+
 ## [2.15.0-beta.1] — 2026-08-19
 
 *Beta / experimental release. The custom-connector CLI verbs (`conn.app_*` /

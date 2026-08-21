@@ -69,6 +69,20 @@ node src/cli/conn.js conn.app_actions '{"applicationId":"cb4e4f15-..."}'
 
 Returns an array of `{ toolkit, action, method, description, params[], input_schema }` (same shape as `conn.actions`). Resolved strictly by `applicationId` — the BFF route keys on the path id and does not accept a slug override, so the requested resource identity always matches the returned catalog.
 
+### conn.callback
+Return the platform's OAuth **callback URL** — the redirect URI to register in your
+provider's OAuth app **before** you create a connector. Read-only, no params.
+
+```bash
+node src/cli/conn.js conn.callback '{}'
+```
+
+Returns `{ callback_url }`. The endpoint is authed (bearer) but **not** org-scoped;
+the CLI still authenticates it with the org's token (harmless — the route ignores
+the org scoping). Fetch this value first, register it as the redirect URI at your
+OAuth provider, then run `conn.app_create` with the provider's `oauth_client_id` /
+`oauth_client_secret`.
+
 ## Custom connector management (applications + action-defs)
 
 The verbs above **use** connections an owner already authorized to you. The verbs
@@ -78,25 +92,29 @@ create a custom connector application, then define the HTTP **action definitions
 server-side: you can only update/delete an application (and its action-defs) that
 belongs to your own org.
 
-Two invariants hold for every verb here (they mirror the rest of `conn.*`):
+Three invariants hold for every verb here (they mirror the rest of `conn.*`):
 
 - **You never supply `org_id`.** cws-core derives the owning org from your
   authenticated principal. (`{org}` still selects *which* enabled org's token to
   use on a multi-org agent — it is not written into any request body.)
 - **You never supply `oauth_callback_url`.** cws-core injects the provider-facing
   redirect URI on create/update and returns it read-only on the item — register
-  that value at your OAuth provider.
+  that value at your OAuth provider. (Use **`conn.callback`** to fetch it *before*
+  creating the connector so you can register it in the provider's OAuth app first.)
+- **You never supply `credential_source`, `visibility`, or `credential_mode`.**
+  cws-core forces them server-side (`custom` / `org` / `direct`), and the
+  create/update schema **rejects them (HTTP 422) if present**, so the CLI drops
+  them from every request body.
 
 ### conn.app_create
 Create a custom connector application.
 
 ```bash
-node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key","visibility":"org","category":"crm"}'
+node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key","category":"crm"}'
 ```
 
 Required: `slug`, `display_name`, `provider_type` (`oauth2` | `api_key`). Optional:
-`description`, `credential_source` (`managed` | `custom`), `visibility`
-(`public` | `org`), `icon_url`, `category`,
+`description`, `icon_url`, `category`,
 `tags[]`, `default_ttl_seconds`, and the auth-shape fields —
 API-key: `api_key_location` (`header` | `query`), `api_key_header_name`;
 OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
@@ -105,10 +123,12 @@ OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
 (`form` | `json`). Returns the created `application` item (its `source` is a
 read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
 
-> **You do not set the credential mode.** cws-connect decides it server-side, so
-> the CLI does not send `credential_mode` on `conn.app_create` (any value you pass
-> is dropped). The created connector uses the single local-egress credential model
-> described under **Credential Handling**.
+> **You do not set `credential_source`, `visibility`, or `credential_mode`.**
+> cws-core forces these server-side (`custom` / `org` / `direct`) and its
+> custom-connector create/update schema now **rejects them (HTTP 422) if sent**, so
+> the CLI never forwards them — any value you pass is dropped before the request,
+> exactly like `org_id` / `oauth_callback_url`. The created connector uses the
+> single local-egress credential model described under **Credential Handling**.
 
 ### conn.app_update
 Update your own custom connector application (ownership-gated).
@@ -399,6 +419,7 @@ agent's **local cleanup is identical** (unindex + delete the cached credential).
 | GET | `/connect/connections/{id}` | conn.status |
 | GET | `/connect/connections/{id}/actions` | conn.actions |
 | GET | `/connect/applications/{id}/actions` | conn.app_actions / conn.catalog |
+| GET | `/connect/oauth-callback-url` | conn.callback |
 | POST | `/connect/applications` | conn.app_create / conn.app_import |
 | PATCH | `/connect/applications/{id}` | conn.app_update |
 | DELETE | `/connect/applications/{id}` | conn.app_delete |
