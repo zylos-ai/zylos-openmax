@@ -201,3 +201,93 @@ export function buildMentions(text, conversationId) {
   }
   return out.length ? out : undefined;
 }
+
+// Global twins of the broadcast matchers, for stripping every sentinel from a
+// string rather than just the first (the originals are single-shot `test()`
+// matchers, so they deliberately aren't global — a global regex carries
+// lastIndex state that would make repeated test() calls alternate).
+const ALL_AGENTS_RE_G = new RegExp(ALL_AGENTS_RE.source, 'giu');
+const ALL_RE_G = new RegExp(ALL_RE.source, 'giu');
+
+// A conservative `@token` scanner, used ONLY to decide whether the registry
+// looks incomplete — never to resolve anybody. Display names may contain
+// characters this misses (a space, most obviously: "@gavin yang" yields the
+// token "gavin"), which is fine, because a partial token is still enough to
+// notice "the registry has nothing for this" and trigger a roster fetch. The
+// actual resolution stays with matchedEntries(), which matches full recorded
+// names against the raw text.
+const MENTION_TOKEN_RE = new RegExp(AT + '([\\p{L}\\p{N}._-]+)', 'giu');
+
+/**
+ * Does `text` mention somebody the local registry can't resolve to a member_id?
+ *
+ * The registry is only ever populated from participants observed speaking in
+ * the conversation (see recordParticipants' caller in comm-bridge.js), so
+ * anyone who has never spoken is invisible to it and an `@name` aimed at them
+ * silently produces no mention at all. This predicate is the trigger for
+ * filling that gap from the conversation roster — see recordRoster().
+ *
+ * Broadcast sentinels are stripped first: `@所有人` / `@所有Agent` resolve
+ * without the registry, so they must never trigger a roster fetch.
+ *
+ * @param {string} text
+ * @param {string} conversationId
+ * @returns {boolean}
+ */
+export function needsRosterHydration(text, conversationId) {
+  const s = String(text ?? '');
+  if (!conversationId || !/[@＠]/.test(s)) return false;
+
+  const withoutBroadcast = s.replace(ALL_AGENTS_RE_G, ' ').replace(ALL_RE_G, ' ');
+  const tokens = [...withoutBroadcast.matchAll(MENTION_TOKEN_RE)].map((m) => m[1]);
+  if (!tokens.length) return false;
+
+  // A token counts as resolved when some registry name that already carries a
+  // member_id starts with it — "starts with" rather than equality because the
+  // recorded name can extend past what the token scanner captured.
+  const resolved = matchedEntries(s, conversationId).filter((e) => e.memberId);
+  return tokens.some((t) => !resolved.some((e) => norm(e.name).startsWith(norm(t))));
+}
+
+/**
+ * Record a conversation's full member roster into the registry, so that an
+ * `@name` aimed at someone who has never spoken can still resolve.
+ *
+ * Two rules, both deliberate:
+ *
+ *  - **Duplicate display names: the first one wins.** Two members can share a
+ *    display name, and the registry is keyed by normalized name, so only one
+ *    can be kept. Ties go to whichever the roster lists first (per Gavin's
+ *    call, 2026-08-07). Without the pre-dedup below, recordParticipants would
+ *    instead let the *last* duplicate overwrite the earlier ones.
+ *  - **Gap-filling only: never overwrite a name that already resolves.** An
+ *    existing entry with a member_id came from someone actually observed
+ *    speaking here, which is stronger evidence of who "@name" means than an
+ *    arbitrary roster ordering. Names recorded without a member_id (legacy
+ *    string-shaped entries) are NOT resolvable, so those do get filled in.
+ *
+ * @param {string} conversationId
+ * @param {Array<{member_id?:string, display_name?:string}>} members
+ */
+export function recordRoster(conversationId, members) {
+  if (!conversationId || !Array.isArray(members)) return;
+
+  const conv = load()[conversationId] || {};
+  const alreadyResolved = new Set(
+    Object.keys(conv).filter((k) => entryOf(conv[k]).memberId),
+  );
+
+  const picked = [];
+  const takenNames = new Set();
+  for (const m of members) {
+    const name = String(m?.display_name ?? '').trim();
+    const memberId = m?.member_id ? String(m.member_id) : undefined;
+    if (!name || !memberId) continue;
+    const key = norm(name);
+    if (alreadyResolved.has(key) || takenNames.has(key)) continue;  // first wins
+    takenNames.add(key);
+    picked.push({ name, memberId });
+  }
+
+  if (picked.length) recordParticipants(conversationId, picked);
+}
