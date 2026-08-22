@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0] — 2026-08-22
+
+Stable release of the custom-connector CLI (promotes `2.15.0-beta.2`). Changes since `2.15.0-beta.2`:
+
+### Added
+
+- `conn.app_list` — list the org's custom connector applications (`GET /connect/applications`), with an optional `category` filter.
+
+### Changed
+
+- `conn.app_create` / `conn.app_update` reworked: `slug` is now optional on `conn.app_create` (server-generated when omitted); `conn.app_update` supports full-field OAuth updates; action-def `description` is now required.
+
+### Removed
+
+- `conn.app_delete` CLI verb dropped (`conn.actiondef_delete` retained). Reverted the #131 card-message documentation that had merged from `main`.
+
 ## [2.15.0-beta.2] — 2026-08-21
 
 *Beta / experimental release — continues the custom-connector CLI preview.*
