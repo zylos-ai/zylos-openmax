@@ -260,20 +260,18 @@ Either path uses the same per-action fields — required `name` / `method` /
 `url_template` / `description`; optional `headers` / `encoding` / `input_schema` — per
 **Action-def schema semantics** below (`Authorization` header forbidden; `input_schema`
 is a draft-07 JSON Schema **string**). Fill `description` for every action (required,
-non-empty). ⚠️ **Each action `name` is a single segment with NO `/`** (e.g. `list_repos`,
-not `repos/list`) — the server prepends the connector slug to form the stored
-`{slug}/{name}`; a name containing `/` is rejected with HTTP 400.
+non-empty). Each action `name` is just the action segment (e.g. `list_repos`) — the
+server prepends the connector slug to form the stored `{slug}/{name}`, so submit the bare
+action name, not `slug/name`.
 
 ### Action-def schema semantics
 
 One action-def row = one HTTP action published for agents to execute.
 
-- **`name`** — the **action-only** name, e.g. `"list_repos"`. **Non-empty and must NOT
-  contain `/`.** The server composes the stored name as `"{connector-slug}/{name}"`, and
-  that composed `slug/name` is what appears in the catalog and what agents pass to
-  `conn.invoke`. Submitting a blank name or one that already contains `/` fails with
-  HTTP 400 `custom connector action name must be non-empty and must not contain '/'`
-  (`conn.actiondef_create` / `conn.actiondef_update` / `conn.app_import` per-action).
+- **`name`** — the **action-only** name, e.g. `"list_repos"` (non-empty). Submit just the
+  action segment — the server prepends the connector slug and stores it as
+  `"{connector-slug}/{name}"`, which is what appears in the catalog and what agents pass
+  to `conn.invoke`. (So don't write the slug prefix into the name yourself.)
 - **`description`** — **required, non-empty** on create/import. A short
   human-readable summary of what the action does; it surfaces to agents in the
   resolved catalog (`conn.actions` / `conn.app_actions`) to help them pick the right
