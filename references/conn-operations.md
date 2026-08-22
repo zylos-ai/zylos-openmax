@@ -109,8 +109,10 @@ Create a custom connector application.
 node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key","category":"crm"}'
 ```
 
-Required: `slug`, `display_name`, `provider_type` (`oauth2` | `api_key`). Optional:
-`description`, `icon_url`, `category`,
+Required: `display_name`, `provider_type` (`oauth2` | `api_key`). `slug` is
+**optional** — cws-core generates one from `display_name` when omitted; pass an
+explicit `slug` only when you need a specific value (it is honored as-is). Optional:
+`slug`, `description`, `icon_url`, `category`,
 `tags[]`, `default_ttl_seconds`, and the auth-shape fields —
 API-key: `api_key_location` (`header` | `query`), `api_key_header_name`;
 OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
@@ -147,7 +149,21 @@ node src/cli/conn.js conn.app_update '{"applicationId":"cb4e4f15-...","display_n
 
 `applicationId` (UUID) required plus at least one updatable field. `slug` and
 `provider_type` are **immutable** and not accepted; the same custom fields as
-create are updatable, plus `is_enabled`.
+create are updatable, plus `is_enabled`. This includes the full OAuth set —
+`oauth_client_id`, `oauth_client_secret`, `oauth_scopes_default[]`,
+`oauth_authorize_url`, `oauth_token_url`, `oauth_pkce`, `oauth_token_auth_method`,
+`oauth_token_body_format`.
+
+Two write semantics to know:
+
+- **`oauth_client_secret` is write-only "blank = keep".** A **blank** (empty or
+  whitespace-only) secret is **dropped** — it never overwrites/clears the stored
+  one, so you can safely update other fields without re-sending it. Pass a
+  **non-empty** value only when you intend to set or rotate it. (An update whose
+  *only* field is a blank secret is rejected as "no updatable fields".)
+- **`oauth_scopes_default` clears on explicit empty.** An explicit empty array
+  (`[]`) is forwarded and **clears** the default scopes (asymmetric with the
+  secret above). Omit the field to leave scopes unchanged.
 
 ### conn.actiondef_list
 List an application's HTTP **action definitions** (the DB-backed action catalog you
@@ -165,12 +181,14 @@ encoding, input_schema, created_at?, updated_at? }`.
 Create one HTTP action definition on an application (ownership-gated).
 
 ```bash
-node src/cli/conn.js conn.actiondef_create '{"applicationId":"cb4e4f15-...","name":"repos/list","method":"GET","url_template":"{base_url}/user/repos","encoding":"","input_schema":"{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"}'
+node src/cli/conn.js conn.actiondef_create '{"applicationId":"cb4e4f15-...","name":"repos/list","description":"List the authenticated user's repositories","method":"GET","url_template":"{base_url}/user/repos","encoding":"","input_schema":"{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"}'
 ```
 
-Required: `applicationId` (UUID), `name`, `method`, `url_template`. Optional:
-`headers` (map), `encoding`, `input_schema`. See **Action-def schema semantics**
-below for the field rules.
+Required: `applicationId` (UUID), `name`, `method`, `url_template`, **`description`
+(non-empty)**. Optional: `headers` (map), `encoding`, `input_schema`. See
+**Action-def schema semantics** below for the field rules. `description` is
+rejected locally with `{status:400}` when missing or empty — before any network
+call (and, in `conn.app_import`, recorded as that action's per-action failure).
 
 ### conn.actiondef_update
 Partial-update one action definition (ownership-gated; parent-scoped by
@@ -198,7 +216,7 @@ loop-create each action-def, reporting **per-action** success/failure so a parti
 import is visible (mirrors the cws-fe "actions JSON import" flow).
 
 ```bash
-node src/cli/conn.js conn.app_import '{"application":{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key"},"actions":[{"name":"repos/list","method":"GET","url_template":"{base_url}/user/repos"},{"name":"repos/get","method":"GET","url_template":"{base_url}/repos/{id}"}]}'
+node src/cli/conn.js conn.app_import '{"application":{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key"},"actions":[{"name":"repos/list","description":"List repositories","method":"GET","url_template":"{base_url}/user/repos"},{"name":"repos/get","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}"}]}'
 ```
 
 `application` (same fields as `conn.app_create`) is validated **before** any network
@@ -215,6 +233,12 @@ One action-def row = one HTTP action published for agents to execute.
 
 - **`name`** — `"toolkit-slug/action-name"` (e.g. `"repos/list"`); the same naming
   agents pass to `conn.invoke`.
+- **`description`** — **required, non-empty** on create/import. A short
+  human-readable summary of what the action does; it surfaces to agents in the
+  resolved catalog (`conn.actions` / `conn.app_actions`) to help them pick the right
+  action. The CLI rejects a missing/blank `description` locally (`{status:400}`)
+  before any network call. (On `conn.actiondef_update` it is an *optional* editable
+  field.)
 - **`method`** — one of `GET` | `POST` | `PUT` | `PATCH` | `DELETE`.
 - **`url_template`** — absolute, or `{base_url}`-prefixed. `{placeholder}` slots are
   filled from params (path/query); an **unfilled query placeholder is dropped**.

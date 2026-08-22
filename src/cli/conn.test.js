@@ -494,10 +494,24 @@ const ACTION_UUID = '22222222-2222-2222-2222-222222222222';
 
 // --- planAppCreate ----------------------------------------------------------
 
-test('planAppCreate: 缺 slug/display_name/provider_type → 400', () => {
-  assert.throws(() => planAppCreate({ display_name: 'X', provider_type: 'api_key' }), (e) => e.status === 400 && /slug/.test(e.message));
+test('planAppCreate: 缺 display_name/provider_type → 400（slug 不再必填）', () => {
   assert.throws(() => planAppCreate({ slug: 'x', provider_type: 'api_key' }), (e) => e.status === 400 && /display_name/.test(e.message));
   assert.throws(() => planAppCreate({ slug: 'x', display_name: 'X' }), (e) => e.status === 400 && /provider_type/.test(e.message));
+});
+
+// #31: slug is server-generated when omitted — the CLI no longer force-requires
+// it, and MUST NOT synthesize/force-send one. An explicit slug is still honored.
+test('planAppCreate: slug 省略 → 不再报错，body 里也不出现 slug（服务端生成）', () => {
+  const plan = planAppCreate({ display_name: 'Acme', provider_type: 'api_key' });
+  assert.equal(plan.method, 'POST');
+  assert.match(plan.path, /\/connect\/applications$/);
+  assert.equal(plan.body.slug, undefined); // never force-sent
+  assert.equal(plan.body.display_name, 'Acme');
+});
+
+test('planAppCreate: 显式 slug 仍原样透传', () => {
+  const plan = planAppCreate({ slug: 'acme', display_name: 'Acme', provider_type: 'oauth2' });
+  assert.equal(plan.body.slug, 'acme');
 });
 
 test('planAppCreate: POST /connect/applications，body 走 allowlist 且不含 org_id/oauth_callback_url/credential_source/visibility', () => {
@@ -614,6 +628,80 @@ test('planAppUpdate: PATCH，忽略 slug/provider_type/org_id/oauth_callback_url
   assert.equal(plan.body.credential_mode, undefined);
 });
 
+// --- OAuth field forwarding (create + update) -------------------------------
+//
+// #31: cws-core now stores the full OAuth field set end-to-end, so the CLI must
+// forward oauth_client_id / oauth_client_secret / oauth_scopes_default and the
+// authorize/token URLs verbatim. Two write semantics are asserted here:
+//   - a BLANK oauth_client_secret is DROPPED ("keep the stored one") — a blank
+//     secret can never clear a previously-set secret;
+//   - a NON-empty secret is forwarded (set/rotate), and an explicit empty
+//     oauth_scopes_default:[] is PRESERVED (clears the default scopes).
+
+test('planAppCreate: OAuth 字段全部透传（client_id/secret/scopes/urls）', () => {
+  const plan = planAppCreate({
+    display_name: 'Acme', provider_type: 'oauth2',
+    oauth_authorize_url: 'https://p.test/authorize', oauth_token_url: 'https://p.test/token',
+    oauth_client_id: 'cid-123', oauth_client_secret: 's3cr3t',
+    oauth_scopes_default: ['read', 'write'], oauth_pkce: true,
+    oauth_token_auth_method: 'basic', oauth_token_body_format: 'form',
+  });
+  assert.equal(plan.body.oauth_client_id, 'cid-123');
+  assert.equal(plan.body.oauth_client_secret, 's3cr3t');
+  assert.deepEqual(plan.body.oauth_scopes_default, ['read', 'write']);
+  assert.equal(plan.body.oauth_authorize_url, 'https://p.test/authorize');
+  assert.equal(plan.body.oauth_token_url, 'https://p.test/token');
+  assert.equal(plan.body.oauth_pkce, true);
+  assert.equal(plan.body.oauth_token_auth_method, 'basic');
+  assert.equal(plan.body.oauth_token_body_format, 'form');
+});
+
+test('planAppCreate: 空 oauth_client_secret 被丢弃（不下发空串）', () => {
+  const plan = planAppCreate({
+    display_name: 'Acme', provider_type: 'oauth2',
+    oauth_client_id: 'cid-123', oauth_client_secret: '   ',
+  });
+  assert.equal(plan.body.oauth_client_id, 'cid-123');
+  assert.equal('oauth_client_secret' in plan.body, false);
+});
+
+test('planAppUpdate: OAuth 字段全部透传，非空 secret 下发', () => {
+  const plan = planAppUpdate({
+    applicationId: APP_UUID,
+    oauth_client_id: 'cid-new', oauth_client_secret: 'rotated',
+    oauth_scopes_default: ['read'],
+    oauth_authorize_url: 'https://p.test/a', oauth_token_url: 'https://p.test/t',
+  });
+  assert.equal(plan.method, 'PATCH');
+  assert.equal(plan.body.oauth_client_id, 'cid-new');
+  assert.equal(plan.body.oauth_client_secret, 'rotated');
+  assert.deepEqual(plan.body.oauth_scopes_default, ['read']);
+  assert.equal(plan.body.oauth_authorize_url, 'https://p.test/a');
+  assert.equal(plan.body.oauth_token_url, 'https://p.test/t');
+});
+
+test('planAppUpdate: 空 secret 被丢弃但其它字段照常更新（blank = 保持不变，绝不清空）', () => {
+  const plan = planAppUpdate({
+    applicationId: APP_UUID, display_name: 'Renamed',
+    oauth_client_id: 'cid-2', oauth_client_secret: '',
+  });
+  assert.equal(plan.body.display_name, 'Renamed');
+  assert.equal(plan.body.oauth_client_id, 'cid-2');
+  assert.equal('oauth_client_secret' in plan.body, false);
+});
+
+test('planAppUpdate: 仅传空 secret → 视为无可更新字段 400（不会下发空串清空）', () => {
+  assert.throws(
+    () => planAppUpdate({ applicationId: APP_UUID, oauth_client_secret: '   ' }),
+    (e) => e.status === 400 && /no updatable fields/.test(e.message),
+  );
+});
+
+test('planAppUpdate: 显式空 oauth_scopes_default:[] 透传（清空默认 scopes，与 secret 语义相反）', () => {
+  const plan = planAppUpdate({ applicationId: APP_UUID, oauth_scopes_default: [] });
+  assert.deepEqual(plan.body.oauth_scopes_default, []);
+});
+
 // --- planActionDefList ------------------------------------------------------
 
 test('planActionDefList: GET .../action-defs；缺/非 UUID applicationId → 400', () => {
@@ -632,10 +720,10 @@ test('planActionDefCreate: 缺 name/method/url_template → 400', () => {
   assert.throws(() => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', method: 'GET' }), (e) => e.status === 400 && /url_template/.test(e.message));
 });
 
-test('planActionDefCreate: POST .../action-defs，body allowlist（含 headers/encoding/input_schema）', () => {
+test('planActionDefCreate: POST .../action-defs，body allowlist（含 description/headers/encoding/input_schema）', () => {
   const plan = planActionDefCreate({
     applicationId: APP_UUID,
-    name: 'repos/list', method: 'GET', url_template: '{base_url}/repos',
+    name: 'repos/list', description: 'List repositories', method: 'GET', url_template: '{base_url}/repos',
     headers: { 'X-Trace': '1' }, encoding: 'form',
     input_schema: '{"type":"object","properties":{},"additionalProperties":false}',
     org_id: 'evil', bogus: 'nope',
@@ -643,6 +731,7 @@ test('planActionDefCreate: POST .../action-defs，body allowlist（含 headers/e
   assert.equal(plan.method, 'POST');
   assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}/action-defs$`));
   assert.equal(plan.body.name, 'repos/list');
+  assert.equal(plan.body.description, 'List repositories');
   assert.equal(plan.body.method, 'GET');
   assert.equal(plan.body.url_template, '{base_url}/repos');
   assert.deepEqual(plan.body.headers, { 'X-Trace': '1' });
@@ -652,21 +741,35 @@ test('planActionDefCreate: POST .../action-defs，body allowlist（含 headers/e
   assert.equal(plan.body.bogus, undefined);
 });
 
+// #31: description is REQUIRED and non-empty on create/import. Missing, empty,
+// or whitespace-only all reject locally (400) before any network call.
+test('planActionDefCreate: 缺/空/空白 description → 400（非空必填）', () => {
+  const baseline = { applicationId: APP_UUID, name: 't/a', method: 'GET', url_template: 'u' };
+  assert.throws(() => planActionDefCreate(baseline), (e) => e.status === 400 && /description is required/.test(e.message));
+  assert.throws(() => planActionDefCreate({ ...baseline, description: '' }), (e) => e.status === 400 && /description is required/.test(e.message));
+  assert.throws(() => planActionDefCreate({ ...baseline, description: '   ' }), (e) => e.status === 400 && /description is required/.test(e.message));
+  // A non-empty description makes it valid.
+  const plan = planActionDefCreate({ ...baseline, description: 'does a thing' });
+  assert.equal(plan.body.description, 'does a thing');
+});
+
 test('planActionDefCreate: headers.Authorization 禁止（大小写不敏感）→ 400', () => {
+  // A valid description is supplied so the reject is isolated to the Authorization
+  // header (the forbidden-header check runs after the required-field checks).
   for (const key of ['Authorization', 'authorization', 'AUTHORIZATION', 'AuThOrIzAtIoN']) {
     assert.throws(
-      () => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', method: 'GET', url_template: 'u', headers: { [key]: 'Bearer x' } }),
+      () => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', description: 'd', method: 'GET', url_template: 'u', headers: { [key]: 'Bearer x' } }),
       (e) => e.status === 400 && /headers\.Authorization is forbidden/.test(e.message),
       `expected rejection for header key ${key}`,
     );
   }
   // A benign header alongside is irrelevant — the Authorization key still trips.
   assert.throws(
-    () => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', method: 'GET', url_template: 'u', headers: { 'X-Trace': '1', authorization: 'Bearer x' } }),
+    () => planActionDefCreate({ applicationId: APP_UUID, name: 't/a', description: 'd', method: 'GET', url_template: 'u', headers: { 'X-Trace': '1', authorization: 'Bearer x' } }),
     (e) => e.status === 400 && /Authorization is forbidden/.test(e.message),
   );
   // Non-Authorization headers pass through untouched.
-  const plan = planActionDefCreate({ applicationId: APP_UUID, name: 't/a', method: 'GET', url_template: 'u', headers: { 'X-Trace': '1' } });
+  const plan = planActionDefCreate({ applicationId: APP_UUID, name: 't/a', description: 'd', method: 'GET', url_template: 'u', headers: { 'X-Trace': '1' } });
   assert.deepEqual(plan.body.headers, { 'X-Trace': '1' });
 });
 
@@ -719,14 +822,16 @@ test('runAppImport: 缺 application 对象 → 400（无网络）', async () => 
   );
 });
 
-test('runAppImport: app body 无效（缺 slug）→ 400 且不发起任何创建', async () => {
+test('runAppImport: app body 无效（缺 display_name，slug 现可省）→ 400 且不发起任何创建', async () => {
   let createAppCalls = 0;
+  // slug is now optional, so the invalid-app guard trips on a STILL-required
+  // field (display_name) instead — validated up-front before any network call.
   await assert.rejects(
     () => runAppImport(
-      { application: { display_name: 'X', provider_type: 'api_key' }, actions: [] },
+      { application: { provider_type: 'api_key' }, actions: [] },
       { createApp: async () => { createAppCalls += 1; return { id: APP_UUID }; }, createActionDef: async () => {} },
     ),
-    (e) => e.status === 400 && /slug/.test(e.message),
+    (e) => e.status === 400 && /display_name/.test(e.message),
   );
   assert.equal(createAppCalls, 0);
 });
@@ -741,8 +846,8 @@ test('runAppImport: 成功创建 app 再逐个创建 action-def；org_id/oauth_c
         org_id: 'evil', oauth_callback_url: 'https://evil/cb',
       },
       actions: [
-        { name: 'repos/list', method: 'GET', url_template: '{base_url}/repos', org_id: 'evil' },
-        { name: 'repos/get', method: 'GET', url_template: '{base_url}/repos/{id}' },
+        { name: 'repos/list', description: 'List repos', method: 'GET', url_template: '{base_url}/repos', org_id: 'evil' },
+        { name: 'repos/get', description: 'Get one repo', method: 'GET', url_template: '{base_url}/repos/{id}' },
       ],
     },
     {
@@ -771,9 +876,9 @@ test('runAppImport: 某个 action-def 失败 → 部分成功报告（不中断�
     {
       application: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' },
       actions: [
-        { name: 'ok/one', method: 'GET', url_template: '{base_url}/a' },
-        { name: 'bad/two', method: 'GET' }, // missing url_template → local 400, never sent
-        { name: 'ok/three', method: 'GET', url_template: '{base_url}/c' },
+        { name: 'ok/one', description: 'a', method: 'GET', url_template: '{base_url}/a' },
+        { name: 'bad/two', description: 'b', method: 'GET' }, // missing url_template → local 400, never sent
+        { name: 'ok/three', description: 'c', method: 'GET', url_template: '{base_url}/c' },
       ],
     },
     {
@@ -800,9 +905,9 @@ test('runAppImport: action-def 带 Authorization 头 → 本地拒绝为该 acti
     {
       application: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' },
       actions: [
-        { name: 'ok/one', method: 'GET', url_template: '{base_url}/a' },
-        { name: 'bad/auth', method: 'GET', url_template: '{base_url}/b', headers: { Authorization: 'Bearer leaked' } },
-        { name: 'bad/auth-lower', method: 'GET', url_template: '{base_url}/c', headers: { authorization: 'Bearer leaked' } },
+        { name: 'ok/one', description: 'a', method: 'GET', url_template: '{base_url}/a' },
+        { name: 'bad/auth', description: 'b', method: 'GET', url_template: '{base_url}/b', headers: { Authorization: 'Bearer leaked' } },
+        { name: 'bad/auth-lower', description: 'c', method: 'GET', url_template: '{base_url}/c', headers: { authorization: 'Bearer leaked' } },
       ],
     },
     {
@@ -1000,6 +1105,135 @@ test('conn.callback (subprocess): GET /connect/oauth-callback-url，返回 unwra
     // inner data object.
     const out = JSON.parse(stdout);
     assert.equal(out.callback_url, 'https://platform.test/oauth/callback');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// ============================================================================
+//  OAuth-field forwarding + Authorization non-forwarding (subprocess, wire-level)
+// ============================================================================
+//
+// #31 regression, proven at the wire (the strongest form — the real CLI process
+// against a local server that captures the received request):
+//   1. The full OAuth field set forwards correctly on conn.app_create and
+//      conn.app_update.
+//   2. A BLANK oauth_client_secret is never placed on the wire on update — a
+//      blank secret must never overwrite/clear a stored one.
+//   3. The CLI never forwards a caller-supplied action-def `Authorization`
+//      header — conn.actiondef_create rejects it LOCALLY (400) and NO request
+//      ever reaches cws-core (the header can't leak into a stored row).
+
+// Small helper: a server that records the first captured {method,url,body}.
+function bodyCaptureServer(match, respond) {
+  const seen = {};
+  const server = createServer((req, res) => {
+    if (match(req)) {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        seen.method = req.method;
+        seen.url = req.url;
+        seen.authorization = req.headers.authorization;
+        try { seen.body = JSON.parse(body); } catch { seen.body = body; }
+        respond(res);
+      });
+      return;
+    }
+    seen.strayUrls = seen.strayUrls || [];
+    seen.strayUrls.push(req.url);
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  return { seen, server };
+}
+
+test('conn.app_create (subprocess): OAuth 字段整套下发到 wire body（client_id/secret/scopes/urls），org_id 不泄漏', async () => {
+  const home = setupHome({ orgId: 'org-1' });
+  const { seen, server } = bodyCaptureServer(
+    (req) => req.method === 'POST' && req.url.includes('/connect/applications'),
+    (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { id: APP_UUID, slug: 'acme' }, request_id: 'r1' }));
+    },
+  );
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(home, 'conn.app_create', {
+      org: 'org-1', display_name: 'Acme', provider_type: 'oauth2',
+      oauth_authorize_url: 'https://p.test/authorize', oauth_token_url: 'https://p.test/token',
+      oauth_client_id: 'cid-123', oauth_client_secret: 's3cr3t',
+      oauth_scopes_default: ['read', 'write'],
+      org_id: 'evil-org',
+    }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    assert.equal(seen.body.oauth_client_id, 'cid-123');
+    assert.equal(seen.body.oauth_client_secret, 's3cr3t');
+    assert.deepEqual(seen.body.oauth_scopes_default, ['read', 'write']);
+    assert.equal(seen.body.oauth_authorize_url, 'https://p.test/authorize');
+    assert.equal(seen.body.oauth_token_url, 'https://p.test/token');
+    assert.equal(seen.body.org_id, undefined);
+    // slug omitted by the caller → never force-sent (server generates it).
+    assert.equal(seen.body.slug, undefined);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.app_update (subprocess): OAuth 字段下发；空 secret 绝不上 wire（blank = 保持不变）', async () => {
+  const home = setupHome({ orgId: 'org-1' });
+  const { seen, server } = bodyCaptureServer(
+    (req) => req.method === 'PATCH' && req.url.includes(`/connect/applications/${APP_UUID}`),
+    (res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { id: APP_UUID }, request_id: 'r1' }));
+    },
+  );
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(home, 'conn.app_update', {
+      org: 'org-1', applicationId: APP_UUID,
+      display_name: 'Acme CRM',
+      oauth_client_id: 'cid-new', oauth_client_secret: '', // blank → dropped
+      oauth_scopes_default: ['read'],
+    }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    assert.equal(seen.method, 'PATCH');
+    assert.equal(seen.body.display_name, 'Acme CRM');
+    assert.equal(seen.body.oauth_client_id, 'cid-new');
+    assert.deepEqual(seen.body.oauth_scopes_default, ['read']);
+    // The blank secret must NOT appear on the wire — it can never clear a stored one.
+    assert.equal('oauth_client_secret' in seen.body, false);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.actiondef_create (subprocess): 调用方 Authorization 头本地拒绝，绝不转发到 cws-core（无任何请求上 wire）', async () => {
+  const home = setupHome({ orgId: 'org-1' });
+  const hits = [];
+  const server = createServer((req, res) => {
+    hits.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ data: { id: ACTION_UUID }, request_id: 'r1' }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(home, 'conn.actiondef_create', {
+      org: 'org-1', applicationId: APP_UUID,
+      name: 'repos/list', description: 'List repos', method: 'GET', url_template: '{base_url}/repos',
+      headers: { Authorization: 'Bearer leaked-caller-token' },
+    }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 400);
+    assert.match(err.error, /headers\.Authorization is forbidden/);
+    // The critical guarantee: the caller's Authorization header never reaches
+    // cws-core — the reject is local, so NO action-def request hit the server.
+    assert.equal(hits.length, 0, `no request should reach cws-core, saw: ${JSON.stringify(hits)}`);
   } finally {
     await new Promise((r) => server.close(r));
   }

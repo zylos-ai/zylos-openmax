@@ -85,7 +85,7 @@ for (const c of [
   { command: 'conn.app_create', params: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' } },
   { command: 'conn.app_update', params: { applicationId: '11111111-1111-1111-1111-111111111111', display_name: 'X' } },
   { command: 'conn.actiondef_list', params: { applicationId: '11111111-1111-1111-1111-111111111111' } },
-  { command: 'conn.actiondef_create', params: { applicationId: '11111111-1111-1111-1111-111111111111', name: 't/a', method: 'GET', url_template: '{base_url}/x' } },
+  { command: 'conn.actiondef_create', params: { applicationId: '11111111-1111-1111-1111-111111111111', name: 't/a', description: 'd', method: 'GET', url_template: '{base_url}/x' } },
   { command: 'conn.actiondef_update', params: { applicationId: '11111111-1111-1111-1111-111111111111', actionId: '22222222-2222-2222-2222-222222222222', method: 'GET' } },
   { command: 'conn.actiondef_delete', params: { applicationId: '11111111-1111-1111-1111-111111111111', actionId: '22222222-2222-2222-2222-222222222222' } },
   { command: 'conn.app_import', params: { application: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' }, actions: [] } },

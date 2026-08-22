@@ -126,8 +126,8 @@ const APP_UPDATE_FIELDS = [
   'oauth_scopes_default', 'oauth_pkce', 'oauth_token_auth_method', 'oauth_token_body_format',
   'default_ttl_seconds',
 ];
-const ACTIONDEF_CREATE_FIELDS = ['name', 'method', 'url_template', 'headers', 'encoding', 'input_schema'];
-const ACTIONDEF_UPDATE_FIELDS = ['method', 'url_template', 'headers', 'encoding', 'input_schema'];
+const ACTIONDEF_CREATE_FIELDS = ['name', 'method', 'url_template', 'description', 'headers', 'encoding', 'input_schema'];
+const ACTIONDEF_UPDATE_FIELDS = ['method', 'url_template', 'description', 'headers', 'encoding', 'input_schema'];
 
 function bad(message) { return Object.assign(new Error(message), { status: 400 }); }
 
@@ -147,6 +147,21 @@ function pick(src, allowed) {
     if (src[k] !== undefined) out[k] = src[k];
   }
   return out;
+}
+
+// OAuth secret semantics: a BLANK (empty/whitespace-only) `oauth_client_secret`
+// means "leave the stored secret unchanged" — it must NEVER be forwarded, so an
+// update that omits or blanks the secret can never CLEAR a previously-stored one.
+// A NON-empty secret IS forwarded (to set/rotate it). This mirrors the cws-fe
+// form, which only sends the secret when the user actually typed a new value.
+// Note this is deliberately asymmetric with `oauth_scopes_default`: an explicit
+// empty array (`[]`) there is preserved and CLEARS the default scopes — only the
+// secret has the write-only "blank = keep" behavior.
+function dropBlankClientSecret(body) {
+  if (typeof body.oauth_client_secret === 'string' && body.oauth_client_secret.trim() === '') {
+    delete body.oauth_client_secret;
+  }
+  return body;
 }
 
 // An action-def's stored `headers` are applied by cws-connect on the DB-backed
@@ -181,17 +196,24 @@ function requireActionId(p) {
 }
 
 // POST /connect/applications — create a custom connector application.
+// `slug` is OPTIONAL: cws-core generates one from display_name when omitted
+// (#31, end-to-end deployed). An explicit slug is still honored — it stays in the
+// allowlist and is forwarded as-is — but the CLI no longer force-requires it.
 export function planAppCreate(p) {
-  if (!p.slug) throw bad('slug is required');
   if (!p.display_name) throw bad('display_name is required');
   if (!p.provider_type) throw bad('provider_type is required (oauth2 | api_key)');
-  return { method: 'POST', path: apiPath('/connect/applications'), body: pick(p, APP_CREATE_FIELDS) };
+  const body = dropBlankClientSecret(pick(p, APP_CREATE_FIELDS));
+  return { method: 'POST', path: apiPath('/connect/applications'), body };
 }
 
 // PATCH /connect/applications/{id} — update the caller's own custom connector.
+// Carries the full OAuth field set (oauth_client_id / oauth_client_secret /
+// oauth_scopes_default / authorize+token URLs, all in APP_UPDATE_FIELDS). A blank
+// secret is dropped BEFORE the "no updatable fields" check, so an update whose
+// ONLY field is a blank secret is correctly rejected as empty rather than sent.
 export function planAppUpdate(p) {
   const applicationId = requireAppId(p);
-  const body = pick(p, APP_UPDATE_FIELDS);
+  const body = dropBlankClientSecret(pick(p, APP_UPDATE_FIELDS));
   if (Object.keys(body).length === 0) throw bad('no updatable fields provided');
   return { method: 'PATCH', path: apiPath(`/connect/applications/${applicationId}`), body };
 }
@@ -208,6 +230,11 @@ export function planActionDefCreate(p) {
   if (!p.name) throw bad('name is required (format: toolkit-slug/action-name)');
   if (!p.method) throw bad('method is required (GET|POST|PUT|PATCH|DELETE)');
   if (!p.url_template) throw bad('url_template is required');
+  // description is REQUIRED and non-empty on create/import (#31, cws-core now
+  // stores it end-to-end). Reject a missing/blank one locally before any network.
+  if (p.description == null || String(p.description).trim() === '') {
+    throw bad('description is required (non-empty)');
+  }
   assertNoAuthorizationHeader(p.headers);
   return {
     method: 'POST',
@@ -847,11 +874,11 @@ Applications
   conn.callback       {}                                        # platform OAuth callback URL to register in the provider's OAuth app
 
 Applications (custom connector management)
-  conn.app_create     {slug, display_name, provider_type, ...}  # create a custom connector application (POST /connect/applications)
-  conn.app_update     {applicationId, ...optional}              # update your own custom connector (slug/provider_type immutable)
+  conn.app_create     {display_name, provider_type, slug?, ...} # create a custom connector application (slug optional — server-generated when omitted)
+  conn.app_update     {applicationId, ...optional}              # update your own custom connector (slug/provider_type immutable; OAuth id/secret/scopes updatable)
   conn.actiondef_list   {applicationId}                         # list an app's HTTP action definitions
-  conn.actiondef_create {applicationId, name, method, url_template, headers?, encoding?, input_schema?}
-  conn.actiondef_update {applicationId, actionId, method?, url_template?, headers?, encoding?, input_schema?}
+  conn.actiondef_create {applicationId, name, method, url_template, description, headers?, encoding?, input_schema?}  # description REQUIRED
+  conn.actiondef_update {applicationId, actionId, method?, url_template?, description?, headers?, encoding?, input_schema?}
   conn.actiondef_delete {applicationId, actionId}               # delete one action definition
   conn.app_import     {application:{...}, actions:[...]}        # bulk: create app then each action-def (per-action report)
                                                                  #   never forward org_id/oauth_callback_url (server-derived);
