@@ -181,7 +181,7 @@ encoding, input_schema, created_at?, updated_at? }`.
 Create one HTTP action definition on an application (ownership-gated).
 
 ```bash
-node src/cli/conn.js conn.actiondef_create '{"applicationId":"cb4e4f15-...","name":"repos/list","description":"List the authenticated user's repositories","method":"GET","url_template":"{base_url}/user/repos","encoding":"","input_schema":"{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"}'
+node src/cli/conn.js conn.actiondef_create '{"applicationId":"cb4e4f15-...","name":"list_repos","description":"List the authenticated user's repositories","method":"GET","url_template":"{base_url}/user/repos","encoding":"","input_schema":"{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"}'
 ```
 
 Required: `applicationId` (UUID), `name`, `method`, `url_template`, **`description`
@@ -216,7 +216,7 @@ loop-create each action-def, reporting **per-action** success/failure so a parti
 import is visible (mirrors the cws-fe "actions JSON import" flow).
 
 ```bash
-node src/cli/conn.js conn.app_import '{"application":{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key"},"actions":[{"name":"repos/list","description":"List repositories","method":"GET","url_template":"{base_url}/user/repos"},{"name":"repos/get","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}"}]}'
+node src/cli/conn.js conn.app_import '{"application":{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key"},"actions":[{"name":"list_repos","description":"List repositories","method":"GET","url_template":"{base_url}/user/repos"},{"name":"get_repo","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}"}]}'
 ```
 
 `application` (same fields as `conn.app_create`) is validated **before** any network
@@ -251,8 +251,8 @@ exactly right:
 
 ```json
 {"actions":[
-  {"name":"repos/list","description":"List the user's repositories","method":"GET","url_template":"{base_url}/user/repos"},
-  {"name":"repos/get","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}","input_schema":"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"}
+  {"name":"list_repos","description":"List the user's repositories","method":"GET","url_template":"{base_url}/user/repos"},
+  {"name":"get_repo","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}","input_schema":"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"}
 ]}
 ```
 
@@ -260,14 +260,20 @@ Either path uses the same per-action fields — required `name` / `method` /
 `url_template` / `description`; optional `headers` / `encoding` / `input_schema` — per
 **Action-def schema semantics** below (`Authorization` header forbidden; `input_schema`
 is a draft-07 JSON Schema **string**). Fill `description` for every action (required,
-non-empty).
+non-empty). ⚠️ **Each action `name` is a single segment with NO `/`** (e.g. `list_repos`,
+not `repos/list`) — the server prepends the connector slug to form the stored
+`{slug}/{name}`; a name containing `/` is rejected with HTTP 400.
 
 ### Action-def schema semantics
 
 One action-def row = one HTTP action published for agents to execute.
 
-- **`name`** — `"toolkit-slug/action-name"` (e.g. `"repos/list"`); the same naming
-  agents pass to `conn.invoke`.
+- **`name`** — the **action-only** name, e.g. `"list_repos"`. **Non-empty and must NOT
+  contain `/`.** The server composes the stored name as `"{connector-slug}/{name}"`, and
+  that composed `slug/name` is what appears in the catalog and what agents pass to
+  `conn.invoke`. Submitting a blank name or one that already contains `/` fails with
+  HTTP 400 `custom connector action name must be non-empty and must not contain '/'`
+  (`conn.actiondef_create` / `conn.actiondef_update` / `conn.app_import` per-action).
 - **`description`** — **required, non-empty** on create/import. A short
   human-readable summary of what the action does; it surfaces to agents in the
   resolved catalog (`conn.actions` / `conn.app_actions`) to help them pick the right

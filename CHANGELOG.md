@@ -25,7 +25,7 @@ Stable release of the custom-connector CLI (promotes `2.15.0-beta.2`). Changes s
 
 ### Docs
 
-- `references/conn-operations.md`: document the two ways the Agent adds actions to a custom connector — (A) import via CLI (`conn.app_import` for new app+actions, `conn.actiondef_create` for an existing one) and (B) hand the user a directly-importable `{"actions":[…]}` block to self-import (distinct from `conn.app_import`'s `{application, actions}`; not a bare array), with field rules and an example.
+- `references/conn-operations.md`: document the two ways the Agent adds actions to a custom connector — (A) import via CLI (`conn.app_import` for new app+actions, `conn.actiondef_create` for an existing one) and (B) hand the user a directly-importable `{"actions":[…]}` block to self-import (distinct from `conn.app_import`'s `{application, actions}`; not a bare array), with field rules and an example. Also **corrected the action-`name` examples to bare single-segment names** (e.g. `list_repos`, not `repos/list`) to match the backend rule — the client submits the action-only name (non-empty, no `/`) and the server composes the stored `{connector-slug}/{name}`; a `/` in the submitted name is rejected HTTP 400 (`ErrActionNameInvalid`).
 
 ## [2.15.0-beta.2] — 2026-08-21
 
