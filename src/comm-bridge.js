@@ -42,7 +42,7 @@ import { createReadinessTrigger } from './lib/readiness-trigger.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
-import { handleConnectionEvent, sendOwnerReauthDm } from './lib/connection-events.js';
+import { handleConnectionEvent, sendOwnerReauthDm, buildConnectionAuthorizedNotice } from './lib/connection-events.js';
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
@@ -1617,28 +1617,14 @@ async function notifyReauthNeeded(orgConfig, info = {}) {
 // to run conn.list. Session-level control inject (no conversation context), mirroring
 // notifyOwnerChanged. Best-effort; never throws into the event handler.
 function notifyConnectionAuthorized(orgConfig, info = {}) {
-  const { connectionId, provider, actionCount, mode } = info;
-  const app = provider || 'a third-party app';
-  const modeNote = mode && mode !== '?' ? `, ${mode} mode` : '';
-  const actionsNote = Number.isInteger(actionCount) && actionCount > 0 ? `, ~${actionCount} actions` : '';
-  const appHint = provider ? ` {app:"${provider}"}` : '';
-  // The call semantics differ by credential mode, so the notice must too:
-  //   - direct → self-trigger: the token is already cached locally and the agent
-  //     makes the request from its OWN egress (conn.invoke assembles + sends it).
-  //   - proxy  → server-side injection: the agent never handles the credential.
-  const callNote = mode === 'direct'
-    ? `the token is ready locally — conn.catalog${appHint} to find actions and conn.invoke {app, action, params} to call; you make the request from your own egress`
-    : `conn.catalog${appHint} to find actions, conn.invoke {app, action, params} to call (credentials are injected server-side; you never handle them)`;
-  const content =
-    `🔌 [Connection authorized] A new third-party connection was authorized to you: ${app} (org ${orgConfig.slug}${modeNote}${actionsNote}). `
-    + `You can use it now — no install needed: conn.list to see it, ${callNote}. connection_id=${connectionId || '?'}.`;
+  const content = buildConnectionAuthorizedNotice(orgConfig, info);
   execFile(
     process.execPath,
     [C4_CONTROL, 'enqueue', '--content', content, '--priority', '2', '--no-ack-suffix'],
     { timeout: 10000 },
     (err, _stdout, stderr) => {
       if (err) warn(`[${orgConfig.slug}] failed to enqueue connection-authorized control: ${stderr || err.message}`);
-      else log(`[${orgConfig.slug}] connection-authorized control enqueued conn=${connectionId || '?'}`);
+      else log(`[${orgConfig.slug}] connection-authorized control enqueued conn=${info.connectionId || '?'}`);
     },
   );
 }

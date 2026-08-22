@@ -7,30 +7,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.14.8-beta.1] — 2026-08-20
+## [2.15.0] — 2026-08-22
+
+Stable release of the custom-connector CLI (promotes `2.15.0-beta.2`). Changes since `2.15.0-beta.2`:
 
 ### Added
 
-- Card message (`type: "CARD"`) documentation. `comm.send` already supported
-  cards (`content.content_type: "card"` + a `cws.card.v1` body) via
-  `buildSendBody`; the skill docs never described it. `references/comm-operations.md`
-  gains a "Card messages" section covering the two card kinds (`display`
-  yes/no reply cards vs `interactive` business cards), the three distinct
-  `type` levels (message `CARD` / content `card` / block type), a minimal
-  copy-paste yes/no card, the `cws.card.v1` top-level key table, `ui.quick_reply`,
-  reading the answer back from `card_state.action_id`, and the current
-  limitations (cws-fe rendering not yet merged → cards degrade to
-  `fallback_text`; some deployed images may reject the `CARD` enum with 422).
+- `conn.app_list` — list the org's custom connector applications (`GET /connect/applications`), with an optional `category` filter.
 
 ### Changed
 
-- `SKILL.md` "How to Send a Message" gains a behavioral rule: when asking the
-  user to pick from a small set of answers (yes/no, confirm/cancel,
-  approve/reject), prefer a `display`-mode card with `ui.quick_reply` buttons
-  over a plain-text question, and read the choice from `card_state.action_id`
-  (not the button label). Open-ended questions stay plain text.
+- `conn.app_create` / `conn.app_update` reworked: `slug` is now optional on `conn.app_create` (server-generated when omitted); `conn.app_update` supports full-field OAuth updates; action-def `description` is now required.
 
-Docs only — no code or runtime behavior change.
+### Removed
+
+- `conn.app_delete` CLI verb dropped (`conn.actiondef_delete` retained). Reverted the #131 card-message documentation that had merged from `main`.
+
+### Docs
+
+- `references/conn-operations.md`: document the two ways the Agent adds actions to a custom connector — (A) import via CLI (`conn.app_import` for new app+actions, `conn.actiondef_create` for an existing one) and (B) hand the user a directly-importable `{"actions":[…]}` block to self-import (distinct from `conn.app_import`'s `{application, actions}`; not a bare array), with field rules and an example. Also **corrected the action-`name` examples to bare action-only names** (e.g. `list_repos`, not `repos/list`): the client submits just the action segment and the server composes the stored `{connector-slug}/{name}`.
+
+## [2.15.0-beta.2] — 2026-08-21
+
+*Beta / experimental release — continues the custom-connector CLI preview.*
+
+### Changed
+
+- `conn.js` **no longer sends `credential_source`, `visibility`, or
+  `credential_mode`** on `conn.app_create` / `conn.app_update` (and the
+  `conn.app_import` app body, which reuses the create planner). cws-core now
+  forces these three server-side (`custom` / `org` / `direct`) and its
+  custom-connector create/update request schema (strict huma) **rejects them with
+  HTTP 422 if present**. They were removed from the `APP_CREATE_FIELDS`
+  (`credential_source`, `visibility`) and `APP_UPDATE_FIELDS`
+  (`credential_source`, `visibility`, `credential_mode`) allowlists, so the request
+  planner drops them exactly the way it already drops the server-injected
+  `org_id` / `oauth_callback_url`. `references/conn-operations.md` updated to match.
+
+### Added
+
+- `conn.app_list` — list the org's custom connector applications
+  (`GET /connect/applications`), optional `category` filter. Enumerates
+  `applicationId`s **without** an existing connection (contrast connection-scoped
+  `conn.list`); org is derived server-side (never a client param).
+- New `conn.callback` command — returns the platform's OAuth **callback URL**
+  (`GET /api/v1/connect/oauth-callback-url`, D8 envelope `{ data: { callback_url } }`,
+  unwrapped to `{ callback_url }`). Register this redirect URI in the provider's
+  OAuth app **before** creating a connector. The endpoint is authed (bearer) but
+  not org-scoped; the CLI authenticates it with the operating org's token.
+
+### Removed
+
+- Dropped the card-message docs (reverted #131 on this branch): removed the
+  `SKILL.md` "prefer a card for a yes/no choice" behavioral bullet and the
+  `references/comm-operations.md` "Card messages" section.
+- Removed the `conn.app_delete` CLI verb (handler, `planAppDelete` helper, usage
+  line, tests) and its `references/conn-operations.md` documentation.
+
+## [2.15.0-beta.1] — 2026-08-19
+
+*Beta / experimental release. The custom-connector CLI verbs (`conn.app_*` /
+`conn.actiondef_*` / `conn.app_import`) ship as a beta preview — the command
+surface and parameters may change before the stable 2.15.0.*
+
+### Added
+
+- Custom-connector management verbs on `conn.js` — onboard and manage custom
+  connector **applications** and their DB-backed HTTP **action definitions**
+  against the cws-core BFF `/connect/applications*` surface (REST contract
+  alpha.90). New verbs: `conn.app_create` (`POST /connect/applications`),
+  `conn.app_update` (`PATCH …/{id}`), `conn.app_delete` (`DELETE …/{id}`),
+  `conn.actiondef_list` (`GET …/{id}/action-defs`), `conn.actiondef_create`
+  (`POST …/action-defs`), `conn.actiondef_update`
+  (`PATCH …/action-defs/{action_id}`), `conn.actiondef_delete`
+  (`DELETE …/action-defs/{action_id}`), plus `conn.app_import` — a bulk verb that
+  creates the application then loop-creates each action-def from an import JSON,
+  returning a per-action success/failure report (`actions_total` /
+  `actions_created` / `actions_failed` / `results[]`) so a partial import is
+  visible and never aborts the remaining actions.
+- Every management verb is org-scoped like the rest of `conn.*`: it resolves the
+  operating org via `requireOrgId()` and routes through the org-scoped
+  `getForOrg`/`postForOrg`/`patchForOrg`/`delForOrg` helpers, failing fast with an
+  actionable HTTP 400 on a multi-org agent with no `{org}` / `COCO_ORG_ID`.
+  Required params are validated locally (400) and `applicationId`/`actionId` must
+  be UUIDs.
+- Security: `org_id` and `oauth_callback_url` are **never** forwarded in a request
+  body — both are server-derived (org from the authenticated principal; callback
+  URL injected by cws-core on create/update). Request bodies are built from a
+  strict field allowlist rather than by spreading caller params, so those fields
+  (and any unknown key) cannot leak through even when supplied. (`org_id` is still
+  honored only as an operating-org selector, never written to a body.)
+- Action-def `headers` reject a caller-supplied `Authorization` key locally,
+  **case-insensitively** (`Authorization` / `authorization` / `AUTHORIZATION`), in
+  the pure planner shared by `conn.actiondef_create`, `conn.actiondef_update`, and
+  the `conn.app_import` action loop — throwing
+  `{status:400, error:"headers.Authorization is forbidden — the connection credential
+  is injected at call time"}` (in `app_import` the offending action is recorded as a
+  per-action failure and never created). Provider auth comes from the connection,
+  not from action headers; a stored `Authorization` on a DB-backed custom action-def
+  is applied after credential injection on the execution path and would override the
+  per-connection auth, so the CLI must not author such a row.
+- `references/conn-operations.md`: a "Custom connector management" section
+  documenting the new verbs and the action-def schema semantics (method set;
+  `url_template` `{placeholder}` slots; `encoding` `""`=JSON / `form` / `none`;
+  `input_schema` = JSON Schema draft-07; the **`Authorization` header is
+  forbidden** — the connection token is injected at call time). `printUsage()` gains
+  an "Applications (custom connector management)" section.
 
 ## [2.14.7] — 2026-08-18
 

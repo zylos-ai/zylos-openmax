@@ -65,15 +65,30 @@ for (const c of [
   { command: 'conn.status', params: { connectionId: 'c1' } },
   { command: 'conn.acquire', params: { connectionId: 'c1' } },
   { command: 'conn.actions', params: { connectionId: 'c1' } },
-  { command: 'conn.execute', params: { connectionId: 'c1', action: 'toolkit/act' } },
+  // conn.execute / conn.proxy are direct-only tombstones now (proxy deprecated/
+  // removed) — they throw BEFORE any org resolution, so they are covered by a
+  // dedicated test below rather than this org-scoping loop.
   { command: 'conn.app_actions', params: { applicationId: 'app-1' } },
-  { command: 'conn.proxy', params: { connectionId: 'c1', url: 'https://example.test' } },
+  // conn.callback authenticates with the org token (endpoint is authed but not
+  // org-scoped) — it still resolves the operating org, so it fails-fast too.
+  { command: 'conn.callback', params: {} },
   // The three agent-facing entry points must fail-fast too (they previously
   // used bare resolveOrgId() and would go out identity-only / return a
   // misleading empty result). invoke needs app+action to reach the org check.
   { command: 'conn.catalog', params: { applicationId: 'app-1' } },
   { command: 'conn.invoke', params: { app: 'gmail', action: 'gmail-labels/list' } },
   { command: 'conn.index', params: {} },
+  // Custom-connector management verbs must fail-fast too. Params are valid enough
+  // to pass local validation so the requireOrgId() gate is what trips (UUIDs where
+  // required). The multi-org home enables org-1 + org-2 with no default, so
+  // {org} (also not set here) can't be resolved → 400.
+  { command: 'conn.app_create', params: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' } },
+  { command: 'conn.app_update', params: { applicationId: '11111111-1111-1111-1111-111111111111', display_name: 'X' } },
+  { command: 'conn.actiondef_list', params: { applicationId: '11111111-1111-1111-1111-111111111111' } },
+  { command: 'conn.actiondef_create', params: { applicationId: '11111111-1111-1111-1111-111111111111', name: 't/a', description: 'd', method: 'GET', url_template: '{base_url}/x' } },
+  { command: 'conn.actiondef_update', params: { applicationId: '11111111-1111-1111-1111-111111111111', actionId: '22222222-2222-2222-2222-222222222222', method: 'GET' } },
+  { command: 'conn.actiondef_delete', params: { applicationId: '11111111-1111-1111-1111-111111111111', actionId: '22222222-2222-2222-2222-222222222222' } },
+  { command: 'conn.app_import', params: { application: { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' }, actions: [] } },
 ]) {
   test(`org-scoping fail-fast: ${c.command} 多 org 且未给 {org} → 400（不静默走 identity-only）`, async () => {
     const home = setupMultiOrgHome();
@@ -82,6 +97,26 @@ for (const c of [
     const err = JSON.parse(stderr);
     assert.equal(err.status, 400);
     assert.match(err.error, /cannot resolve org|multiple orgs/i);
+  });
+}
+
+// Direct-only: the removed proxy verbs must fail with an explicit "unsupported /
+// deprecated" error (status 400) and never make a network call — even in a
+// multi-org home with no {org}. The unroutable COCO_API_URL means any stray
+// proxy/execute HTTP call would surface a DIFFERENT (connection) error, so a
+// clean deprecated message proves no network happened.
+for (const c of [
+  { command: 'conn.execute', params: { connectionId: 'c1', action: 'toolkit/act' } },
+  { command: 'conn.proxy', params: { connectionId: 'c1', url: 'https://example.test' } },
+]) {
+  test(`direct-only tombstone: ${c.command} → 400 unsupported（proxy 已废弃，无网络调用）`, async () => {
+    const home = setupMultiOrgHome();
+    const { code, stderr } = await runConnMultiOrg(home, c.command, c.params);
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 400);
+    assert.match(err.error, /unsupported|deprecated|removed/i);
+    assert.match(err.error, /conn\.invoke/); // points to the direct replacement
   });
 }
 

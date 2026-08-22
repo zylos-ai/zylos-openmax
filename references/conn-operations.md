@@ -10,13 +10,13 @@ A **Connection** is a third-party app or account — mail, chat, calendar, docs,
 
 1. **`conn.list`** — which apps/accounts are authorized to you right now (each entry pairs an `application` with a `connectionId` + `status`).
 2. **`conn.catalog {app}`** (or `conn.app_actions {applicationId}`) — the app's **action catalog**: every action it exposes, each carrying an `input_schema` (JSON Schema) that describes that action's parameters.
-3. **`conn.invoke {app, action, params}`** — run the chosen action with `params` shaped by its `input_schema`. Authorization and token injection happen server-side.
+3. **`conn.invoke {app, action, params}`** — run the chosen action with `params` shaped by its `input_schema`. The credential is cached locally and injected into the request for you.
 
 Because you read the catalog and its `input_schema` **at call time**, the same three verbs drive *any* connected app. What differs per app is only the action names and their `input_schema` — which you **discover, never hardcode** — so a newly-added provider needs zero changes here.
 
 **When the app you need isn't in `conn.list`:** it simply isn't authorized to you yet. Tell the owner and ask them to connect/authorize it — do not fall back to a non-platform workaround (installing something, SMTP, scraping, etc.).
 
-**Two credential modes, one flow — and the flow is identical for both.** `conn.invoke` splits on the connection's credential mode internally, so you use the exact same command and get the exact same result shape either way: *direct* — the token is cached locally and `conn.invoke` assembles the request from the catalog and calls the provider **from your own egress**; *proxy* — cws-connect calls the provider server-side and injects the token for you. You never choose the mode, hold a URL, or craft a raw request. Prefer the cache-aware verbs (`conn.invoke` / `conn.catalog`), which resolve the connection and action for you. See "Credential Modes" and "Capability Cache & Call Chain" below for the mechanics.
+**One credential model — the token is cached locally.** `conn.invoke` resolves the connection, assembles the request from the app's catalog (`url_template` + your `params`), injects the locally-cached token, and calls the provider **from your own egress**. You never hold a URL or craft a raw request. Prefer the cache-aware verbs (`conn.invoke` / `conn.catalog`), which resolve the connection and action for you. See "Credential Handling" and "Capability Cache & Call Chain" below for the mechanics.
 
 > The command reference below is app-agnostic: examples use placeholders like `<app>`, `<toolkit-slug>/<action-name>`, and a generic provider URL. Substitute the real values you get from `conn.list` / `conn.catalog` at runtime — never assume a particular provider.
 
@@ -34,9 +34,9 @@ principal, not from any client-supplied parameter (no `agentMemberId` override
 exists). Returns array of connections with status, application, owner, scopes.
 
 ### conn.acquire
-Acquire credential for a connection. Returns `credential_mode` plus:
-- **direct**: `access_token`, `token_type`, `expires_at`, `toolkits[]`
-- **proxy**: `proxy_ref`, `proxy_endpoint`, `toolkits[]`
+Acquire the credential for a connection. Returns `access_token`, `token_type`,
+`expires_at`, `toolkits[]` — the token is cached locally and injected for you on
+`conn.invoke`, so you normally never call this directly.
 
 ```bash
 node src/cli/conn.js conn.acquire '{"connectionId":"2b0e4f41-..."}'
@@ -69,6 +69,233 @@ node src/cli/conn.js conn.app_actions '{"applicationId":"cb4e4f15-..."}'
 
 Returns an array of `{ toolkit, action, method, description, params[], input_schema }` (same shape as `conn.actions`). Resolved strictly by `applicationId` — the BFF route keys on the path id and does not accept a slug override, so the requested resource identity always matches the returned catalog.
 
+### conn.callback
+Return the platform's OAuth **callback URL** — the redirect URI to register in your
+provider's OAuth app **before** you create a connector. Read-only, no params.
+
+```bash
+node src/cli/conn.js conn.callback '{}'
+```
+
+Returns `{ callback_url }`. The endpoint is authed (bearer) but **not** org-scoped;
+the CLI still authenticates it with the org's token (harmless — the route ignores
+the org scoping). Fetch this value first, register it as the redirect URI at your
+OAuth provider, then run `conn.app_create` with the provider's `oauth_client_id` /
+`oauth_client_secret`.
+
+## Custom connector management (applications + action-defs)
+
+The verbs above **use** connections an owner already authorized to you. The verbs
+in this section **onboard and manage the connector applications themselves** — you
+create a custom connector application, then define the HTTP **action definitions**
+(the DB-backed action catalog) it exposes. These are org-scoped and ownership-gated
+server-side: you can only update/delete an application (and its action-defs) that
+belongs to your own org.
+
+Two invariants hold for every verb here (they mirror the rest of `conn.*`):
+
+- **You never supply `org_id`.** cws-core derives the owning org from your
+  authenticated principal. (`{org}` still selects *which* enabled org's token to
+  use on a multi-org agent — it is not written into any request body.)
+- **You never supply `oauth_callback_url`.** cws-core injects the provider-facing
+  redirect URI on create/update and returns it read-only on the item — register
+  that value at your OAuth provider. (Use **`conn.callback`** to fetch it *before*
+  creating the connector so you can register it in the provider's OAuth app first.)
+
+### conn.app_create
+Create a custom connector application.
+
+```bash
+node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key","category":"crm"}'
+```
+
+Required: `display_name`, `provider_type` (`oauth2` | `api_key`). `slug` is
+**optional** — cws-core generates one from `display_name` when omitted; pass an
+explicit `slug` only when you need a specific value (it is honored as-is). Optional:
+`slug`, `description`, `icon_url`, `category`,
+`tags[]`, `default_ttl_seconds`, and the auth-shape fields —
+API-key: `api_key_location` (`header` | `query`), `api_key_header_name`;
+OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
+`oauth_client_secret`, `oauth_scopes_default[]`, `oauth_pkce` (bool),
+`oauth_token_auth_method` (`basic` | `post`), `oauth_token_body_format`
+(`form` | `json`). Returns the created `application` item (its `source` is a
+read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
+
+### conn.app_list
+List the connector applications visible to your org — the public catalog **∪**
+your own org's custom connectors. This is **how you enumerate `applicationId`s
+without an existing connection** (contrast `conn.list`, which is
+connection-scoped and only returns apps you already have a connection to).
+
+```bash
+node src/cli/conn.js conn.app_list '{}'
+```
+
+Optional `category` filters the result (e.g. `{"category":"crm"}`). The owning
+org is derived **server-side** from your authenticated principal — you never pass
+`org_id` (and `{org}` only selects which enabled org's token to use on a
+multi-org agent). Returns an **array** of application items, each with
+`applicationId` / `id`, `slug`, `display_name`, `provider_type`, `source`,
+`visibility`, `credential_source`, `credential_mode`, `category`, the auth-shape
+fields (`oauth_*` / `api_key_*`), `is_enabled`, `oauth_callback_url`,
+`created_at`, … (same item shape `conn.app_create` / `conn.app_update` return).
+
+### conn.app_update
+Update your own custom connector application (ownership-gated).
+
+```bash
+node src/cli/conn.js conn.app_update '{"applicationId":"cb4e4f15-...","display_name":"Acme CRM","category":"sales","is_enabled":false}'
+```
+
+`applicationId` (UUID) required plus at least one updatable field. `slug` and
+`provider_type` are **immutable** and not accepted; the same custom fields as
+create are updatable, plus `is_enabled`. This includes the full OAuth set —
+`oauth_client_id`, `oauth_client_secret`, `oauth_scopes_default[]`,
+`oauth_authorize_url`, `oauth_token_url`, `oauth_pkce`, `oauth_token_auth_method`,
+`oauth_token_body_format`.
+
+Two write semantics to know:
+
+- **`oauth_client_secret` is write-only "blank = keep".** A **blank** (empty or
+  whitespace-only) secret is **dropped** — it never overwrites/clears the stored
+  one, so you can safely update other fields without re-sending it. Pass a
+  **non-empty** value only when you intend to set or rotate it. (An update whose
+  *only* field is a blank secret is rejected as "no updatable fields".)
+- **`oauth_scopes_default` clears on explicit empty.** An explicit empty array
+  (`[]`) is forwarded and **clears** the default scopes (asymmetric with the
+  secret above). Omit the field to leave scopes unchanged.
+
+### conn.actiondef_list
+List an application's HTTP **action definitions** (the DB-backed action catalog you
+publish for agents). Distinct from `conn.app_actions` / `conn.actions`, which return
+the *resolved capability catalog* agents execute.
+
+```bash
+node src/cli/conn.js conn.actiondef_list '{"applicationId":"cb4e4f15-..."}'
+```
+
+Returns an array of `{ id, application_id, name, method, url_template, headers?,
+encoding, input_schema, created_at?, updated_at? }`.
+
+### conn.actiondef_create
+Create one HTTP action definition on an application (ownership-gated).
+
+```bash
+node src/cli/conn.js conn.actiondef_create '{"applicationId":"cb4e4f15-...","name":"list_repos","description":"List the authenticated user's repositories","method":"GET","url_template":"{base_url}/user/repos","encoding":"","input_schema":"{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"}'
+```
+
+Required: `applicationId` (UUID), `name`, `method`, `url_template`, **`description`
+(non-empty)**. Optional: `headers` (map), `encoding`, `input_schema`. See
+**Action-def schema semantics** below for the field rules. `description` is
+rejected locally with `{status:400}` when missing or empty — before any network
+call (and, in `conn.app_import`, recorded as that action's per-action failure).
+
+### conn.actiondef_update
+Partial-update one action definition (ownership-gated; parent-scoped by
+`applicationId`).
+
+```bash
+node src/cli/conn.js conn.actiondef_update '{"applicationId":"cb4e4f15-...","actionId":"7d2a...","method":"POST","url_template":"{base_url}/user/repos"}'
+```
+
+`applicationId` + `actionId` (both UUID) required, plus at least one of `method`,
+`url_template`, `encoding`, `input_schema`, `headers`. Note the server rule for
+`headers`: a **non-empty** map replaces the stored headers; an empty map leaves
+them unchanged.
+
+### conn.actiondef_delete
+Delete one action definition (ownership-gated).
+
+```bash
+node src/cli/conn.js conn.actiondef_delete '{"applicationId":"cb4e4f15-...","actionId":"7d2a..."}'
+```
+
+### conn.app_import
+Bulk-onboard a custom connector from an import JSON: create the application, then
+loop-create each action-def, reporting **per-action** success/failure so a partial
+import is visible (mirrors the cws-fe "actions JSON import" flow).
+
+```bash
+node src/cli/conn.js conn.app_import '{"application":{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key"},"actions":[{"name":"list_repos","description":"List repositories","method":"GET","url_template":"{base_url}/user/repos"},{"name":"get_repo","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}"}]}'
+```
+
+`application` (same fields as `conn.app_create`) is validated **before** any network
+call; an invalid app body fails fast without creating anything. Returns
+`{ application, applicationId, actions_total, actions_created, actions_failed,
+results[] }` where each `results[i]` is `{ index, name, ok, id? , error?, status? }`.
+Action-def failures do **not** abort the remaining actions — the app and its
+succeeding action-defs stand, and you fix/retry the failed ones with
+`conn.actiondef_create`.
+
+### Adding actions to a custom connector — two paths
+
+When a user wants actions added to a custom connector, you (the Agent) have **two
+ways** — pick by what the user wants:
+
+**A) Import them yourself via the CLI.** If the user just wants it done, call the CLI
+from your own egress:
+- **New connector + its actions in one shot** — `conn.app_import` with
+  `{"application":{…},"actions":[…]}` (creates the app, then loop-creates each action;
+  per-action partial-failure is reported in `results[]`).
+- **Add actions to an *existing* connector** — `conn.actiondef_create`, one call per
+  action (`applicationId` + the action fields).
+
+**B) Hand the user a JSON block to self-import.** If the user wants to paste it into the
+UI themselves (cws-fe「添加动作」/「动作 JSON 导入」box), give them a **directly-importable**
+object — a single top-level `actions` array, one entry per action. The shape must be
+exactly right:
+- **Do** emit `{"actions":[ {…}, {…} ]}` — an object with one `actions` array.
+- **Do NOT** wrap it in `application` — the `{"application":{…},"actions":[…]}` shape is
+  only for the CLI `conn.app_import` (path A), which *also creates the connector*.
+- **Do NOT** emit a bare array (`[ {…} ]`) — it must be the `{"actions":[…]}` object.
+
+```json
+{"actions":[
+  {"name":"list_repos","description":"List the user's repositories","method":"GET","url_template":"{base_url}/user/repos"},
+  {"name":"get_repo","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}","input_schema":"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"}
+]}
+```
+
+Either path uses the same per-action fields — required `name` / `method` /
+`url_template` / `description`; optional `headers` / `encoding` / `input_schema` — per
+**Action-def schema semantics** below (`Authorization` header forbidden; `input_schema`
+is a draft-07 JSON Schema **string**). Fill `description` for every action (required,
+non-empty). Each action `name` is just the action segment (e.g. `list_repos`) — the
+server prepends the connector slug to form the stored `{slug}/{name}`, so submit the bare
+action name, not `slug/name`.
+
+### Action-def schema semantics
+
+One action-def row = one HTTP action published for agents to execute.
+
+- **`name`** — the **action-only** name, e.g. `"list_repos"` (non-empty). Submit just the
+  action segment — the server prepends the connector slug and stores it as
+  `"{connector-slug}/{name}"`, which is what appears in the catalog and what agents pass
+  to `conn.invoke`. (So don't write the slug prefix into the name yourself.)
+- **`description`** — **required, non-empty** on create/import. A short
+  human-readable summary of what the action does; it surfaces to agents in the
+  resolved catalog (`conn.actions` / `conn.app_actions`) to help them pick the right
+  action. The CLI rejects a missing/blank `description` locally (`{status:400}`)
+  before any network call. (On `conn.actiondef_update` it is an *optional* editable
+  field.)
+- **`method`** — one of `GET` | `POST` | `PUT` | `PATCH` | `DELETE`.
+- **`url_template`** — absolute, or `{base_url}`-prefixed. `{placeholder}` slots are
+  filled from params (path/query); an **unfilled query placeholder is dropped**.
+- **`encoding`** — `""` (empty) = JSON body · `form` = urlencoded · `none` = no body.
+- **`input_schema`** — a JSON Schema **draft-07** string describing the action's
+  params. `{"type":"object","properties":{},"additionalProperties":false}` means the
+  action takes no request body.
+- **`headers`** — static or templated headers. **The `Authorization` header is
+  forbidden.** Provider auth comes from the *connection* (the credential is injected
+  from the connection at call time), **not** from action headers — a stored
+  `Authorization` would override the per-connection auth, so it must never be
+  authored. The CLI **rejects it locally, case-insensitively** (`Authorization` /
+  `authorization` / `AUTHORIZATION`): `conn.actiondef_create` / `conn.actiondef_update`
+  fail with `{status:400, error:"headers.Authorization is forbidden — the connection
+  credential is injected at call time"}`, and `conn.app_import` records the offending
+  action as a per-action failure (that row is never created). Do not put credentials
+  in `headers`.
+
 ### conn.cached
 List locally cached credentials (from WS event auto-acquire).
 
@@ -76,7 +303,7 @@ List locally cached credentials (from WS event auto-acquire).
 node src/cli/conn.js conn.cached '{}'
 ```
 
-Returns `{ count, credentials: [{ connection_id, credential_mode, has_access_token, has_proxy_ref }] }`.
+Returns `{ count, credentials: [{ connection_id, provider, has_access_token }] }`.
 
 ### conn.clear_cache
 Clear cached credentials. Without `connectionId`, clears all.
@@ -86,27 +313,29 @@ node src/cli/conn.js conn.clear_cache '{"connectionId":"2b0e4f41-..."}'
 node src/cli/conn.js conn.clear_cache '{}'
 ```
 
-## Credential Modes
+## Credential Handling
 
-Both modes are driven by the **same** `conn.invoke {app, action, params}` — it splits internally, so you never select a mode or change how you call.
+`conn.invoke {app, action, params}` runs every call the same way: it acquires the
+connection's real `access_token`, caches it locally (`connect/credentials/<id>.json`,
+`0600`), assembles the request from the catalog's `url_template` + params, injects
+the token, and calls the provider **from this host's egress**. The token is
+refreshed proactively when its `expires_at` is near/expired and reactively once on
+a provider 401; a missing local cache is re-acquired before the call.
 
-| Mode | Where the token lives | How `conn.invoke` runs the call |
-|------|-----------------------|---------------------------------|
-| **direct** | Real `access_token` cached locally (`connect/credentials/<id>.json`, `0600`) | Assembles the request from the catalog's `url_template` + params, injects the local token, and calls the provider **from this host's egress**. Refreshes the token proactively when it carries an `expires_at` that is near/expired, and reactively once on a provider 401 (all tokens); a missing local cache is re-acquired first rather than downgraded to proxy. |
-| **proxy** | Never leaves cws-connect | Forwards to the server-side execute endpoint; cws-connect resolves the action, injects the token, and calls the provider. |
-
-Request assembly for direct mode is **code-driven from the catalog** — the action name must resolve in the local catalog and the URL can only be that action's `url_template` expanded with schema-checked params. A free-form provider URL is never accepted from the caller.
+Request assembly is **code-driven from the catalog** — the action name must resolve
+in the local catalog and the URL can only be that action's `url_template` expanded
+with schema-checked params. A free-form provider URL is never accepted from the
+caller.
 
 ## Capability Cache & Call Chain (runtime/connect/)
 
-All connect-side local state lives under one subtree, split by its natural key —
-**not** by credential mode:
+All connect-side local state lives under one subtree, split by its natural key:
 
 ```
 runtime/connect/
-├── connections-index.<orgId>.json   # connection → application, per org (BOTH modes)
-├── action-catalog/<applicationId>.json   # application → capability  (BOTH modes)
-└── credentials/<connectionId>.json  # real access_token — DIRECT mode only
+├── connections-index.<orgId>.json   # connection → application, per org
+├── action-catalog/<applicationId>.json   # application → capability
+└── credentials/<connectionId>.json  # real access_token, 0600
 ```
 
 The connections index is **per-org** (`connections-index.<orgId>.json`): the
@@ -117,15 +346,12 @@ the single/default enabled org) and run the lookup **and** the execute call
 against that org's index, JWT, and member. The action catalog stays global
 (keyed by applicationId) since an app's capabilities are the same across orgs.
 
-- **connections-index** and **action-catalog** are the mode-agnostic *discovery*
-  layer, used by proxy and direct alike. The index resolves an application →
-  its `connectionId` + `status` (the agent's entry point is an app, not a
-  connection); the catalog caches the per-application action metadata
-  (`input_schema` etc.).
-- **credentials/** only exists for **direct/token-mode** connections (they cache
-  a real `access_token`, so files are `0600`). **Proxy-mode connections store
-  nothing** — the token is injected server-side by cws-connect at call time, so
-  the old per-connection credential blob is not written.
+- **connections-index** and **action-catalog** are the *discovery* layer. The
+  index resolves an application → its `connectionId` + `status` (the agent's entry
+  point is an app, not a connection); the catalog caches the per-application action
+  metadata (`input_schema` etc.).
+- **credentials/** caches the connection's real `access_token` (files are `0600`),
+  which `conn.invoke` injects into the request at call time.
 
 ### Recommended agent flow (identify → call)
 
@@ -134,11 +360,9 @@ it does not need to "know" the sequence:
 
 1. **`conn.invoke {app, action, params}`** — resolves the connection for `app`
    from `connections-index.json` (refreshing from `conn.list` on a miss), then
-   runs the action, splitting on credential mode: **direct** → assemble from the
-   local catalog's `url_template` and call the provider from this host (injecting
-   the locally-cached token, refreshed on near-expiry / 401); **proxy** → the
-   server-side execute endpoint (`connection_agents` re-checked there). Same
-   command and result shape for both. On an action/schema-shaped error it
+   runs the action: assemble the request from the local catalog's `url_template`
+   and call the provider from this host, injecting the locally-cached token
+   (refreshed on near-expiry / 401). On an action/schema-shaped error it
    invalidates the cached catalog once so the next `conn.catalog` refetches.
 2. **`conn.catalog {app|applicationId}`** — returns the cached action catalog for
    discovery, filling from `conn.app_actions` on a miss / TTL-expiry (24h) /
@@ -150,11 +374,10 @@ Invalidation is **TTL + error-triggered** — the app-actions response carries n
 version/etag today (see "cws-connect follow-up" below), so there is no
 change-detected refresh yet.
 
-> **catalog note:** the catalog now carries a per-action `url_template` (and an
-> optional `headers_template`, Authorization excluded). Direct-mode `conn.invoke`
-> uses these to assemble the real request locally; proxy-mode resolves the same
-> mapping server-side. Either way the mapping comes from the catalog, never from
-> a caller-supplied URL. If a cached catalog predates `url_template`, a direct
+> **catalog note:** the catalog carries a per-action `url_template` (and an
+> optional `headers_template`, Authorization excluded). `conn.invoke` uses these
+> to assemble the real request locally — the mapping comes from the catalog, never
+> from a caller-supplied URL. If a cached catalog predates `url_template`,
 > `conn.invoke` returns a clear error — run `conn.catalog {refresh:true}`.
 
 ### Multiple connections for one app (disambiguation)
@@ -225,49 +448,53 @@ The comm-bridge automatically maintains the index, the action-catalog cache, and
 
 | Event | Action |
 |-------|--------|
-| `connection.authorized` | Upsert into `connections-index.<orgId>.json`, then **refresh that org's index from the authoritative agent-connections list** so `applicationId`/`slug`/`name` are correct immediately — the event payload carries only `connection_id` + `provider` (slug), so a bare upsert alone would leave `applicationId`/`name` null until the next `conn.list`. Also **warm the action-catalog cache** (`action-catalog/{applicationId}.json`, from `/connect/applications/{id}/actions`) for **both proxy and direct** so the app is invokable right after authorize. **direct only** additionally → acquire credential → cache to `runtime/connect/credentials/{id}.json`. Proxy → indexed + catalog warmed, no credential stored. The identity refresh + catalog warm are **best-effort** (a failure never blocks the credential/index path). **Also enqueues a one-line session notice to the agent** (`🔌 [Connection authorized] …`, via the C4 control queue) so the bot learns it can act via `conn.*` right away, instead of only discovering the connection by chance on a later `conn.list`. |
+| `connection.authorized` | Upsert into `connections-index.<orgId>.json`, then **refresh that org's index from the authoritative agent-connections list** so `applicationId`/`slug`/`name` are correct immediately — the event payload carries only `connection_id` + `provider` (slug), so a bare upsert alone would leave `applicationId`/`name` null until the next `conn.list`. Also **warm the action-catalog cache** (`action-catalog/{applicationId}.json`, from `/connect/applications/{id}/actions`) so the app is invokable right after authorize, and **acquire the credential** → cache to `runtime/connect/credentials/{id}.json`. The identity refresh + catalog warm are **best-effort** (a failure never blocks the credential/index path). **Also enqueues a one-line session notice to the agent** (`🔌 [Connection authorized] …`, via the C4 control queue) so the bot learns it can act via `conn.*` right away, instead of only discovering the connection by chance on a later `conn.list`. |
 | `connection.revoked` | Remove from index + delete cached credential |
 | `connection.disconnected` | Remove from index + delete cached credential |
-| `connection.credential_updated` | Upsert index; re-acquire + refresh the credential **iff a local credential file already exists** (the direct-mode marker — this event carries no `credential_mode`). Drops the file if the connection is no longer direct. Proxy connections (no file) are skipped. |
+| `connection.credential_updated` | Upsert index; re-acquire and rewrite the cached token so the local `access_token` stays current. |
 | `connection.reauth_needed` | **Stop calling the dead connection**: delete the cached credential and keep the connection indexed but flagged `status: needs_reauth` (not removed — reauth is recoverable), so `conn.invoke` surfaces an actionable 409 "needs re-authorization" hint instead of a bare 404. Also **best-effort DM the owner** to re-authorize (`sendOwnerReauthDm`; a no-owner / send failure only warns, never blocks the event path). |
 
 Cache location: `components/openmax/runtime/connect/`
 
-### Per-mode agent behavior (direct vs proxy)
+### Agent-side effect of each event
 
-What the agent actually does and stores locally, split by credential mode. The
-authorization/token boundary is enforced server-side by cws-connect either way;
-this table is only the **agent-side** effect.
+What the agent actually does and stores locally per event. The authorization/token
+boundary is enforced server-side by cws-connect; this table is only the
+**agent-side** effect.
 
-| Trigger (endpoint) → event | proxy mode — agent does / stores | direct mode — agent does / stores |
-|---|---|---|
-| **Authorize to agent** → `connection.authorized` | Upsert the org index (`connections-index.<orgId>.json`), then **refresh it from the agent-connections list** so `{applicationId, slug, name, status:active}` is correct despite the sparse event payload, and **warm the action-catalog cache** (`action-catalog/<applicationId>.json`). **No `acquire`, no credential stored** — the token is injected server-side at call time. | Upsert + refresh the org index and **warm the action-catalog cache** (same as proxy), **and** `acquire` the credential and write the real `access_token` to `connect/credentials/<connectionId>.json` (file `0600`, dir `0700`). |
-| **Revoke this agent** (`DELETE /connections/{id}/agents/{memberId}`) → `connection.revoked` | Remove the connection from the org index. No credential file exists, so nothing to delete. | Remove from the org index **and** delete `connect/credentials/<connectionId>.json` (the cached token). |
-| **Disconnect the connection** (`POST /connections/{id}/disconnect`) → `connection.disconnected` | Same as revoke: remove from the org index; no credential file. | Same as revoke: remove from the org index **and** delete the cached token file. |
-| Token refreshed → `connection.credential_updated` | Nothing (no local file to refresh). | Re-`acquire` and rewrite the cached token **iff** a local credential file already exists; if the connection is no longer direct, drop the stale file. |
+| Trigger (endpoint) → event | agent does / stores |
+|---|---|
+| **Authorize to agent** → `connection.authorized` | Upsert the org index (`connections-index.<orgId>.json`), then **refresh it from the agent-connections list** so `{applicationId, slug, name, status:active}` is correct despite the sparse event payload, **warm the action-catalog cache** (`action-catalog/<applicationId>.json`), **and** `acquire` the credential and write the real `access_token` to `connect/credentials/<connectionId>.json` (file `0600`, dir `0700`). |
+| **Revoke this agent** (`DELETE /connections/{id}/agents/{memberId}`) → `connection.revoked` | Remove from the org index **and** delete `connect/credentials/<connectionId>.json` (the cached token). |
+| **Disconnect the connection** (`POST /connections/{id}/disconnect`) → `connection.disconnected` | Same as revoke: remove from the org index **and** delete the cached token file. |
+| Token refreshed → `connection.credential_updated` | Re-`acquire` and rewrite the cached token so the local `access_token` stays current. |
 
-Notes:
-- **revoke vs disconnect** differ in *meaning* — revoke removes only *this agent's*
-  authorization (`connection_agents` binding) while the connection lives on for
-  others; disconnect tears down the whole connection for everyone — but the
-  agent's **local cleanup is identical** (unindex + delete any cached credential).
-- Proxy mode never persists a credential locally, so revoke/disconnect only touch
-  the index for it. Direct mode is the only case where a real token file is
-  written and later deleted.
+Note: **revoke vs disconnect** differ in *meaning* — revoke removes only *this
+agent's* authorization (`connection_agents` binding) while the connection lives on
+for others; disconnect tears down the whole connection for everyone — but the
+agent's **local cleanup is identical** (unindex + delete the cached credential).
 
 ## BFF Endpoints (via cws-core)
 
 | Method | Path | CLI |
 |--------|------|-----|
 | GET | `/connect/agents/me/connections` | conn.list / conn.index --refresh |
-| POST | `/connect/connections/{id}/credential` | conn.acquire (also the direct-mode token refresh) |
-| POST | `/connect/connections/{id}/proxy` | (proxy-mode internal) |
+| POST | `/connect/connections/{id}/credential` | conn.acquire (also the token refresh) |
 | GET | `/connect/connections/{id}` | conn.status |
 | GET | `/connect/connections/{id}/actions` | conn.actions |
-| POST | `/connect/connections/{id}/actions/execute` | conn.invoke (proxy mode) |
 | GET | `/connect/applications/{id}/actions` | conn.app_actions / conn.catalog |
+| GET | `/connect/oauth-callback-url` | conn.callback |
+| GET | `/connect/applications` | conn.app_list |
+| POST | `/connect/applications` | conn.app_create / conn.app_import |
+| PATCH | `/connect/applications/{id}` | conn.app_update |
+| GET | `/connect/applications/{id}/action-defs` | conn.actiondef_list |
+| POST | `/connect/applications/{id}/action-defs` | conn.actiondef_create / conn.app_import |
+| PATCH | `/connect/applications/{id}/action-defs/{action_id}` | conn.actiondef_update |
+| DELETE | `/connect/applications/{id}/action-defs/{action_id}` | conn.actiondef_delete |
 
-None of these endpoints accept a client-supplied `agent_member_id` — cws-core
+None of the connection/action *usage* endpoints accept a client-supplied
+`agent_member_id`, and none of the application/action-def *management* endpoints
+accept a client-supplied `org_id` or `oauth_callback_url` — cws-core
 derives the caller's identity from the authenticated principal on every one of
 them (security fix, 2026-08-04). The CLI never had a way to target a
 connection/action that doesn't belong to the calling agent.

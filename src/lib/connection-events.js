@@ -102,10 +102,14 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
       const mode = data.credential_mode || '?';
       log(`[${slug}] connection.authorized conn=${connectionId} mode=${mode}`);
       upsertConnection(indexConn, idxPath);
-      // Only direct/token-mode connections cache a real access_token locally.
-      // Proxy-mode connections need no local credential (token is injected
-      // server-side by cws-connect at call time), so we skip the acquire+store
-      // entirely and just record the connection in the index.
+      // Direct-only runtime: only direct/token-mode connections cache a real
+      // access_token locally, which is the only mode conn.invoke can execute.
+      // A non-direct connection is a legacy/deprecated proxy connection (proxy
+      // is deprecated/removed — the backend now forces `direct` on create and is
+      // deleting old proxy connections). We do NOT treat it as a working proxy
+      // path: skip the credential acquire+cache and log it as unsupported. An
+      // unexpected legacy proxy connection from the backend must never crash the
+      // event handler — just skip + log.
       if (data.credential_mode === 'direct') {
         try {
           const cred = await acquireCredential(orgId, connectionId, { post });
@@ -115,7 +119,7 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
           warn(`[${slug}] credential acquire failed conn=${connectionId}: ${e.message}`);
         }
       } else {
-        log(`[${slug}] proxy connection indexed (no local credential) conn=${connectionId} provider=${data.provider || '?'}`);
+        warn(`[${slug}] non-direct connection conn=${connectionId} mode=${data.credential_mode || '?'} provider=${data.provider || '?'} — proxy is deprecated/unsupported; skipping local credential (this connection is not invokable via conn.invoke)`);
       }
       // Best-effort: any failure here never breaks the credential/index path above.
       let applicationId = null;
@@ -202,6 +206,49 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
     default:
       warn(`[${slug}] unknown connection event: ${event}`);
   }
+}
+
+/**
+ * Build the proactive `🔌 [Connection authorized]` session-notice text.
+ *
+ * Pure string builder (no I/O) so it is unit-testable; comm-bridge.js wraps it
+ * with the control-queue enqueue. The notice MUST match the direct-only runtime:
+ * only a `direct` connection is invokable, so only a direct connection gets a
+ * "ready to use via conn.invoke" notice.
+ *
+ *   - direct → self-trigger: the token is already cached locally and the agent
+ *     makes the request from its OWN egress (conn.invoke assembles + sends it).
+ *     Tell the agent it is ready to use now.
+ *   - non-direct (legacy proxy, or unknown mode) → NOT invokable. Proxy is
+ *     deprecated/unsupported and conn.invoke will reject it, so we must NOT tell
+ *     the agent it is ready or hint conn.invoke. Instead say it is a legacy
+ *     non-direct connection that must be recreated / re-authorized as a direct
+ *     connection before it can be used.
+ *
+ * @param {object} orgConfig - needs slug
+ * @param {object} info      - { connectionId, provider, actionCount, mode }
+ * @returns {string} the notice body
+ */
+export function buildConnectionAuthorizedNotice(orgConfig, info = {}) {
+  const { connectionId, provider, actionCount, mode } = info;
+  const app = provider || 'a third-party app';
+  const modeNote = mode && mode !== '?' ? `, ${mode} mode` : '';
+  const appHint = provider ? ` {app:"${provider}"}` : '';
+  if (mode === 'direct') {
+    const actionsNote = Number.isInteger(actionCount) && actionCount > 0 ? `, ~${actionCount} actions` : '';
+    const callNote = `the token is ready locally — conn.catalog${appHint} to find actions and conn.invoke {app, action, params} to call; you make the request from your own egress`;
+    return (
+      `🔌 [Connection authorized] A new third-party connection was authorized to you: ${app} (org ${orgConfig.slug}${modeNote}${actionsNote}). `
+      + `You can use it now — no install needed: conn.list to see it, ${callNote}. connection_id=${connectionId || '?'}.`
+    );
+  }
+  // Non-direct: deprecated/unsupported. Do NOT present it as usable and do NOT
+  // hint conn.invoke — it will be rejected by the direct-only runtime.
+  return (
+    `🔌 [Connection authorized] A legacy non-direct connection was authorized to you: ${app} (org ${orgConfig.slug}${modeNote}). `
+    + `Proxy connections are deprecated and are NOT usable — conn.invoke will reject it. `
+    + `To use ${app}, it must be recreated / re-authorized as a direct connection. connection_id=${connectionId || '?'}.`
+  );
 }
 
 /**

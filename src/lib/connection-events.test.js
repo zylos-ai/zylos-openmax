@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { handleConnectionEvent, acquireCredential, isEventForMe, sendOwnerReauthDm } from './connection-events.js';
+import { handleConnectionEvent, acquireCredential, isEventForMe, sendOwnerReauthDm, buildConnectionAuthorizedNotice } from './connection-events.js';
 import { readIndex, indexPathForOrg } from './connect-store.js';
 
 // Regression coverage for the 2026-08-04 security fix: cws-core no longer
@@ -75,7 +75,13 @@ test('connection.authorized (direct mode): acquires credential + warms identity/
   assert.ok(fs.existsSync(path.join(credentialsDir, 'conn-1.json')), 'direct credential was not cached locally');
 });
 
-test('connection.authorized (proxy mode): no credential acquire, but still warms identity/catalog via the NEW endpoint', async () => {
+test('connection.authorized (non-direct / legacy proxy): no credential acquire or cache (direct-only), and the handler stays robust (does not crash) — no proxy semantics', async () => {
+  // Direct-only runtime: proxy is deprecated/removed, so a non-direct connection
+  // arriving from the backend is a legacy anomaly. It must NOT be credential-
+  // acquired or cached (no proxy semantics), yet an unexpected legacy connection
+  // must never crash the event handler — it is skipped + logged, and the rest of
+  // the best-effort path (identity/catalog warm) still runs. The await resolving
+  // (never rejecting) below is itself the robustness assertion.
   const { connectDir, credentialsDir, catalogDir } = tmpDirs();
   const { calls, get, post } = recordingHttp();
 
@@ -86,9 +92,9 @@ test('connection.authorized (proxy mode): no credential acquire, but still warms
   await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir });
 
   const paths = calls.map((c) => c.path);
-  assert.ok(!paths.some((p) => p.includes('/credential')), `proxy mode must never acquire a credential: ${JSON.stringify(paths)}`);
+  assert.ok(!paths.some((p) => p.includes('/credential')), `a non-direct connection must never acquire a credential: ${JSON.stringify(paths)}`);
   assert.ok(paths.includes('/api/v1/connect/agents/me/connections'), `missing warm-list call: ${JSON.stringify(paths)}`);
-  assert.ok(!fs.existsSync(path.join(credentialsDir, 'conn-2.json')), 'proxy mode must not cache a local credential file');
+  assert.ok(!fs.existsSync(path.join(credentialsDir, 'conn-2.json')), 'a non-direct connection must not cache a local credential file');
 });
 
 test('connection.credential_updated: re-acquires via the bare path when a cached credential already exists', async () => {
@@ -128,14 +134,81 @@ test('connection.authorized: notifies the agent session (so it learns it can act
   const notify = (info) => notes.push(info);
 
   const frame = { payload: { event: 'connection.authorized', data: {
-    connection_id: 'conn-9', provider: 'gmail', credential_mode: 'proxy',
+    connection_id: 'conn-9', provider: 'gmail', credential_mode: 'direct',
   } } };
   await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notify });
 
   assert.equal(notes.length, 1, 'authorize must notify the agent exactly once');
   assert.equal(notes[0].connectionId, 'conn-9');
   assert.equal(notes[0].provider, 'gmail');
-  assert.equal(notes[0].mode, 'proxy');
+  assert.equal(notes[0].mode, 'direct');
+});
+
+test('connection.authorized (legacy proxy): still notifies the agent, but the notice carries the non-direct mode (so the notice builder can flag it deprecated/unsupported)', async () => {
+  // Direct-only runtime: a legacy proxy connection is still surfaced to the agent
+  // via the authorize notice, but the notice text must NOT present it as usable —
+  // that branching happens in buildConnectionAuthorizedNotice (asserted below).
+  // Here we assert the mode reaches the notifier so it can branch correctly.
+  const { connectDir, credentialsDir, catalogDir } = tmpDirs();
+  const { get, post } = recordingHttp();
+  const notes = [];
+  const notify = (info) => notes.push(info);
+
+  const frame = { payload: { event: 'connection.authorized', data: {
+    connection_id: 'conn-9p', provider: 'gmail', credential_mode: 'proxy',
+  } } };
+  await handleConnectionEvent(baseOrgConfig, frame, { get, post, connectDir, credentialsDir, catalogDir, notify });
+
+  assert.equal(notes.length, 1, 'authorize must notify the agent exactly once, even for a legacy proxy connection');
+  assert.equal(notes[0].connectionId, 'conn-9p');
+  assert.equal(notes[0].mode, 'proxy', 'the non-direct mode must reach the notifier so the notice can flag it unsupported');
+});
+
+// -----------------------------------------------------------------------------
+// Authorized-notice text: the agent-facing contract must match the direct-only
+// runtime — a direct connection is presented as ready to use via conn.invoke; a
+// non-direct (legacy proxy / unknown mode) connection must NOT be presented as
+// usable and must NOT hint conn.invoke (the runtime rejects it).
+// -----------------------------------------------------------------------------
+const noticeOrg = { slug: 'acme' };
+
+test('buildConnectionAuthorizedNotice (direct): presents the connection as ready to use via conn.invoke', () => {
+  const text = buildConnectionAuthorizedNotice(noticeOrg, {
+    connectionId: 'conn-d', provider: 'github', actionCount: 12, mode: 'direct',
+  });
+  assert.ok(text.includes('You can use it now'), `direct notice must say it is usable now: ${text}`);
+  assert.ok(text.includes('conn.invoke'), `direct notice must hint conn.invoke: ${text}`);
+  assert.ok(text.includes('your own egress'), `direct notice must describe the direct self-egress model: ${text}`);
+  assert.ok(text.includes('github'), 'direct notice must name the app');
+  assert.ok(text.includes('conn-d'), 'direct notice must carry the connection_id');
+  // A direct notice must never carry the deprecated/proxy language.
+  assert.ok(!/deprecated|not usable|NOT usable|recreated|re-authorized as a direct/i.test(text),
+    `direct notice must not carry deprecated/unsupported language: ${text}`);
+});
+
+test('buildConnectionAuthorizedNotice (non-direct / legacy proxy): flags deprecated/unsupported + recreate-as-direct, and does NOT present it as usable or hint conn.invoke', () => {
+  const text = buildConnectionAuthorizedNotice(noticeOrg, {
+    connectionId: 'conn-p', provider: 'notion', mode: 'proxy',
+  });
+  // Must carry the deprecated/unsupported + recreate-as-direct guidance.
+  assert.ok(/deprecated/i.test(text), `non-direct notice must say proxy is deprecated: ${text}`);
+  assert.ok(/not usable/i.test(text), `non-direct notice must say it is not usable: ${text}`);
+  assert.ok(/direct connection/i.test(text), `non-direct notice must tell the agent to recreate as a direct connection: ${text}`);
+  assert.ok(text.includes('notion'), 'non-direct notice must name the app');
+  assert.ok(text.includes('conn-p'), 'non-direct notice must carry the connection_id');
+  // Must NOT present it as ready-to-use or hint conn.invoke as a usable path.
+  assert.ok(!text.includes('You can use it now'), `non-direct notice must not say it is usable now: ${text}`);
+  assert.ok(!/conn\.invoke \{app, action, params\} to call/.test(text),
+    `non-direct notice must not hint conn.invoke as a usable path: ${text}`);
+  assert.ok(!text.includes('ready locally'), `non-direct notice must not say the token is ready: ${text}`);
+});
+
+test('buildConnectionAuthorizedNotice (unknown mode): treated as non-direct — not presented as usable', () => {
+  const text = buildConnectionAuthorizedNotice(noticeOrg, {
+    connectionId: 'conn-u', provider: 'slack', mode: '?',
+  });
+  assert.ok(!text.includes('You can use it now'), `unknown-mode notice must not present the connection as usable: ${text}`);
+  assert.ok(/deprecated|not usable/i.test(text), `unknown-mode notice must fall to the non-direct/unsupported branch: ${text}`);
 });
 
 test('the authorize notify hook is authorize-only — revoked / disconnected / credential_updated / reauth_needed do NOT fire it', async () => {

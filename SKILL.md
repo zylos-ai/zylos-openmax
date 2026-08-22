@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.14.8-beta.1
+version: 2.15.0
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -119,7 +119,6 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 
 - **Replying to a message routed to you → always use the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
 - **`comm.send` is for agent-initiated (proactive) sends only** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing into a known `conversationId`.
-- **When you're asking the user to pick from a small set of answers — yes/no, confirm/cancel, approve/reject — prefer a card over a plain-text question.** Send a **yes/no reply card** (`type:"CARD"`, `content.content_type:"card"`, a `cws.card.v1` body with `mode:"display"` and `ui.quick_reply` buttons) so the answer is one tap. Read the choice back from `card_state.action_id` (do not match on the button label). This applies to both the C4 reply path and proactive `comm.send`. Free-form questions (open-ended, more than ~4 options, or needing typed detail) stay plain text. Full mechanics, the minimal copy-paste example, and the current on-screen-rendering caveat are in `references/comm-operations.md` → "Card messages".
 
 ## Acting on External Apps / Accounts (Connections) — recognize this first
 
@@ -130,7 +129,7 @@ Whenever a request needs a **third-party app or account** — sending or reading
 1. **Load `references/conn-operations.md`.**
 2. **`conn.list`** — which apps/accounts are authorized to you right now.
 3. **`conn.catalog {app}`** — that app's available actions, each with an `input_schema` describing its parameters.
-4. **`conn.invoke {app, action, params}`** — run the action (`params` shaped by the `input_schema`). The token is handled for you (from a local cache for direct connections, or server-side for proxy connections); you never craft a URL or a raw HTTP request.
+4. **`conn.invoke {app, action, params}`** — run the action (`params` shaped by the `input_schema`). The token is handled for you: it is cached locally, and `conn.invoke` assembles the request from the app's catalog and calls the provider from your own egress; you never craft a URL or a raw HTTP request.
 
 If an owner authorized **more than one connection of the same app** (e.g. two Gmail accounts), `conn.invoke {app, ...}` returns `needs_selection` (a normal result, not an error) with a `candidates` list instead of silently picking one. Each candidate has a guaranteed-non-empty, unique `label` (its `display_name`, or an app-name + creation-time fallback when unnamed). **Ask the user which one — in the user's own language — referring to each by its `label`, never the `connection_id`** — then retry with `conn.invoke {connectionId, action, params}` (the `connectionId` targets that connection directly and skips app-resolution). A non-active connection (needs re-auth / expired / revoked) is rejected up front with an actionable error. See `references/conn-operations.md` → "Multiple connections for one app".
 
@@ -594,6 +593,6 @@ You can generate it in one step with the CLI: `node src/cli/core.js core.fronten
 | **AS** | File upload (IM/KB dual mode) + download URL resolution + local download | send conversation attachments, archive files to KB, download remote artifacts for vision/analysis | `references/as-operations.md` |
 | **Comm** | IM that the Agent **proactively initiates**: conversation/message/unread/WS sync/KB page search | proactively DM a colleague, create a group, search a page in a targeted way, WS reconnect to fill gaps | `references/comm-operations.md` |
 | **Core** | Identity + member/project/role/invitation directory queries + org switching + platform agent lifecycle | `core.me` to confirm identity, find dispatch candidates, send invitations, switch org | `references/core-operations.md` |
-| **Connect** | Third-party app connections (OAuth/API): list/status, action discovery + execute, and the app-keyed capability cache under `runtime/connect/` | **any request that touches an external app/account** — send/read mail, post/read messages, calendar, docs/files, trackers, etc.: `conn.list` → `conn.catalog {app}` → `conn.invoke {app, action, params}` (token handled for you — local cache for direct, server-side for proxy) | `references/conn-operations.md` |
+| **Connect** | Third-party app connections (OAuth/API): list/status, action discovery + execute, and the app-keyed capability cache under `runtime/connect/` | **any request that touches an external app/account** — send/read mail, post/read messages, calendar, docs/files, trackers, etc.: `conn.list` → `conn.catalog {app}` → `conn.invoke {app, action, params}` (token handled for you — cached locally, request assembled from the catalog and called from your own egress) | `references/conn-operations.md` |
 
 The top of each Layer 3 doc has its own four-part summary of `Purpose` / `When to load this document` / `Out of scope for this document` / `Prerequisites`; after loading it into memory, first scan this section to confirm it is the one you want, then read on to the command list.

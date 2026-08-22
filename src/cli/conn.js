@@ -11,7 +11,7 @@
 
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { apiPath, getForOrg, postForOrg } from '../lib/client.js';
+import { apiPath, getForOrg, postForOrg, patchForOrg, delForOrg } from '../lib/client.js';
 import { loadConfig, enabledOrgs, resolveDefaultOrgId } from '../lib/config.js';
 import { listCachedCredentials, clearCachedCredentials, readCredentialCache, saveCredentialCache } from '../lib/credential-cache.js';
 import {
@@ -68,6 +68,247 @@ function resolveSelfMemberId(orgId = resolveDefaultOrgId()) {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function isUuid(s) { return typeof s === 'string' && UUID_RE.test(s); }
+
+// ============================================================================
+//  Custom-connector management (applications + action-defs)
+// ============================================================================
+//
+// These verbs onboard/manage CUSTOM connector applications and their DB-backed
+// HTTP action definitions against the cws-core BFF (/connect/applications*).
+// They are org-scoped exactly like the rest of conn.js: the handler resolves the
+// operating org via requireOrgId() and routes through the *ForOrg helpers so a
+// multi-org agent never calls the backend with an identity-only token.
+//
+// The request PLAN for each verb is a pure function (planApp* / planActionDef*)
+// that validates required params locally (throws {status:400}) and returns
+// { method, path, body } WITHOUT touching the network — so path-building, the
+// method, and the request body are unit-testable in isolation. The COMMANDS
+// handlers below just wire the plan to the matching *ForOrg helper.
+//
+// SECURITY: a set of fields is NEVER forwarded to cws-core in the request body —
+// they are all server-decided, so we build bodies with a strict ALLOWLIST (`pick`)
+// rather than spreading the caller's params, and any field outside the allowlist
+// (or any unknown key) cannot leak through even if supplied:
+//   - `org_id`             — derived from the authenticated principal (still honored
+//                            as an OPERATING-org selector via resolveOrgId — that
+//                            picks which org's JWT to use, never written to a body).
+//   - `oauth_callback_url` — injected by cws-core on create/update, returned read-only.
+//   - `credential_source`  — server-FORCED to `custom` for these CLI-created connectors.
+//   - `visibility`         — server-FORCED to `org`.
+//   - `credential_mode`    — server-FORCED to `direct` (proxy is deprecated/removed).
+// The last three were removed from the cws-core custom-connector create/update
+// request schema (strict huma): sending ANY of them now returns HTTP 422. So the
+// CLI planner drops them exactly the way it already drops `org_id`/`oauth_callback_url`.
+// This mirrors conn.js's existing "no client-supplied identity override" posture.
+
+// Application create body — the custom-connector superset (§1.2). `org_id`,
+// `oauth_callback_url`, `credential_source`, `visibility`, and `credential_mode`
+// are intentionally absent from this allowlist: cws-core forces
+// custom/org/direct server-side and REJECTS (422) any of them in the body.
+const APP_CREATE_FIELDS = [
+  'slug', 'display_name', 'description', 'provider_type',
+  'icon_url', 'category', 'tags',
+  'api_key_location', 'api_key_header_name',
+  'oauth_authorize_url', 'oauth_token_url', 'oauth_client_id', 'oauth_client_secret',
+  'oauth_scopes_default', 'oauth_pkce', 'oauth_token_auth_method', 'oauth_token_body_format',
+  'default_ttl_seconds',
+];
+// Application update body — pointer/optional fields (§1.2). `slug` and
+// `provider_type` are immutable server-side, so they are NOT accepted here.
+// `credential_source` / `visibility` / `credential_mode` are likewise NOT
+// accepted: they are server-forced (custom/org/direct) and REJECTED (422) if
+// sent — same treatment as the always-forbidden `org_id` / `oauth_callback_url`.
+const APP_UPDATE_FIELDS = [
+  'display_name', 'description',
+  'icon_url', 'category', 'tags', 'is_enabled',
+  'api_key_location', 'api_key_header_name',
+  'oauth_authorize_url', 'oauth_token_url', 'oauth_client_id', 'oauth_client_secret',
+  'oauth_scopes_default', 'oauth_pkce', 'oauth_token_auth_method', 'oauth_token_body_format',
+  'default_ttl_seconds',
+];
+const ACTIONDEF_CREATE_FIELDS = ['name', 'method', 'url_template', 'description', 'headers', 'encoding', 'input_schema'];
+const ACTIONDEF_UPDATE_FIELDS = ['method', 'url_template', 'description', 'headers', 'encoding', 'input_schema'];
+
+function bad(message) { return Object.assign(new Error(message), { status: 400 }); }
+
+// Direct-only tombstone error for the removed proxy verbs (conn.proxy /
+// conn.execute) and any other would-be proxy path. Proxy mode is deprecated/
+// removed; only direct connections can be invoked (via conn.invoke).
+function proxyDeprecatedError(verb) {
+  return bad(`unsupported: ${verb} is removed — proxy mode is deprecated/removed; only direct connections can be invoked. Use conn.invoke {app|connectionId, action, params} instead.`);
+}
+
+// Copy only the allowlisted keys that are actually present (skip `undefined`).
+// Absent keys stay absent so cws-core applies its own defaults; `null` passes
+// through so an update can explicitly clear a field.
+function pick(src, allowed) {
+  const out = {};
+  for (const k of allowed) {
+    if (src[k] !== undefined) out[k] = src[k];
+  }
+  return out;
+}
+
+// OAuth secret semantics: a BLANK (empty/whitespace-only) `oauth_client_secret`
+// means "leave the stored secret unchanged" — it must NEVER be forwarded, so an
+// update that omits or blanks the secret can never CLEAR a previously-stored one.
+// A NON-empty secret IS forwarded (to set/rotate it). This mirrors the cws-fe
+// form, which only sends the secret when the user actually typed a new value.
+// Note this is deliberately asymmetric with `oauth_scopes_default`: an explicit
+// empty array (`[]`) there is preserved and CLEARS the default scopes — only the
+// secret has the write-only "blank = keep" behavior.
+function dropBlankClientSecret(body) {
+  if (typeof body.oauth_client_secret === 'string' && body.oauth_client_secret.trim() === '') {
+    delete body.oauth_client_secret;
+  }
+  return body;
+}
+
+// An action-def's stored `headers` are applied by cws-connect on the DB-backed
+// custom-action execution path AFTER the per-connection credential is injected,
+// and (unlike discovery) that path does NOT strip them — so a stored
+// `Authorization` header would override the connection's own auth. Reject any
+// caller-supplied Authorization key locally (case-insensitive) so the CLI never
+// authors a row that violates the "provider auth comes from the connection, not
+// from action headers" contract. Lives in the pure planner so every path
+// (create / update / app_import) is covered and can't bypass it.
+function assertNoAuthorizationHeader(headers) {
+  if (!headers || typeof headers !== 'object') return;
+  for (const k of Object.keys(headers)) {
+    if (k.toLowerCase() === 'authorization') {
+      throw bad('headers.Authorization is forbidden — the connection credential is injected at call time');
+    }
+  }
+}
+
+function requireAppId(p) {
+  const applicationId = p.applicationId || p.application_id;
+  if (!applicationId) throw bad('applicationId is required');
+  if (!isUuid(applicationId)) throw bad('applicationId must be a UUID');
+  return applicationId;
+}
+
+function requireActionId(p) {
+  const actionId = p.actionId || p.action_id;
+  if (!actionId) throw bad('actionId is required');
+  if (!isUuid(actionId)) throw bad('actionId must be a UUID');
+  return actionId;
+}
+
+// POST /connect/applications — create a custom connector application.
+// `slug` is OPTIONAL: cws-core generates one from display_name when omitted
+// (#31, end-to-end deployed). An explicit slug is still honored — it stays in the
+// allowlist and is forwarded as-is — but the CLI no longer force-requires it.
+export function planAppCreate(p) {
+  if (!p.display_name) throw bad('display_name is required');
+  if (!p.provider_type) throw bad('provider_type is required (oauth2 | api_key)');
+  const body = dropBlankClientSecret(pick(p, APP_CREATE_FIELDS));
+  return { method: 'POST', path: apiPath('/connect/applications'), body };
+}
+
+// PATCH /connect/applications/{id} — update the caller's own custom connector.
+// Carries the full OAuth field set (oauth_client_id / oauth_client_secret /
+// oauth_scopes_default / authorize+token URLs, all in APP_UPDATE_FIELDS). A blank
+// secret is dropped BEFORE the "no updatable fields" check, so an update whose
+// ONLY field is a blank secret is correctly rejected as empty rather than sent.
+export function planAppUpdate(p) {
+  const applicationId = requireAppId(p);
+  const body = dropBlankClientSecret(pick(p, APP_UPDATE_FIELDS));
+  if (Object.keys(body).length === 0) throw bad('no updatable fields provided');
+  return { method: 'PATCH', path: apiPath(`/connect/applications/${applicationId}`), body };
+}
+
+// GET /connect/applications/{id}/action-defs — list the app's HTTP action defs.
+export function planActionDefList(p) {
+  const applicationId = requireAppId(p);
+  return { method: 'GET', path: apiPath(`/connect/applications/${applicationId}/action-defs`) };
+}
+
+// POST /connect/applications/{id}/action-defs — create one HTTP action def.
+export function planActionDefCreate(p) {
+  const applicationId = requireAppId(p);
+  if (!p.name) throw bad('name is required (format: toolkit-slug/action-name)');
+  if (!p.method) throw bad('method is required (GET|POST|PUT|PATCH|DELETE)');
+  if (!p.url_template) throw bad('url_template is required');
+  // description is REQUIRED and non-empty on create/import (#31, cws-core now
+  // stores it end-to-end). Reject a missing/blank one locally before any network.
+  if (p.description == null || String(p.description).trim() === '') {
+    throw bad('description is required (non-empty)');
+  }
+  assertNoAuthorizationHeader(p.headers);
+  return {
+    method: 'POST',
+    path: apiPath(`/connect/applications/${applicationId}/action-defs`),
+    body: pick(p, ACTIONDEF_CREATE_FIELDS),
+  };
+}
+
+// PATCH /connect/applications/{id}/action-defs/{action_id} — partial update.
+export function planActionDefUpdate(p) {
+  const applicationId = requireAppId(p);
+  const actionId = requireActionId(p);
+  assertNoAuthorizationHeader(p.headers);
+  const body = pick(p, ACTIONDEF_UPDATE_FIELDS);
+  if (Object.keys(body).length === 0) throw bad('no updatable fields provided');
+  return {
+    method: 'PATCH',
+    path: apiPath(`/connect/applications/${applicationId}/action-defs/${actionId}`),
+    body,
+  };
+}
+
+// DELETE /connect/applications/{id}/action-defs/{action_id}.
+export function planActionDefDelete(p) {
+  const applicationId = requireAppId(p);
+  const actionId = requireActionId(p);
+  return {
+    method: 'DELETE',
+    path: apiPath(`/connect/applications/${applicationId}/action-defs/${actionId}`),
+  };
+}
+
+// Bulk import: create the application, then create each action-def in order,
+// collecting a per-action success/failure report so a partial import surfaces
+// exactly which actions landed. Pure/injectable (deps: createApp,
+// createActionDef) so the loop + partial-failure reporting are unit-testable
+// without network or config. The app body and every action body run through the
+// same allowlist planners, so `org_id`/`oauth_callback_url` can never leak in.
+export async function runAppImport(params, { createApp, createActionDef }) {
+  const application = params.application;
+  if (!application || typeof application !== 'object' || Array.isArray(application)) {
+    throw bad('application object is required');
+  }
+  const actions = Array.isArray(params.actions) ? params.actions : [];
+  // Validate the app body up-front (throws 400) BEFORE any network call.
+  const { body: appBody } = planAppCreate(application);
+  const app = await createApp(appBody);
+  const applicationId = app?.id || app?.application_id;
+  if (!applicationId) {
+    throw Object.assign(new Error('application create did not return an id'), { status: 502 });
+  }
+  const results = [];
+  let created = 0;
+  for (let i = 0; i < actions.length; i += 1) {
+    const a = actions[i] || {};
+    const name = a.name ?? null;
+    try {
+      const { body } = planActionDefCreate({ applicationId, ...a });
+      const def = await createActionDef(applicationId, body);
+      created += 1;
+      results.push({ index: i, name, ok: true, id: def?.id ?? null });
+    } catch (err) {
+      results.push({ index: i, name, ok: false, error: err.message, status: err.status });
+    }
+  }
+  return {
+    application: app,
+    applicationId,
+    actions_total: actions.length,
+    actions_created: created,
+    actions_failed: actions.length - created,
+    results,
+  };
+}
 
 // The app_actions / actions endpoints return the catalog either as a bare array
 // or wrapped as { actions: [...] } depending on the BFF envelope — normalize.
@@ -301,8 +542,10 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath('/connect/agents/me/connections'));
   },
 
-  // Acquire credential for a connection.
-  // Returns credential_mode + access_token (direct) or proxy_ref (proxy).
+  // Acquire credential for a connection. Direct-only: returns credential_mode:
+  // 'direct' + access_token (proxy is deprecated/removed). A legacy proxy
+  // connection would return credential_mode: 'proxy' with no local token — such
+  // connections are not invokable (see conn.invoke).
   'conn.acquire': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
@@ -311,27 +554,18 @@ const COMMANDS = {
     return postForOrg(orgId, apiPath(`/connect/connections/${connId}/credential`));
   },
 
-  // Proxy a request through a connection.
-  // NOTE: proxy-mode only; hidden from the agent surface (help text + reference
-  // doc), retained here for proxy connections and future use. Not reachable via
-  // conn.invoke (which does direct locally / proxy via conn.execute).
-  'conn.proxy': () => {
-    const connId = params.connectionId || params.connection_id;
-    if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const orgId = requireOrgId();
-    return postForOrg(orgId, apiPath(`/connect/connections/${connId}/proxy`), {
-      method: params.method || 'GET',
-      url: params.url,
-      headers: params.headers,
-      body: params.body,
-    });
-  },
+  // conn.proxy — REMOVED (direct-only). Proxy execution is deprecated/removed:
+  // the backend forces `direct` on custom-connector create and is deleting legacy
+  // proxy connections. Kept only as an explicit tombstone so an old caller gets
+  // an actionable error instead of silently proxying — there is NO proxy HTTP
+  // path left in this module. Use conn.invoke (direct) instead.
+  'conn.proxy': () => { throw proxyDeprecatedError('conn.proxy'); },
 
   // Discover the named actions available for a connection (action discovery).
   // Returns [{toolkit, action, method, description, params, input_schema}];
-  // pair with conn.execute to invoke one by "toolkit-slug/action-name". cws-core
+  // pair with conn.invoke to run one by "toolkit-slug/action-name". cws-core
   // scopes discovery to the caller's own connection-agent authorization
-  // boundary (derived server-side), same as conn.execute/conn.proxy.
+  // boundary (derived server-side).
   'conn.actions': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
@@ -340,24 +574,12 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath(`/connect/connections/${connId}/actions`));
   },
 
-  // Execute a registered named action through a connection (proxy mode:
-  // cws-connect resolves the action, injects the token server-side, and calls
-  // the provider — the agent needs neither the token nor the provider URL).
-  // action format: "toolkit-slug/action-name" (e.g. "github-repos/list").
-  // NOTE: proxy-mode only; hidden from the agent surface (help text + reference
-  // doc), retained here. conn.invoke routes proxy connections through this same
-  // server-side execute endpoint internally.
-  'conn.execute': () => {
-    const connId = params.connectionId || params.connection_id;
-    if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
-    const orgId = requireOrgId();
-    if (!resolveSelfMemberId(orgId)) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
-    if (!params.action) throw Object.assign(new Error('action is required (format: toolkit-slug/action-name)'), { status: 400 });
-    return postForOrg(orgId, apiPath(`/connect/connections/${connId}/actions/execute`), {
-      action: params.action,
-      params: params.params || {},
-    });
-  },
+  // conn.execute — REMOVED (direct-only). This used to POST to the server-side
+  // proxy execute endpoint (cws-connect resolves the action, injects the token,
+  // calls the provider). Proxy is deprecated/removed, so it is kept only as an
+  // explicit tombstone — no server-side execute HTTP path remains here. Run
+  // actions via conn.invoke (direct local egress) instead.
+  'conn.execute': () => { throw proxyDeprecatedError('conn.execute'); },
 
   // Get connection details (status, owner, scopes, etc.).
   'conn.status': () => {
@@ -383,6 +605,99 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath(`/connect/applications/${appId}/actions`));
   },
 
+  // Return the platform's OAuth callback URL — the redirect URI to register in
+  // your provider's OAuth app BEFORE creating a connector. cws-core forces the
+  // callback URL server-side, so a user needs this value up-front. The endpoint
+  // is authed (bearer) but NOT org-scoped; we call it via getForOrg so the org's
+  // JWT authenticates the request (the org scoping is harmless — the route
+  // ignores it). The D8 envelope is unwrapped by the client, so this resolves to
+  // the inner `{ callback_url }` object, which we return as-is (matching how the
+  // sibling read verbs echo their unwrapped data).
+  'conn.callback': () => {
+    return getForOrg(requireOrgId(), apiPath('/connect/oauth-callback-url'));
+  },
+
+  // List the caller's org custom connector applications — the way to enumerate
+  // applicationIds WITHOUT an existing connection (contrast conn.list, which is
+  // connection-scoped). Org-scoped exactly like the sibling read verbs: the org
+  // is derived server-side from the authenticated principal (requireOrgId only
+  // selects which org's JWT to use — org_id is NEVER sent as a client param).
+  // Optional {category} is appended as a query filter. The D8 envelope's `data`
+  // is an ARRAY of application items (same item shape conn.app_create/app_get
+  // return); the client unwraps it, so this resolves to that array as-is.
+  'conn.app_list': () => {
+    let path = apiPath('/connect/applications');
+    if (params.category !== undefined && params.category !== null && params.category !== '') {
+      path += `?category=${encodeURIComponent(params.category)}`;
+    }
+    return getForOrg(requireOrgId(), path);
+  },
+
+  // --- Custom-connector management: applications ----------------------------
+  // Each verb validates its params locally (pure planner, throws 400), then
+  // resolves the operating org and routes through the org-scoped helper. Param
+  // validation runs BEFORE requireOrgId(), matching conn.acquire/conn.app_actions.
+
+  // Create a custom connector application. org_id/oauth_callback_url are never
+  // forwarded (server-derived/injected) — the planner's allowlist drops them.
+  'conn.app_create': () => {
+    const { path, body } = planAppCreate(params);
+    const orgId = requireOrgId();
+    return postForOrg(orgId, path, body);
+  },
+
+  // Update the caller's own custom connector application (ownership-gated
+  // server-side; slug/provider_type are immutable and not accepted).
+  'conn.app_update': () => {
+    const { path, body } = planAppUpdate(params);
+    const orgId = requireOrgId();
+    return patchForOrg(orgId, path, body);
+  },
+
+  // --- Custom-connector management: action definitions ----------------------
+  // DB-backed HTTP action definitions (distinct from the resolved capability
+  // catalog conn.app_actions returns). See references/conn-operations.md for the
+  // method set, url_template placeholders, encoding values, input_schema, and the
+  // forbidden Authorization header.
+
+  'conn.actiondef_list': () => {
+    const { path } = planActionDefList(params);
+    const orgId = requireOrgId();
+    return getForOrg(orgId, path);
+  },
+
+  'conn.actiondef_create': () => {
+    const { path, body } = planActionDefCreate(params);
+    const orgId = requireOrgId();
+    return postForOrg(orgId, path, body);
+  },
+
+  'conn.actiondef_update': () => {
+    const { path, body } = planActionDefUpdate(params);
+    const orgId = requireOrgId();
+    return patchForOrg(orgId, path, body);
+  },
+
+  'conn.actiondef_delete': () => {
+    const { path } = planActionDefDelete(params);
+    const orgId = requireOrgId();
+    return delForOrg(orgId, path);
+  },
+
+  // Bulk onboard a custom connector from an import JSON: create the application,
+  // then loop-create each action-def, reporting per-action success/failure so a
+  // partial import is visible. Mirrors the cws-fe "actions JSON import" flow.
+  'conn.app_import': () => {
+    if (!params.application || typeof params.application !== 'object' || Array.isArray(params.application)) {
+      throw Object.assign(new Error('application object is required'), { status: 400 });
+    }
+    const orgId = requireOrgId();
+    return runAppImport(params, {
+      createApp: (body) => postForOrg(orgId, apiPath('/connect/applications'), body),
+      createActionDef: (appId, body) => postForOrg(orgId, apiPath(`/connect/applications/${appId}/action-defs`), body),
+    });
+  },
+
   // Cache-aware, app-keyed action catalog. Reads runtime/connect/action-catalog/
   // first and fills it from conn.app_actions on a miss / TTL-expiry / {refresh}.
   // Accepts either {applicationId} directly, or {app} (slug or id) resolved via
@@ -403,13 +718,13 @@ const COMMANDS = {
   // One-call app-keyed execute: resolve the connection for an application from
   // the local index (refreshing from conn.list on a miss), then run the named
   // action. This is the cache-aware entry meant for agents — it removes the
-  // per-call discovery round-trip. Internally it splits on credential_mode
-  // (transparent to the caller — same command, same result shape):
+  // per-call discovery round-trip. Direct-only runtime (proxy is deprecated/
+  // removed):
   //   - direct → LOCAL EGRESS: assemble the request from the local catalog's
   //     url_template + params, inject the locally-cached token (refreshing it on
   //     near-expiry / a provider 401), and call the provider from THIS host.
-  //   - proxy  → server-side execute (cws-connect resolves the action, injects
-  //     the token, and calls the provider; connection_agents re-checked there).
+  //   - anything else (a legacy proxy connection) → an explicit "unsupported"
+  //     error; we never silently fall back to server-side proxy execute.
   // On an action/schema-shaped failure it invalidates the cached catalog once so
   // the next conn.catalog is fresh, then resurfaces the error.
   'conn.invoke': async () => {
@@ -503,21 +818,16 @@ const COMMANDS = {
       }
     }
 
-    // proxy mode — server-side execute (existing behavior, unchanged).
-    try {
-      // Execute against the resolved connection using the SAME org's JWT — a
-      // multi-org agent must not run one org's connection with another's token.
-      return await postForOrg(orgId, apiPath(`/connect/connections/${entry.id}/actions/execute`), {
-        action: params.action,
-        params: params.params || {},
-      });
-    } catch (err) {
-      // Stale catalog is a plausible cause of an unknown-action/schema error —
-      // drop it so the agent's next conn.catalog refetches. Does not auto-retry
-      // (a wrong action name won't fix itself); the error is re-thrown as-is.
-      if (looksLikeActionOrSchemaError(err) && entry.applicationId) invalidateCatalog(entry.applicationId);
-      throw err;
-    }
+    // Direct-only runtime: a non-`direct` credential_mode means this is a legacy
+    // proxy connection. Proxy is deprecated/removed — the backend now forces
+    // `direct` on custom-connector create and is deleting old proxy connections.
+    // We DO NOT silently fall back to server-side proxy execute; surface an
+    // explicit, actionable error so the direct-only doc/contract and the runtime
+    // agree (no silent-proxy path).
+    throw Object.assign(
+      new Error(`unsupported: connection ${entry.id} is not a direct connection (credential_mode: ${mode}) — proxy mode is deprecated/removed; only direct connections can be invoked. Re-create this connection (custom connectors are now created direct-only).`),
+      { status: 400 },
+    );
   },
 
   // Show the local connections index for an org (observability). {refresh}
@@ -554,12 +864,25 @@ Usage: node src/cli/conn.js <command> '<json-params>'
 
 Connections
   conn.list           {}                                        # list connections available to this agent (self only)
-  conn.acquire        {connectionId}                            # acquire credential (returns access_token or proxy_ref)
+  conn.acquire        {connectionId}                            # acquire the direct access_token for a connection
   conn.actions        {connectionId}                            # discover named actions for a connection
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)
 
 Applications
   conn.app_actions    {applicationId}                           # app-keyed action catalog (incl. input_schema; no connection needed)
+  conn.app_list       {category?}                                   # list your org's custom connector applications (GET /connect/applications)
+  conn.callback       {}                                        # platform OAuth callback URL to register in the provider's OAuth app
+
+Applications (custom connector management)
+  conn.app_create     {display_name, provider_type, slug?, ...} # create a custom connector application (slug optional — server-generated when omitted)
+  conn.app_update     {applicationId, ...optional}              # update your own custom connector (slug/provider_type immutable; OAuth id/secret/scopes updatable)
+  conn.actiondef_list   {applicationId}                         # list an app's HTTP action definitions
+  conn.actiondef_create {applicationId, name, method, url_template, description, headers?, encoding?, input_schema?}  # description REQUIRED
+  conn.actiondef_update {applicationId, actionId, method?, url_template?, description?, headers?, encoding?, input_schema?}
+  conn.actiondef_delete {applicationId, actionId}               # delete one action definition
+  conn.app_import     {application:{...}, actions:[...]}        # bulk: create app then each action-def (per-action report)
+                                                                 #   never forward org_id/oauth_callback_url (server-derived);
+                                                                 #   action-def Authorization header is forbidden (see reference doc)
 
 Capability cache (runtime/connect/)
   conn.invoke         {app, action, params?}                    # app-keyed execute: resolve connection via local index → execute
