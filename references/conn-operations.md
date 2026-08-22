@@ -227,18 +227,26 @@ Action-def failures do **not** abort the remaining actions — the app and its
 succeeding action-defs stand, and you fix/retry the failed ones with
 `conn.actiondef_create`.
 
-### Helping a user import actions — emit the directly-importable `{"actions":[…]}` block
+### Adding actions to a custom connector — two paths
 
-When a **user asks you (the Agent) to help them build actions to import** into an
-*existing* custom connector (the cws-fe「添加动作」/「动作 JSON 导入」paste box), reply
-with a **directly-importable** JSON object: a single top-level `actions` array, one
-entry per action. The user copies this block and pastes it straight into the import
-dialog — so the shape must be exactly right:
+When a user wants actions added to a custom connector, you (the Agent) have **two
+ways** — pick by what the user wants:
 
+**A) Import them yourself via the CLI.** If the user just wants it done, call the CLI
+from your own egress:
+- **New connector + its actions in one shot** — `conn.app_import` with
+  `{"application":{…},"actions":[…]}` (creates the app, then loop-creates each action;
+  per-action partial-failure is reported in `results[]`).
+- **Add actions to an *existing* connector** — `conn.actiondef_create`, one call per
+  action (`applicationId` + the action fields).
+
+**B) Hand the user a JSON block to self-import.** If the user wants to paste it into the
+UI themselves (cws-fe「添加动作」/「动作 JSON 导入」box), give them a **directly-importable**
+object — a single top-level `actions` array, one entry per action. The shape must be
+exactly right:
 - **Do** emit `{"actions":[ {…}, {…} ]}` — an object with one `actions` array.
 - **Do NOT** wrap it in `application` — the `{"application":{…},"actions":[…]}` shape is
-  only for the CLI `conn.app_import`, which *also creates the connector*. Importing into
-  an existing connector uses the bare `{"actions":[…]}` object.
+  only for the CLI `conn.app_import` (path A), which *also creates the connector*.
 - **Do NOT** emit a bare array (`[ {…} ]`) — it must be the `{"actions":[…]}` object.
 
 ```json
@@ -248,11 +256,11 @@ dialog — so the shape must be exactly right:
 ]}
 ```
 
-Each action's fields — required `name` / `method` / `url_template` / `description`;
-optional `headers` / `encoding` / `input_schema` — follow **Action-def schema semantics**
-below (in particular: `Authorization` header forbidden; `input_schema` is a draft-07
-JSON Schema **string**). Generate one entry per action the user described, filling
-`description` for every one (it is required and non-empty).
+Either path uses the same per-action fields — required `name` / `method` /
+`url_template` / `description`; optional `headers` / `encoding` / `input_schema` — per
+**Action-def schema semantics** below (`Authorization` header forbidden; `input_schema`
+is a draft-07 JSON Schema **string**). Fill `description` for every action (required,
+non-empty).
 
 ### Action-def schema semantics
 

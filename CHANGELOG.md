@@ -25,7 +25,7 @@ Stable release of the custom-connector CLI (promotes `2.15.0-beta.2`). Changes s
 
 ### Docs
 
-- `references/conn-operations.md`: document the directly-importable `{"actions":[…]}` block the Agent should emit when helping a user import actions into an *existing* custom connector (distinct from `conn.app_import`'s `{application, actions}`; not a bare array), with field rules and an example.
+- `references/conn-operations.md`: document the two ways the Agent adds actions to a custom connector — (A) import via CLI (`conn.app_import` for new app+actions, `conn.actiondef_create` for an existing one) and (B) hand the user a directly-importable `{"actions":[…]}` block to self-import (distinct from `conn.app_import`'s `{application, actions}`; not a bare array), with field rules and an example.
 
 ## [2.15.0-beta.2] — 2026-08-21
 
