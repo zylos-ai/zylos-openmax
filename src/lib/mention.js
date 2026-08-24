@@ -57,6 +57,56 @@ function save(reg) {
   }
 }
 
+// Reserved top-level registry key holding a { conversationId: epochMs } map of
+// the last time we fetched (or attempted to fetch) each conversation's roster.
+// Kept at the top level, alongside the conversationId-keyed name maps, so it
+// never collides with a real conversation id and is invisible to matchedEntries
+// (which only ever indexes reg[conversationId]). Deliberately NOT a normalized
+// display-name key: no name normalizes to a string starting with "__".
+const ROSTER_META_KEY = '__rosterFetchedAt';
+
+// Negative-cache window for roster hydration. Once we've hit a conversation's
+// member list, skip re-hitting it for this long — EVEN IF the @name still
+// didn't resolve (misspelled, not a member, or a longer name that only shares a
+// prefix). Two problems this closes, both raised in review:
+//   1. an @token that can never resolve would otherwise re-fetch /members on
+//      every single message (needsRosterHydration stays true forever), and
+//   2. once the GET is bounded by a timeout, an unresponsive members endpoint
+//      would otherwise cost that timeout on every send; with the cache it costs
+//      it at most once per window.
+// We stamp the timestamp BEFORE the fetch, so a hang/timeout/error is cached
+// too — the whole point is to not retry a bad endpoint per-message.
+export const ROSTER_FETCH_TTL_MS = 10 * 60 * 1000; // 10 min
+
+/**
+ * Has this conversation's roster been fetched within `ttlMs`? Callers use this
+ * to decide whether to skip a (bounded, best-effort) roster hydration.
+ * @param {string} conversationId
+ * @param {number} [ttlMs]
+ * @param {number} [nowMs] injectable clock for tests
+ * @returns {boolean}
+ */
+export function rosterFetchedRecently(conversationId, ttlMs = ROSTER_FETCH_TTL_MS, nowMs = Date.now()) {
+  if (!conversationId) return false;
+  const meta = load()[ROSTER_META_KEY];
+  const ts = meta && meta[conversationId];
+  return Number.isFinite(ts) && (nowMs - ts) < ttlMs;
+}
+
+/**
+ * Record that this conversation's roster was just fetched (or attempted).
+ * Best-effort persistence, like the rest of the registry.
+ * @param {string} conversationId
+ * @param {number} [nowMs] injectable clock for tests
+ */
+export function markRosterFetched(conversationId, nowMs = Date.now()) {
+  if (!conversationId) return;
+  const reg = load();
+  const meta = reg[ROSTER_META_KEY] || (reg[ROSTER_META_KEY] = {});
+  meta[conversationId] = nowMs;
+  save(reg);
+}
+
 // Registry entries were originally plain strings (display_name only, pre
 // mentions support). Normalize either shape to {name, memberId}.
 function entryOf(v) {
@@ -238,15 +288,23 @@ export function needsRosterHydration(text, conversationId) {
   const s = String(text ?? '');
   if (!conversationId || !/[@＠]/.test(s)) return false;
 
-  const withoutBroadcast = s.replace(ALL_AGENTS_RE_G, ' ').replace(ALL_RE_G, ' ');
-  const tokens = [...withoutBroadcast.matchAll(MENTION_TOKEN_RE)].map((m) => m[1]);
-  if (!tokens.length) return false;
-
-  // A token counts as resolved when some registry name that already carries a
-  // member_id starts with it — "starts with" rather than equality because the
-  // recorded name can extend past what the token scanner captured.
-  const resolved = matchedEntries(s, conversationId).filter((e) => e.memberId);
-  return tokens.some((t) => !resolved.some((e) => norm(e.name).startsWith(norm(t))));
+  // Blank out everything that already resolves without a roster fetch, then see
+  // if any `@token` survives. We strip the actual matched SPANS rather than
+  // comparing name prefixes: a resolvable long name (e.g. "@test11") must not
+  // mask a distinct shorter token that merely shares its prefix (e.g. "@test",
+  // a different member who has never spoken) — that prefix collision was a
+  // false-negative that left "@test" silently unresolved forever. Stripping the
+  // "@test11" span leaves "@test" standing, so it correctly triggers a fetch.
+  //   - broadcast sentinels (@所有人/@所有Agent) resolve without the registry;
+  //   - any @name matchedEntries can already resolve to a member_id will become
+  //     a real mention as-is.
+  let remaining = s.replace(ALL_AGENTS_RE_G, ' ').replace(ALL_RE_G, ' ');
+  for (const { name } of matchedEntries(s, conversationId).filter((e) => e.memberId)) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    remaining = remaining.replace(new RegExp(AT + esc + '(?![\\p{L}\\p{N}._-])', 'giu'), ' ');
+  }
+  // A fresh (non-global) matcher so lingering lastIndex state can't skew test().
+  return new RegExp(AT + '[\\p{L}\\p{N}._-]+', 'u').test(remaining);
 }
 
 /**

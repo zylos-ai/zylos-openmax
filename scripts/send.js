@@ -61,6 +61,8 @@ import {
   buildMentions,
   needsRosterHydration,
   recordRoster,
+  rosterFetchedRecently,
+  markRosterFetched,
 } from '../src/lib/mention.js';
 import { lookupConvOrg, registerConvOrg } from '../src/lib/conv-org.js';
 import { RUNTIME_DIR } from '../src/lib/session.js';
@@ -99,26 +101,35 @@ function resolveTargetConversation(ep) {
   return ep.threadConversationId || ep.conversationId;
 }
 
-// Conversations whose roster this process has already fetched, so a multi-chunk
-// or multi-mention send can't issue the same request twice. Cross-process reuse
-// comes for free: recordRoster persists into mention-registry.json, so the very
-// next send finds the names locally and needsRosterHydration returns false.
-const _rosterFetched = new Set();
+// Bound on the best-effort roster GET. Native fetch has no default deadline, so
+// a members endpoint that accepts the connection and then never answers would
+// hang this promise forever — and a try/catch can't rescue a promise that never
+// rejects, so the whole send would wedge (not "fall back to no mention"). A
+// short deadline turns that hang into a normal rejection we can swallow. Kept
+// generous enough that a merely-slow-but-healthy backend still resolves the
+// mention; the negative cache below stops a bad endpoint from costing it twice.
+const ROSTER_HYDRATION_TIMEOUT_MS = 2000;
 
 /**
  * Fill the mention registry from the conversation roster, but only when the
  * text actually mentions somebody we can't already resolve.
  *
- * Best-effort throughout: a roster fetch that fails must never block the send.
- * The worst case is the pre-existing behaviour — an @name that resolves to no
- * mention — not a dropped message.
+ * Best-effort throughout: a roster fetch that fails, times out, or hangs must
+ * never block the send. The worst case is the pre-existing behaviour — an
+ * @name that resolves to no mention — not a dropped message.
+ *
+ * The conversation is stamped as "fetched" BEFORE the request, and skipped for
+ * ROSTER_FETCH_TTL_MS afterwards, so a persistently-unresolvable @token (or an
+ * unresponsive endpoint) can't re-issue this GET on every message.
  */
 async function hydrateRosterIfNeeded(text, convId) {
-  if (!convId || _rosterFetched.has(convId)) return;
+  if (!convId || rosterFetchedRecently(convId)) return;
   if (!needsRosterHydration(text, convId)) return;
-  _rosterFetched.add(convId);
+  markRosterFetched(convId);
   try {
-    const res = await get(apiPath(`/conversations/${convId}/members`));
+    const res = await get(apiPath(`/conversations/${convId}/members`), undefined, {
+      timeoutMs: ROSTER_HYDRATION_TIMEOUT_MS,
+    });
     const members = Array.isArray(res?.data) ? res.data : (Array.isArray(res) ? res : []);
     recordRoster(convId, members);
   } catch {
@@ -135,6 +146,13 @@ async function sendText(ep, text) {
   // text mentions somebody we can't resolve, fetch the roster once and record
   // it, then let the normal resolution run against the now-complete registry.
   await hydrateRosterIfNeeded(text, convId);
+  // If an @token still can't be resolved after hydration, the target isn't in
+  // the roster (misspelled, or not a member): the mention will silently produce
+  // nothing. Surface that on stderr so a dead @ is diagnosable instead of
+  // invisible — never blocks the send.
+  if (needsRosterHydration(text, convId)) {
+    console.warn(`[send] unresolvable @mention in conversation ${convId}; sending without a structured mention`);
+  }
   // Canonicalize @mentions to the exact participant display_name so cws-fe's
   // participant-name matcher highlights them (cws-fe issue #6 covers the
   // AGENT_TEXT render side). No-op when no known participant matches.

@@ -16,6 +16,9 @@ const {
   buildMentions,
   needsRosterHydration,
   recordRoster,
+  rosterFetchedRecently,
+  markRosterFetched,
+  ROSTER_FETCH_TTL_MS,
 } = await import('./mention.js');
 
 const CONV = 'conv-1';
@@ -333,4 +336,61 @@ test('recordRoster skips entries missing a name or a member_id, and bad input', 
   // Non-array input is ignored rather than throwing.
   recordRoster(conv, undefined);
   recordRoster(undefined, [{ member_id: LUNA_ID, display_name: 'x' }]);
+});
+
+test('needsRosterHydration is not fooled by a resolvable longer name that is a prefix of a distinct token', () => {
+  const conv = nextConv();
+  // A real member "test11" has spoken (resolvable); a different real member
+  // "test" never has. The two @tokens must be judged independently: matching
+  // "@test11" must NOT mark the shorter, distinct "@test" as resolved.
+  recordParticipants(conv, { name: 'test11', memberId: GAVIN_ID });
+  assert.equal(
+    needsRosterHydration('@test11 帮我看下, @test 你也确认一下', conv), true,
+    '@test is a different member and must still trigger a roster fetch',
+  );
+  // And when the resolvable long name is the ONLY mention, no fetch is needed.
+  assert.equal(needsRosterHydration('@test11 帮我看下', conv), false);
+});
+
+test('needsRosterHydration still resolves a space-containing display name (token scanner truncates it)', () => {
+  const conv = nextConv();
+  // "gavin yang" carries a space, so the @token scanner only captures "gavin";
+  // the full recorded name still matches the text span, so it counts resolved.
+  recordParticipants(conv, { name: 'gavin yang', memberId: GAVIN_ID });
+  assert.equal(needsRosterHydration('@gavin yang 看下', conv), false);
+});
+
+// ---------------------------------------------------------------------------
+// Roster-fetch negative cache — rosterFetchedRecently() / markRosterFetched()
+//
+// Bounds the cost of a roster fetch to once per conversation per TTL, even for
+// an @token that can never resolve (so it can't re-hit /members every message)
+// and even when the members endpoint is slow/hung (the stamp is written before
+// the request, so a bad endpoint isn't retried per-send).
+// ---------------------------------------------------------------------------
+
+test('rosterFetchedRecently is false before any fetch, true right after marking', () => {
+  const conv = nextConv();
+  assert.equal(rosterFetchedRecently(conv), false);
+  markRosterFetched(conv);
+  assert.equal(rosterFetchedRecently(conv), true);
+});
+
+test('rosterFetchedRecently expires after the TTL window', () => {
+  const conv = nextConv();
+  const t0 = 1_000_000;
+  markRosterFetched(conv, t0);
+  assert.equal(rosterFetchedRecently(conv, ROSTER_FETCH_TTL_MS, t0 + ROSTER_FETCH_TTL_MS - 1), true);
+  assert.equal(rosterFetchedRecently(conv, ROSTER_FETCH_TTL_MS, t0 + ROSTER_FETCH_TTL_MS + 1), false);
+});
+
+test('the roster-fetch cache does not disturb name resolution in the same conversation', () => {
+  const conv = nextConv();
+  recordParticipants(conv, { name: 'luna.coco', memberId: LUNA_ID });
+  markRosterFetched(conv);
+  // The reserved meta key must not leak into matchedEntries / buildMentions.
+  assert.deepEqual(buildMentions('@luna.coco ping', conv), [
+    { type: 'member', member_id: LUNA_ID },
+  ]);
+  assert.equal(needsRosterHydration('@luna.coco ping', conv), false);
 });
