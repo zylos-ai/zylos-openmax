@@ -10,7 +10,16 @@ import path from 'node:path';
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'openmax-mention-test-'));
 process.env.HOME = tmpHome;
 const REG_PATH = path.join(tmpHome, 'zylos/components/openmax/mention-registry.json');
-const { recordParticipants, resolveMentions, buildMentions } = await import('./mention.js');
+const {
+  recordParticipants,
+  resolveMentions,
+  buildMentions,
+  needsRosterHydration,
+  recordRoster,
+  rosterFetchedRecently,
+  markRosterFetched,
+  ROSTER_FETCH_TTL_MS,
+} = await import('./mention.js');
 
 const CONV = 'conv-1';
 const LUNA_ID = '019f6a10-1af8-73ef-b9bb-08b28dcaa998';
@@ -210,4 +219,178 @@ test('individual and broadcast mentions can mix ASCII and fullwidth triggers on 
     { type: 'all_agents' },
     { type: 'member', member_id: LUNA_ID },
   ]);
+});
+
+// ---------------------------------------------------------------------------
+// Roster hydration — needsRosterHydration() + recordRoster()
+//
+// The registry is only ever fed by participants observed speaking (see
+// recordParticipants' caller in comm-bridge.js), so an @name aimed at somebody
+// who has never spoken resolves to nothing at all. These cover the trigger for
+// pulling the conversation roster to close that gap, and the two rules
+// recordRoster enforces when it writes the roster in.
+// ---------------------------------------------------------------------------
+
+let _rosterConv = 0;
+const nextConv = () => `roster-conv-${++_rosterConv}`;
+
+test('needsRosterHydration fires for an @name the registry has never seen', () => {
+  const conv = nextConv();
+  assert.equal(needsRosterHydration('@newcomer 在吗', conv), true);
+});
+
+test('needsRosterHydration is quiet once the name resolves', () => {
+  const conv = nextConv();
+  recordParticipants(conv, { name: 'luna.coco', memberId: LUNA_ID });
+  assert.equal(needsRosterHydration('@luna.coco 在吗', conv), false);
+});
+
+test('needsRosterHydration is quiet when there is no mention at all', () => {
+  const conv = nextConv();
+  assert.equal(needsRosterHydration('just a plain message', conv), false);
+});
+
+test('needsRosterHydration ignores broadcast sentinels (they need no registry)', () => {
+  const conv = nextConv();
+  // A roster fetch for @所有Agent would be pure waste: the broadcast resolves
+  // by literal label, with no member_id lookup involved.
+  assert.equal(needsRosterHydration('@所有Agent 集合', conv), false);
+  assert.equal(needsRosterHydration('@所有人 集合', conv), false);
+  assert.equal(needsRosterHydration('＠所有Agent 集合', conv), false);
+});
+
+test('needsRosterHydration still fires for a real name alongside a broadcast', () => {
+  const conv = nextConv();
+  assert.equal(needsRosterHydration('@所有Agent 另外 @newcomer 你也看下', conv), true);
+});
+
+test('needsRosterHydration fires when only one of two names resolves', () => {
+  const conv = nextConv();
+  recordParticipants(conv, { name: 'luna.coco', memberId: LUNA_ID });
+  assert.equal(needsRosterHydration('@luna.coco 和 @newcomer 都看下', conv), true);
+});
+
+test('needsRosterHydration fires for a name recorded without a member_id', () => {
+  const conv = nextConv();
+  // Legacy string-shaped entry: a name with no id can't produce a mention, so
+  // it is not "resolved" and must still trigger a roster fetch.
+  recordParticipants(conv, 'luna.coco');
+  assert.equal(needsRosterHydration('@luna.coco 在吗', conv), true);
+});
+
+test('recordRoster makes a never-spoken member mentionable', () => {
+  const conv = nextConv();
+  recordRoster(conv, [
+    { member_id: GAVIN_ID, display_name: 'gavin.yang' },
+  ]);
+  assert.deepEqual(buildMentions('@gavin.yang 看下', conv), [
+    { type: 'member', member_id: GAVIN_ID },
+  ]);
+  assert.equal(needsRosterHydration('@gavin.yang 看下', conv), false);
+});
+
+test('recordRoster keeps the FIRST of two members sharing a display name', () => {
+  const conv = nextConv();
+  const FIRST = '019f0000-0000-0000-0000-00000000aaaa';
+  const SECOND = '019f0000-0000-0000-0000-00000000bbbb';
+  recordRoster(conv, [
+    { member_id: FIRST, display_name: 'dup.name' },
+    { member_id: SECOND, display_name: 'dup.name' },
+  ]);
+  assert.deepEqual(buildMentions('@dup.name 看下', conv), [
+    { type: 'member', member_id: FIRST },
+  ], 'ties go to the member the roster listed first');
+});
+
+test('recordRoster never overwrites a name that already resolves', () => {
+  const conv = nextConv();
+  // luna.coco was observed actually speaking here — stronger evidence of who
+  // "@luna.coco" means than an arbitrary roster ordering.
+  recordParticipants(conv, { name: 'luna.coco', memberId: LUNA_ID });
+  recordRoster(conv, [
+    { member_id: GAVIN_ID, display_name: 'luna.coco' },
+  ]);
+  assert.deepEqual(buildMentions('@luna.coco 在吗', conv), [
+    { type: 'member', member_id: LUNA_ID },
+  ], 'the observed-speaker id survives');
+});
+
+test('recordRoster fills in a legacy name-only entry', () => {
+  const conv = nextConv();
+  recordParticipants(conv, 'luna.coco');            // name, no member_id
+  assert.equal(buildMentions('@luna.coco 在吗', conv), undefined);
+  recordRoster(conv, [{ member_id: LUNA_ID, display_name: 'luna.coco' }]);
+  assert.deepEqual(buildMentions('@luna.coco 在吗', conv), [
+    { type: 'member', member_id: LUNA_ID },
+  ], 'the name-only record gets healed rather than skipped');
+});
+
+test('recordRoster skips entries missing a name or a member_id, and bad input', () => {
+  const conv = nextConv();
+  recordRoster(conv, [
+    { member_id: LUNA_ID },                          // no display_name
+    { display_name: 'no.id.here' },                  // no member_id
+    null,
+  ]);
+  assert.equal(buildMentions('@no.id.here 在吗', conv), undefined);
+  // Non-array input is ignored rather than throwing.
+  recordRoster(conv, undefined);
+  recordRoster(undefined, [{ member_id: LUNA_ID, display_name: 'x' }]);
+});
+
+test('needsRosterHydration is not fooled by a resolvable longer name that is a prefix of a distinct token', () => {
+  const conv = nextConv();
+  // A real member "test11" has spoken (resolvable); a different real member
+  // "test" never has. The two @tokens must be judged independently: matching
+  // "@test11" must NOT mark the shorter, distinct "@test" as resolved.
+  recordParticipants(conv, { name: 'test11', memberId: GAVIN_ID });
+  assert.equal(
+    needsRosterHydration('@test11 帮我看下, @test 你也确认一下', conv), true,
+    '@test is a different member and must still trigger a roster fetch',
+  );
+  // And when the resolvable long name is the ONLY mention, no fetch is needed.
+  assert.equal(needsRosterHydration('@test11 帮我看下', conv), false);
+});
+
+test('needsRosterHydration still resolves a space-containing display name (token scanner truncates it)', () => {
+  const conv = nextConv();
+  // "gavin yang" carries a space, so the @token scanner only captures "gavin";
+  // the full recorded name still matches the text span, so it counts resolved.
+  recordParticipants(conv, { name: 'gavin yang', memberId: GAVIN_ID });
+  assert.equal(needsRosterHydration('@gavin yang 看下', conv), false);
+});
+
+// ---------------------------------------------------------------------------
+// Roster-fetch negative cache — rosterFetchedRecently() / markRosterFetched()
+//
+// Bounds the cost of a roster fetch to once per conversation per TTL, even for
+// an @token that can never resolve (so it can't re-hit /members every message)
+// and even when the members endpoint is slow/hung (the stamp is written before
+// the request, so a bad endpoint isn't retried per-send).
+// ---------------------------------------------------------------------------
+
+test('rosterFetchedRecently is false before any fetch, true right after marking', () => {
+  const conv = nextConv();
+  assert.equal(rosterFetchedRecently(conv), false);
+  markRosterFetched(conv);
+  assert.equal(rosterFetchedRecently(conv), true);
+});
+
+test('rosterFetchedRecently expires after the TTL window', () => {
+  const conv = nextConv();
+  const t0 = 1_000_000;
+  markRosterFetched(conv, t0);
+  assert.equal(rosterFetchedRecently(conv, ROSTER_FETCH_TTL_MS, t0 + ROSTER_FETCH_TTL_MS - 1), true);
+  assert.equal(rosterFetchedRecently(conv, ROSTER_FETCH_TTL_MS, t0 + ROSTER_FETCH_TTL_MS + 1), false);
+});
+
+test('the roster-fetch cache does not disturb name resolution in the same conversation', () => {
+  const conv = nextConv();
+  recordParticipants(conv, { name: 'luna.coco', memberId: LUNA_ID });
+  markRosterFetched(conv);
+  // The reserved meta key must not leak into matchedEntries / buildMentions.
+  assert.deepEqual(buildMentions('@luna.coco ping', conv), [
+    { type: 'member', member_id: LUNA_ID },
+  ]);
+  assert.equal(needsRosterHydration('@luna.coco ping', conv), false);
 });

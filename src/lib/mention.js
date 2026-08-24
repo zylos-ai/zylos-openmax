@@ -57,6 +57,56 @@ function save(reg) {
   }
 }
 
+// Reserved top-level registry key holding a { conversationId: epochMs } map of
+// the last time we fetched (or attempted to fetch) each conversation's roster.
+// Kept at the top level, alongside the conversationId-keyed name maps, so it
+// never collides with a real conversation id and is invisible to matchedEntries
+// (which only ever indexes reg[conversationId]). Deliberately NOT a normalized
+// display-name key: no name normalizes to a string starting with "__".
+const ROSTER_META_KEY = '__rosterFetchedAt';
+
+// Negative-cache window for roster hydration. Once we've hit a conversation's
+// member list, skip re-hitting it for this long — EVEN IF the @name still
+// didn't resolve (misspelled, not a member, or a longer name that only shares a
+// prefix). Two problems this closes, both raised in review:
+//   1. an @token that can never resolve would otherwise re-fetch /members on
+//      every single message (needsRosterHydration stays true forever), and
+//   2. once the GET is bounded by a timeout, an unresponsive members endpoint
+//      would otherwise cost that timeout on every send; with the cache it costs
+//      it at most once per window.
+// We stamp the timestamp BEFORE the fetch, so a hang/timeout/error is cached
+// too — the whole point is to not retry a bad endpoint per-message.
+export const ROSTER_FETCH_TTL_MS = 10 * 60 * 1000; // 10 min
+
+/**
+ * Has this conversation's roster been fetched within `ttlMs`? Callers use this
+ * to decide whether to skip a (bounded, best-effort) roster hydration.
+ * @param {string} conversationId
+ * @param {number} [ttlMs]
+ * @param {number} [nowMs] injectable clock for tests
+ * @returns {boolean}
+ */
+export function rosterFetchedRecently(conversationId, ttlMs = ROSTER_FETCH_TTL_MS, nowMs = Date.now()) {
+  if (!conversationId) return false;
+  const meta = load()[ROSTER_META_KEY];
+  const ts = meta && meta[conversationId];
+  return Number.isFinite(ts) && (nowMs - ts) < ttlMs;
+}
+
+/**
+ * Record that this conversation's roster was just fetched (or attempted).
+ * Best-effort persistence, like the rest of the registry.
+ * @param {string} conversationId
+ * @param {number} [nowMs] injectable clock for tests
+ */
+export function markRosterFetched(conversationId, nowMs = Date.now()) {
+  if (!conversationId) return;
+  const reg = load();
+  const meta = reg[ROSTER_META_KEY] || (reg[ROSTER_META_KEY] = {});
+  meta[conversationId] = nowMs;
+  save(reg);
+}
+
 // Registry entries were originally plain strings (display_name only, pre
 // mentions support). Normalize either shape to {name, memberId}.
 function entryOf(v) {
@@ -200,4 +250,102 @@ export function buildMentions(text, conversationId) {
     out.push({ type: 'member', member_id: memberId });
   }
   return out.length ? out : undefined;
+}
+
+// Global twins of the broadcast matchers, for stripping every sentinel from a
+// string rather than just the first (the originals are single-shot `test()`
+// matchers, so they deliberately aren't global — a global regex carries
+// lastIndex state that would make repeated test() calls alternate).
+const ALL_AGENTS_RE_G = new RegExp(ALL_AGENTS_RE.source, 'giu');
+const ALL_RE_G = new RegExp(ALL_RE.source, 'giu');
+
+// A conservative `@token` scanner, used ONLY to decide whether the registry
+// looks incomplete — never to resolve anybody. Display names may contain
+// characters this misses (a space, most obviously: "@gavin yang" yields the
+// token "gavin"), which is fine, because a partial token is still enough to
+// notice "the registry has nothing for this" and trigger a roster fetch. The
+// actual resolution stays with matchedEntries(), which matches full recorded
+// names against the raw text.
+const MENTION_TOKEN_RE = new RegExp(AT + '([\\p{L}\\p{N}._-]+)', 'giu');
+
+/**
+ * Does `text` mention somebody the local registry can't resolve to a member_id?
+ *
+ * The registry is only ever populated from participants observed speaking in
+ * the conversation (see recordParticipants' caller in comm-bridge.js), so
+ * anyone who has never spoken is invisible to it and an `@name` aimed at them
+ * silently produces no mention at all. This predicate is the trigger for
+ * filling that gap from the conversation roster — see recordRoster().
+ *
+ * Broadcast sentinels are stripped first: `@所有人` / `@所有Agent` resolve
+ * without the registry, so they must never trigger a roster fetch.
+ *
+ * @param {string} text
+ * @param {string} conversationId
+ * @returns {boolean}
+ */
+export function needsRosterHydration(text, conversationId) {
+  const s = String(text ?? '');
+  if (!conversationId || !/[@＠]/.test(s)) return false;
+
+  // Blank out everything that already resolves without a roster fetch, then see
+  // if any `@token` survives. We strip the actual matched SPANS rather than
+  // comparing name prefixes: a resolvable long name (e.g. "@test11") must not
+  // mask a distinct shorter token that merely shares its prefix (e.g. "@test",
+  // a different member who has never spoken) — that prefix collision was a
+  // false-negative that left "@test" silently unresolved forever. Stripping the
+  // "@test11" span leaves "@test" standing, so it correctly triggers a fetch.
+  //   - broadcast sentinels (@所有人/@所有Agent) resolve without the registry;
+  //   - any @name matchedEntries can already resolve to a member_id will become
+  //     a real mention as-is.
+  let remaining = s.replace(ALL_AGENTS_RE_G, ' ').replace(ALL_RE_G, ' ');
+  for (const { name } of matchedEntries(s, conversationId).filter((e) => e.memberId)) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    remaining = remaining.replace(new RegExp(AT + esc + '(?![\\p{L}\\p{N}._-])', 'giu'), ' ');
+  }
+  // A fresh (non-global) matcher so lingering lastIndex state can't skew test().
+  return new RegExp(AT + '[\\p{L}\\p{N}._-]+', 'u').test(remaining);
+}
+
+/**
+ * Record a conversation's full member roster into the registry, so that an
+ * `@name` aimed at someone who has never spoken can still resolve.
+ *
+ * Two rules, both deliberate:
+ *
+ *  - **Duplicate display names: the first one wins.** Two members can share a
+ *    display name, and the registry is keyed by normalized name, so only one
+ *    can be kept. Ties go to whichever the roster lists first (per Gavin's
+ *    call, 2026-08-07). Without the pre-dedup below, recordParticipants would
+ *    instead let the *last* duplicate overwrite the earlier ones.
+ *  - **Gap-filling only: never overwrite a name that already resolves.** An
+ *    existing entry with a member_id came from someone actually observed
+ *    speaking here, which is stronger evidence of who "@name" means than an
+ *    arbitrary roster ordering. Names recorded without a member_id (legacy
+ *    string-shaped entries) are NOT resolvable, so those do get filled in.
+ *
+ * @param {string} conversationId
+ * @param {Array<{member_id?:string, display_name?:string}>} members
+ */
+export function recordRoster(conversationId, members) {
+  if (!conversationId || !Array.isArray(members)) return;
+
+  const conv = load()[conversationId] || {};
+  const alreadyResolved = new Set(
+    Object.keys(conv).filter((k) => entryOf(conv[k]).memberId),
+  );
+
+  const picked = [];
+  const takenNames = new Set();
+  for (const m of members) {
+    const name = String(m?.display_name ?? '').trim();
+    const memberId = m?.member_id ? String(m.member_id) : undefined;
+    if (!name || !memberId) continue;
+    const key = norm(name);
+    if (alreadyResolved.has(key) || takenNames.has(key)) continue;  // first wins
+    takenNames.add(key);
+    picked.push({ name, memberId });
+  }
+
+  if (picked.length) recordParticipants(conversationId, picked);
 }

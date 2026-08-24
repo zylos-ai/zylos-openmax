@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.0] — 2026-08-24
+
+Group-history dedup correctness plus a mention roster fallback so an `@name` aimed at someone who has not spoken in the conversation still wakes them.
+
+### Added
+
+- Mention roster fallback: when an outbound message `@`-mentions a participant not yet in the local mention registry (someone who has never spoken in the conversation), fetch the conversation roster once (`GET /conversations/{id}/members`, gap-fill, first-wins on duplicate display names) and resolve the mention against it. Best-effort — a failed, timed-out, or hung fetch never blocks the send.
+
+### Fixed
+
+- group-history: compare `message_id` as strings in both identity checks (`recordHistoryEntry` dedup and `getHistory` exclusion), so a message the delivery path sends sometimes as a JSON number and sometimes as a string is no longer recorded/appended twice, and the in-flight message is correctly excluded from its own history. Normalized at compare time, so existing on-disk logs need no migration.
+- mention: bound the roster-hydration `GET` with a short (2s) timeout so an unresponsive members endpoint can no longer hang the entire send (a never-settling fetch that `try/catch` cannot rescue); on timeout the send proceeds without a structured mention.
+- mention: fix a roster-fetch trigger false-negative where a resolvable longer name (e.g. `test11`) masked a distinct shorter `@name` sharing its prefix (`test`), leaving that mention silently unresolved forever; the trigger now strips actually-resolved mention spans instead of comparing name prefixes.
+- mention: negative-cache roster fetches per conversation (stamped before the request, TTL-bounded) so an unresolvable `@name` — or an unresponsive endpoint — no longer re-fetches `/members` on every message.
+
 ## [2.15.0] — 2026-08-22
 
 Stable release of the custom-connector CLI (promotes `2.15.0-beta.2`). Changes since `2.15.0-beta.2`:

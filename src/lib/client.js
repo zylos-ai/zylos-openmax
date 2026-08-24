@@ -321,7 +321,10 @@ async function request(method, path, opts = {}) {
 }
 
 // Default-org variants (use COCO_ORG_ID env or single-enabled-org).
-export const get   = (path, query) => request('GET',    path, { query });
+// `get` takes an optional `{ timeoutMs }` so a caller that must not block
+// indefinitely (e.g. a best-effort pre-send roster fetch) can bound the
+// request; omitting it preserves the original no-deadline behaviour.
+export const get   = (path, query, { timeoutMs } = {}) => request('GET', path, { query, timeoutMs });
 export const post  = (path, body)  => request('POST',   path, { body });
 export const patch = (path, body)  => request('PATCH',  path, { body });
 export const put   = (path, body)  => request('PUT',    path, { body });
@@ -331,7 +334,7 @@ export const del   = (path)        => request('DELETE', path);
 // running on (e.g. per-org WS message handlers, multi-org CLI commands).
 // They resolve the JWT against that specific org's cache, so a multi-org
 // agent never accidentally calls cws-core with the wrong org's token.
-export const getForOrg   = (orgId, path, query) => request('GET',    path, { query, orgId });
+export const getForOrg   = (orgId, path, query, { timeoutMs } = {}) => request('GET', path, { query, orgId, timeoutMs });
 export const postForOrg  = (orgId, path, body, { timeoutMs } = {}) =>
   request('POST', path, { body, orgId, timeoutMs });
 
