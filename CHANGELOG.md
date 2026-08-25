@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.2] — 2026-08-25
+
+### Fixed
+
+- New-task intake no longer infers an Issue decision from ordinary task wording, deliverable format, immediacy, simplicity, or phrases such as "follow the normal process". Until the human explicitly chooses Issue-backed work, OpenMax asks only for the missing Issue/Project decisions and defers KnowledgeBase, executor, Blueprint, and plan questions.
+
 ## [2.16.1] — 2026-08-25
 
 ### Changed

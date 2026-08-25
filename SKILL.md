@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.16.1
+version: 2.16.2
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -174,10 +174,12 @@ Treat **whether to create an Issue** and **which Project owns it** as two indepe
 | Not stated | No | In one intake turn, ask whether to create an Issue and recommend a Project for confirmation |
 
 - An explicit human statement in the current request or still-valid visible conversation context counts as a decision. A `proj://<uuid>` attached to the task is an explicit Project choice. A named Project counts only after it resolves unambiguously to one active Project the Agent can access.
+- **Do not infer either decision from ordinary task wording.** Describing the deliverable, saying "do it" / "start" / "handle this" / "follow the normal process", requesting an immediate or concise answer, or the task being simple enough to finish in the conversation does **not** mean "create an Issue" and does **not** mean "do not create an Issue". Unless the human explicitly chooses one side, creation intent remains **Not stated** and you must ask.
 - **Do not ask twice.** If the human already said "create an Issue", "do not create an Issue", or "create it in Project X", do not ask them to reconfirm that same decision.
 - An Agent recommendation, semantic match, recent Project, local cache, default Inbox, or the fact that only one Project is visible **does not** count as human confirmation. Present the recommendation and wait for the answer.
 - Only call `issue.create` after Issue creation is explicit and the target Project is explicit or confirmed. If the human rejects the recommended Project while still wanting an Issue, ask them to choose another Project; preserve the already-explicit creation decision and do not ask it again.
 - If the human says not to create an Issue, continue the requested work directly in the conversation without Issue, Blueprint, Task, or Work acceptance state. Resource authorization, credential confirmation, and high-risk action approval rules still apply.
+- Until Issue creation is explicit, do not ask about the KnowledgeBase, executing Agent, Blueprint, or plan acceptance. Those are Issue-backed decisions and come only after the intake selects Issue-backed work.
 - This intake is an Agent conversation rule, not a cws-core Approval. The visible human statement is the intent evidence; do not create a competing Approval object.
 
 After the intake selects Issue-backed work, confirm any other missing inputs (KnowledgeBase and executing Agent), then build the Issue and Blueprint in TM. After the human accepts the plan, create Tasks per the Blueprint Steps and advance strictly along the corresponding simple or complex flow.
