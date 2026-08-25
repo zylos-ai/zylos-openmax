@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Every inbound OpenMax envelope now explicitly requires loading the `openmax` Skill before handling the message, preventing a freshly restarted runtime from occasionally answering without the Skill.
 - Short conversational deliverables are still tasks when the human explicitly calls them work/tasks or asks the Agent to create, write, organize, analyze, research, change, or deliver an output.
+- Simple-task KB selection now skips repeat questions when the human already chose the KB, while Project parameter resolution explicitly treats cache, search, and Inbox as recommendation sources rather than human consent.
 
 ## [2.16.2] — 2026-08-25
 

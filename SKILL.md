@@ -192,7 +192,7 @@ Rule of thumb for judging simple/complex: a single output that one agent can com
 ### Simple Task Flow (single Agent completes independently, e.g. research report)
 1. **Receive the user's intent**: parse the message, recognize it as a simple research/analysis need
 2. **Resolve new-Issue intake**: apply the decision matrix above. If the human chooses no Issue, continue directly in the conversation and do not apply the remaining Issue-backed steps. If the human chooses an Issue, its Project must already be explicit or confirmed before continuing
-3. **Choose the KnowledgeBase (must ask, silent decisions forbidden, and must be before execution)**: **ask the user first** which KnowledgeBase the output should be distilled into; you may suggest the default KB, but it too must be confirmed / chosen by the user
+3. **Choose the KnowledgeBase (confirm only when missing, silent decisions forbidden, and must be before execution)**: if the human has already explicitly specified or confirmed the output KnowledgeBase, use it without asking again. Otherwise, **ask the user first** which KnowledgeBase the output should be distilled into; you may suggest the default KB, but it too must be confirmed / chosen by the user
 4. **Confirm the executing Agent (must ask, the bot does not decide on its own)**: use `core.agent_profiles` (self-reported skills + manual tags + description) to pull candidate agent capability profiles, **give a recommendation + reasoning** based on them, list the candidates to the originator, and let **the originator confirm / choose** the executing bot; when there is no matching expertise you may recommend that COCO do it itself, but the originator must still confirm
 5. **Register the Issue + single-step Blueprint**: the Lead creates the **Issue** under the **confirmed project**, explicitly sets `ownerMemberId` to the member id of the human who initiated the task, sets `leadAgentId` to itself, and uses `backlog:false` because this flow proceeds directly into planning. Then create a Blueprint with only one step, whose step description is the execution unit of this simple task. **Write the description in Markdown** (headings, lists, bold, code blocks, etc.; all platform text defaults to markdown, no extra format parameter needed).
 6. **Submit the plan for confirmation**: the Lead submits the human-readable Markdown plan via `issue.submit_plan {blueprintId}`; after the human replies "accept the plan", during the text-card simulation period the Lead calls `issue.accept_plan {source:"text_card_proxy"}`. The plan description is written into the Issue comment, and the Blueprint is the source of truth for the plan.
@@ -295,6 +295,8 @@ COCO_ORG_ID=<org-context org-id> node .../kb.js ...
 
 ### Parameter Resolution
 
+This section resolves IDs and discovers candidates for API calls; it does **not** authorize Issue creation or select the owning Project. For a new Issue, the New-Issue Intake rules above take precedence: only the human's explicit Project choice or confirmation selects the Project. Memory, the local directory, API results, and defaults may supply a recommendation, but never consent.
+
 For the IDs needed by API calls, obtain them by priority:
 
 1. **Human message context** → projectId, orgId, etc. given by the human, use directly, do not re-create
@@ -302,8 +304,10 @@ For the IDs needed by API calls, obtain them by priority:
 3. **Memory** → last known projectId, issueId, etc.
 4. **Local directory** → semantic match from the cached Project/Issue name+description
 5. **API query** → `project.list`, `core.member_list({kind:"agent"})`, etc.
-6. **Default** → project unspecified → Inbox
+6. **Default candidate** → when the Project is unspecified, Inbox may be recommended but must not be selected silently
 7. **Ask the human**
+
+For new-Issue Project ownership, stop when these steps produce a plausible candidate, present it to the human, and wait for confirmation. Do not pass a cached, semantically matched, API-discovered, or default Project ID to `issue.create` until the human confirms it.
 
 Parameter dependency tree (must be obtained in this order the first time, persist after obtaining):
 
