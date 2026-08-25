@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.1] — 2026-08-25
+
+### Changed
+
+- New-task Issue intake now treats creation intent and target Project as independent decisions and asks only for missing information. Explicit human choices are not reconfirmed; Agent recommendations, recent/default Projects, and a sole visible Project do not count as confirmation. OpenMax calls `issue.create` only after creation and Project are settled, while an explicit no-Issue choice continues directly in the conversation without Work objects.
+
 ## [2.16.0] — 2026-08-24
 
 Group-history dedup correctness plus a mention roster fallback so an `@name` aimed at someone who has not spoken in the conversation still wakes them.

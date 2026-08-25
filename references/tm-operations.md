@@ -4,7 +4,7 @@
 
 **When to load this document**:
 
-- When you receive a human's "new requirement / do this for me", load it to look up the `issue.create` parameters, create an Issue, then create a single-step or multi-step Blueprint and go through plan confirmation
+- When a human's new task has passed the `SKILL.md` new-Issue intake (creation is explicit and the Project is explicit or confirmed), load this reference to look up the `issue.create` parameters, create the Issue, then create a single-step or multi-step Blueprint and go through plan confirmation. If the human chose no Issue, do not call any command in the Issue creation flow
 - When you need to dispatch a task to someone else or pick up work yourself, look up `task.create` / `task.claim` → `task.start` (picking up work is two steps: claim to assign, start to begin work)
 - When you need to stop an issue early before it reaches a conclusion, look up `issue.terminate` (terminate + cleanup)
 - When work is done and you are wrapping up, look up the order `attempt.transition` → `task.transition` → `issue.deliver` → `accept_delivered`; when the human does not accept, do not call reject first — clarify through conversation first, then `issue.resume`
