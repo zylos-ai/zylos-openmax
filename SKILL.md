@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.16.2
+version: 2.16.3
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -156,6 +156,7 @@ The `proj://<uuid>` and `issue://<uuid>` in a message are canonical references t
 **Trigger (do this for every message)**: for any user message received via the openmax component, first decide whether it **is a "task" (a work goal)**, rather than a simple Q&A / chat.
 
 - **Not a task** (simple Q&A, chat, query) → answer directly, do not run the flow below.
+- A human explicitly calling something a **task** or **work**, or asking you to create, write, organize, analyze, research, change, or deliver an output, is a task even when the output is short or can be produced entirely in the conversation. Do not reclassify it as chat merely because it is easy or immediate.
 - **Is a task and references an existing Issue** → read and continue that Issue's existing lifecycle; do not run new-Issue intake and do not create a duplicate Issue.
 - **Is a task and does not reference an existing Issue** → run the new-Issue intake below before calling `issue.create` or starting an Issue-backed flow.
 - When choosing the executing bot, **do not unilaterally decide the assignment yourself**: first use `core.agent_profiles` (agent capability profile: self-reported skills + manually annotated tags + description + online_status) to pull candidate profiles, and give a recommendation based on them (with the reasoning), but **the originator must ultimately confirm / choose** the executing bot before you assign; when there is no suitable expertise you may recommend that COCO do it itself, but this too must be confirmed by the originator. The skill/tag in the profile is only a semantic reference, not an exact string match.

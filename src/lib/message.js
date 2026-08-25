@@ -16,6 +16,7 @@
  * Inbound C4 text format (tag on its own line; the attributed utterance lives
  * inside <current-message> for parity with other C4 channels):
  *   [OPENMAX DM]
+ *   <openmax-instruction>...</openmax-instruction>
  *   <current-message>
  *   <name> said: <content>
  *   </current-message>
@@ -203,6 +204,19 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
     header += `<org-context org-id="${escapeXml(orgId)}"/>\n`;
   }
   const parts = [header];
+
+  // Skill discovery is advisory in the runtime: a model can occasionally
+  // answer an inbound message without invoking the listed skill, especially
+  // immediately after a session restart. Put the fixed channel instruction in
+  // every OpenMax envelope so loading the skill is part of the message contract
+  // rather than a best-effort inference from the skill listing.
+  parts.push(
+`<openmax-instruction>
+Before handling the current message, invoke the openmax skill and follow it. For a new task, complete New-Issue Intake before doing the work.
+</openmax-instruction>
+
+`,
+  );
 
   if (threadContext && threadContext.length > 0) {
     const lines = threadContext.map(m => {
