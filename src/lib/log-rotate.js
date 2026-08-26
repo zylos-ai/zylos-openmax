@@ -30,6 +30,16 @@
  * The live file stays plain text; only the rolled-off archives are gzipped.
  * Archives are kept forever — there is NO pruning / retention limit here.
  *
+ * Because archives are never pruned, the archive identity must be collision-proof:
+ * `stamp()` is only second-granular, so two rotations of the same file within one
+ * second (runOnStart + a manual tick, a crash-restart, a frozen-clock test) would
+ * otherwise derive the same `<stem>.<stamp>` base and the second rotation would
+ * silently overwrite the first archive. A reservation loop instead claims a unique
+ * base by appending `.1`, `.2`, … until it finds one whose `.log.gz` does not
+ * already exist AND whose `.log` snapshot slot it can atomically create with
+ * `O_EXCL` — so neither a published archive nor an in-progress/preserved snapshot
+ * is ever clobbered.
+ *
  * Registered into the existing TaskRegistry via startLogRotation() so it inherits
  * serialization (non-overlapping ticks), error isolation and unified start/stop.
  *
@@ -70,9 +80,13 @@ export function logPaths() {
  * @param {() => import('node:stream').Transform} [opts.gzipFactory]
  *        Compression-stream factory; defaults to zlib.createGzip. Injectable so
  *        tests can force an archive-write failure (zlib exports are read-only).
+ * @param {() => string} [opts.stampFn]
+ *        Timestamp factory; defaults to `stamp`. Injectable so tests can freeze the
+ *        clock (a constant stamp) and deterministically exercise same-second rotations.
  */
 export async function rotateFile(file, maxBytes = MAX_BYTES, opts = {}) {
   const gzipFactory = opts.gzipFactory ?? (() => zlib.createGzip());
+  const stampFn = opts.stampFn ?? stamp;
   let size;
   try {
     size = fs.statSync(file).size;
@@ -84,15 +98,41 @@ export async function rotateFile(file, maxBytes = MAX_BYTES, opts = {}) {
   const dir = path.dirname(file);
   const bn = path.basename(file);
   const stem = bn.endsWith('.log') ? bn.slice(0, -'.log'.length) : bn;
-  const base = path.join(dir, `${stem}.${stamp()}`);
-  const snapshot = `${base}.log`;                          // durable UNCOMPRESSED snapshot
-  const archive = `${base}.log.gz`;                        // final compressed archive
+
+  // Reserve a collision-proof base. `stamp()` is only second-granular, so a base
+  // of just `<stem>.<stamp>` can repeat when the same file rotates twice within one
+  // second — and since archives are never pruned, reusing a base means the second
+  // rotation clobbers the first's `.log.gz` (success path) or its preserved `.log`
+  // snapshot (archive-failure path). We probe n = 0, 1, 2, … and claim the first
+  // base whose `.log.gz` is absent AND whose `.log` snapshot slot we can create with
+  // O_EXCL (atomic reserve). Rotations are serialized by TaskRegistry's
+  // non-overlapping ticks, so this is sequential — the same-second case is repeated
+  // calls, not true concurrency. A brief TOCTOU exists between the `.log.gz` check
+  // and the O_EXCL create; that is acceptable given the serialized single-writer.
+  const stamped = stampFn();
+  let base, snapshot, archive;
+  for (let n = 0; ; n++) {
+    const cand = path.join(dir, `${stem}.${stamped}${n === 0 ? '' : `.${n}`}`);
+    if (fs.existsSync(`${cand}.log.gz`)) continue; // a prior same-second rotation already published here
+    let fd;
+    try {
+      fd = fs.openSync(`${cand}.log`, 'wx'); // O_EXCL: fails if a snapshot slot is already taken
+    } catch (err) {
+      if (err?.code === 'EEXIST') continue;  // a prior rotation's snapshot still present (e.g. its archive failed)
+      throw err;
+    }
+    fs.closeSync(fd);
+    base = cand;
+    snapshot = `${cand}.log`;   // durable UNCOMPRESSED snapshot (slot already reserved above)
+    archive = `${cand}.log.gz`; // final compressed archive
+    break;
+  }
   const partial = `${archive}.partial.${process.pid}`;    // in-progress gzip (collision-safe)
 
-  // Fast raw snapshot into a real, non-hidden archive candidate. copyFileSync
-  // reads to EOF, so appends that land while the copy is running (O_APPEND puts
-  // them at EOF, ahead of the copy read) are captured too — only the gap AFTER
-  // this returns is at risk.
+  // Fast raw snapshot into the reserved (currently empty) archive candidate.
+  // copyFileSync reads to EOF, so appends that land while the copy is running
+  // (O_APPEND puts them at EOF, ahead of the copy read) are captured too — only the
+  // gap AFTER this returns is at risk.
   fs.copyFileSync(file, snapshot);
   // Truncate IMMEDIATELY, before the (slow) compression, so the copytruncate
   // loss window is just the syscall gap between the copy and this truncate.

@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Token/auth error logging no longer renders as `[object Object]`: the error branch now drills into the cws-core error envelope (`error.detail` / `error.title`) and coerces to a string, so the real failure cause surfaces.
 - Log levels: token lifecycle progress logs and the benign `unhandled system event` (message reactions) now write to stdout instead of stderr, so `error.log` retains only genuine errors.
+- Log rotation: same-second rotations of one file no longer overwrite each other. The second-granular timestamp could yield an identical `<stem>.<stamp>` base for two rotations within one second (runOnStart + a manual tick, a crash-restart), silently clobbering the earlier `.log.gz` — data loss under the "archives kept forever" guarantee. `rotateFile` now claims a collision-proof base via a reservation loop that appends `.1`, `.2`, … skipping any base whose `.log.gz` already exists and reserving the snapshot slot with an `O_EXCL` create, so neither a published archive nor a preserved snapshot is ever overwritten.
 
 ## [2.16.3] — 2026-08-25
 

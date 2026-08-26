@@ -133,6 +133,46 @@ test('archives are kept forever — repeated rotations never prune', async () =>
   assert.equal(gzArchives(dir).length, 3); // all retained, zero deletions
 });
 
+test('same-second rotations do NOT overwrite each other (collision-proof base)', async () => {
+  // Regression: `stamp()` is only second-granular, so two rotations of the same
+  // file within one second used to derive the same `<stem>.<stamp>` base and the
+  // second .log.gz clobbered the first — silent segment loss under the
+  // "archives kept forever" guarantee. Freeze the stamp to a constant to force the
+  // collision deterministically (no ~1.1s sleep needed) and assert BOTH segments
+  // survive as two distinct archives.
+  const dir = tmpDir();
+  const file = path.join(dir, 'out.log');
+  const stampFn = () => '2026-08-26_120000';
+
+  const first = 'first-segment '.repeat(50);  // > 10-byte threshold below
+  fs.writeFileSync(file, first);
+  assert.equal(await rotateFile(file, 10, { stampFn }), true);
+
+  const second = 'second-segment '.repeat(50);
+  fs.writeFileSync(file, second);
+  assert.equal(await rotateFile(file, 10, { stampFn }), true);
+
+  // Two distinct archives at the frozen stamp: the plain base and the `.1` variant.
+  const archives = gzArchives(dir).sort();
+  assert.equal(archives.length, 2);
+  assert.deepEqual(archives, [
+    'out.2026-08-26_120000.1.log.gz',
+    'out.2026-08-26_120000.log.gz',
+  ]);
+
+  // Gunzipping both recovers BOTH segments — neither overwrote the other.
+  const restored = archives
+    .map((a) => zlib.gunzipSync(fs.readFileSync(path.join(dir, a))).toString('utf8'))
+    .sort()
+    .join('|');
+  assert.ok(restored.includes(first), 'first segment must survive');
+  assert.ok(restored.includes(second), 'second segment must survive');
+
+  // No lingering snapshots or partials after both successful rotations.
+  assert.equal(snapshotLeftovers(dir).length, 0);
+  assert.equal(partials(dir).length, 0);
+});
+
 test('rotateAll no-ops gracefully when PM2 env is absent', async () => {
   const savedOut = process.env.pm_out_log_path;
   const savedErr = process.env.pm_err_log_path;
