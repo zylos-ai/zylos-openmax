@@ -48,12 +48,40 @@ test('copytruncate: oversized file is gzip-archived then truncated to 0', async 
   // live file truncated to 0, still plain text and present
   assert.equal(fs.statSync(file).size, 0);
 
-  // exactly one gzip archive, decompressing back to the original bytes
+  // exactly one gzip archive, decompressing back to the pre-rotation bytes
   const archives = gzArchives(dir);
   assert.equal(archives.length, 1);
   assert.match(archives[0], /^out\.\d{4}-\d{2}-\d{2}_\d{6}\.log\.gz$/);
   const restored = zlib.gunzipSync(fs.readFileSync(path.join(dir, archives[0]))).toString('utf8');
   assert.equal(restored, payload);
+
+  // the intermediate raw snapshot (.tmp) is cleaned up
+  assert.equal(fs.readdirSync(dir).filter((f) => f.includes('.tmp')).length, 0);
+});
+
+test('copytruncate captures the snapshot even while the file is being appended', async () => {
+  // NOTE: copytruncate is intentionally NOT lossless under concurrent writes —
+  // bytes appended in the tiny gap between the copy and the truncate are dropped.
+  // We assert only what IS true: the archive holds a valid gzip snapshot of the
+  // file as it stood, and the live file ends up truncated. We do NOT assert that
+  // every concurrently-appended byte survives.
+  const dir = tmpDir();
+  const file = path.join(dir, 'out.log');
+  fs.writeFileSync(file, 'seed-'.repeat(200)); // > 100-byte threshold
+
+  const rotate = rotateFile(file, 100);
+  // race some appends against the rotation; these may or may not be retained
+  for (let i = 0; i < 50; i++) fs.appendFileSync(file, `late-${i}\n`);
+  const rotated = await rotate;
+
+  assert.equal(rotated, true);
+  const archives = gzArchives(dir);
+  assert.equal(archives.length, 1);
+  // archive decompresses cleanly to a non-empty snapshot (validity, not losslessness)
+  const restored = zlib.gunzipSync(fs.readFileSync(path.join(dir, archives[0]))).toString('utf8');
+  assert.ok(restored.length > 0);
+  assert.ok(restored.startsWith('seed-'));
+  assert.equal(fs.readdirSync(dir).filter((f) => f.includes('.tmp')).length, 0);
 });
 
 test('archives are kept forever — repeated rotations never prune', async () => {

@@ -4,10 +4,20 @@
  * PM2 (fork mode) owns the log file descriptors and opens them O_APPEND, so we
  * cannot rename+reopen from inside the app (the daemon would keep writing to the
  * old inode and `pm2 logs` would tail the wrong file). Instead we use the
- * logrotate `copytruncate` strategy: stream the current contents into a
- * timestamped gzip archive next to the log, then truncate the live file to 0.
- * Under O_APPEND the daemon's next write lands at offset 0 with no sparse hole,
- * the path is unchanged, and `pm2 logs` keeps following it.
+ * logrotate `copytruncate` strategy: take a fast raw snapshot of the live file
+ * (`copyFileSync` to a tmp file), truncate the live file to 0 IMMEDIATELY, then
+ * gzip the tmp snapshot into a timestamped archive next to the log. Under
+ * O_APPEND the daemon's next write lands at offset 0 with no sparse hole, the
+ * path is unchanged, and `pm2 logs` keeps following it.
+ *
+ * copytruncate is inherently lossy in one tiny window: bytes the O_APPEND writer
+ * emits in the microsecond gap between `copyFileSync` returning and the
+ * `truncateSync` are in neither the snapshot nor the (now-empty) live file — they
+ * are LOST, not preserved and not deferred to a next window. This is the same
+ * trade-off logrotate's own copytruncate makes. Doing copy-then-immediate-
+ * truncate (and compressing only AFTER the truncate) shrinks that window from the
+ * full gzip-stream duration down to two adjacent syscalls; it does not eliminate
+ * it. Acceptable for logs.
  *
  * The live file stays plain text; only the rolled-off archives are gzipped.
  * Archives are kept forever — there is NO pruning / retention limit here.
@@ -62,16 +72,27 @@ export async function rotateFile(file, maxBytes = MAX_BYTES) {
   const bn = path.basename(file);
   const stem = bn.endsWith('.log') ? bn.slice(0, -'.log'.length) : bn;
   const archive = path.join(dir, `${stem}.${stamp()}.log.gz`);
+  const tmp = `${archive}.tmp.${process.pid}`;
 
-  // Snapshot only the bytes present at stat time; anything appended during the
-  // copy is left for the next window (the small copytruncate race, acceptable
-  // for logs and identical to logrotate's own trade-off).
-  await pipeline(
-    fs.createReadStream(file, { end: size - 1 }),
-    zlib.createGzip(),
-    fs.createWriteStream(archive),
-  );
-  fs.truncateSync(file, 0); // live file back to 0; O_APPEND writer continues at offset 0
+  try {
+    // Fast raw snapshot. copyFileSync reads to EOF, so appends that land while
+    // the copy is running (O_APPEND puts them at EOF, ahead of the copy read)
+    // are captured too — only the gap AFTER this returns is at risk.
+    fs.copyFileSync(file, tmp);
+    // Truncate IMMEDIATELY, before the (slow) compression, so the copytruncate
+    // loss window is just the syscall gap between the copy and this truncate.
+    // Bytes appended in that microsecond gap are LOST — not preserved, not
+    // deferred to a next window. Same lossy race as logrotate's copytruncate.
+    fs.truncateSync(file, 0); // O_APPEND writer resumes at offset 0, no sparse hole
+    // Compress the snapshot outside the loss window.
+    await pipeline(
+      fs.createReadStream(tmp),
+      zlib.createGzip(),
+      fs.createWriteStream(archive),
+    );
+  } finally {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
+  }
   return true;
 }
 
