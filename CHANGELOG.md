@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.0] — 2026-08-26
+
+### Added
+
+- Log rotation: a `log-rotate` task registered into the existing `TaskRegistry` performs a **daily** size check and rotates any PM2 log file (`pm_out_log_path` / `pm_err_log_path`) exceeding 20 MB via copytruncate — streaming the current contents into a timestamped `.gz` archive next to the log, then truncating the live file to 0 (safe under PM2's O_APPEND writer; `pm2 logs` keeps following). `runOnStart` reclaims an already-oversized file at boot. Archives are gzipped and kept indefinitely; the live file stays plain text. Graceful no-op outside PM2.
+
+### Fixed
+
+- Token/auth error logging no longer renders as `[object Object]`: the error branch now drills into the cws-core error envelope (`error.detail` / `error.title`) and coerces to a string, so the real failure cause surfaces.
+- Log levels: token lifecycle progress logs and the benign `unhandled system event` (message reactions) now write to stdout instead of stderr, so `error.log` retains only genuine errors.
+
 ## [2.16.3] — 2026-08-25
 
 ### Fixed
