@@ -535,12 +535,11 @@ function isComposioEntry(entry) {
   return !!entry && (entry.credentialSource === 'composio' || entry.credentialMode === 'proxy');
 }
 
-// Does ANY connection in the org index for this applicationId look composio? Used
-// by conn.catalog when it was given a bare applicationId (no resolvable entry) to
-// decide whether to persist a catalog for that app.
-function anyComposioForApp(applicationId, orgId) {
-  const conns = Object.values(readIndex(indexPathForOrg(orgId)).connections || {});
-  return conns.some((e) => e.applicationId === applicationId && isComposioEntry(e));
+// Is an index entry's connector taxonomy KNOWN? A legacy entry that predates
+// credentialMode/credentialSource has BOTH null — we cannot tell composio from
+// non-composio, so the caller must refresh before trusting a "not composio" read.
+function taxonomyKnown(entry) {
+  return !!entry && (entry.credentialMode != null || entry.credentialSource != null);
 }
 
 // Heuristic: does an execute error look like a stale/unknown-action or
@@ -738,18 +737,37 @@ const COMMANDS = {
   // source }.
   'conn.catalog': async () => {
     const orgId = requireOrgId();
+    const agentId = resolveSelfMemberId(orgId);
+    const idxPath = indexPathForOrg(orgId);
     let appId = params.applicationId || params.application_id;
     let entry = null;
     if (!appId && params.app) {
-      const agentId = resolveSelfMemberId(orgId);
       entry = await resolveConnectionForApp(params.app, orgId, agentId);
       appId = entry?.applicationId || (isUuid(params.app) ? params.app : null);
     }
     if (!appId) throw Object.assign(new Error('applicationId (or a resolvable app) is required'), { status: 400 });
-    // Never persist a full catalog for a composio (proxy) connector. Detect via
-    // the resolved entry when we have one, else scan the index for that appId.
-    const composio = entry ? isComposioEntry(entry) : anyComposioForApp(appId, orgId);
-    return getCatalog(orgId, appId, { refresh: !!params.refresh, persist: !composio });
+    // Decide whether to persist a full on-disk catalog. We must NEVER persist for
+    // a composio (proxy) connector — so we persist ONLY when CONFIDENT the app is
+    // non-composio (its taxonomy is known and not composio). A LEGACY index entry
+    // that predates credentialMode/credentialSource has UNKNOWN taxonomy: scanning
+    // it would (wrongly) look non-composio, so refresh once from conn.list (which
+    // now returns the taxonomy) and re-decide. If STILL unknown after the refresh,
+    // stay conservative and do NOT persist — a legacy entry could be composio.
+    // Decision inputs: the resolved entry when we have one, else the index entries
+    // sharing this applicationId.
+    const decide = () => {
+      if (entry) return { composio: isComposioEntry(entry), known: taxonomyKnown(entry) };
+      const forApp = Object.values(readIndex(idxPath).connections || {}).filter((e) => e.applicationId === appId);
+      return { composio: forApp.some(isComposioEntry), known: forApp.some(taxonomyKnown) };
+    };
+    let { composio, known } = decide();
+    if (!composio && !known && agentId) {
+      await refreshIndex(orgId, agentId);
+      if (entry) { const re = readIndex(idxPath).connections[entry.id]; if (re) entry = re; }
+      ({ composio, known } = decide());
+    }
+    // Persist only when confidently non-composio; composio OR still-unknown → skip.
+    return getCatalog(orgId, appId, { refresh: !!params.refresh, persist: known && !composio });
   },
 
   // One-call app-keyed execute: resolve the connection for an application from

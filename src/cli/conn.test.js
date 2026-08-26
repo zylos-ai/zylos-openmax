@@ -521,6 +521,86 @@ test('conn.invoke routing (legacy index): entry lacks credential_mode → refres
   }
 });
 
+// --- conn.catalog: never persist a full catalog for a composio app ----------
+//
+// P2-1 regression (zylos0t): a LEGACY index entry that has an applicationId but
+// lacks the connector taxonomy (credentialMode/credentialSource) must NOT be
+// treated as non-composio on face value. conn.catalog must refresh from conn.list
+// (which now returns the taxonomy) before deciding, and must NEVER writeCatalog
+// for what turns out to be a composio (proxy) app.
+
+test('conn.catalog (P2-1): legacy index (applicationId, no taxonomy) + conn.list reveals composio → refreshes AND does NOT persist a catalog', async () => {
+  const home = setupHome({ connections: {
+    // Legacy: applicationId present, but no credentialMode/credentialSource.
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // conn.list now returns the taxonomy → this app is composio (proxy).
+      res.end(JSON.stringify({
+        data: [{ id: 'c1', application_id: 'app-1', application_slug: 'notion', application_name: 'Notion', status: 'active', credential_mode: 'proxy', credential_source: 'composio' }],
+        request_id: 'r1',
+      }));
+      return;
+    }
+    if (req.url.includes('/connect/applications/app-1/actions')) {
+      // Fetch-through is allowed (returns the catalog to the caller); the point is
+      // it must NOT be written to disk.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ toolkit: 'notion', action: 'notion/search', method: 'POST', input_schema: '{}' }], request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  const catalogFile = path.join(home, 'zylos/components/openmax/runtime/connect/action-catalog/app-1.json');
+  try {
+    const { code, stdout } = await runConn(home, 'conn.catalog', { app: 'notion' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    // The legacy-taxonomy safeguard forced a conn.list refresh before deciding.
+    assert.ok(seen.some((u) => u.includes('/connect/agents/me/connections')), `must refresh from conn.list to learn the taxonomy: ${JSON.stringify(seen)}`);
+    // The negative control: a composio app must NEVER persist a full catalog.
+    assert.ok(!fs.existsSync(catalogFile), `composio catalog must not be persisted: ${catalogFile}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.catalog (positive control): a known-direct app persists its catalog without a taxonomy refresh', async () => {
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-2', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'direct', credentialSource: 'managed' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/applications/app-2/actions')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ toolkit: 'gmail', action: 'gmail/send', method: 'POST', input_schema: '{}' }], request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  const catalogFile = path.join(home, 'zylos/components/openmax/runtime/connect/action-catalog/app-2.json');
+  try {
+    const { code, stdout } = await runConn(home, 'conn.catalog', { app: 'gmail' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    // Taxonomy is already known (direct) → no conn.list refresh needed.
+    assert.ok(!seen.some((u) => u.includes('/connect/agents/me/connections')), `known-direct must not need a taxonomy refresh: ${JSON.stringify(seen)}`);
+    // Confidently non-composio → the catalog IS persisted.
+    assert.ok(fs.existsSync(catalogFile), `direct app catalog must be persisted: ${catalogFile}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
 // --- conn.proxy / conn.execute: direct-only tombstones ----------------------
 //
 // The two proxy verbs are removed (proxy deprecated/removed). They must throw an
