@@ -50,6 +50,7 @@ import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } fr
 import { createMetricsReporter } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
+import { startLogRotation } from './lib/log-rotate.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
 import {
   AGENT_DIAGNOSTICS_CONFIG_EVENT,
@@ -1464,7 +1465,9 @@ async function handleSystemEvent(orgConfig, frame) {
   const payload = frame.payload || {};
   const kind = classifySystemEvent(payload.event);
   if (!kind) {
-    warn(`[${orgConfig.slug}] unhandled system event: ${payload.event || '(unknown)'} conv=${payload.conversation_id || '?'}`);
+    // Benign INFO: an event kind we don't act on. Route to stdout (out.log) so
+    // error.log stays reserved for genuine failures. See task #44 log hygiene.
+    log(`[${orgConfig.slug}] unhandled system event: ${payload.event || '(unknown)'} conv=${payload.conversation_id || '?'}`);
     return;
   }
 
@@ -2486,6 +2489,10 @@ if (config.channelLiveness?.enabled !== false) {
     delay: CHANNEL_LIVENESS_INITIAL_DELAY_MS,
   });
 }
+// Size-based daily log rotation (task #44). Registers + starts the 'log-rotate'
+// task on the shared registry; runOnStart catches an already-oversized out.log
+// at boot. No-ops gracefully when not running under PM2 (env paths absent).
+startLogRotation(tasks);
 tasks.start('ws-stall-watchdog');
 tasks.start('connect-result-resend');
 tasks.start('frame-metrics');

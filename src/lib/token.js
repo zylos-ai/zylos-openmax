@@ -150,10 +150,20 @@ async function corePost(endpoint, body, bearerToken) {
   }
 
   if (!res.ok) {
-    const msg = (data && typeof data === 'object'
-      ? (data.detail || data.error || data.message)
-      : null) || text || `HTTP ${res.status}`;
-    const err = new Error(`${endpoint}: ${msg}`);
+    // cws-core nests the human-readable detail under `error`:
+    //   { error: { title, status, detail, code, errors: [...] }, ... }
+    // A flat `data.error` extraction coerced that object to "[object Object]".
+    // Mirror client.js: drill into the envelope, then flat shapes, then text.
+    let msg;
+    if (data && typeof data === 'object') {
+      const env = (data.error && typeof data.error === 'object') ? data.error : null;
+      msg = (env && (env.detail || env.title))
+         || data.detail
+         || data.message
+         || (typeof data.error === 'string' ? data.error : null);
+    }
+    if (!msg) msg = text || `HTTP ${res.status}`;
+    const err = new Error(`${endpoint}: ${String(msg)}`);
     err.status = res.status;
     throw err;
   }
@@ -194,7 +204,7 @@ function writeBackMemberId(orgId, jwt) {
       if (!o.self) o.self = { member_id: '', name: '' };
       if (!o.self.member_id) {
         o.self.member_id = memberId;
-        console.error(`${LOG} auto-filled orgs.${slug}.self.member_id from JWT claims: ${memberId}`);
+        console.log(`${LOG} auto-filled orgs.${slug}.self.member_id from JWT claims: ${memberId}`);
       }
     });
     return;
@@ -238,7 +248,7 @@ export async function exchange(orgIdArg) {
     const apiKey = resolveApiKey();
     if (!apiKey) throw new Error('token.exchange: config.agent.api_key not set');
     const body = oid ? { org_id: oid } : {};
-    console.error(`${LOG} exchange org=${oid || '(identity-only)'}`);
+    console.log(`${LOG} exchange org=${oid || '(identity-only)'}`);
     const raw = await corePost('/auth/agent/token', body, apiKey);
     const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
     const state = {
@@ -250,7 +260,7 @@ export async function exchange(orgIdArg) {
     _stateByOrg.set(oid, state);
     writeDisk(oid, state);
     if (oid) writeBackMemberId(oid, state.access_token);
-    console.error(`${LOG} exchange ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
+    console.log(`${LOG} exchange ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
     return state.access_token;
   });
 }
@@ -263,7 +273,7 @@ export async function refresh(orgIdArg) {
     try {
       const body = oid ? { refresh_token: s.refresh_token, org_id: oid }
                        : { refresh_token: s.refresh_token };
-      console.error(`${LOG} refresh org=${oid || '(identity-only)'}`);
+      console.log(`${LOG} refresh org=${oid || '(identity-only)'}`);
       const raw = await corePost('/auth/refresh', body, s.access_token);
       const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
       const state = {
@@ -275,7 +285,7 @@ export async function refresh(orgIdArg) {
       _stateByOrg.set(oid, state);
       writeDisk(oid, state);
       if (oid) writeBackMemberId(oid, state.access_token);
-      console.error(`${LOG} refresh ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
+      console.log(`${LOG} refresh ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
       return state.access_token;
     } catch (err) {
       console.warn(`${LOG} refresh(${oid || '_identity'}) failed, re-exchanging with api_key:`, err.message);
@@ -311,11 +321,11 @@ export async function getWsTicket(orgIdArg) {
   const oid = resolveOrgId(orgIdArg);
   if (!oid) throw new Error('token.getWsTicket: org_id required (no default org configured)');
   const accessToken = await getAccessToken(oid);
-  console.error(`${LOG} ws-ticket org=${oid}`);
+  console.log(`${LOG} ws-ticket org=${oid}`);
   const raw = await corePost('/auth/ws-ticket', { org_id: oid }, accessToken);
   const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
   if (!d.ticket) throw new Error('token.getWsTicket: server returned no ticket');
-  console.error(`${LOG} ws-ticket ok org=${oid}`);
+  console.log(`${LOG} ws-ticket ok org=${oid}`);
   return d.ticket;
 }
 
