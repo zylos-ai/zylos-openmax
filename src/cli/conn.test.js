@@ -601,15 +601,16 @@ test('conn.catalog (positive control): a known-direct app persists its catalog w
   }
 });
 
-// --- conn.proxy / conn.execute: direct-only tombstones ----------------------
+// --- conn.proxy / conn.execute: removed-verb tombstones ---------------------
 //
-// The two proxy verbs are removed (proxy deprecated/removed). They must throw an
-// explicit unsupported/deprecated error pointing to conn.invoke — never make a
-// proxy/execute network call. COCO_API_URL defaults to an unroutable port, so a
-// clean deprecated message also proves no network happened.
+// The two legacy verbs are removed. They must throw an explicit "unsupported/
+// removed" error pointing to conn.invoke (which now handles BOTH direct and
+// proxy/Composio) — never make a proxy/execute network call. COCO_API_URL
+// defaults to an unroutable port, so a clean message also proves no network
+// happened.
 
 for (const command of ['conn.proxy', 'conn.execute']) {
-  test(`${command} tombstone: direct-only → 400 unsupported/deprecated, points to conn.invoke`, async () => {
+  test(`${command} tombstone: removed → 400 unsupported/removed, points to conn.invoke`, async () => {
     const home = setupHome({ connections: {
       c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active' },
     } });

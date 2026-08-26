@@ -131,11 +131,12 @@ const ACTIONDEF_UPDATE_FIELDS = ['method', 'url_template', 'description', 'heade
 
 function bad(message) { return Object.assign(new Error(message), { status: 400 }); }
 
-// Direct-only tombstone error for the removed proxy verbs (conn.proxy /
-// conn.execute) and any other would-be proxy path. Proxy mode is deprecated/
-// removed; only direct connections can be invoked (via conn.invoke).
+// Tombstone error for the removed legacy verbs (conn.proxy / conn.execute). They
+// are gone; conn.invoke is the single entry point and auto-routes by
+// credential_mode — direct (local egress) AND proxy/Composio (server-side
+// execute) are both invokable through it.
 function proxyDeprecatedError(verb) {
-  return bad(`unsupported: ${verb} is removed — proxy mode is deprecated/removed; only direct connections can be invoked. Use conn.invoke {app|connectionId, action, params} instead.`);
+  return bad(`unsupported: ${verb} is removed — use conn.invoke {app|connectionId, action, params} instead, which supports both direct (local egress) and proxy/Composio (server-side execute) connections.`);
 }
 
 // Copy only the allowlisted keys that are actually present (skip `undefined`).
@@ -577,11 +578,11 @@ const COMMANDS = {
     return postForOrg(orgId, apiPath(`/connect/connections/${connId}/credential`));
   },
 
-  // conn.proxy — REMOVED (direct-only). Proxy execution is deprecated/removed:
-  // the backend forces `direct` on custom-connector create and is deleting legacy
-  // proxy connections. Kept only as an explicit tombstone so an old caller gets
-  // an actionable error instead of silently proxying — there is NO proxy HTTP
-  // path left in this module. Use conn.invoke (direct) instead.
+  // conn.proxy — REMOVED. The old free-form client-driven proxy verb is gone;
+  // server-side execution is now reached only through conn.invoke's proxy route
+  // (which auto-selects it by credential_mode). Kept as an explicit tombstone so
+  // an old caller gets an actionable error pointing at conn.invoke instead of a
+  // silent failure — there is NO client-driven proxy HTTP path left in this module.
   'conn.proxy': () => { throw proxyDeprecatedError('conn.proxy'); },
 
   // Discover the named actions available for a connection (action discovery).
@@ -606,11 +607,11 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath(`/connect/connections/${connId}/actions`));
   },
 
-  // conn.execute — REMOVED (direct-only). This used to POST to the server-side
-  // proxy execute endpoint (cws-connect resolves the action, injects the token,
-  // calls the provider). Proxy is deprecated/removed, so it is kept only as an
-  // explicit tombstone — no server-side execute HTTP path remains here. Run
-  // actions via conn.invoke (direct local egress) instead.
+  // conn.execute — REMOVED. This used to be a standalone verb that POSTed to the
+  // server-side execute endpoint. That endpoint is still used — but now only via
+  // conn.invoke's proxy/Composio route (POST /connect/connections/{id}/actions/
+  // execute), selected automatically by credential_mode. Kept as an explicit
+  // tombstone pointing at conn.invoke; no standalone execute verb remains here.
   'conn.execute': () => { throw proxyDeprecatedError('conn.execute'); },
 
   // Get connection details (status, owner, scopes, etc.).

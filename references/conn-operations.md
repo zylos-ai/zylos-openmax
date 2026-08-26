@@ -10,7 +10,7 @@ A **Connection** is a third-party app or account — mail, chat, calendar, docs,
 
 1. **`conn.list`** — which apps/accounts are authorized to you right now (each entry pairs an `application` with a `connectionId` + `status`).
 2. **`conn.catalog {app}`** (or `conn.app_actions {applicationId}`) — the app's **action catalog**: every action it exposes, each carrying an `input_schema` (JSON Schema) that describes that action's parameters.
-3. **`conn.invoke {app, action, params}`** — run the chosen action with `params` shaped by its `input_schema`. The credential is cached locally and injected into the request for you.
+3. **`conn.invoke {app, action, params}`** — run the chosen action with `params` shaped by its `input_schema`. The credential is handled for you; `conn.invoke` auto-routes by the connection's `credential_mode` (**`direct`** = local token + your own egress, **`proxy`**/Composio = server-side execute) — see "Two execution models" above.
 
 Because you read the catalog and its `input_schema` **at call time**, the same three verbs drive *any* connected app. What differs per app is only the action names and their `input_schema` — which you **discover, never hardcode** — so a newly-added provider needs zero changes here.
 
@@ -320,12 +320,21 @@ node src/cli/conn.js conn.clear_cache '{}'
 
 ## Credential Handling
 
-`conn.invoke {app, action, params}` runs every call the same way: it acquires the
-connection's real `access_token`, caches it locally (`connect/credentials/<id>.json`,
-`0600`), assembles the request from the catalog's `url_template` + params, injects
-the token, and calls the provider **from this host's egress**. The token is
-refreshed proactively when its `expires_at` is near/expired and reactively once on
-a provider 401; a missing local cache is re-acquired before the call.
+`conn.invoke {app, action, params}` auto-routes by the connection's
+`credential_mode` — you always call the same verb; the credential handling differs:
+
+- **`direct`** — `conn.invoke` acquires the connection's real `access_token`, caches
+  it locally (`connect/credentials/<id>.json`, `0600`), assembles the request from
+  the catalog's `url_template` + params, injects the token, and calls the provider
+  **from this host's egress**. The token is refreshed proactively when its
+  `expires_at` is near/expired and reactively once on a provider 401; a missing
+  local cache is re-acquired before the call.
+- **`proxy`** (e.g. a **Composio** connector, `credential_source:"composio"`) — the
+  connection holds **no** local token and its `acquire` is rejected server-side, so
+  `conn.invoke` does **not** touch the credential cache or the local catalog. It
+  POSTs the action to `POST /connect/connections/{id}/actions/execute`, and the
+  platform resolves the action, injects the credential, and calls the provider
+  **server-side**, returning `{ status_code, body }`.
 
 Request assembly is **code-driven from the catalog** — the action name must resolve
 in the local catalog and the URL can only be that action's `url_template` expanded
@@ -455,14 +464,14 @@ re-invoke by `connectionId`. `app` is not required when `connectionId` is given.
 
 ## WS Event Flow
 
-The comm-bridge automatically maintains the index, the action-catalog cache, and (direct-mode) credentials:
+The comm-bridge automatically maintains the index for all modes, and (for `direct` connections only) the action-catalog cache and credentials — a `proxy`/composio connection is indexed but keeps no local catalog or credential:
 
 | Event | Action |
 |-------|--------|
-| `connection.authorized` | Upsert into `connections-index.<orgId>.json`, then **refresh that org's index from the authoritative agent-connections list** so `applicationId`/`slug`/`name` are correct immediately — the event payload carries only `connection_id` + `provider` (slug), so a bare upsert alone would leave `applicationId`/`name` null until the next `conn.list`. Also **warm the action-catalog cache** (`action-catalog/{applicationId}.json`, from `/connect/applications/{id}/actions`) so the app is invokable right after authorize, and **acquire the credential** → cache to `runtime/connect/credentials/{id}.json`. The identity refresh + catalog warm are **best-effort** (a failure never blocks the credential/index path). **Also enqueues a one-line session notice to the agent** (`🔌 [Connection authorized] …`, via the C4 control queue) so the bot learns it can act via `conn.*` right away, instead of only discovering the connection by chance on a later `conn.list`. |
+| `connection.authorized` | Upsert into `connections-index.<orgId>.json` (recording the connector taxonomy `credentialMode`/`credentialSource`), then **refresh that org's index from the authoritative agent-connections list** so `applicationId`/`slug`/`name` are correct immediately — the event payload carries only `connection_id` + `provider` (slug), so a bare upsert alone would leave `applicationId`/`name` null until the next `conn.list`. Then, **by mode**: a **`direct`** connection **warms the action-catalog cache** (`action-catalog/{applicationId}.json`, from `/connect/applications/{id}/actions`) and **acquires the credential** → cache to `runtime/connect/credentials/{id}.json`; a **`proxy`/composio** connection does **neither** (it holds no local token and executes server-side, so no credential is acquired and no full catalog is warmed). The identity refresh + catalog warm are **best-effort** (a failure never blocks the credential/index path). **Also enqueues a one-line session notice to the agent** (`🔌 [Connection authorized] …`, via the C4 control queue) so the bot learns it can act via `conn.*` right away, instead of only discovering the connection by chance on a later `conn.list`. |
 | `connection.revoked` | Remove from index + delete cached credential |
 | `connection.disconnected` | Remove from index + delete cached credential |
-| `connection.credential_updated` | Upsert index; re-acquire and rewrite the cached token so the local `access_token` stays current. |
+| `connection.credential_updated` | Upsert index; **only when a local credential file already exists** (i.e. a `direct` connection) re-acquire and rewrite the cached token so the local `access_token` stays current. A `proxy`/composio connection has no local file, so this is a no-op for it. |
 | `connection.reauth_needed` | **Stop calling the dead connection**: delete the cached credential and keep the connection indexed but flagged `status: needs_reauth` (not removed — reauth is recoverable), so `conn.invoke` surfaces an actionable 409 "needs re-authorization" hint instead of a bare 404. Also **best-effort DM the owner** to re-authorize (`sendOwnerReauthDm`; a no-owner / send failure only warns, never blocks the event path). |
 
 Cache location: `components/openmax/runtime/connect/`
@@ -475,10 +484,10 @@ boundary is enforced server-side by cws-connect; this table is only the
 
 | Trigger (endpoint) → event | agent does / stores |
 |---|---|
-| **Authorize to agent** → `connection.authorized` | Upsert the org index (`connections-index.<orgId>.json`), then **refresh it from the agent-connections list** so `{applicationId, slug, name, status:active}` is correct despite the sparse event payload, **warm the action-catalog cache** (`action-catalog/<applicationId>.json`), **and** `acquire` the credential and write the real `access_token` to `connect/credentials/<connectionId>.json` (file `0600`, dir `0700`). |
+| **Authorize to agent** → `connection.authorized` | Upsert the org index (`connections-index.<orgId>.json`, incl. `credentialMode`/`credentialSource`), then **refresh it from the agent-connections list** so `{applicationId, slug, name, status:active}` is correct despite the sparse event payload. Then, **for a `direct` connection only**: **warm the action-catalog cache** (`action-catalog/<applicationId>.json`) **and** `acquire` the credential and write the real `access_token` to `connect/credentials/<connectionId>.json` (file `0600`, dir `0700`). A **`proxy`/composio** connection skips both — no local credential file and no full catalog (it executes server-side). |
 | **Revoke this agent** (`DELETE /connections/{id}/agents/{memberId}`) → `connection.revoked` | Remove from the org index **and** delete `connect/credentials/<connectionId>.json` (the cached token). |
 | **Disconnect the connection** (`POST /connections/{id}/disconnect`) → `connection.disconnected` | Same as revoke: remove from the org index **and** delete the cached token file. |
-| Token refreshed → `connection.credential_updated` | Re-`acquire` and rewrite the cached token so the local `access_token` stays current. |
+| Token refreshed → `connection.credential_updated` | Re-`acquire` and rewrite the cached token so the local `access_token` stays current — **only when a local credential file exists** (`direct`); a `proxy`/composio connection has no local file and is skipped. |
 
 Note: **revoke vs disconnect** differ in *meaning* — revoke removes only *this
 agent's* authorization (`connection_agents` binding) while the connection lives on
