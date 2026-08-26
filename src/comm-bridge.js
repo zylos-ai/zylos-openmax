@@ -35,7 +35,7 @@ import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
 import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
-import { traceSystemFrame, logUnhandledSystemEvent } from './lib/system-events.js';
+import { logSystemFrame } from './lib/system-events.js';
 import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
 import { createDefaultReadinessGate, createGatedOnlineReporter, readinessReport } from './lib/agent-readiness.js';
@@ -1466,12 +1466,11 @@ async function handleSystemEvent(orgConfig, frame) {
   const payload = frame.payload || {};
   const kind = classifySystemEvent(payload.event);
   if (!kind) {
-    // Benign INFO: an event kind we don't act on. High-frequency no-ops
-    // (reactions / read receipts / mention notices) are suppressed; every other
-    // unknown event still logs so contract drift stays discoverable. Routed to
-    // stdout (out.log) so error.log stays reserved for genuine failures. See
-    // task #44 log hygiene.
-    logUnhandledSystemEvent(log, orgConfig.slug, payload);
+    // Benign INFO: an event kind we don't act on. The dispatcher already logged
+    // the single line for this frame via logSystemFrame() (one "unhandled
+    // system event: …" line for unknowns, nothing for benign no-ops), so we do
+    // NOT log again here — doing so double-logged every unknown event. See task
+    // #44 log hygiene.
     return;
   }
 
@@ -1704,10 +1703,12 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
         log(`[${orgConfig.slug}] message_ack seq=${frame.payload?.seq} msg=${frame.payload?.message_id}`);
         break;
       case 'system':
-        // Skip the pre-classification trace for high-frequency benign no-ops
-        // (reactions / read receipts / mention notices); all other system
-        // events log as before. See task #44 log hygiene.
-        traceSystemFrame(log, orgConfig.slug, frame);
+        // Single stdout line per system frame: nothing for high-frequency
+        // benign no-ops (reactions / read receipts / mention notices), one
+        // `system event=…` for known events, one `unhandled system event: …`
+        // for unknowns. handleSystemEvent no longer logs the unhandled case.
+        // See task #44 log hygiene.
+        logSystemFrame(log, orgConfig.slug, frame, classifySystemEvent);
         handleSystemEvent(orgConfig, frame).catch(e => warn(`[${orgConfig.slug}] handleSystemEvent:`, e.message));
         break;
       case 'error':

@@ -1,18 +1,15 @@
 // Log-hygiene for high-frequency benign no-op system events (task #44 / PR #135).
 //
-// comm-bridge's `system`-frame dispatch calls traceSystemFrame() (the
-// pre-classification trace at the switch) and, when classifySystemEvent()
-// returns null, logUnhandledSystemEvent(). These are the exact functions wired
-// into src/comm-bridge.js, so testing them here covers the real dispatch log
-// behavior without importing the self-executing comm-bridge daemon.
+// comm-bridge's `system`-frame dispatch calls logSystemFrame() exactly once per
+// frame (passing classifySystemEvent as `classify`), and handleSystemEvent no
+// longer logs the unhandled case — so an unknown event produces exactly ONE
+// line, not the two it used to (trace + unhandled). logSystemFrame is the real
+// function wired into src/comm-bridge.js, so testing it here covers the live
+// dispatch log behavior without importing the self-executing comm-bridge daemon.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  isBenignNoopSystemEvent,
-  traceSystemFrame,
-  logUnhandledSystemEvent,
-} from './system-events.js';
+import { isBenignNoopSystemEvent, logSystemFrame } from './system-events.js';
 
 const BENIGN = [
   'message.reaction.added',
@@ -22,6 +19,19 @@ const BENIGN = [
   'message.mention.created',
   'message.created',
 ];
+
+// Stand-in for comm-bridge's classifySystemEvent: truthy = known/actionable.
+const fakeClassify = (ev) => {
+  const e = String(ev || '').toLowerCase();
+  if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
+  if (e === 'message.updated') return 'edit';
+  return null;
+};
+
+function spy() {
+  const logs = [];
+  return { log: (...a) => logs.push(a.join(' ')), logs };
+}
 
 test('isBenignNoopSystemEvent: all known no-ops match (case-insensitive)', () => {
   for (const name of BENIGN) {
@@ -37,37 +47,39 @@ test('isBenignNoopSystemEvent: unknown / actionable events do not match', () => 
   }
 });
 
-test('dispatch trace: a reaction system frame produces NO log', () => {
-  const logs = [];
-  const log = (...a) => logs.push(a.join(' '));
+test('logSystemFrame (a): a benign no-op frame produces ZERO lines', () => {
+  const { log, logs } = spy();
   const frame = { type: 'system', payload: { event: 'message.reaction.added', conversation_id: 'c-1' } };
-  const emitted = traceSystemFrame(log, 'org-a', frame);
-  assert.equal(emitted, false);
+  assert.equal(logSystemFrame(log, 'org-a', frame, fakeClassify), false);
   assert.equal(logs.length, 0);
 });
 
-test('dispatch trace: an unknown event type STILL logs once (drift stays visible)', () => {
-  const logs = [];
-  const log = (...a) => logs.push(a.join(' '));
+test('logSystemFrame (b): a known/actionable event logs EXACTLY one trace line', () => {
+  const { log, logs } = spy();
+  const frame = { type: 'system', payload: { event: 'message.recalled', conversation_id: 'c-7' } };
+  assert.equal(logSystemFrame(log, 'org-a', frame, fakeClassify), true);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /^\[org-a\] system event=message\.recalled conv=c-7$/);
+});
+
+test('logSystemFrame (c): an unknown event logs EXACTLY one "unhandled" line (no double-log)', () => {
+  const { log, logs } = spy();
   const frame = { type: 'system', payload: { event: 'message.somethingnew', conversation_id: 'c-9' } };
-  const emitted = traceSystemFrame(log, 'org-a', frame);
-  assert.equal(emitted, true);
+  assert.equal(logSystemFrame(log, 'org-a', frame, fakeClassify), true);
   assert.equal(logs.length, 1);
-  assert.match(logs[0], /system event=message\.somethingnew/);
-  assert.match(logs[0], /conv=c-9/);
+  assert.match(logs[0], /^\[org-a\] unhandled system event: message\.somethingnew conv=c-9$/);
 });
 
-test('unhandled log: benign no-op is suppressed, unknown still logs once', () => {
-  const logs = [];
-  const log = (...a) => logs.push(a.join(' '));
+test('logSystemFrame: missing event / conv fall back to the original placeholder strings', () => {
+  // Unknown-with-missing-fields uses (unknown)/? ; a classified-but-blank uses <unknown>/<unknown>.
+  const u = spy();
+  logSystemFrame(u.log, 'org-a', { payload: {} }, fakeClassify);
+  assert.equal(u.logs.length, 1);
+  assert.match(u.logs[0], /unhandled system event: \(unknown\) conv=\?$/);
 
-  // Benign: no log.
-  assert.equal(logUnhandledSystemEvent(log, 'org-a', { event: 'message.read', conversation_id: 'c-2' }), false);
-  assert.equal(logs.length, 0);
-
-  // Unknown drift: logged once.
-  assert.equal(logUnhandledSystemEvent(log, 'org-a', { event: 'message.somethingnew', conversation_id: 'c-3' }), true);
-  assert.equal(logs.length, 1);
-  assert.match(logs[0], /unhandled system event: message\.somethingnew/);
-  assert.match(logs[0], /conv=c-3/);
+  const k = spy();
+  // classify returns truthy for '' here to exercise the trace-line placeholders.
+  logSystemFrame(k.log, 'org-a', { payload: {} }, () => 'edit');
+  assert.equal(k.logs.length, 1);
+  assert.match(k.logs[0], /system event=<unknown> conv=<unknown>$/);
 });
