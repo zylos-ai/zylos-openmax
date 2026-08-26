@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.3] — 2026-08-25
+
+### Fixed
+
+- Every inbound OpenMax envelope now explicitly requires loading the `openmax` Skill before handling the message, preventing a freshly restarted runtime from occasionally answering without the Skill.
+- Short conversational deliverables are still tasks when the human explicitly calls them work/tasks or asks the Agent to create, write, organize, analyze, research, change, or deliver an output.
+- Simple-task KB selection now skips repeat questions when the human already chose the KB, while Project parameter resolution explicitly treats cache, search, and Inbox as recommendation sources rather than human consent.
+
+## [2.16.2] — 2026-08-25
+
+### Fixed
+
+- New-task intake no longer infers an Issue decision from ordinary task wording, deliverable format, immediacy, simplicity, or phrases such as "follow the normal process". Until the human explicitly chooses Issue-backed work, OpenMax asks only for the missing Issue/Project decisions and defers KnowledgeBase, executor, Blueprint, and plan questions.
+
+## [2.16.1] — 2026-08-25
+
+### Changed
+
+- New-task Issue intake now treats creation intent and target Project as independent decisions and asks only for missing information. Explicit human choices are not reconfirmed; Agent recommendations, recent/default Projects, and a sole visible Project do not count as confirmation. OpenMax calls `issue.create` only after creation and Project are settled, while an explicit no-Issue choice continues directly in the conversation without Work objects.
+
 ## [2.16.0] — 2026-08-24
 
 Group-history dedup correctness plus a mention roster fallback so an `@name` aimed at someone who has not spoken in the conversation still wakes them.
