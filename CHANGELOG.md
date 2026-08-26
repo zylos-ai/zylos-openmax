@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.4] — 2026-08-26
+
+### Fixed
+
+- `issue.idle` handling no longer writes routine no-change comments when the Lead has no action that can advance the Issue. This avoids rearming hourly Lead reminders and lets the next idle window escalate the owner; actual actions and new decisions are still recorded through normal Work operations.
+
 ## [2.16.3] — 2026-08-25
 
 ### Fixed
