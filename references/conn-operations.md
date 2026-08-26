@@ -16,7 +16,12 @@ Because you read the catalog and its `input_schema` **at call time**, the same t
 
 **When the app you need isn't in `conn.list`:** it simply isn't authorized to you yet. Tell the owner and ask them to connect/authorize it — do not fall back to a non-platform workaround (installing something, SMTP, scraping, etc.).
 
-**One credential model — the token is cached locally.** `conn.invoke` resolves the connection, assembles the request from the app's catalog (`url_template` + your `params`), injects the locally-cached token, and calls the provider **from your own egress**. You never hold a URL or craft a raw request. Prefer the cache-aware verbs (`conn.invoke` / `conn.catalog`), which resolve the connection and action for you. See "Credential Handling" and "Capability Cache & Call Chain" below for the mechanics.
+**Two execution models, one verb.** `conn.invoke` resolves the connection and routes on its `credential_mode` (recorded in the local index):
+
+- **`direct`** — the common case: the token is cached locally, so `conn.invoke` assembles the request from the app's catalog (`url_template` + your `params`), injects the token, and calls the provider **from your own egress**. Returns `{ status_code, headers, body }`.
+- **`proxy`** (e.g. a **Composio** connector, `credential_source:"composio"`) — the connection holds **no** local token, so `conn.invoke` sends the action to the platform, which resolves it, injects the credential, and calls the provider **server-side**. Returns `{ status_code, body }`. You still call the same `conn.invoke {app|connectionId, action, params}` — the routing is automatic and invisible.
+
+Either way you never hold a URL or craft a raw request. Prefer the cache-aware verbs (`conn.invoke` / `conn.catalog`), which resolve the connection and action for you. See "Credential Handling" and "Capability Cache & Call Chain" below for the mechanics.
 
 > The command reference below is app-agnostic: examples use placeholders like `<app>`, `<toolkit-slug>/<action-name>`, and a generic provider URL. Substitute the real values you get from `conn.list` / `conn.catalog` at runtime — never assume a particular provider.
 
@@ -360,10 +365,16 @@ it does not need to "know" the sequence:
 
 1. **`conn.invoke {app, action, params}`** — resolves the connection for `app`
    from `connections-index.json` (refreshing from `conn.list` on a miss), then
-   runs the action: assemble the request from the local catalog's `url_template`
-   and call the provider from this host, injecting the locally-cached token
-   (refreshed on near-expiry / 401). On an action/schema-shaped error it
-   invalidates the cached catalog once so the next `conn.catalog` refetches.
+   routes on its `credential_mode`:
+   - **`direct`** — assemble the request from the local catalog's `url_template`
+     and call the provider from this host, injecting the locally-cached token
+     (refreshed on near-expiry / 401). On an action/schema-shaped error it
+     invalidates the cached catalog once so the next `conn.catalog` refetches.
+   - **`proxy` / composio** — POST the action to the platform's server-side
+     execute endpoint (`POST /connect/connections/{id}/actions/execute`); no local
+     token or catalog is touched. Returns the server passthrough `{ status_code,
+     body }`. A legacy index entry with no recorded `credential_mode` triggers one
+     `conn.list` refresh (which now returns it) before routing.
 2. **`conn.catalog {app|applicationId}`** — returns the cached action catalog for
    discovery, filling from `conn.app_actions` on a miss / TTL-expiry (24h) /
    `{refresh:true}`. Read this to pick an `action` + build `params` from its
@@ -480,6 +491,7 @@ agent's **local cleanup is identical** (unindex + delete the cached credential).
 |--------|------|-----|
 | GET | `/connect/agents/me/connections` | conn.list / conn.index --refresh |
 | POST | `/connect/connections/{id}/credential` | conn.acquire (also the token refresh) |
+| POST | `/connect/connections/{id}/actions/execute` | conn.invoke (proxy/composio server-side execute) |
 | GET | `/connect/connections/{id}` | conn.status |
 | GET | `/connect/connections/{id}/actions` | conn.actions |
 | GET | `/connect/applications/{id}/actions` | conn.app_actions / conn.catalog |

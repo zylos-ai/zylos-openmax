@@ -133,6 +133,60 @@ test('toEntry 保留 createdAt（用于空/重名连接的兜底标签）', () =
   assert.equal(readIndex(idx).connections.c1.createdAt, '2026-01-05T10:00:00Z');
 });
 
+// --- connector taxonomy: credentialMode / credentialSource ------------------
+
+test('toEntry 捕获 credentialMode/credentialSource（direct/managed 与 proxy/composio 都认）', () => {
+  const idx = tmpIndex();
+  upsertConnection(
+    { connection_id: 'c1', application_slug: 'gmail', credential_mode: 'direct', credential_source: 'managed', status: 'active' },
+    idx,
+  );
+  upsertConnection(
+    { connection_id: 'c2', application_slug: 'notion', credential_mode: 'proxy', credential_source: 'composio', status: 'active' },
+    idx,
+  );
+  const a = readIndex(idx).connections.c1;
+  const b = readIndex(idx).connections.c2;
+  assert.equal(a.credentialMode, 'direct');
+  assert.equal(a.credentialSource, 'managed');
+  assert.equal(b.credentialMode, 'proxy');
+  assert.equal(b.credentialSource, 'composio'); // composio = proxy + composio
+});
+
+test('toEntry 缺 credentialMode/credentialSource → null（不臆造）', () => {
+  const idx = tmpIndex();
+  upsertConnection({ connection_id: 'c1', application_slug: 'gmail', status: 'active' }, idx);
+  const e = readIndex(idx).connections.c1;
+  assert.equal(e.credentialMode, null);
+  assert.equal(e.credentialSource, null);
+});
+
+test('upsert 叠加：稀疏事件（无 credential_mode）不清空已知的 proxy/composio', () => {
+  const idx = tmpIndex();
+  upsertConnection(
+    { connection_id: 'c1', application_id: 'app-1', application_slug: 'notion', credential_mode: 'proxy', credential_source: 'composio', status: 'active' },
+    idx,
+  );
+  assert.equal(readIndex(idx).connections.c1.credentialMode, 'proxy');
+  // 后续只带 slug 的事件不得把分类冲成 null
+  upsertConnection({ connection_id: 'c1', provider: 'notion', status: 'active' }, idx);
+  assert.equal(readIndex(idx).connections.c1.credentialMode, 'proxy');
+  assert.equal(readIndex(idx).connections.c1.credentialSource, 'composio');
+});
+
+test('replaceIndexFromList 整体重建也捕获 credentialMode/credentialSource（走 toEntry）', () => {
+  const idx = tmpIndex();
+  replaceIndexFromList([
+    { id: 'c1', application_id: 'app-1', application_slug: 'gmail', credential_mode: 'direct', credential_source: 'managed', status: 'active' },
+    { id: 'c2', application_id: 'app-2', application_slug: 'notion', credentialMode: 'proxy', credentialSource: 'composio', status: 'active' },
+  ], idx);
+  assert.equal(readIndex(idx).connections.c1.credentialMode, 'direct');
+  assert.equal(readIndex(idx).connections.c1.credentialSource, 'managed');
+  // camelCase 别名也认
+  assert.equal(readIndex(idx).connections.c2.credentialMode, 'proxy');
+  assert.equal(readIndex(idx).connections.c2.credentialSource, 'composio');
+});
+
 // --- reauth normalization (invoke guard depends on it) ----------------------
 
 test('toEntry 规范化 error+needs_reauth → status:needs_reauth（被 invoke 守卫拦截）', () => {

@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.16.3] — 2026-08-25
+## [2.16.4] — 2026-08-27
+
+### Added
+
+- `conn.invoke` now routes by the connection's `credential_mode`. A **proxy** connection (e.g. a Composio connector: `credential_source:"composio"` + `credential_mode:"proxy"`) is executed **server-side** via `POST /connect/connections/{id}/actions/execute` — no local credential acquire, no local action catalog — and returns the server passthrough `{ status_code, body }`. A **direct** connection keeps the existing local-egress path (acquire → local catalog → assemble → send) unchanged.
+- The connections index now persists the connector taxonomy (`credentialMode`, `credentialSource`) from `conn.list` / `conn.status` / the `connection.authorized` WS event, so `conn.invoke` can route without probing (a Composio `acquire` is rejected server-side and is never used for detection).
+
+### Changed
+
+- A legacy index entry lacking `credentialMode` triggers a one-shot `conn.list` refresh (which now returns the field) before routing; if still absent it falls back to `direct` (historical behavior).
+- Composio (proxy) connectors never persist a full local action catalog: `conn.catalog` fetches through without writing, and the `connection.authorized` catalog-warm is skipped for them.
 
 ### Fixed
 

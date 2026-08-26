@@ -98,6 +98,14 @@ function toEntry(conn) {
     // human label can still be built for legacy connections whose display_name
     // is empty or collides with another same-app connection's.
     createdAt: conn.created_at || conn.createdAt || null,
+    // Connector taxonomy (cws-connect): credential_mode is "direct" | "proxy",
+    // credential_source is "managed" | "custom" | "composio". A composio
+    // connection is credential_source:"composio" + credential_mode:"proxy" — it
+    // holds no local token and must execute SERVER-SIDE (see conn.invoke).
+    // conn.list / conn.status / list-available carry these; a sparse WS event may
+    // not, so they default to null and are filled additively by a later refresh.
+    credentialMode: conn.credential_mode || conn.credentialMode || null,
+    credentialSource: conn.credential_source || conn.credentialSource || null,
     status,
   };
 }
@@ -122,6 +130,10 @@ export function upsertConnection(conn, indexPath = INDEX_PATH) {
     // already captured.
     displayName: entry.displayName ?? prev.displayName ?? null,
     createdAt: entry.createdAt ?? prev.createdAt ?? null,
+    // Additive like the rest: a sparse event (slug only, no credential_mode)
+    // must never null a value a richer conn.list record already captured.
+    credentialMode: entry.credentialMode ?? prev.credentialMode ?? null,
+    credentialSource: entry.credentialSource ?? prev.credentialSource ?? null,
     status: entry.status ?? prev.status ?? 'active',
   };
   writeIndex(index, indexPath);
