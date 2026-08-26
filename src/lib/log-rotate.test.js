@@ -20,6 +20,14 @@ function tmpDir() {
 function gzArchives(dir) {
   return fs.readdirSync(dir).filter((f) => f.endsWith('.log.gz'));
 }
+// Uncompressed snapshot candidates: <stem>.<YYYY-MM-DD_HHMMSS>.log (NOT the live
+// file, which has no timestamp, and NOT the .log.gz archive).
+function snapshotLeftovers(dir) {
+  return fs.readdirSync(dir).filter((f) => /\.\d{4}-\d{2}-\d{2}_\d{6}\.log$/.test(f));
+}
+function partials(dir) {
+  return fs.readdirSync(dir).filter((f) => f.includes('.partial'));
+}
 
 test('constants match the approved design (20MB threshold, DAILY check)', () => {
   assert.equal(MAX_BYTES, 20 * 1024 * 1024);
@@ -55,8 +63,9 @@ test('copytruncate: oversized file is gzip-archived then truncated to 0', async 
   const restored = zlib.gunzipSync(fs.readFileSync(path.join(dir, archives[0]))).toString('utf8');
   assert.equal(restored, payload);
 
-  // the intermediate raw snapshot (.tmp) is cleaned up
-  assert.equal(fs.readdirSync(dir).filter((f) => f.includes('.tmp')).length, 0);
+  // on success the uncompressed snapshot is removed and no .gz.partial lingers
+  assert.equal(snapshotLeftovers(dir).length, 0);
+  assert.equal(partials(dir).length, 0);
 });
 
 test('copytruncate captures the snapshot even while the file is being appended', async () => {
@@ -81,7 +90,33 @@ test('copytruncate captures the snapshot even while the file is being appended',
   const restored = zlib.gunzipSync(fs.readFileSync(path.join(dir, archives[0]))).toString('utf8');
   assert.ok(restored.length > 0);
   assert.ok(restored.startsWith('seed-'));
-  assert.equal(fs.readdirSync(dir).filter((f) => f.includes('.tmp')).length, 0);
+  assert.equal(snapshotLeftovers(dir).length, 0);
+  assert.equal(partials(dir).length, 0);
+});
+
+test('archive I/O failure preserves the uncompressed snapshot (no segment loss)', async () => {
+  const dir = tmpDir();
+  const file = path.join(dir, 'out.log');
+  const payload = 'important-log-line\n'.repeat(300); // > 100-byte threshold
+  fs.writeFileSync(file, payload);
+
+  // Force the compression step to fail AFTER the snapshot copy + truncate.
+  const gzipFactory = () => { throw new Error('injected gzip failure'); };
+  await assert.rejects(
+    () => rotateFile(file, 100, { gzipFactory }),
+    /injected gzip failure/,
+  ); // error surfaced by rotateFile
+
+  // live file was already truncated (loss window stays tiny) ...
+  assert.equal(fs.statSync(file).size, 0);
+  // ... but the whole rotated segment survives as an UNCOMPRESSED snapshot
+  const snaps = snapshotLeftovers(dir);
+  assert.equal(snaps.length, 1);
+  assert.match(snaps[0], /^out\.\d{4}-\d{2}-\d{2}_\d{6}\.log$/);
+  assert.equal(fs.readFileSync(path.join(dir, snaps[0]), 'utf8'), payload); // zero data loss
+  // no compressed archive, and no leftover .gz.partial
+  assert.equal(gzArchives(dir).length, 0);
+  assert.equal(partials(dir).length, 0);
 });
 
 test('archives are kept forever — repeated rotations never prune', async () => {

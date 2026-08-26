@@ -5,10 +5,18 @@
  * cannot rename+reopen from inside the app (the daemon would keep writing to the
  * old inode and `pm2 logs` would tail the wrong file). Instead we use the
  * logrotate `copytruncate` strategy: take a fast raw snapshot of the live file
- * (`copyFileSync` to a tmp file), truncate the live file to 0 IMMEDIATELY, then
- * gzip the tmp snapshot into a timestamped archive next to the log. Under
- * O_APPEND the daemon's next write lands at offset 0 with no sparse hole, the
- * path is unchanged, and `pm2 logs` keeps following it.
+ * (`copyFileSync` to a durable, uncompressed `<stem>.<stamp>.log`), truncate the
+ * live file to 0 IMMEDIATELY, then gzip that snapshot to a `.gz.partial` and
+ * atomically rename it onto the final `<stem>.<stamp>.log.gz` — only then is the
+ * uncompressed snapshot deleted. Under O_APPEND the daemon's next write lands at
+ * offset 0 with no sparse hole, the path is unchanged, and `pm2 logs` keeps
+ * following it.
+ *
+ * Archive-I/O failures never eat the segment: if the gzip/write fails after the
+ * truncate (disk full, perms, stream error) the `.gz.partial` is removed but the
+ * uncompressed `<stem>.<stamp>.log` snapshot is KEPT in place (data preserved,
+ * just not compressed) and the error propagates so rotateAll logs it. The atomic
+ * rename also means a half-written `.log.gz` is never observable.
  *
  * copytruncate is inherently lossy in one tiny window: bytes the O_APPEND writer
  * emits in the microsecond gap between `copyFileSync` returning and the
@@ -58,8 +66,13 @@ export function logPaths() {
  * Returns true if it rotated, false if skipped (small / missing / unreadable).
  * @param {string} file
  * @param {number} [maxBytes]
+ * @param {object} [opts]
+ * @param {() => import('node:stream').Transform} [opts.gzipFactory]
+ *        Compression-stream factory; defaults to zlib.createGzip. Injectable so
+ *        tests can force an archive-write failure (zlib exports are read-only).
  */
-export async function rotateFile(file, maxBytes = MAX_BYTES) {
+export async function rotateFile(file, maxBytes = MAX_BYTES, opts = {}) {
+  const gzipFactory = opts.gzipFactory ?? (() => zlib.createGzip());
   let size;
   try {
     size = fs.statSync(file).size;
@@ -71,27 +84,42 @@ export async function rotateFile(file, maxBytes = MAX_BYTES) {
   const dir = path.dirname(file);
   const bn = path.basename(file);
   const stem = bn.endsWith('.log') ? bn.slice(0, -'.log'.length) : bn;
-  const archive = path.join(dir, `${stem}.${stamp()}.log.gz`);
-  const tmp = `${archive}.tmp.${process.pid}`;
+  const base = path.join(dir, `${stem}.${stamp()}`);
+  const snapshot = `${base}.log`;                          // durable UNCOMPRESSED snapshot
+  const archive = `${base}.log.gz`;                        // final compressed archive
+  const partial = `${archive}.partial.${process.pid}`;    // in-progress gzip (collision-safe)
 
+  // Fast raw snapshot into a real, non-hidden archive candidate. copyFileSync
+  // reads to EOF, so appends that land while the copy is running (O_APPEND puts
+  // them at EOF, ahead of the copy read) are captured too — only the gap AFTER
+  // this returns is at risk.
+  fs.copyFileSync(file, snapshot);
+  // Truncate IMMEDIATELY, before the (slow) compression, so the copytruncate
+  // loss window is just the syscall gap between the copy and this truncate.
+  // Bytes appended in that microsecond gap are LOST — not preserved, not
+  // deferred to a next window. Same lossy race as logrotate's copytruncate.
+  fs.truncateSync(file, 0); // O_APPEND writer resumes at offset 0, no sparse hole
+
+  // Compress the snapshot outside the loss window. The uncompressed snapshot is
+  // the durable copy of the rotated segment and must survive until the .log.gz
+  // is safely in place — so if the archive I/O fails here (disk full, perms,
+  // stream error) we KEEP the snapshot rather than lose the whole segment.
   try {
-    // Fast raw snapshot. copyFileSync reads to EOF, so appends that land while
-    // the copy is running (O_APPEND puts them at EOF, ahead of the copy read)
-    // are captured too — only the gap AFTER this returns is at risk.
-    fs.copyFileSync(file, tmp);
-    // Truncate IMMEDIATELY, before the (slow) compression, so the copytruncate
-    // loss window is just the syscall gap between the copy and this truncate.
-    // Bytes appended in that microsecond gap are LOST — not preserved, not
-    // deferred to a next window. Same lossy race as logrotate's copytruncate.
-    fs.truncateSync(file, 0); // O_APPEND writer resumes at offset 0, no sparse hole
-    // Compress the snapshot outside the loss window.
     await pipeline(
-      fs.createReadStream(tmp),
-      zlib.createGzip(),
-      fs.createWriteStream(archive),
+      fs.createReadStream(snapshot),
+      gzipFactory(),
+      fs.createWriteStream(partial),
     );
-  } finally {
-    try { fs.rmSync(tmp, { force: true }); } catch { /* best-effort cleanup */ }
+    // Atomic publish: rename the fully-written .partial onto the final name so a
+    // half-written .log.gz is never observable. Only then drop the snapshot.
+    fs.renameSync(partial, archive);
+    try { fs.rmSync(snapshot, { force: true }); } catch { /* best-effort */ }
+  } catch (err) {
+    // Archive failed: bin the partial, but LEAVE the uncompressed snapshot in
+    // place so the rotated segment is preserved (just not gzipped). Propagate so
+    // rotateAll logs it.
+    try { fs.rmSync(partial, { force: true }); } catch { /* best-effort */ }
+    throw err;
   }
   return true;
 }
