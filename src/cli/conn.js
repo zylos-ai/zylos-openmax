@@ -566,10 +566,12 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath('/connect/agents/me/connections'));
   },
 
-  // Acquire credential for a connection. Direct-only: returns credential_mode:
-  // 'direct' + access_token (proxy is deprecated/removed). A legacy proxy
-  // connection would return credential_mode: 'proxy' with no local token — such
-  // connections are not invokable (see conn.invoke).
+  // Acquire a credential for a connection. This verb is DIRECT-only: it returns
+  // credential_mode:'direct' + access_token for local egress. A proxy/Composio
+  // connection has no local token to hand out (its acquire is rejected
+  // server-side), so conn.acquire does not apply to it — but such connections
+  // ARE invokable via conn.invoke, which routes proxy/Composio to server-side
+  // execute (no local token needed).
   'conn.acquire': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
