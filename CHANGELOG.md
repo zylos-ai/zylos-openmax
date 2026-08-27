@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.0-beta.1] — 2026-08-27
+
+*Beta / experimental release. `comm.send_card` ships as a beta preview:
+it has never been exercised end-to-end against a live environment, so the
+parameter surface may change before a stable 2.17.0.*
+
 ### Added
 
 - `comm.send_card` — send a `cws.card.v1` **display** card: a title/summary plus
