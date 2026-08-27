@@ -185,6 +185,68 @@ node src/cli/comm.js comm.sync '{
 node src/cli/comm.js comm.unread '{"conversationId":"<conv-uuid>"}'
 ```
 
+## Display cards (`cws.card.v1`)
+
+When the user is picking from a few fixed answers — yes/no, approve/reject, one
+of three environments — send a **display card** with quick-reply buttons instead
+of a plain-text question. The answer comes back as a stable **action id** rather
+than free text, so you never have to parse "yes" / "Yes." / "好的".
+
+```bash
+node src/cli/comm.js comm.send_card '{
+  "conversationId": "<uuid>",
+  "title": "需要确认",
+  "summary": "是否继续部署 int?",
+  "options": ["是", "否"]
+}'
+```
+
+`options` accepts a bare string (shorthand for the option text) or
+`{text, label?, id?, style?}`. `style` is `primary` | `secondary` | `danger` and
+is a rendering hint only.
+
+**Reading the answer back** — match on `card_state.action_id`, **never on the
+label**: the label is display text that can be reworded at any time, while the
+id is the stable identity. Derived ids are the slugified option text
+(`"Yes please"` → `yes-please`); text with no `[a-z0-9_-]` characters (e.g. pure
+CJK) falls back to a positional `option-1`, `option-2`, … — pass `id` explicitly
+whenever you want to match on something meaningful.
+
+### Three different fields all called "type"
+
+The most common way to get a 422. They must all line up, and `comm.send_card`
+sets the first two for you:
+
+| Level | Field | Value for a card |
+|---|---|---|
+| Message | `type` | `CARD` |
+| Content | `content.content_type` | `card` |
+| Block | `blocks[].type` | `text`, `markdown`, `fields`, … |
+
+### Limits (enforced locally before the request goes out)
+
+Mirrored from the cws-comm validator, so a malformed card names the offending
+field instead of returning an opaque 422. **Counts are code points, not bytes** —
+200 CJK characters are 200 code points and 600 bytes.
+
+| Field | Limit |
+|---|---|
+| `title` | 200 code points |
+| `summary` | 1000 code points |
+| `text` (block) | 2000 code points |
+| `fallbackText` | 512 code points (over-long input is truncated, not rejected) |
+| `options` | at most 5; two options may not share one option text or one id |
+| option text | 200 code points |
+| option label | 32 code points |
+| whole body | 64 KB serialized |
+
+### Scope
+
+`comm.send_card` sends **display-mode** cards only (`mode: "display"`), which any
+sender may post. Interactive cards — the ones carrying a business operation —
+additionally require a `context` and a registered operation, and are not covered
+by this verb.
+
 ## Relationship with SKILL.md
 
 This document is the Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible only for the **command mechanics** of the Comm CLI. The behavioral-surface content below is **in SKILL.md**; this document does not repeat it:

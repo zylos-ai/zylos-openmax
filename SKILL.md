@@ -119,6 +119,7 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 ## How to Send a Message (reply via C4 `c4-send`; `comm.send` is proactive-only)
 
 - **Replying to a message routed to you → always use the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
+- **Asking the user to choose between a few fixed answers (yes/no, approve/reject) → send a display card with quick-reply buttons (`comm.send_card`), not a plain-text question**, and read the answer from `card_state.action_id`. Open-ended questions, more than five choices, or anything needing a typed explanation stay plain text. See `references/comm-operations.md`.
 - **`comm.send` is for agent-initiated (proactive) sends only** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing into a known `conversationId`.
 
 ## Acting on External Apps / Accounts (Connections) — recognize this first

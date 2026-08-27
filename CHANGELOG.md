@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `comm.send_card` — send a `cws.card.v1` **display** card: a title/summary plus
+  up to five `ui.quick_reply` buttons, for asking the user to pick one of a few
+  fixed answers. The choice reads back from `card_state.action_id`, so no free
+  text has to be parsed. `src/lib/card.js` mirrors the cws-comm validator's
+  caps (code points, not bytes) and rejects a malformed card locally with the
+  offending field named, instead of surfacing an opaque 422 from cws-core.
+  Interactive (business-operation) cards are out of scope.
+- `references/comm-operations.md` — "Display cards" section covering the verb,
+  the three fields all named `type`, the frozen limits, and why the answer must
+  be matched on the action id rather than the label.
+
 ## [2.16.4] — 2026-08-26
 
 ### Fixed
