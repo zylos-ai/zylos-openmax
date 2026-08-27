@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.17.0
+version: 2.17.0-beta.3
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -119,6 +119,7 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 ## How to Send a Message (reply via C4 `c4-send`; `comm.send` is proactive-only)
 
 - **Replying to a message routed to you → always use the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
+- **Asking the user to choose between a few fixed answers (yes/no, approve/reject) → send a display card with quick-reply buttons (`comm.send_card`), not a plain-text question**, and read the answer from `card_state.action_id`. Open-ended questions, more than five choices, or anything needing a typed explanation stay plain text. See `references/comm-operations.md`.
 - **`comm.send` is for agent-initiated (proactive) sends only** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing into a known `conversationId`.
 
 ## Acting on External Apps / Accounts (Connections) — recognize this first
@@ -582,8 +583,10 @@ Each org has an **independent** access policy under `orgs.<slug>` in `config.jso
 - Platform events (Task completion, Issue termination/acceptance, approval results, etc.) are delivered as DMs by the **System Member** (`sender_type=SYSTEM`, such as the "Scheduler"). Such senders are **not subject to dmPolicy/owner-binding constraints**; comm-bridge lets them through directly and injects them into the session.
 - The System Member is a **write-only identity**, with no "receive/consume" semantics. After receiving a system broadcast such as one from the scheduler, **go back to the corresponding Issue/Task context to act** (claim, advance, clean up, etc.; e.g. `issue.activated` → `issue.submit_plan` after requirement clarification, see behavioral guardrail #11), **do not reply to this system DM** — no one will consume your reply, and writing back only pollutes the conversation.
 - The message body is self-contained natural language with visible resource references; act from that body and re-read the referenced Work objects instead of relying on hidden message metadata.
+- Treat a System Member message as an event notification, not as the complete handling procedure. Use its event facts and visible resource references to locate the current Work context, then use this Skill to decide what to do.
 - On `issue.idle`, you are the Issue Lead and must inspect the referenced Issue instead of forwarding the reminder blindly. Read `issue.get`, the current Blueprint (`blueprint.get`/`blueprint.list`), `task.list`, relevant `attempt.list`, and recent Issue/Task comments, then verify the actual state and blocking point.
-- `waiting_dependency` means unfinished Task dependencies, not necessarily another Agent. Decide whether to contact the responsible Worker, unblock an upstream Task, reassign work, or ask a human to intervene. Record the decision through normal Work actions/comments so the Issue activity clock advances. Do not reply to the Scheduler DM and do not ask the platform to message Workers automatically.
+- `waiting_dependency` means unfinished Task dependencies, not necessarily another Agent. Decide whether to contact the responsible Worker, unblock an upstream Task, reassign work, or ask a human to intervene.
+- When an `issue.idle` inspection leads to an actual action or a new decision, record it through normal Work actions/comments. If the dependency is unchanged and there is currently no action that can advance the Issue, do not write a routine “no change” or “continue monitoring” comment, do not invent progress, and do not repeat the same nudge. Leave the Issue activity clock unchanged so the scheduler can escalate to the owner in the next idle window. Do not reply to the Scheduler DM and do not ask the platform to message Workers automatically.
 
 **Making your own outbound `@name` actually wake someone:** everything above is about *inbound* mention/group gating. On the way out, writing `@name` in the text is not enough by itself — the platform only wakes the mentioned party when the message carries the mentioned member's `member_id` alongside it; typing their name is not sufficient on its own. **The standard move, before sending any message that @-mentions someone: query that conversation's member roster first** — `comm.member_list({conversationId})` (same idea as step 1 of the Cross-agent Communication Pattern above, `core.member_list({search:"<name>"})`, when you don't yet have a conversationId) — match your intended recipient's name against the returned roster to get their `member_id`, then pass it explicitly via `mentions`. Don't rely on `comm.send`'s auto-resolution (it only knows participants already seen speaking in that conversation, and is a best-effort fallback for the plain `c4-send.js` reply path, not the recommended way to compose an intentional mention). See `comm-operations.md` for the exact mechanics, including the `@所有人`/`@所有Agent` broadcast sentinels.
 

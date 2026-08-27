@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.17.0] — 2026-08-26
+## [2.17.0-beta.3] — 2026-08-28
+
+*Beta / experimental release. Log-hygiene / observability changes; validate `out.log` rotation and RPC log volume in int before a stable 2.17.0.*
 
 ### Added
 
@@ -19,6 +21,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Token/auth error logging no longer renders as `[object Object]`: the error branch now drills into the cws-core error envelope (`error.detail` / `error.title`) and coerces to a string, so the real failure cause surfaces.
 - Log levels: token lifecycle progress logs and the benign `unhandled system event` (message reactions) now write to stdout instead of stderr, so `error.log` retains only genuine errors.
 - Log rotation: same-second rotations of one file no longer overwrite each other. The second-granular timestamp could yield an identical `<stem>.<stamp>` base for two rotations within one second (runOnStart + a manual tick, a crash-restart), silently clobbering the earlier `.log.gz` — data loss under the "archives kept forever" guarantee. `rotateFile` now claims a collision-proof base via a reservation loop that appends `.1`, `.2`, … skipping any base whose `.log.gz` already exists and reserving the snapshot slot with an `O_EXCL` create, so neither a published archive nor a preserved snapshot is ever overwritten.
+## [2.17.0-beta.2] — 2026-08-28
+
+*Beta / experimental release (full notes in the GitHub release).*
+
+### Fixed
+
+- WeChat / WhatsApp rebind: disconnect now truly destroys the channel session — a per-channel `logout` hook (WeChat admin account delete + login cancel; WhatsApp `auth_info` removal) with an in-flight-login guard and a file fallback on any partial account-delete failure — so a reconnect issues a fresh QR instead of reviving the old account. Pairs with cws-connect !118.
+
+## [2.17.0-beta.1] — 2026-08-27
+
+*Beta / experimental release. `comm.send_card` ships as a beta preview:
+it has never been exercised end-to-end against a live environment, so the
+parameter surface may change before a stable 2.17.0.*
+
+### Added
+
+- `comm.send_card` — send a `cws.card.v1` **display** card: a title/summary plus
+  up to five `ui.quick_reply` buttons, for asking the user to pick one of a few
+  fixed answers. The choice reads back from `card_state.action_id`, so no free
+  text has to be parsed. `src/lib/card.js` mirrors the cws-comm validator's
+  caps (code points, not bytes) and rejects a malformed card locally with the
+  offending field named, instead of surfacing an opaque 422 from cws-core.
+  Interactive (business-operation) cards are out of scope.
+- Option-text comparison now trims with Go's `unicode.IsSpace` set rather than
+  JS `String.trim`. The two disagree in both directions: U+0085 slipped a
+  duplicate pair past the local check into a 422 from cws-core, and U+FEFF made
+  two options the backend considers distinct fail here as "duplicates" while the
+  caller was looking at two texts that plainly differ. Normalization decides
+  equality only — the text on the wire is never rewritten.
+- An id the caller supplies is now honoured regardless of its position: a
+  derived id that would take it yields to the positional form. Previously the
+  invariant only held when the explicit id came first, and the error blamed the
+  option the caller had actually chosen.
+- `references/comm-operations.md` — "Display cards" section covering the verb,
+  the three fields all named `type`, the frozen limits, and why the answer must
+  be matched on the action id rather than the label.
+
+## [2.16.4] — 2026-08-26
+
+### Fixed
+
+- `issue.idle` handling no longer writes routine no-change comments when the Lead has no action that can advance the Issue. This avoids rearming hourly Lead reminders and lets the next idle window escalate the owner; actual actions and new decisions are still recorded through normal Work operations.
 
 ## [2.16.3] — 2026-08-25
 
