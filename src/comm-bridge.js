@@ -35,6 +35,7 @@ import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
 import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
+import { logSystemFrame } from './lib/system-events.js';
 import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
 import { createDefaultReadinessGate, createGatedOnlineReporter, readinessReport } from './lib/agent-readiness.js';
@@ -50,6 +51,7 @@ import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } fr
 import { createMetricsReporter } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
+import { startLogRotation } from './lib/log-rotate.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
 import {
   AGENT_DIAGNOSTICS_CONFIG_EVENT,
@@ -1464,7 +1466,11 @@ async function handleSystemEvent(orgConfig, frame) {
   const payload = frame.payload || {};
   const kind = classifySystemEvent(payload.event);
   if (!kind) {
-    warn(`[${orgConfig.slug}] unhandled system event: ${payload.event || '(unknown)'} conv=${payload.conversation_id || '?'}`);
+    // Benign INFO: an event kind we don't act on. The dispatcher already logged
+    // the single line for this frame via logSystemFrame() (one "unhandled
+    // system event: …" line for unknowns, nothing for benign no-ops), so we do
+    // NOT log again here — doing so double-logged every unknown event. See task
+    // #44 log hygiene.
     return;
   }
 
@@ -1697,7 +1703,12 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
         log(`[${orgConfig.slug}] message_ack seq=${frame.payload?.seq} msg=${frame.payload?.message_id}`);
         break;
       case 'system':
-        log(`[${orgConfig.slug}] system event=${frame.payload?.event || '<unknown>'} conv=${frame.payload?.conversation_id || '<unknown>'}`);
+        // Single stdout line per system frame: nothing for high-frequency
+        // benign no-ops (reactions / read receipts / mention notices), one
+        // `system event=…` for known events, one `unhandled system event: …`
+        // for unknowns. handleSystemEvent no longer logs the unhandled case.
+        // See task #44 log hygiene.
+        logSystemFrame(log, orgConfig.slug, frame, classifySystemEvent);
         handleSystemEvent(orgConfig, frame).catch(e => warn(`[${orgConfig.slug}] handleSystemEvent:`, e.message));
         break;
       case 'error':
@@ -2486,6 +2497,10 @@ if (config.channelLiveness?.enabled !== false) {
     delay: CHANNEL_LIVENESS_INITIAL_DELAY_MS,
   });
 }
+// Size-based daily log rotation (task #44). Registers + starts the 'log-rotate'
+// task on the shared registry; runOnStart catches an already-oversized out.log
+// at boot. No-ops gracefully when not running under PM2 (env paths absent).
+startLogRotation(tasks);
 tasks.start('ws-stall-watchdog');
 tasks.start('connect-result-resend');
 tasks.start('frame-metrics');

@@ -7,31 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [2.17.0-beta.3] — 2026-08-28
 
-- Connection routing now keys **only** on `credential_mode` (`direct` / `proxy`); all `credential_source` / "composio" awareness is dropped. `conn.js` `isComposioEntry` → `isProxyEntry` (`credentialMode === 'proxy'` only); `taxonomyKnown` keys on `credentialMode != null` only. `conn.catalog` persists a local catalog **only** for a confidently-`direct` app (proxy → never persist, unchanged semantics).
-- `conn.invoke` with an empty `credential_mode` still refreshes the index once via `conn.list` and re-reads (self-healing a stale-but-valid entry), but if the mode is **still** empty after the refresh it now returns the explicit **unsupported** error instead of defaulting to `direct` — only a true orphan reaches this path.
-- `connection-events.js` routes and log/notify wording are genericized from "composio" / "via Composio" to "proxy"; behavior is otherwise identical (proxy → server-side execute, no local credential/catalog).
-
-### Removed
-
-- The connections index no longer stores `credentialSource`; `connect-store.js` (`toEntry`, `upsertConnection`, `replaceIndexFromList`) drops the field from every entry shape, and all reads of it are removed.
-
-### Fixed
-
-- `replaceIndexFromList` (the authoritative wholesale rebuild from `conn.list`) now prunes **orphan** connections — an entry whose app is unresolvable and whose taxonomy is unknown (`slug == null && credentialMode == null`) — so a full refresh corrects the local index instead of carrying orphans forward. The single, additive `upsertConnection` path is unchanged.
-
-## [2.16.4] — 2026-08-27
+*Beta / experimental release. Log-hygiene / observability changes; validate `out.log` rotation and RPC log volume in int before a stable 2.17.0.*
 
 ### Added
 
-- `conn.invoke` now routes by the connection's `credential_mode`. A **proxy** connection (e.g. a Composio connector: `credential_source:"composio"` + `credential_mode:"proxy"`) is executed **server-side** via `POST /connect/connections/{id}/actions/execute` — no local credential acquire, no local action catalog — and returns the server passthrough `{ status_code, body }`. A **direct** connection keeps the existing local-egress path (acquire → local catalog → assemble → send) unchanged.
-- The connections index now persists the connector taxonomy (`credentialMode`) from `conn.list` / `conn.status` / the `connection.authorized` WS event, so `conn.invoke` can route without probing (a Composio `acquire` is rejected server-side and is never used for detection). The index does **not** record `credentialSource` — classification keys purely on `credentialMode`.
+- Log rotation: a `log-rotate` task registered into the existing `TaskRegistry` performs a **daily** size check and rotates any PM2 log file (`pm_out_log_path` / `pm_err_log_path`) exceeding 20 MB via copytruncate — streaming the current contents into a timestamped `.gz` archive next to the log, then truncating the live file to 0 (safe under PM2's O_APPEND writer; `pm2 logs` keeps following). `runOnStart` reclaims an already-oversized file at boot. Archives are gzipped and kept indefinitely; the live file stays plain text. Graceful no-op outside PM2.
 
-### Changed
+### Fixed
 
-- A legacy index entry lacking `credentialMode` triggers a one-shot `conn.list` refresh (which now returns the field) before routing; if still absent it falls back to `direct` (historical behavior).
-- Composio (proxy) connectors never persist a full local action catalog: `conn.catalog` fetches through without writing, and the `connection.authorized` catalog-warm is skipped for them.
+- Log hygiene: successful (2xx) periodic `runtime-metrics` and `online-report` RPCs no longer print their `[rpc] → … / ←` pairs to stdout, cutting the dominant `out.log` flood from these ~10–60s reporters. A new opt-in `quietOnSuccess` client option suppresses stdout only on success — errors (>=400) still log via `console.warn`, all other RPC logging is unchanged, and the file sink (`COCO_RPC_LOG_FILE`) is unaffected. The routine `online-report: triggered=false reason=…` summary is also suppressed; only a meaningful `triggered=true` event is logged. High-frequency benign no-op system events (reactions, read/delivered receipts, mention/created notices) no longer log at all; every other system frame now logs exactly one line — a `system event=…` trace for known events and a single `unhandled system event: …` line for unknown ones (previously an unknown event double-logged: one trace plus one unhandled line) — so contract drift stays visible without the duplication.
+- Token/auth error logging no longer renders as `[object Object]`: the error branch now drills into the cws-core error envelope (`error.detail` / `error.title`) and coerces to a string, so the real failure cause surfaces.
+- Log levels: token lifecycle progress logs and the benign `unhandled system event` (message reactions) now write to stdout instead of stderr, so `error.log` retains only genuine errors.
+- Log rotation: same-second rotations of one file no longer overwrite each other. The second-granular timestamp could yield an identical `<stem>.<stamp>` base for two rotations within one second (runOnStart + a manual tick, a crash-restart), silently clobbering the earlier `.log.gz` — data loss under the "archives kept forever" guarantee. `rotateFile` now claims a collision-proof base via a reservation loop that appends `.1`, `.2`, … skipping any base whose `.log.gz` already exists and reserving the snapshot slot with an `O_EXCL` create, so neither a published archive nor a preserved snapshot is ever overwritten.
+## [2.17.0-beta.2] — 2026-08-28
+
+*Beta / experimental release (full notes in the GitHub release).*
+
+### Fixed
+
+- WeChat / WhatsApp rebind: disconnect now truly destroys the channel session — a per-channel `logout` hook (WeChat admin account delete + login cancel; WhatsApp `auth_info` removal) with an in-flight-login guard and a file fallback on any partial account-delete failure — so a reconnect issues a fresh QR instead of reviving the old account. Pairs with cws-connect !118.
+
+## [2.17.0-beta.1] — 2026-08-27
+
+*Beta / experimental release. `comm.send_card` ships as a beta preview:
+it has never been exercised end-to-end against a live environment, so the
+parameter surface may change before a stable 2.17.0.*
+
+### Added
+
+- `comm.send_card` — send a `cws.card.v1` **display** card: a title/summary plus
+  up to five `ui.quick_reply` buttons, for asking the user to pick one of a few
+  fixed answers. The choice reads back from `card_state.action_id`, so no free
+  text has to be parsed. `src/lib/card.js` mirrors the cws-comm validator's
+  caps (code points, not bytes) and rejects a malformed card locally with the
+  offending field named, instead of surfacing an opaque 422 from cws-core.
+  Interactive (business-operation) cards are out of scope.
+- Option-text comparison now trims with Go's `unicode.IsSpace` set rather than
+  JS `String.trim`. The two disagree in both directions: U+0085 slipped a
+  duplicate pair past the local check into a 422 from cws-core, and U+FEFF made
+  two options the backend considers distinct fail here as "duplicates" while the
+  caller was looking at two texts that plainly differ. Normalization decides
+  equality only — the text on the wire is never rewritten.
+- An id the caller supplies is now honoured regardless of its position: a
+  derived id that would take it yields to the positional form. Previously the
+  invariant only held when the explicit id came first, and the error blamed the
+  option the caller had actually chosen.
+- `references/comm-operations.md` — "Display cards" section covering the verb,
+  the three fields all named `type`, the frozen limits, and why the answer must
+  be matched on the action id rather than the label.
+
+## [2.16.4] — 2026-08-26
+
+### Fixed
+
+- `issue.idle` handling no longer writes routine no-change comments when the Lead has no action that can advance the Issue. This avoids rearming hourly Lead reminders and lets the next idle window escalate the owner; actual actions and new decisions are still recorded through normal Work operations.
+
+## [2.16.3] — 2026-08-25
 
 ### Fixed
 

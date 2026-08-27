@@ -179,27 +179,32 @@ function appendRpcLine(line) {
   } catch { /* best-effort: don't crash RPCs on disk errors */ }
 }
 
-function logRpcRequest(method, url, body, orgId) {
+function logRpcRequest(method, url, body, orgId, quietOnSuccess) {
   const tag = orgId ? `org=${orgId}` : '';
   const bodyStr = body === undefined ? '(no body)' : JSON.stringify(redactSecrets(body));
   const line = `[rpc] → ${method} ${url} ${tag} req: ${bodyStr}`;
-  if (rpcLogStdoutEnabled()) console.log(line);
+  // High-frequency periodic reporters opt into quietOnSuccess: skip the stdout
+  // request line entirely (the response line handles the success/error split).
+  // The file sink is unaffected.
+  if (!quietOnSuccess && rpcLogStdoutEnabled()) console.log(line);
   appendRpcLine(line);
 }
 
-function logRpcResponse(method, url, status, data) {
+function logRpcResponse(method, url, status, data, quietOnSuccess) {
   let bodyStr;
   try { bodyStr = typeof data === 'string' ? data : JSON.stringify(redactSecrets(data)); }
   catch { bodyStr = String(data); }
   const line = `[rpc] ← ${method} ${url} resp ${status}: ${bodyStr}`;
-  if (rpcLogStdoutEnabled()) {
+  // quietOnSuccess suppresses stdout only for 2xx/3xx; errors (>=400) still log
+  // via console.warn so failures are never hidden. The file sink is unaffected.
+  if (rpcLogStdoutEnabled() && !(quietOnSuccess && status < 400)) {
     const level = status >= 400 ? 'warn' : 'log';
     console[level](line);
   }
   appendRpcLine(line);
 }
 
-async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId, timeoutMs } = {}) {
+async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId, timeoutMs, quietOnSuccess } = {}) {
   const url = buildUrl(baseUrl, path, query);
 
   // Single attempt: resolve token, send, parse response. Returned shape lets
@@ -214,7 +219,7 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
     if (token) headers.Authorization = `Bearer ${token}`;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-    logRpcRequest(method, url, body, orgId);
+    logRpcRequest(method, url, body, orgId, quietOnSuccess);
 
     const res = await fetch(url, {
       method,
@@ -231,7 +236,7 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
     let data;
     try { data = JSON.parse(text); } catch { data = text; }
 
-    logRpcResponse(method, url, res.status, data);
+    logRpcResponse(method, url, res.status, data, quietOnSuccess);
     return { res, data, text };
   };
 
@@ -335,8 +340,8 @@ export const del   = (path)        => request('DELETE', path);
 // They resolve the JWT against that specific org's cache, so a multi-org
 // agent never accidentally calls cws-core with the wrong org's token.
 export const getForOrg   = (orgId, path, query, { timeoutMs } = {}) => request('GET', path, { query, orgId, timeoutMs });
-export const postForOrg  = (orgId, path, body, { timeoutMs } = {}) =>
-  request('POST', path, { body, orgId, timeoutMs });
+export const postForOrg  = (orgId, path, body, { timeoutMs, quietOnSuccess } = {}) =>
+  request('POST', path, { body, orgId, timeoutMs, quietOnSuccess });
 
 // Org-scoped GET that also attaches caller-supplied request headers — used when
 // a route needs a one-shot bearer that is NOT the org JWT (e.g. cws-connect's
@@ -345,7 +350,7 @@ export const postForOrg  = (orgId, path, body, { timeoutMs } = {}) =>
 export const getForOrgWithHeaders = (orgId, path, extraHeaders, query) =>
   request('GET', path, { query, orgId, extraHeaders });
 export const patchForOrg = (orgId, path, body)  => request('PATCH',  path, { body,  orgId });
-export const putForOrg   = (orgId, path, body)  => request('PUT',    path, { body,  orgId });
+export const putForOrg   = (orgId, path, body, { quietOnSuccess } = {}) => request('PUT', path, { body, orgId, quietOnSuccess });
 export const delForOrg   = (orgId, path)        => request('DELETE', path, { orgId });
 
 /**
