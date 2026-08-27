@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.0-beta.1] — 2026-08-27
+
+*Beta / experimental release. `comm.send_card` ships as a beta preview:
+it has never been exercised end-to-end against a live environment, so the
+parameter surface may change before a stable 2.17.0.*
+
+### Added
+
+- `comm.send_card` — send a `cws.card.v1` **display** card: a title/summary plus
+  up to five `ui.quick_reply` buttons, for asking the user to pick one of a few
+  fixed answers. The choice reads back from `card_state.action_id`, so no free
+  text has to be parsed. `src/lib/card.js` mirrors the cws-comm validator's
+  caps (code points, not bytes) and rejects a malformed card locally with the
+  offending field named, instead of surfacing an opaque 422 from cws-core.
+  Interactive (business-operation) cards are out of scope.
+- Option-text comparison now trims with Go's `unicode.IsSpace` set rather than
+  JS `String.trim`. The two disagree in both directions: U+0085 slipped a
+  duplicate pair past the local check into a 422 from cws-core, and U+FEFF made
+  two options the backend considers distinct fail here as "duplicates" while the
+  caller was looking at two texts that plainly differ. Normalization decides
+  equality only — the text on the wire is never rewritten.
+- An id the caller supplies is now honoured regardless of its position: a
+  derived id that would take it yields to the positional form. Previously the
+  invariant only held when the explicit id came first, and the error blamed the
+  option the caller had actually chosen.
+- `references/comm-operations.md` — "Display cards" section covering the verb,
+  the three fields all named `type`, the frozen limits, and why the answer must
+  be matched on the action id rather than the label.
+
 ## [2.16.4] — 2026-08-26
 
 ### Fixed

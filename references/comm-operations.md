@@ -185,6 +185,106 @@ node src/cli/comm.js comm.sync '{
 node src/cli/comm.js comm.unread '{"conversationId":"<conv-uuid>"}'
 ```
 
+## Display cards (`cws.card.v1`)
+
+When the user is picking from a few fixed answers — yes/no, approve/reject, one
+of three environments — send a **display card** with quick-reply buttons instead
+of a plain-text question. The answer comes back as a stable **action id** rather
+than free text, so you never have to parse "yes" / "Yes." / "好的".
+
+```bash
+node src/cli/comm.js comm.send_card '{
+  "conversationId": "<uuid>",
+  "title": "需要确认",
+  "summary": "是否继续部署 int?",
+  "options": ["是", "否"]
+}'
+```
+
+`options` accepts a bare string (shorthand for the option text) or
+`{text, label?, id?, style?}`. `style` is `primary` | `secondary` | `danger` and
+is a rendering hint only.
+
+**How the answer gets back to you.** Tapping a quick-reply button posts an
+ordinary reply on the user's behalf carrying that button's option text.
+cws-comm matches that reply text against the card's quick-reply options and
+records the conclusion on the card as `card_state.action_id` — the `id` of the
+button whose text matched. That match is also *why* two buttons may not share
+one option text: the read path would have no grounds to pick between them.
+
+**Reading the answer back** — match on `card_state.action_id`, **never on the
+label**: the label is display text that can be reworded at any time, while the
+id is the stable identity. Derived ids are the slugified option text
+(`"Yes please"` → `yes-please`); text with no `[a-z0-9_-]` characters (e.g. pure
+CJK), and any derived id that would collide with an earlier one (`"Yes!"` and
+`"Yes?"` both slugify to `yes`), fall back to a positional `option-1`,
+`option-2`, … Pass `id` explicitly whenever you want to match on something
+meaningful — an id you supply is never rewritten **regardless of where it sits
+in the list**: a derived id that would take it yields to the positional form
+instead. A duplicate among ids *you* chose is an error rather than a silent
+renumbering.
+
+An option longer than the 32-code-point label cap needs an explicit shorter
+`label`: the option text itself may run to 200 code points, but it cannot
+double as the button label.
+
+### When the user does not press a button
+
+The match is on reply text, so an answer in the user's own words settles
+nothing:
+
+- The user **taps a button**, or types text **exactly equal** to an option
+  (after trim + NFC) → the card settles and `card_state.action_id` is set.
+- The user replies **in their own words** ("sounds good", "行吧") → no match, no
+  `card_state`, and you are back to reading a plain reply. Handle that path;
+  it is not the exception it looks like.
+
+And note what a settled display card proves. Settlement is derived from a
+matching **reply**, not from a click — the domain comment is explicit that it
+"only means somebody answered". So treat `card_state.action_id` as *the answer*,
+never as evidence that a particular person pressed a particular button.
+
+That reply-derived settlement is confined to display cards, and cws-comm calls
+that limit a security boundary rather than an optimization: were it to apply to
+interactive cards, anyone in the conversation could post text equal to a button's
+option text and make a business card read as settled while the business never
+happened.
+
+### Three different fields all called "type"
+
+The most common way to get a 422. They must all line up, and `comm.send_card`
+sets the first two for you:
+
+| Level | Field | Value for a card |
+|---|---|---|
+| Message | `type` | `CARD` |
+| Content | `content.content_type` | `card` |
+| Block | `blocks[].type` | `text`, `markdown`, `fields`, … |
+
+### Limits (enforced locally before the request goes out)
+
+Mirrored from the cws-comm validator, so a malformed card names the offending
+field instead of returning an opaque 422. **Counts are code points, not bytes** —
+200 CJK characters are 200 code points and 600 bytes.
+
+| Field | Limit |
+|---|---|
+| `title` | 200 code points |
+| `summary` | 1000 code points |
+| `text` (block) | 2000 code points |
+| `fallbackText` | 512 code points — a fallback *derived* from `text` is truncated; one you pass explicitly is rejected rather than silently cut |
+| `options` | at most 5; two options may not share one option text — compared after the same trim + NFC normalization the backend applies (Go `unicode.IsSpace`, which is *not* JS `String.trim` — it strips U+0085 and keeps U+FEFF), so `"Yes"` and `"Yes "` are one option. The text you wrote is never rewritten; normalization decides equality only — or one id |
+| option text | 200 code points |
+| option label | 32 code points |
+| whole body | 64 KB serialized |
+
+### Scope
+
+`comm.send_card` sends **display-mode** cards only (`mode: "display"`), which any
+sender may post. Interactive cards — the ones carrying a business operation —
+additionally require a `context` and a registered operation, and are not covered
+by this verb.
+
 ## Relationship with SKILL.md
 
 This document is the Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible only for the **command mechanics** of the Comm CLI. The behavioral-surface content below is **in SKILL.md**; this document does not repeat it:
