@@ -226,6 +226,28 @@ An option longer than the 32-code-point label cap needs an explicit shorter
 `label`: the option text itself may run to 200 code points, but it cannot
 double as the button label.
 
+### When the user does not press a button
+
+The match is on reply text, so an answer in the user's own words settles
+nothing:
+
+- The user **taps a button**, or types text **exactly equal** to an option
+  (after trim + NFC) → the card settles and `card_state.action_id` is set.
+- The user replies **in their own words** ("sounds good", "行吧") → no match, no
+  `card_state`, and you are back to reading a plain reply. Handle that path;
+  it is not the exception it looks like.
+
+And note what a settled display card proves. Settlement is derived from a
+matching **reply**, not from a click — the domain comment is explicit that it
+"only means somebody answered". So treat `card_state.action_id` as *the answer*,
+never as evidence that a particular person pressed a particular button.
+
+That reply-derived settlement is confined to display cards, and cws-comm calls
+that limit a security boundary rather than an optimization: were it to apply to
+interactive cards, anyone in the conversation could post text equal to a button's
+option text and make a business card read as settled while the business never
+happened.
+
 ### Three different fields all called "type"
 
 The most common way to get a 422. They must all line up, and `comm.send_card`
