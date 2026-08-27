@@ -453,13 +453,17 @@ const COMMANDS = {
   //   buildDisplayCard() enforces the cws-comm caps locally, so a malformed
   //   card names the offending field instead of returning an opaque 422.
   'comm.send_card': async () => {
-    const body = buildDisplayCard(params);
+    const cardBody = buildDisplayCard(params);
+    // Drop any caller-supplied `body`: buildSendBody treats one carrying both
+    // `content` and `type` as a verbatim override, which would silently send
+    // that instead of the card just built and validated here.
+    const { body: _ignoredOverride, ...rest } = params;
     // The card body is not text, so buildSendBody's @name resolution cannot
     // run over it; an explicit `mentions` array still passes through.
     return post(apiPath(`/conversations/${params.conversationId}/messages`), buildSendBody({
-      ...params,
+      ...rest,
       type:    'CARD',
-      content: { content_type: 'card', body },
+      content: { content_type: 'card', body: cardBody },
     }));
   },
 

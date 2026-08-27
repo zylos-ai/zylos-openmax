@@ -209,8 +209,15 @@ is a rendering hint only.
 label**: the label is display text that can be reworded at any time, while the
 id is the stable identity. Derived ids are the slugified option text
 (`"Yes please"` → `yes-please`); text with no `[a-z0-9_-]` characters (e.g. pure
-CJK) falls back to a positional `option-1`, `option-2`, … — pass `id` explicitly
-whenever you want to match on something meaningful.
+CJK), and any derived id that would collide with an earlier one (`"Yes!"` and
+`"Yes?"` both slugify to `yes`), fall back to a positional `option-1`,
+`option-2`, … Pass `id` explicitly whenever you want to match on something
+meaningful — an id you supply is never rewritten, so a duplicate there is an
+error rather than a silent renumbering.
+
+An option longer than the 32-code-point label cap needs an explicit shorter
+`label`: the option text itself may run to 200 code points, but it cannot
+double as the button label.
 
 ### Three different fields all called "type"
 
@@ -234,7 +241,7 @@ field instead of returning an opaque 422. **Counts are code points, not bytes** 
 | `title` | 200 code points |
 | `summary` | 1000 code points |
 | `text` (block) | 2000 code points |
-| `fallbackText` | 512 code points (over-long input is truncated, not rejected) |
+| `fallbackText` | 512 code points — a fallback *derived* from `text` is truncated; one you pass explicitly is rejected rather than silently cut |
 | `options` | at most 5; two options may not share one option text or one id |
 | option text | 200 code points |
 | option label | 32 code points |

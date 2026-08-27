@@ -75,15 +75,27 @@ function normalizeOption(option, index) {
   const text = requireText(raw.text, `${path}.text`);
   capRunes(text, MAX_QUICK_REPLY_TEXT_RUNES, `${path}.text`);
 
-  const label = raw.label === undefined ? text : requireText(raw.label, `${path}.label`);
-  capRunes(label, MAX_ACTION_LABEL_RUNES, `${path}.label`);
+  // The label defaults to the option text, but the two caps differ: a quick
+  // reply may carry 200 code points while a label may carry 32. Blaming
+  // `${path}.label` for a text-only input would name a field the caller never
+  // wrote, so point at what they did write and say what to do about it.
+  let label;
+  if (raw.label === undefined) {
+    if (runes(text) > MAX_ACTION_LABEL_RUNES) {
+      throw new CardError(`${path}.text`, `is ${runes(text)} code points, which is too long to double as the button label (max ${MAX_ACTION_LABEL_RUNES}); pass an explicit shorter "label"`);
+    }
+    label = text;
+  } else {
+    label = capRunes(requireText(raw.label, `${path}.label`), MAX_ACTION_LABEL_RUNES, `${path}.label`);
+  }
 
-  const id = raw.id === undefined ? deriveActionId(text, index) : raw.id;
+  const idExplicit = raw.id !== undefined;
+  const id = idExplicit ? raw.id : deriveActionId(text, index);
   if (typeof id !== 'string' || !ACTION_ID_RE.test(id)) {
     throw new CardError(`${path}.id`, `must match ${ACTION_ID_RE}, got ${JSON.stringify(id)}`);
   }
 
-  const action = { id, label, kind: 'ui', operation: QUICK_REPLY_OPERATION, params: { text } };
+  const action = { id, label, kind: 'ui', operation: QUICK_REPLY_OPERATION, params: { text }, idExplicit };
   if (raw.style !== undefined) {
     if (!['primary', 'secondary', 'danger'].includes(raw.style)) {
       throw new CardError(`${path}.style`, `must be primary, secondary or danger, got ${JSON.stringify(raw.style)}`);
@@ -121,10 +133,17 @@ export function buildDisplayCard(input = {}) {
   const text = input.text === undefined ? summary : requireText(input.text, 'text');
   capRunes(text, MAX_BLOCK_TEXT_RUNES, 'text');
 
-  const fallbackSource = input.fallbackText === undefined ? text : requireText(input.fallbackText, 'fallbackText');
-  const fallbackText = runes(fallbackSource) > MAX_BLOCK_FALLBACK_RUNES
-    ? `${[...fallbackSource].slice(0, MAX_BLOCK_FALLBACK_RUNES - 1).join('')}…`
-    : fallbackSource;
+  // Truncating a default we derived ourselves is fine. Truncating what the
+  // caller explicitly wrote would change their message without telling them,
+  // so that case is an error instead.
+  let fallbackText;
+  if (input.fallbackText === undefined) {
+    fallbackText = runes(text) > MAX_BLOCK_FALLBACK_RUNES
+      ? `${[...text].slice(0, MAX_BLOCK_FALLBACK_RUNES - 1).join('')}…`
+      : text;
+  } else {
+    fallbackText = capRunes(requireText(input.fallbackText, 'fallbackText'), MAX_BLOCK_FALLBACK_RUNES, 'fallbackText');
+  }
 
   const body = {
     schema: CARD_SCHEMA_V1,
@@ -153,12 +172,25 @@ export function buildDisplayCard(input = {}) {
         throw new CardError(`options[${i}].text`, `duplicates options[${seenText.get(optionText)}].text (${JSON.stringify(optionText)}); two quick replies may not share one option text`);
       }
       seenText.set(optionText, i);
+
+      // A derived id is ours to adjust: two distinct options whose slugs happen
+      // to collide ("Yes!" and "Yes?" both slugify to "yes") are legitimate, so
+      // fall back to the positional id rather than rejecting the card. An id the
+      // caller chose is never rewritten — a duplicate there is their mistake.
       if (seenId.has(action.id)) {
-        throw new CardError(`options[${i}].id`, `duplicates options[${seenId.get(action.id)}].id (${JSON.stringify(action.id)}); pass an explicit id to disambiguate`);
+        const clashesWith = seenId.get(action.id);
+        if (action.idExplicit) {
+          throw new CardError(`options[${i}].id`, `duplicates options[${clashesWith}].id (${JSON.stringify(action.id)})`);
+        }
+        const positional = `option-${i + 1}`;
+        if (seenId.has(positional)) {
+          throw new CardError(`options[${i}].id`, `cannot be derived: both ${JSON.stringify(action.id)} and ${JSON.stringify(positional)} are already taken; pass an explicit id`);
+        }
+        action.id = positional;
       }
       seenId.set(action.id, i);
     });
-    body.actions = actions;
+    body.actions = actions.map(({ idExplicit, ...action }) => action);
   }
 
   const bytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
@@ -166,18 +198,4 @@ export function buildDisplayCard(input = {}) {
     throw new CardError('body', `serializes to ${bytes} bytes, over the ${MAX_BODY_BYTES}-byte cap`);
   }
   return body;
-}
-
-/**
- * Read back which option the user picked.
- *
- * Match on `action_id`, never on the label: labels are display text and can be
- * reworded without any code change, while the id is the stable identity.
- *
- * @param {object} message A message object as returned by comm.get_message.
- * @returns {string|undefined} the chosen action id, or undefined if the card
- *                             has not been answered yet.
- */
-export function readCardChoice(message) {
-  return message?.card_state?.action_id ?? message?.content?.card_state?.action_id ?? undefined;
 }

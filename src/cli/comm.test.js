@@ -182,3 +182,21 @@ test('send_card refuses a malformed card locally, naming the field', async () =>
   assert.match(failure.error, /^options: /);
   assert.equal(failure.status, undefined, 'no HTTP round trip happened');
 });
+
+test('send_card ignores a stray body param instead of letting it hijack the card', async () => {
+  // buildSendBody has an escape hatch: a `body` carrying both `content` and
+  // `type` is passed through verbatim. send_card spreads the caller's params,
+  // so without stripping it a stray `body` would silently send something other
+  // than the card that was just built and validated.
+  const request = await captureRequest('comm.send_card', {
+    conversationId: 'cv-card-4',
+    title: 't',
+    summary: 's',
+    options: ['是'],
+    body: { type: 'AGENT_TEXT', content: { content_type: 'text', body: { text: 'hijacked' } } },
+  });
+
+  assert.equal(request.body.type, 'CARD');
+  assert.equal(request.body.content.content_type, 'card');
+  assert.equal(request.body.content.body.schema, 'cws.card.v1');
+});

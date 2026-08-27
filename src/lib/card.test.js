@@ -3,7 +3,6 @@ import test from 'node:test';
 
 import {
   buildDisplayCard,
-  readCardChoice,
   CardError,
   CARD_SCHEMA_V1,
   MAX_ACTIONS,
@@ -87,17 +86,6 @@ test('two options may not share one option text (validator rule 11)', () => {
   );
 });
 
-test('two options may not share one id', () => {
-  assert.throws(
-    () => buildDisplayCard({
-      title: 't',
-      summary: 's',
-      options: [{ text: 'a', id: 'same' }, { text: 'b', id: 'same' }],
-    }),
-    (err) => err instanceof CardError && err.field === 'options[1].id',
-  );
-});
-
 test('more than five options is rejected before the request goes out', () => {
   const five = ['a', 'b', 'c', 'd', 'e'];
   assert.equal(buildDisplayCard({ title: 't', summary: 's', options: five }).actions.length, MAX_ACTIONS);
@@ -147,9 +135,62 @@ test('an unknown style is rejected', () => {
   );
 });
 
-test('readCardChoice returns the action id, and undefined while unanswered', () => {
-  assert.equal(readCardChoice({ card_state: { action_id: 'approve' } }), 'approve');
-  assert.equal(readCardChoice({ content: { card_state: { action_id: 'reject' } } }), 'reject');
-  assert.equal(readCardChoice({ card_state: null }), undefined);
-  assert.equal(readCardChoice(undefined), undefined);
+test('an option longer than a label may be sent by passing an explicit label', () => {
+  // 40 code points is a legal quick_reply text (cap 200) but not a legal label
+  // (cap 32). The caller supplied neither a label nor an id, so an error about
+  // `options[0].label` would name a field they never wrote — it has to point at
+  // `text` and say what to do instead.
+  const long = 'x'.repeat(40);
+  assert.throws(
+    () => buildDisplayCard({ title: 't', summary: 's', options: [long] }),
+    (err) => err instanceof CardError
+      && err.field === 'options[0].text'
+      && /label/.test(err.message),
+  );
+  // …and that is the whole fix: give it a short label and the long text stays.
+  const body = buildDisplayCard({ title: 't', summary: 's', options: [{ text: long, label: 'pick' }] });
+  assert.equal(body.actions[0].params.text, long);
+  assert.equal(body.actions[0].label, 'pick');
+});
+
+test('two distinct options whose slugs collide still get distinct ids', () => {
+  // "Yes!" and "Yes?" both slugify to "yes". They are different options and the
+  // caller chose no ids, so the builder disambiguates instead of rejecting.
+  const body = buildDisplayCard({ title: 't', summary: 's', options: ['Yes!', 'Yes?'] });
+  const ids = body.actions.map((a) => a.id);
+  assert.equal(new Set(ids).size, 2, `ids must stay distinct, got ${JSON.stringify(ids)}`);
+  for (const id of ids) assert.match(id, /^[a-z0-9_-]{1,64}$/);
+  assert.deepEqual(body.actions.map((a) => a.params.text), ['Yes!', 'Yes?']);
+});
+
+test('an id the caller chose is never rewritten, so a duplicate is still an error', () => {
+  assert.throws(
+    () => buildDisplayCard({
+      title: 't',
+      summary: 's',
+      options: [{ text: 'a', id: 'same' }, { text: 'b', id: 'same' }],
+    }),
+    (err) => err instanceof CardError && err.field === 'options[1].id',
+  );
+});
+
+test('an explicitly supplied over-long fallbackText is rejected, not silently cut', () => {
+  // Truncating a default we derived ourselves is fine; truncating what the
+  // caller explicitly wrote changes their message without telling them.
+  assert.throws(
+    () => buildDisplayCard({ title: 't', summary: 's', fallbackText: '字'.repeat(MAX_BLOCK_FALLBACK_RUNES + 1) }),
+    (err) => err instanceof CardError && err.field === 'fallbackText',
+  );
+});
+
+test('no internal bookkeeping leaks into the wire body', () => {
+  // idExplicit is a builder-internal flag; the validator rejects unknown keys
+  // on an action, so it must never reach the request.
+  const body = buildDisplayCard({ title: 't', summary: 's', options: ['是', '否'] });
+  for (const action of body.actions) {
+    assert.deepEqual(
+      Object.keys(action).sort(),
+      ['id', 'kind', 'label', 'operation', 'params'],
+    );
+  }
 });
