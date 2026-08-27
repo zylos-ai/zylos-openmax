@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Connection routing now keys **only** on `credential_mode` (`direct` / `proxy`); all `credential_source` / "composio" awareness is dropped. `conn.js` `isComposioEntry` → `isProxyEntry` (`credentialMode === 'proxy'` only); `taxonomyKnown` keys on `credentialMode != null` only. `conn.catalog` persists a local catalog **only** for a confidently-`direct` app (proxy → never persist, unchanged semantics).
+- `conn.invoke` with an empty `credential_mode` still refreshes the index once via `conn.list` and re-reads (self-healing a stale-but-valid entry), but if the mode is **still** empty after the refresh it now returns the explicit **unsupported** error instead of defaulting to `direct` — only a true orphan reaches this path.
+- `connection-events.js` routes and log/notify wording are genericized from "composio" / "via Composio" to "proxy"; behavior is otherwise identical (proxy → server-side execute, no local credential/catalog).
+
+### Removed
+
+- The connections index no longer stores `credentialSource`; `connect-store.js` (`toEntry`, `upsertConnection`, `replaceIndexFromList`) drops the field from every entry shape, and all reads of it are removed.
+
+### Fixed
+
+- `replaceIndexFromList` (the authoritative wholesale rebuild from `conn.list`) now prunes **orphan** connections — an entry whose app is unresolvable and whose taxonomy is unknown (`slug == null && credentialMode == null`) — so a full refresh corrects the local index instead of carrying orphans forward. The single, additive `upsertConnection` path is unchanged.
+
 ## [2.16.4] — 2026-08-27
 
 ### Added

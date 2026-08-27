@@ -528,19 +528,19 @@ async function getCatalog(orgId, applicationId, { refresh = false, ttlMs = CATAL
   return { ...rec, source: 'fetch' };
 }
 
-// A connection is a composio (proxy) connector when its credential_source is
-// "composio" OR its credential_mode is "proxy" (the two travel together for
-// composio). Either signal is sufficient — a legacy index that captured only one
-// still routes correctly.
-function isComposioEntry(entry) {
-  return !!entry && (entry.credentialSource === 'composio' || entry.credentialMode === 'proxy');
+// A connection is a proxy connector when its credential_mode is "proxy" — it
+// holds no local token and executes SERVER-SIDE (see conn.invoke). This is the
+// single source of truth for the direct/proxy split; credential_source is no
+// longer consulted.
+function isProxyEntry(entry) {
+  return !!entry && entry.credentialMode === 'proxy';
 }
 
 // Is an index entry's connector taxonomy KNOWN? A legacy entry that predates
-// credentialMode/credentialSource has BOTH null — we cannot tell composio from
-// non-composio, so the caller must refresh before trusting a "not composio" read.
+// credentialMode has it null — we cannot tell proxy from direct, so the caller
+// must refresh before trusting a "not proxy" read.
 function taxonomyKnown(entry) {
-  return !!entry && (entry.credentialMode != null || entry.credentialSource != null);
+  return !!entry && entry.credentialMode != null;
 }
 
 // Heuristic: does an execute error look like a stale/unknown-action or
@@ -750,27 +750,27 @@ const COMMANDS = {
     }
     if (!appId) throw Object.assign(new Error('applicationId (or a resolvable app) is required'), { status: 400 });
     // Decide whether to persist a full on-disk catalog. We must NEVER persist for
-    // a composio (proxy) connector — so we persist ONLY when CONFIDENT the app is
-    // non-composio (its taxonomy is known and not composio). A LEGACY index entry
-    // that predates credentialMode/credentialSource has UNKNOWN taxonomy: scanning
-    // it would (wrongly) look non-composio, so refresh once from conn.list (which
-    // now returns the taxonomy) and re-decide. If STILL unknown after the refresh,
-    // stay conservative and do NOT persist — a legacy entry could be composio.
+    // a proxy connector — so we persist ONLY when CONFIDENT the app is direct (its
+    // taxonomy is known and not proxy). A LEGACY index entry that predates
+    // credentialMode has UNKNOWN taxonomy: scanning it would (wrongly) look
+    // non-proxy, so refresh once from conn.list (which now returns the taxonomy)
+    // and re-decide. If STILL unknown after the refresh, stay conservative and do
+    // NOT persist — a legacy entry could be proxy.
     // Decision inputs: the resolved entry when we have one, else the index entries
     // sharing this applicationId.
     const decide = () => {
-      if (entry) return { composio: isComposioEntry(entry), known: taxonomyKnown(entry) };
+      if (entry) return { proxy: isProxyEntry(entry), known: taxonomyKnown(entry) };
       const forApp = Object.values(readIndex(idxPath).connections || {}).filter((e) => e.applicationId === appId);
-      return { composio: forApp.some(isComposioEntry), known: forApp.some(taxonomyKnown) };
+      return { proxy: forApp.some(isProxyEntry), known: forApp.some(taxonomyKnown) };
     };
-    let { composio, known } = decide();
-    if (!composio && !known && agentId) {
+    let { proxy, known } = decide();
+    if (!proxy && !known && agentId) {
       await refreshIndex(orgId, agentId);
       if (entry) { const re = readIndex(idxPath).connections[entry.id]; if (re) entry = re; }
-      ({ composio, known } = decide());
+      ({ proxy, known } = decide());
     }
-    // Persist only when confidently non-composio; composio OR still-unknown → skip.
-    return getCatalog(orgId, appId, { refresh: !!params.refresh, persist: known && !composio });
+    // Persist only when confidently direct; proxy OR still-unknown → skip.
+    return getCatalog(orgId, appId, { refresh: !!params.refresh, persist: known && !proxy });
   },
 
   // One-call app-keyed execute: resolve the connection for an application from
@@ -851,16 +851,17 @@ const COMMANDS = {
     // Route by the connector taxonomy recorded in the index (credential_mode).
     let mode = entry.credentialMode;
     if (!mode) {
-      // Legacy index / not-yet-refreshed entry: conn.list now returns
-      // credential_mode, so refresh once and re-read. We deliberately do NOT use
-      // `acquire` to detect the mode — a composio acquire is REJECTED server-side
-      // (ErrComposioNotAcquirable), so it cannot be a detector. If the field is
-      // STILL absent after the refresh (a truly legacy backend), fall back to
-      // 'direct' — the historical behavior.
+      // Stale / not-yet-refreshed entry: conn.list now returns credential_mode, so
+      // refresh once and re-read — this self-heals a stale-but-valid entry. We
+      // deliberately do NOT use `acquire` to detect the mode — a proxy acquire is
+      // REJECTED server-side (ErrComposioNotAcquirable), so it cannot be a detector.
+      // If the field is STILL absent after the refresh, the connection is a true
+      // orphan (unresolvable app + no mode) and is treated as UNSUPPORTED below —
+      // we never guess 'direct'.
       await refreshIndex(orgId, agentId);
       const refreshed = readIndex(idxPath).connections[entry.id];
       if (refreshed) entry = refreshed;
-      mode = entry.credentialMode || 'direct';
+      mode = entry.credentialMode;
     }
 
     if (mode === 'proxy') {

@@ -521,6 +521,49 @@ test('conn.invoke routing (legacy index): entry lacks credential_mode → refres
   }
 });
 
+test('conn.invoke routing (empty mode, self-heal fails): entry lacks credential_mode AND refresh does not fill it → UNSUPPORTED (never default-direct, no acquire)', async () => {
+  // A stale/orphan index entry with NO credentialMode. conn.invoke refreshes once
+  // from conn.list (self-heal) but the list STILL carries no credential_mode. The
+  // post-refresh fallback must NOT default to 'direct' — it must surface the
+  // explicit unsupported error path (the same one used for an unexpected mode) and
+  // must never acquire a credential or call server execute.
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active' }, // no credentialMode
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // conn.list STILL lacks credential_mode (truly stale/orphan backend record).
+      res.end(JSON.stringify({
+        data: [{ id: 'c1', application_id: 'app-1', application_slug: 'notion', application_name: 'Notion', status: 'active' }],
+        request_id: 'r1',
+      }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'notion/search', params: {} }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 400);
+    assert.match(err.error, /unsupported/i);
+    // The self-heal refresh was attempted...
+    assert.ok(seen.some((u) => u.includes('/connect/agents/me/connections')), `must refresh once before giving up: ${JSON.stringify(seen)}`);
+    // ...but it must NOT default to direct: never acquire, never server-execute.
+    assert.ok(!seen.some((u) => u.includes('/credential')), `empty-mode must never acquire a credential: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), `empty-mode must never call server execute: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => /\/connect\/applications\/[^/]+\/actions/.test(u)), `empty-mode must never fetch a local catalog: ${JSON.stringify(seen)}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
 // --- conn.catalog: never persist a full catalog for a composio app ----------
 //
 // P2-1 regression (zylos0t): a LEGACY index entry that has an applicationId but
@@ -596,6 +639,40 @@ test('conn.catalog (positive control): a known-direct app persists its catalog w
     assert.ok(!seen.some((u) => u.includes('/connect/agents/me/connections')), `known-direct must not need a taxonomy refresh: ${JSON.stringify(seen)}`);
     // Confidently non-composio → the catalog IS persisted.
     assert.ok(fs.existsSync(catalogFile), `direct app catalog must be persisted: ${catalogFile}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.catalog (proxy control): a known-proxy app (credentialMode only, no credentialSource) never persists AND needs no refresh', async () => {
+  // isProxyEntry keys PURELY on credentialMode==='proxy' — credentialSource is
+  // gone. A known-proxy entry is confidently proxy without any refresh, so
+  // conn.catalog must NOT hit conn.list and must NOT write a local catalog.
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-3', slug: 'notion', name: 'Notion', status: 'active', credentialMode: 'proxy' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/applications/app-3/actions')) {
+      // Fetch-through is allowed (returned to the caller) but must not be persisted.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ toolkit: 'notion', action: 'notion/search', method: 'POST', input_schema: '{}' }], request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  const catalogFile = path.join(home, 'zylos/components/openmax/runtime/connect/action-catalog/app-3.json');
+  try {
+    const { code, stdout } = await runConn(home, 'conn.catalog', { app: 'notion' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    // Known-proxy from credentialMode alone → no taxonomy refresh needed.
+    assert.ok(!seen.some((u) => u.includes('/connect/agents/me/connections')), `known-proxy must not need a taxonomy refresh: ${JSON.stringify(seen)}`);
+    // Proxy → the catalog must NEVER be persisted.
+    assert.ok(!fs.existsSync(catalogFile), `proxy catalog must not be persisted: ${catalogFile}`);
   } finally {
     await new Promise((r) => server.close(r));
   }

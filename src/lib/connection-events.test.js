@@ -205,17 +205,19 @@ test('buildConnectionAuthorizedNotice (proxy): presents the connection as USABLE
   assert.ok(!text.includes('your own egress'), `proxy notice must not claim local egress: ${text}`);
 });
 
-test('buildConnectionAuthorizedNotice (composio via credential_source): USABLE via server-side execute, names Composio', () => {
-  // A composio connection may surface with credential_source:"composio" — the
-  // notice must present it usable-via-server-execute the same as any proxy mode.
+test('buildConnectionAuthorizedNotice: credential_source is IGNORED — proxy wording only, never "Composio"', () => {
+  // credentialSource is no longer part of the taxonomy. Even if a caller passes a
+  // stray credentialSource, the notice keys purely on mode==='proxy' and must
+  // carry the generic proxy/server-side wording — never provider-specific
+  // "Composio" language.
   const text = buildConnectionAuthorizedNotice(noticeOrg, {
     connectionId: 'conn-c', provider: 'gmail', mode: 'proxy', credentialSource: 'composio',
   });
-  assert.ok(text.includes('You can use it now'), `composio notice must say it is usable now: ${text}`);
-  assert.ok(text.includes('conn.invoke'), `composio notice must hint conn.invoke: ${text}`);
-  assert.ok(/server-side/i.test(text), `composio notice must say the action runs server-side: ${text}`);
-  assert.ok(/Composio/i.test(text), `composio notice should name Composio: ${text}`);
-  assert.ok(!/not usable|recreated|re-authorized/i.test(text), `composio notice must not carry not-usable/recreate language: ${text}`);
+  assert.ok(text.includes('You can use it now'), `proxy notice must say it is usable now: ${text}`);
+  assert.ok(text.includes('conn.invoke'), `proxy notice must hint conn.invoke: ${text}`);
+  assert.ok(/server-side/i.test(text), `proxy notice must say the action runs server-side: ${text}`);
+  assert.ok(!/Composio/i.test(text), `notice must NOT name Composio (genericized to proxy): ${text}`);
+  assert.ok(!/not usable|recreated|re-authorized/i.test(text), `proxy notice must not carry not-usable/recreate language: ${text}`);
 });
 
 test('buildConnectionAuthorizedNotice (unknown/legacy mode): NOT presented as usable — recreate guidance', () => {

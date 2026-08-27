@@ -98,14 +98,13 @@ function toEntry(conn) {
     // human label can still be built for legacy connections whose display_name
     // is empty or collides with another same-app connection's.
     createdAt: conn.created_at || conn.createdAt || null,
-    // Connector taxonomy (cws-connect): credential_mode is "direct" | "proxy",
-    // credential_source is "managed" | "custom" | "composio". A composio
-    // connection is credential_source:"composio" + credential_mode:"proxy" — it
-    // holds no local token and must execute SERVER-SIDE (see conn.invoke).
-    // conn.list / conn.status / list-available carry these; a sparse WS event may
-    // not, so they default to null and are filled additively by a later refresh.
+    // Connector taxonomy (cws-connect): credential_mode is "direct" | "proxy".
+    // A proxy connection holds no local token and must execute SERVER-SIDE (see
+    // conn.invoke); a direct connection does local egress with a cached token.
+    // conn.list / conn.status / list-available carry credential_mode; a sparse WS
+    // event may not, so it defaults to null and is filled additively by a later
+    // refresh.
     credentialMode: conn.credential_mode || conn.credentialMode || null,
-    credentialSource: conn.credential_source || conn.credentialSource || null,
     status,
   };
 }
@@ -133,7 +132,6 @@ export function upsertConnection(conn, indexPath = INDEX_PATH) {
     // Additive like the rest: a sparse event (slug only, no credential_mode)
     // must never null a value a richer conn.list record already captured.
     credentialMode: entry.credentialMode ?? prev.credentialMode ?? null,
-    credentialSource: entry.credentialSource ?? prev.credentialSource ?? null,
     status: entry.status ?? prev.status ?? 'active',
   };
   writeIndex(index, indexPath);
@@ -151,12 +149,22 @@ export function removeConnection(connectionId, indexPath = INDEX_PATH) {
   return false;
 }
 
-/** Rebuild the index wholesale from a conn.list array (authoritative refresh). */
+/**
+ * Rebuild the index wholesale from a conn.list array (authoritative refresh).
+ * Stale entries absent from the list are dropped by the wholesale rebuild.
+ * Orphan entries are additionally SKIPPED: a connection whose app is
+ * unresolvable AND whose taxonomy is unknown (`slug == null && credentialMode ==
+ * null`) carries no useful discovery/routing information — it can neither be
+ * resolved from an app nor routed by conn.invoke — so it must not pollute the
+ * rebuilt index.
+ */
 export function replaceIndexFromList(list, indexPath = INDEX_PATH) {
   const connections = {};
   for (const conn of Array.isArray(list) ? list : []) {
     const entry = toEntry(conn);
-    if (entry) connections[entry.id] = entry;
+    if (!entry) continue;
+    if (entry.slug == null && entry.credentialMode == null) continue;
+    connections[entry.id] = entry;
   }
   writeIndex({ connections }, indexPath);
   return connections;
