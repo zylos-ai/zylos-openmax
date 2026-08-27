@@ -906,6 +906,38 @@ test('wechatLogout: admin API unreachable → stops, then deletes accounts.json 
   assert.ok(removed.some((p) => p.endsWith('/h/zylos/components/wechat/context-tokens.json')));
 });
 
+test('wechatLogout: partial DELETE failure (GET 200 but one account DELETE non-200) → still runs file fallback after stop', async () => {
+  const calls = [];
+  const fetchDep = async (url, opts) => {
+    calls.push({ url, method: opts.method });
+    if (url.endsWith('/v1/login/cancel')) return { status: 200, text: async () => '{}' };
+    if (url.endsWith('/v1/accounts') && opts.method === 'GET') {
+      return { status: 200, text: async () => JSON.stringify({ accounts: [{ normalizedAccountId: 'ok-acc' }, { normalizedAccountId: 'stale-acc' }] }) };
+    }
+    if (url.endsWith('/v1/accounts/ok-acc') && opts.method === 'DELETE') return { status: 200, text: async () => '{}' };
+    if (url.endsWith('/v1/accounts/stale-acc') && opts.method === 'DELETE') return { status: 500, text: async () => '{"error":"boom"}' };
+    return { status: 404, text: async () => '{}' };
+  };
+  const removed = [];
+  const fsDep = { readFileSync: () => 'tok\n', rmSync: (p) => removed.push(String(p)) };
+  let stopped = false;
+  await wechatLogout({
+    fetchDep, fsDep, home: '/h',
+    stopService: async () => { stopped = true; return true; },
+    active: null, log: () => {}, warn: () => {},
+  });
+  assert.ok(stopped, 'service stopped');
+  assert.ok(calls.some((c) => c.url.endsWith('/v1/accounts/stale-acc') && c.method === 'DELETE'), 'attempted the failing DELETE');
+  // Core of the fix: a non-200 DELETE must NOT count as confirmed removal, so
+  // the file fallback runs and destroys the on-disk session even though the
+  // admin API was reachable — otherwise the stale account revives via the 409
+  // already-present path on the next connect (taskboard #50 rebind invariant).
+  assert.ok(removed.some((p) => p.endsWith('/h/zylos/components/wechat/accounts.json')), 'fallback deleted accounts.json');
+  assert.ok(removed.some((p) => p.endsWith('/h/zylos/components/wechat/accounts')), 'fallback deleted accounts/');
+  assert.ok(removed.some((p) => p.endsWith('/h/zylos/components/wechat/login-sessions')), 'fallback deleted login-sessions/');
+  assert.ok(removed.some((p) => p.endsWith('/h/zylos/components/wechat/context-tokens.json')), 'fallback deleted context-tokens.json');
+});
+
 // -- whatsappLogout unit ------------------------------------------------------
 
 test('whatsappLogout: stops FIRST (Baileys holds files open), then removes auth_info + status.json + qr.png', async () => {

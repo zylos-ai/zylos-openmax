@@ -285,9 +285,14 @@ export async function wechatLogout({
     return { status: resp.status, json };
   };
 
-  // Whether the admin API was reachable enough to enumerate accounts. If not,
-  // we destroy the session files directly after the stop instead.
-  let apiReachable = false;
+  // Track whether the admin API CONFIRMED every listed account was removed.
+  // `apiReachable` alone is not enough: a GET that lists accounts followed by a
+  // failed/partial DELETE would leave the session on disk. We only skip the
+  // file fallback when the admin path fully confirmed removal; ANY delete
+  // failure/throw/non-200 (or an unreachable API) forces the file fallback so a
+  // WeChat session can never survive a disconnect and revive via the 409
+  // already-present path on the next connect (taskboard #50 rebind invariant).
+  let removalConfirmed = false;
   if (token) {
     // Abort any in-flight login the connect flow published a session id for.
     try {
@@ -298,16 +303,18 @@ export async function wechatLogout({
     try {
       const { status, json } = await call('GET', '/v1/accounts');
       if (status === 200 && Array.isArray(json?.accounts)) {
-        apiReachable = true;
+        let anyDeleteFailed = false;
         for (const acct of json.accounts) {
           const id = acct?.normalizedAccountId || acct?.accountId;
-          if (!id) continue;
+          if (!id) { anyDeleteFailed = true; warn('wechat account with no id in list — cannot delete via API, will use file fallback'); continue; }
           try {
             const del = await call('DELETE', `/v1/accounts/${encodeURIComponent(id)}`);
             if (del.status === 200) log(`removed wechat account ${id}`);
-            else warn(`delete wechat account ${id} → http ${del.status}`);
-          } catch (e) { warn(`delete wechat account ${id} failed: ${e.message}`); }
+            else { anyDeleteFailed = true; warn(`delete wechat account ${id} → http ${del.status} (will use file fallback)`); }
+          } catch (e) { anyDeleteFailed = true; warn(`delete wechat account ${id} failed: ${e.message} (will use file fallback)`); }
         }
+        // Confirmed only if EVERY listed account was actually removed (200).
+        removalConfirmed = !anyDeleteFailed;
       } else {
         warn(`GET /v1/accounts unexpected (http ${status}) — will use file fallback`);
       }
@@ -321,8 +328,11 @@ export async function wechatLogout({
   // Stop the service (confirmed) before any file surgery.
   const stopped = stopService ? await stopService() : false;
 
-  // Belt-and-suspenders: only when the admin API could not confirm removal.
-  if (!apiReachable) {
+  // Belt-and-suspenders: run whenever the admin API did NOT confirm removal of
+  // every account (unreachable, listing error, OR any per-account DELETE
+  // failure). This guarantees the on-disk session is destroyed even on a
+  // partial admin-side failure, so it cannot revive on the next connect.
+  if (!removalConfirmed) {
     if (!stopped) warn('service not confirmed stopped — deleting session files anyway (best-effort)');
     // accounts.json + accounts/ hold the credentials; login-sessions/ any
     // pending scan; context-tokens.json the per-account context tokens.
