@@ -205,6 +205,13 @@ node src/cli/comm.js comm.send_card '{
 `{text, label?, id?, style?}`. `style` is `primary` | `secondary` | `danger` and
 is a rendering hint only.
 
+**How the answer gets back to you.** Tapping a quick-reply button posts an
+ordinary reply on the user's behalf carrying that button's option text.
+cws-comm matches that reply text against the card's quick-reply options and
+records the conclusion on the card as `card_state.action_id` — the `id` of the
+button whose text matched. That match is also *why* two buttons may not share
+one option text: the read path would have no grounds to pick between them.
+
 **Reading the answer back** — match on `card_state.action_id`, **never on the
 label**: the label is display text that can be reworded at any time, while the
 id is the stable identity. Derived ids are the slugified option text
@@ -242,7 +249,7 @@ field instead of returning an opaque 422. **Counts are code points, not bytes** 
 | `summary` | 1000 code points |
 | `text` (block) | 2000 code points |
 | `fallbackText` | 512 code points — a fallback *derived* from `text` is truncated; one you pass explicitly is rejected rather than silently cut |
-| `options` | at most 5; two options may not share one option text or one id |
+| `options` | at most 5; two options may not share one option text — compared after the same trim + NFC normalization the backend applies, so `"Yes"` and `"Yes "` are one option — or one id |
 | option text | 200 code points |
 | option label | 32 code points |
 | whole body | 64 KB serialized |

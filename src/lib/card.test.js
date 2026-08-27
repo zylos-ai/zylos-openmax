@@ -194,3 +194,22 @@ test('no internal bookkeeping leaks into the wire body', () => {
     );
   }
 });
+
+test('duplicate option text is caught after the same trim+NFC the backend applies', () => {
+  // cws-comm compares quick_reply texts as NFC(TrimSpace(text)) — its own
+  // comment calls out that "是" and "是 " would otherwise "pass here and
+  // collide there". Comparing raw strings locally would let exactly that pair
+  // through and turn into the 422 this validation exists to prevent.
+  assert.throws(
+    () => buildDisplayCard({ title: 't', summary: 's', options: ['是', '是 '] }),
+    (err) => err instanceof CardError && err.field === 'options[1].text',
+  );
+  // NFC: a precomposed "é" and its decomposed form are the same option.
+  assert.throws(
+    () => buildDisplayCard({ title: 't', summary: 's', options: ['café', 'café'] }),
+    (err) => err instanceof CardError && err.field === 'options[1].text',
+  );
+  // Positive control: genuinely different texts still pass.
+  const ok = buildDisplayCard({ title: 't', summary: 's', options: ['是', '否'] });
+  assert.equal(ok.actions.length, 2);
+});

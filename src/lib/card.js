@@ -42,6 +42,13 @@ export class CardError extends Error {
 
 const runes = (s) => [...s].length;
 
+/**
+ * Mirror of cws-comm's `normalizeCardReplyText` (NFC over a trimmed string).
+ * Used only to compare two option texts for equality — never to rewrite what
+ * the caller wrote.
+ */
+const normalizeOptionText = (s) => s.trim().normalize('NFC');
+
 function requireText(value, field) {
   if (typeof value !== 'string' || value === '') {
     throw new CardError(field, 'is required and must be a non-empty string');
@@ -167,9 +174,12 @@ export function buildDisplayCard(input = {}) {
     const seenText = new Map();
     const seenId = new Map();
     actions.forEach((action, i) => {
-      const optionText = action.params.text;
+      // Compare after the same trim + NFC the backend applies, or "是" and
+      // "是 " pass here and collide there — which is precisely the 422 this
+      // local validation exists to prevent. The text itself is left untouched.
+      const optionText = normalizeOptionText(action.params.text);
       if (seenText.has(optionText)) {
-        throw new CardError(`options[${i}].text`, `duplicates options[${seenText.get(optionText)}].text (${JSON.stringify(optionText)}); two quick replies may not share one option text`);
+        throw new CardError(`options[${i}].text`, `duplicates options[${seenText.get(optionText)}].text (${JSON.stringify(action.params.text)}); two quick replies may not share one option text, compared after trim + NFC`);
       }
       seenText.set(optionText, i);
 
