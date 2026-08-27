@@ -369,7 +369,7 @@ export function createMetricsReporter(activeOrgConfigs, {
       return;
     }
     try {
-      await putForOrg(orgConfig.org_id, apiPath(`/agents/${selfMemberId}/runtime-metrics`), payload);
+      await putForOrg(orgConfig.org_id, apiPath(`/agents/${selfMemberId}/runtime-metrics`), payload, { quietOnSuccess: true });
     } catch (err) {
       if (err.status === 404) {
         if (!warnedEndpoint404) {

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.0-beta.3] — 2026-08-28
+
+*Beta / experimental release. Log-hygiene / observability changes; validate `out.log` rotation and RPC log volume in int before a stable 2.17.0.*
+
+### Added
+
+- Log rotation: a `log-rotate` task registered into the existing `TaskRegistry` performs a **daily** size check and rotates any PM2 log file (`pm_out_log_path` / `pm_err_log_path`) exceeding 20 MB via copytruncate — streaming the current contents into a timestamped `.gz` archive next to the log, then truncating the live file to 0 (safe under PM2's O_APPEND writer; `pm2 logs` keeps following). `runOnStart` reclaims an already-oversized file at boot. Archives are gzipped and kept indefinitely; the live file stays plain text. Graceful no-op outside PM2.
+
+### Fixed
+
+- Log hygiene: successful (2xx) periodic `runtime-metrics` and `online-report` RPCs no longer print their `[rpc] → … / ←` pairs to stdout, cutting the dominant `out.log` flood from these ~10–60s reporters. A new opt-in `quietOnSuccess` client option suppresses stdout only on success — errors (>=400) still log via `console.warn`, all other RPC logging is unchanged, and the file sink (`COCO_RPC_LOG_FILE`) is unaffected. The routine `online-report: triggered=false reason=…` summary is also suppressed; only a meaningful `triggered=true` event is logged. High-frequency benign no-op system events (reactions, read/delivered receipts, mention/created notices) no longer log at all; every other system frame now logs exactly one line — a `system event=…` trace for known events and a single `unhandled system event: …` line for unknown ones (previously an unknown event double-logged: one trace plus one unhandled line) — so contract drift stays visible without the duplication.
+- Token/auth error logging no longer renders as `[object Object]`: the error branch now drills into the cws-core error envelope (`error.detail` / `error.title`) and coerces to a string, so the real failure cause surfaces.
+- Log levels: token lifecycle progress logs and the benign `unhandled system event` (message reactions) now write to stdout instead of stderr, so `error.log` retains only genuine errors.
+- Log rotation: same-second rotations of one file no longer overwrite each other. The second-granular timestamp could yield an identical `<stem>.<stamp>` base for two rotations within one second (runOnStart + a manual tick, a crash-restart), silently clobbering the earlier `.log.gz` — data loss under the "archives kept forever" guarantee. `rotateFile` now claims a collision-proof base via a reservation loop that appends `.1`, `.2`, … skipping any base whose `.log.gz` already exists and reserving the snapshot slot with an `O_EXCL` create, so neither a published archive nor a preserved snapshot is ever overwritten.
+## [2.17.0-beta.2] — 2026-08-28
+
+*Beta / experimental release (full notes in the GitHub release).*
+
+### Fixed
+
+- WeChat / WhatsApp rebind: disconnect now truly destroys the channel session — a per-channel `logout` hook (WeChat admin account delete + login cancel; WhatsApp `auth_info` removal) with an in-flight-login guard and a file fallback on any partial account-delete failure — so a reconnect issues a fresh QR instead of reviving the old account. Pairs with cws-connect !118.
+
 ## [2.17.0-beta.1] — 2026-08-27
 
 *Beta / experimental release. `comm.send_card` ships as a beta preview:
