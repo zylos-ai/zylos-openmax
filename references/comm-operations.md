@@ -219,8 +219,10 @@ id is the stable identity. Derived ids are the slugified option text
 CJK), and any derived id that would collide with an earlier one (`"Yes!"` and
 `"Yes?"` both slugify to `yes`), fall back to a positional `option-1`,
 `option-2`, … Pass `id` explicitly whenever you want to match on something
-meaningful — an id you supply is never rewritten, so a duplicate there is an
-error rather than a silent renumbering.
+meaningful — an id you supply is never rewritten **regardless of where it sits
+in the list**: a derived id that would take it yields to the positional form
+instead. A duplicate among ids *you* chose is an error rather than a silent
+renumbering.
 
 An option longer than the 32-code-point label cap needs an explicit shorter
 `label`: the option text itself may run to 200 code points, but it cannot
@@ -271,7 +273,7 @@ field instead of returning an opaque 422. **Counts are code points, not bytes** 
 | `summary` | 1000 code points |
 | `text` (block) | 2000 code points |
 | `fallbackText` | 512 code points — a fallback *derived* from `text` is truncated; one you pass explicitly is rejected rather than silently cut |
-| `options` | at most 5; two options may not share one option text — compared after the same trim + NFC normalization the backend applies, so `"Yes"` and `"Yes "` are one option — or one id |
+| `options` | at most 5; two options may not share one option text — compared after the same trim + NFC normalization the backend applies (Go `unicode.IsSpace`, which is *not* JS `String.trim` — it strips U+0085 and keeps U+FEFF), so `"Yes"` and `"Yes "` are one option. The text you wrote is never rewritten; normalization decides equality only — or one id |
 | option text | 200 code points |
 | option label | 32 code points |
 | whole body | 64 KB serialized |

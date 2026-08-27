@@ -213,3 +213,72 @@ test('duplicate option text is caught after the same trim+NFC the backend applie
   const ok = buildDisplayCard({ title: 't', summary: 's', options: ['是', '否'] });
   assert.equal(ok.actions.length, 2);
 });
+
+
+test('an id the caller chose wins even when a derived id got there first', () => {
+  // "Yes!" derives `yes`; the SECOND option explicitly asks for `yes`. The
+  // stated invariant is that a derived id yields and a chosen one is never
+  // rewritten, so the derived one must move and the error must not blame the
+  // option the caller actually chose.
+  const body = buildDisplayCard({
+    title: 't', summary: 's',
+    options: ['Yes!', { text: 'OK', id: 'yes' }],
+  });
+  assert.deepEqual(body.actions.map((a) => a.id), ['option-1', 'yes']);
+  assert.deepEqual(body.actions.map((a) => a.params.text), ['Yes!', 'OK']);
+});
+
+test('a double collision is refused rather than sent with a duplicate id', () => {
+  assert.throws(
+    () => buildDisplayCard({
+      title: 't', summary: 's',
+      options: [{ text: 'first', id: 'yes' }, { text: 'Yes!' }, { text: 'x', id: 'option-2' }],
+    }),
+    (err) => err instanceof CardError
+      && err.field === 'options[1].id'
+      && /cannot be derived/.test(err.message),
+  );
+});
+
+test('a pure-CJK option derives a positional id, not an empty one', () => {
+  // The first keeps only its ASCII "A"; the second keeps nothing at all and
+  // must not produce an id the validator would reject.
+  const body = buildDisplayCard({ title: 't', summary: 's', options: ['\u65b9\u6848A', '\u65b9\u6848\u4e00'] });
+  assert.deepEqual(body.actions.map((a) => a.id), ['a', 'option-2']);
+  for (const a of body.actions) assert.match(a.id, /^[a-z0-9_-]{1,64}$/);
+});
+
+test('astral characters count as one code point each, not two', () => {
+  // 32 emoji is 32 code points but 64 UTF-16 units; counting .length rejects it.
+  const label32 = '\u{1F600}'.repeat(32);
+  const ok = buildDisplayCard({ title: 't', summary: 's', options: [{ text: 'x', label: label32 }] });
+  assert.equal(ok.actions[0].label, label32);
+  assert.throws(
+    () => buildDisplayCard({ title: 't', summary: 's', options: [{ text: 'x', label: '\u{1F600}'.repeat(33) }] }),
+    (err) => err instanceof CardError && err.field === 'options[0].label',
+  );
+});
+
+test('the trim mirrors Go unicode.IsSpace, not JS String.trim', () => {
+  const Y = '\u662f';
+  // U+0085 (NEL): Go trims it, JS trim does not. Under JS semantics this
+  // duplicate pair slips through and comes back as a 422 from cws-core.
+  assert.throws(
+    () => buildDisplayCard({ title: 't', summary: 's', options: [Y, '\u0085' + Y] }),
+    (err) => err instanceof CardError && err.field === 'options[1].text',
+  );
+  // U+FEFF (BOM): JS trim strips it, Go does not. Under JS semantics these two
+  // are rejected as duplicates while the caller sees two texts that differ.
+  const distinct = buildDisplayCard({ title: 't', summary: 's', options: ['\uFEFF' + Y, Y] });
+  assert.equal(distinct.actions.length, 2);
+  assert.deepEqual(distinct.actions.map((a) => a.params.text), ['\uFEFF' + Y, Y]);
+});
+
+test('the option text on the wire is never normalized', () => {
+  // Normalization decides equality only. The read path normalizes both the
+  // stored option and the incoming reply in SQL before comparing, so rewriting
+  // the payload would change the caller's words for no gain.
+  const raw = '   \u662f  ';
+  const body = buildDisplayCard({ title: 't', summary: 's', options: [{ text: raw, label: 'yes' }] });
+  assert.equal(body.actions[0].params.text, raw);
+});

@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caps (code points, not bytes) and rejects a malformed card locally with the
   offending field named, instead of surfacing an opaque 422 from cws-core.
   Interactive (business-operation) cards are out of scope.
+- Option-text comparison now trims with Go's `unicode.IsSpace` set rather than
+  JS `String.trim`. The two disagree in both directions: U+0085 slipped a
+  duplicate pair past the local check into a 422 from cws-core, and U+FEFF made
+  two options the backend considers distinct fail here as "duplicates" while the
+  caller was looking at two texts that plainly differ. Normalization decides
+  equality only — the text on the wire is never rewritten.
+- An id the caller supplies is now honoured regardless of its position: a
+  derived id that would take it yields to the positional form. Previously the
+  invariant only held when the explicit id came first, and the error blamed the
+  option the caller had actually chosen.
 - `references/comm-operations.md` — "Display cards" section covering the verb,
   the three fields all named `type`, the frozen limits, and why the answer must
   be matched on the action id rather than the label.

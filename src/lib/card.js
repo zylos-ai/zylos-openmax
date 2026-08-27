@@ -44,10 +44,27 @@ const runes = (s) => [...s].length;
 
 /**
  * Mirror of cws-comm's `normalizeCardReplyText` (NFC over a trimmed string).
- * Used only to compare two option texts for equality — never to rewrite what
- * the caller wrote.
+ *
+ * The trim has to be Go's `strings.TrimSpace`, i.e. `unicode.IsSpace`, and NOT
+ * JS `String.prototype.trim` — the two disagree in both directions and each
+ * disagreement is a real defect:
+ *   - U+0085 (NEL): Go trims, JS does not. Left as JS, a duplicate pair slips
+ *     past this check and comes back as the 422 this validation exists to
+ *     prevent.
+ *   - U+FEFF (BOM): JS trims, Go does not. Left as JS, two options the backend
+ *     considers distinct are rejected here as "duplicates" — while the caller
+ *     is looking at two texts that plainly differ.
+ * So the character class below is `unicode.White_Space` verbatim: JS `\s` minus
+ * U+FEFF plus U+0085.
+ *
+ * Used only to compare two option texts for equality. The text that goes on the
+ * wire is never rewritten: the read path (DeriveCardDisplayStates) normalizes
+ * both the stored option and the incoming reply in SQL before comparing them, so
+ * pre-normalizing the payload would alter the caller's words for no gain.
  */
-const normalizeOptionText = (s) => s.trim().normalize('NFC');
+const GO_SPACE = '\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000';
+const TRIM_RE = new RegExp(`^[${GO_SPACE}]+|[${GO_SPACE}]+$`, 'gu');
+const normalizeOptionText = (s) => s.replace(TRIM_RE, '').normalize('NFC');
 
 function requireText(value, field) {
   if (typeof value !== 'string' || value === '') {
@@ -168,6 +185,28 @@ export function buildDisplayCard(input = {}) {
   }
   if (rawOptions.length > 0) {
     const actions = rawOptions.map(normalizeOption);
+
+    // Reserve every id the caller chose BEFORE handing out derived ones.
+    // Without this pass the stated invariant — a caller's id is never
+    // rewritten, a derived id yields — only held when the explicit one came
+    // first; a derived id could take a later explicit id's slot and the error
+    // would then blame the option the caller actually chose.
+    const claimed = new Set();
+    actions.forEach((action, i) => {
+      if (!action.idExplicit) return;
+      if (claimed.has(action.id)) {
+        throw new CardError(`options[${i}].id`, `duplicates an earlier options[].id (${JSON.stringify(action.id)})`);
+      }
+      claimed.add(action.id);
+    });
+    actions.forEach((action, i) => {
+      if (action.idExplicit || !claimed.has(action.id)) return;
+      const positional = `option-${i + 1}`;
+      if (claimed.has(positional)) {
+        throw new CardError(`options[${i}].id`, `cannot be derived: both ${JSON.stringify(action.id)} and ${JSON.stringify(positional)} are already taken; pass an explicit id`);
+      }
+      action.id = positional;
+    });
 
     // Validator rule 11: two quick-reply buttons may not carry the same option
     // text — the reply they produce would be indistinguishable.
