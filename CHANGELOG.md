@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.17.0-beta.3] — 2026-08-28
+## [2.17.0] — 2026-08-28
 
-*Beta / experimental release. Log-hygiene / observability changes; validate `out.log` rotation and RPC log volume in int before a stable 2.17.0.*
+*Stable release. Promotes the 2.17.0-beta.1 … beta.3 pre-releases to a formal version — `comm.send_card` display cards, WeChat/WhatsApp rebind, and log-hygiene / rotation / observability. The itemized notes below (this section plus the beta.2 / beta.1 entries) are the full scope of 2.17.0.*
 
 ### Added
 
