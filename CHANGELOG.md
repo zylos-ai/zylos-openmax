@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.1] — 2026-08-30
+
+### Changed
+
+- `conn.invoke` now routes by the connection's `credential_mode`: **proxy/Composio** connections execute **server-side** via cws-core's proxy execute endpoint (`POST /connect/connections/{id}/actions/execute`), while **direct** connections execute locally (local egress) — `invokeDirect` assembles the request from the per-action catalog templates and calls the provider directly, acquiring/refreshing the credential from cws-core only on a cache miss, a near-expiry OAuth token, or a provider 401. A single entry point (`conn.invoke`) now auto-selects the path; callers no longer choose proxy vs direct.
+- `conn.list` / `conn.catalog` data-and-cache boundaries converged: `conn.list` always reads from cws-core; `conn.catalog` serves a local on-disk catalog for direct connectors (persisted) and fetches through to cws-core every time for proxy/Composio connectors (never persisted).
+
+### Removed
+
+- The client-driven `conn.proxy` and `conn.execute` verbs are removed. Server-side execution is reached only through `conn.invoke`'s proxy route (selected automatically by `credential_mode`). Both are kept as explicit tombstones that return an actionable error pointing at `conn.invoke`, so an old caller fails loudly rather than silently.
+
 ## [2.17.0] — 2026-08-28
 
 *Stable release. Promotes the 2.17.0-beta.1 … beta.3 pre-releases to a formal version — `comm.send_card` display cards, WeChat/WhatsApp rebind, and log-hygiene / rotation / observability. The itemized notes below (this section plus the beta.2 / beta.1 entries) are the full scope of 2.17.0.*
