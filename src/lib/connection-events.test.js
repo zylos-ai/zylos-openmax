@@ -75,12 +75,13 @@ test('connection.authorized (direct mode): acquires credential + warms identity/
   assert.ok(fs.existsSync(path.join(credentialsDir, 'conn-1.json')), 'direct credential was not cached locally');
 });
 
-test('connection.authorized (non-direct / legacy proxy): no credential acquire or cache (direct-only), and the handler stays robust (does not crash) — no proxy semantics', async () => {
-  // Direct-only runtime: proxy is deprecated/removed, so a non-direct connection
-  // arriving from the backend is a legacy anomaly. It must NOT be credential-
-  // acquired or cached (no proxy semantics), yet an unexpected legacy connection
-  // must never crash the event handler — it is skipped + logged, and the rest of
-  // the best-effort path (identity/catalog warm) still runs. The await resolving
+test('connection.authorized (proxy / composio): no LOCAL credential acquire or cache (server-side execute), and the handler stays robust (does not crash)', async () => {
+  // Proxy / composio connections hold NO local token — their credential lives
+  // server-side and `acquire` is rejected — so the handler correctly SKIPS the
+  // local credential acquire+cache (that is the right behavior, not an anomaly:
+  // the connection is still invokable via conn.invoke, executed server-side). The
+  // handler must also never crash — it skips + logs, and the rest of the
+  // best-effort path (identity/catalog warm) still runs. The await resolving
   // (never rejecting) below is itself the robustness assertion.
   const { connectDir, credentialsDir, catalogDir } = tmpDirs();
   const { calls, get, post } = recordingHttp();
@@ -144,11 +145,11 @@ test('connection.authorized: notifies the agent session (so it learns it can act
   assert.equal(notes[0].mode, 'direct');
 });
 
-test('connection.authorized (legacy proxy): still notifies the agent, but the notice carries the non-direct mode (so the notice builder can flag it deprecated/unsupported)', async () => {
-  // Direct-only runtime: a legacy proxy connection is still surfaced to the agent
-  // via the authorize notice, but the notice text must NOT present it as usable —
-  // that branching happens in buildConnectionAuthorizedNotice (asserted below).
-  // Here we assert the mode reaches the notifier so it can branch correctly.
+test('connection.authorized (proxy / composio): notifies the agent and the non-direct mode reaches the notifier (so the notice builder can present it usable-via-server-execute)', async () => {
+  // A proxy/composio connection is surfaced to the agent via the authorize notice
+  // as USABLE (server-side execute) — that branching happens in
+  // buildConnectionAuthorizedNotice (asserted below). Here we assert the mode
+  // reaches the notifier so it can branch correctly.
   const { connectDir, credentialsDir, catalogDir } = tmpDirs();
   const { get, post } = recordingHttp();
   const notes = [];
@@ -165,10 +166,11 @@ test('connection.authorized (legacy proxy): still notifies the agent, but the no
 });
 
 // -----------------------------------------------------------------------------
-// Authorized-notice text: the agent-facing contract must match the direct-only
-// runtime — a direct connection is presented as ready to use via conn.invoke; a
-// non-direct (legacy proxy / unknown mode) connection must NOT be presented as
-// usable and must NOT hint conn.invoke (the runtime rejects it).
+// Authorized-notice text: the agent-facing contract must match conn.invoke's
+// routing — BOTH a direct connection (local egress) and a proxy/composio
+// connection (server-side execute) are presented as ready to use via conn.invoke;
+// only a genuinely unknown/legacy non-direct, non-proxy mode must NOT be presented
+// as usable and must NOT hint conn.invoke (the runtime rejects it).
 // -----------------------------------------------------------------------------
 const noticeOrg = { slug: 'acme' };
 
@@ -186,29 +188,45 @@ test('buildConnectionAuthorizedNotice (direct): presents the connection as ready
     `direct notice must not carry deprecated/unsupported language: ${text}`);
 });
 
-test('buildConnectionAuthorizedNotice (non-direct / legacy proxy): flags deprecated/unsupported + recreate-as-direct, and does NOT present it as usable or hint conn.invoke', () => {
+test('buildConnectionAuthorizedNotice (proxy): presents the connection as USABLE via conn.invoke, executed server-side (no local token)', () => {
   const text = buildConnectionAuthorizedNotice(noticeOrg, {
     connectionId: 'conn-p', provider: 'notion', mode: 'proxy',
   });
-  // Must carry the deprecated/unsupported + recreate-as-direct guidance.
-  assert.ok(/deprecated/i.test(text), `non-direct notice must say proxy is deprecated: ${text}`);
-  assert.ok(/not usable/i.test(text), `non-direct notice must say it is not usable: ${text}`);
-  assert.ok(/direct connection/i.test(text), `non-direct notice must tell the agent to recreate as a direct connection: ${text}`);
-  assert.ok(text.includes('notion'), 'non-direct notice must name the app');
-  assert.ok(text.includes('conn-p'), 'non-direct notice must carry the connection_id');
-  // Must NOT present it as ready-to-use or hint conn.invoke as a usable path.
-  assert.ok(!text.includes('You can use it now'), `non-direct notice must not say it is usable now: ${text}`);
-  assert.ok(!/conn\.invoke \{app, action, params\} to call/.test(text),
-    `non-direct notice must not hint conn.invoke as a usable path: ${text}`);
-  assert.ok(!text.includes('ready locally'), `non-direct notice must not say the token is ready: ${text}`);
+  // Presented as ready-to-use, hinting conn.invoke — same usable contract as direct.
+  assert.ok(text.includes('You can use it now'), `proxy notice must say it is usable now: ${text}`);
+  assert.ok(text.includes('conn.invoke'), `proxy notice must hint conn.invoke: ${text}`);
+  // The distinguishing detail: it runs server-side (no local token/egress).
+  assert.ok(/server-side/i.test(text), `proxy notice must say the action runs server-side: ${text}`);
+  assert.ok(/no local token/i.test(text), `proxy notice must say no local token is needed: ${text}`);
+  assert.ok(text.includes('notion'), 'proxy notice must name the app');
+  assert.ok(text.includes('conn-p'), 'proxy notice must carry the connection_id');
+  // Must NOT carry the not-usable / recreate language, nor the direct-only egress phrasing.
+  assert.ok(!/not usable|recreated|re-authorized/i.test(text), `proxy notice must not carry not-usable/recreate language: ${text}`);
+  assert.ok(!text.includes('your own egress'), `proxy notice must not claim local egress: ${text}`);
 });
 
-test('buildConnectionAuthorizedNotice (unknown mode): treated as non-direct — not presented as usable', () => {
+test('buildConnectionAuthorizedNotice: credential_source is IGNORED — proxy wording only, never "Composio"', () => {
+  // credentialSource is no longer part of the taxonomy. Even if a caller passes a
+  // stray credentialSource, the notice keys purely on mode==='proxy' and must
+  // carry the generic proxy/server-side wording — never provider-specific
+  // "Composio" language.
+  const text = buildConnectionAuthorizedNotice(noticeOrg, {
+    connectionId: 'conn-c', provider: 'gmail', mode: 'proxy', credentialSource: 'composio',
+  });
+  assert.ok(text.includes('You can use it now'), `proxy notice must say it is usable now: ${text}`);
+  assert.ok(text.includes('conn.invoke'), `proxy notice must hint conn.invoke: ${text}`);
+  assert.ok(/server-side/i.test(text), `proxy notice must say the action runs server-side: ${text}`);
+  assert.ok(!/Composio/i.test(text), `notice must NOT name Composio (genericized to proxy): ${text}`);
+  assert.ok(!/not usable|recreated|re-authorized/i.test(text), `proxy notice must not carry not-usable/recreate language: ${text}`);
+});
+
+test('buildConnectionAuthorizedNotice (unknown/legacy mode): NOT presented as usable — recreate guidance', () => {
   const text = buildConnectionAuthorizedNotice(noticeOrg, {
     connectionId: 'conn-u', provider: 'slack', mode: '?',
   });
   assert.ok(!text.includes('You can use it now'), `unknown-mode notice must not present the connection as usable: ${text}`);
-  assert.ok(/deprecated|not usable/i.test(text), `unknown-mode notice must fall to the non-direct/unsupported branch: ${text}`);
+  assert.ok(/not usable/i.test(text), `unknown-mode notice must fall to the not-usable branch: ${text}`);
+  assert.ok(/recreated|re-authorized/i.test(text), `unknown-mode notice must give recreate/re-authorize guidance: ${text}`);
 });
 
 test('the authorize notify hook is authorize-only — revoked / disconnected / credential_updated / reauth_needed do NOT fire it', async () => {

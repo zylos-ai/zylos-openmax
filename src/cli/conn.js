@@ -131,11 +131,12 @@ const ACTIONDEF_UPDATE_FIELDS = ['method', 'url_template', 'description', 'heade
 
 function bad(message) { return Object.assign(new Error(message), { status: 400 }); }
 
-// Direct-only tombstone error for the removed proxy verbs (conn.proxy /
-// conn.execute) and any other would-be proxy path. Proxy mode is deprecated/
-// removed; only direct connections can be invoked (via conn.invoke).
+// Tombstone error for the removed legacy verbs (conn.proxy / conn.execute). They
+// are gone; conn.invoke is the single entry point and auto-routes by
+// credential_mode — direct (local egress) AND proxy/Composio (server-side
+// execute) are both invokable through it.
 function proxyDeprecatedError(verb) {
-  return bad(`unsupported: ${verb} is removed — proxy mode is deprecated/removed; only direct connections can be invoked. Use conn.invoke {app|connectionId, action, params} instead.`);
+  return bad(`unsupported: ${verb} is removed — use conn.invoke {app|connectionId, action, params} instead, which supports both direct (local egress) and proxy/Composio (server-side execute) connections.`);
 }
 
 // Copy only the allowlisted keys that are actually present (skip `undefined`).
@@ -509,14 +510,37 @@ export async function resolveInvokeEntry(
 // via conn.app_actions (org-scoped token) on a miss / TTL-expiry / explicit
 // refresh. The catalog file is global (keyed by applicationId) since an app's
 // capabilities are the same across orgs.
-async function getCatalog(orgId, applicationId, { refresh = false, ttlMs = CATALOG_TTL_MS } = {}) {
-  if (!refresh) {
+// `persist` (default true) gates the on-disk catalog. For a composio (proxy)
+// connector we must NEVER persist a full action catalog — its action space is
+// huge and it executes server-side — so the composio path passes persist:false,
+// which BOTH skips the cache read (never serves a stale/absent composio catalog)
+// AND skips writeCatalog (fetch-through, no disk footprint).
+async function getCatalog(orgId, applicationId, { refresh = false, ttlMs = CATALOG_TTL_MS, persist = true } = {}) {
+  if (!refresh && persist) {
     const cached = readCatalog(applicationId, { ttlMs });
     if (cached) return { ...cached, source: 'cache' };
   }
   const actions = actionsOf(await getForOrg(orgId, apiPath(`/connect/applications/${applicationId}/actions`)));
+  if (!persist) {
+    return { applicationId, fetchedAt: Date.now(), actions, source: 'fetch' };
+  }
   const rec = writeCatalog(applicationId, actions);
   return { ...rec, source: 'fetch' };
+}
+
+// A connection is a proxy connector when its credential_mode is "proxy" — it
+// holds no local token and executes SERVER-SIDE (see conn.invoke). This is the
+// single source of truth for the direct/proxy split; credential_source is no
+// longer consulted.
+function isProxyEntry(entry) {
+  return !!entry && entry.credentialMode === 'proxy';
+}
+
+// Is an index entry's connector taxonomy KNOWN? A legacy entry that predates
+// credentialMode has it null — we cannot tell proxy from direct, so the caller
+// must refresh before trusting a "not proxy" read.
+function taxonomyKnown(entry) {
+  return !!entry && entry.credentialMode != null;
 }
 
 // Heuristic: does an execute error look like a stale/unknown-action or
@@ -542,10 +566,12 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath('/connect/agents/me/connections'));
   },
 
-  // Acquire credential for a connection. Direct-only: returns credential_mode:
-  // 'direct' + access_token (proxy is deprecated/removed). A legacy proxy
-  // connection would return credential_mode: 'proxy' with no local token — such
-  // connections are not invokable (see conn.invoke).
+  // Acquire a credential for a connection. This verb is DIRECT-only: it returns
+  // credential_mode:'direct' + access_token for local egress. A proxy/Composio
+  // connection has no local token to hand out (its acquire is rejected
+  // server-side), so conn.acquire does not apply to it — but such connections
+  // ARE invokable via conn.invoke, which routes proxy/Composio to server-side
+  // execute (no local token needed).
   'conn.acquire': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
@@ -554,11 +580,11 @@ const COMMANDS = {
     return postForOrg(orgId, apiPath(`/connect/connections/${connId}/credential`));
   },
 
-  // conn.proxy — REMOVED (direct-only). Proxy execution is deprecated/removed:
-  // the backend forces `direct` on custom-connector create and is deleting legacy
-  // proxy connections. Kept only as an explicit tombstone so an old caller gets
-  // an actionable error instead of silently proxying — there is NO proxy HTTP
-  // path left in this module. Use conn.invoke (direct) instead.
+  // conn.proxy — REMOVED. The old free-form client-driven proxy verb is gone;
+  // server-side execution is now reached only through conn.invoke's proxy route
+  // (which auto-selects it by credential_mode). Kept as an explicit tombstone so
+  // an old caller gets an actionable error pointing at conn.invoke instead of a
+  // silent failure — there is NO client-driven proxy HTTP path left in this module.
   'conn.proxy': () => { throw proxyDeprecatedError('conn.proxy'); },
 
   // Discover the named actions available for a connection (action discovery).
@@ -566,6 +592,15 @@ const COMMANDS = {
   // pair with conn.invoke to run one by "toolkit-slug/action-name". cws-core
   // scopes discovery to the caller's own connection-agent authorization
   // boundary (derived server-side).
+  //
+  // Composio note: this per-connection GET is a READ-ONLY discovery call — it
+  // never persists a full action catalog (no writeCatalog), so it is already safe
+  // for composio (proxy) connectors, which must not carry a full on-disk catalog.
+  // FLAG: cws-core added two-stage composio discovery (action search → single-
+  // action describe, + application-actions pagination, MR!579), but the
+  // openmax-facing route names are NOT yet visible from this repo, so we cannot
+  // wire the search→describe flow without guessing paths. Until those routes are
+  // confirmed, discovery stays the single per-connection call below.
   'conn.actions': () => {
     const connId = params.connectionId || params.connection_id;
     if (!connId) throw Object.assign(new Error('connectionId is required'), { status: 400 });
@@ -574,11 +609,11 @@ const COMMANDS = {
     return getForOrg(orgId, apiPath(`/connect/connections/${connId}/actions`));
   },
 
-  // conn.execute — REMOVED (direct-only). This used to POST to the server-side
-  // proxy execute endpoint (cws-connect resolves the action, injects the token,
-  // calls the provider). Proxy is deprecated/removed, so it is kept only as an
-  // explicit tombstone — no server-side execute HTTP path remains here. Run
-  // actions via conn.invoke (direct local egress) instead.
+  // conn.execute — REMOVED. This used to be a standalone verb that POSTed to the
+  // server-side execute endpoint. That endpoint is still used — but now only via
+  // conn.invoke's proxy/Composio route (POST /connect/connections/{id}/actions/
+  // execute), selected automatically by credential_mode. Kept as an explicit
+  // tombstone pointing at conn.invoke; no standalone execute verb remains here.
   'conn.execute': () => { throw proxyDeprecatedError('conn.execute'); },
 
   // Get connection details (status, owner, scopes, etc.).
@@ -705,28 +740,56 @@ const COMMANDS = {
   // source }.
   'conn.catalog': async () => {
     const orgId = requireOrgId();
+    const agentId = resolveSelfMemberId(orgId);
+    const idxPath = indexPathForOrg(orgId);
     let appId = params.applicationId || params.application_id;
+    let entry = null;
     if (!appId && params.app) {
-      const agentId = resolveSelfMemberId(orgId);
-      const entry = await resolveConnectionForApp(params.app, orgId, agentId);
+      entry = await resolveConnectionForApp(params.app, orgId, agentId);
       appId = entry?.applicationId || (isUuid(params.app) ? params.app : null);
     }
     if (!appId) throw Object.assign(new Error('applicationId (or a resolvable app) is required'), { status: 400 });
-    return getCatalog(orgId, appId, { refresh: !!params.refresh });
+    // Decide whether to persist a full on-disk catalog. We must NEVER persist for
+    // a proxy connector — so we persist ONLY when CONFIDENT the app is direct (its
+    // taxonomy is known and not proxy). A LEGACY index entry that predates
+    // credentialMode has UNKNOWN taxonomy: scanning it would (wrongly) look
+    // non-proxy, so refresh once from conn.list (which now returns the taxonomy)
+    // and re-decide. If STILL unknown after the refresh, stay conservative and do
+    // NOT persist — a legacy entry could be proxy.
+    // Decision inputs: the resolved entry when we have one, else the index entries
+    // sharing this applicationId.
+    const decide = () => {
+      if (entry) return { proxy: isProxyEntry(entry), known: taxonomyKnown(entry) };
+      const forApp = Object.values(readIndex(idxPath).connections || {}).filter((e) => e.applicationId === appId);
+      return { proxy: forApp.some(isProxyEntry), known: forApp.some(taxonomyKnown) };
+    };
+    let { proxy, known } = decide();
+    if (!proxy && !known && agentId) {
+      await refreshIndex(orgId, agentId);
+      if (entry) { const re = readIndex(idxPath).connections[entry.id]; if (re) entry = re; }
+      ({ proxy, known } = decide());
+    }
+    // Persist only when confidently direct; proxy OR still-unknown → skip.
+    return getCatalog(orgId, appId, { refresh: !!params.refresh, persist: known && !proxy });
   },
 
   // One-call app-keyed execute: resolve the connection for an application from
   // the local index (refreshing from conn.list on a miss), then run the named
   // action. This is the cache-aware entry meant for agents — it removes the
-  // per-call discovery round-trip. Direct-only runtime (proxy is deprecated/
-  // removed):
+  // per-call discovery round-trip. Routed by the connector taxonomy recorded in
+  // the index (credential_mode):
   //   - direct → LOCAL EGRESS: assemble the request from the local catalog's
   //     url_template + params, inject the locally-cached token (refreshing it on
   //     near-expiry / a provider 401), and call the provider from THIS host.
-  //   - anything else (a legacy proxy connection) → an explicit "unsupported"
-  //     error; we never silently fall back to server-side proxy execute.
-  // On an action/schema-shaped failure it invalidates the cached catalog once so
-  // the next conn.catalog is fresh, then resurfaces the error.
+  //     Returns the provider passthrough { status_code, headers, body }.
+  //   - proxy (e.g. composio) → SERVER-SIDE execute: the connection holds no
+  //     local token and its acquire is rejected server-side, so we POST the
+  //     action to cws-core's proxy execute endpoint, which resolves the action,
+  //     injects the credential, and calls the provider. Returns the server
+  //     passthrough { status_code, body } (no locally-observed response headers).
+  //   - an unexpected mode → an explicit "unsupported" error (never a guess).
+  // On an action/schema-shaped failure (direct path) it invalidates the cached
+  // catalog once so the next conn.catalog is fresh, then resurfaces the error.
   'conn.invoke': async () => {
     // An explicit connectionId (alias connection_id) SKIPS app-resolution and
     // targets that connection directly — the one-command retry after a
@@ -741,7 +804,8 @@ const COMMANDS = {
     if (!agentId) throw Object.assign(new Error('cannot resolve agent member_id'), { status: 400 });
 
     const idxPath = indexPathForOrg(orgId);
-    const { entry, needsSelection } = await resolveInvokeEntry(
+    // `let` — the credential_mode refresh below may re-read a fuller entry.
+    const { entry: resolvedEntry, needsSelection } = await resolveInvokeEntry(
       { app, connectionId: explicitConnId, action: params.action },
       {
         findActives: (a) => findActiveConnectionsByApp(a, idxPath),
@@ -753,7 +817,9 @@ const COMMANDS = {
     // >1 active for the app: return the candidate list (normal result, exit 0)
     // so the agent asks the user which one — never silently pick the first.
     if (needsSelection) return needsSelection;
-    if (!entry) throw Object.assign(new Error(`no connection found for app "${app}" (org ${orgId}, agent ${agentId})`), { status: 404 });
+    if (!resolvedEntry) throw Object.assign(new Error(`no connection found for app "${app}" (org ${orgId}, agent ${agentId})`), { status: 404 });
+    // Mutable — the credential_mode legacy refresh below may re-read a fuller entry.
+    let entry = resolvedEntry;
 
     // Prefer the caller's app for messages; when they invoked by connectionId
     // (no app), fall back to the resolved slug/id so hints stay meaningful.
@@ -782,50 +848,83 @@ const COMMANDS = {
       );
     }
 
-    // Decide the path from the local credential cache, re-acquiring on a miss so
-    // a direct connection with no cache file (authorized offline / runtime wiped
-    // / conn.clear_cache) is not wrongly downgraded to proxy (which cws-connect
-    // now rejects with ErrDirectNotProxyable/422). See resolveCredential.
-    const { credential, mode } = await resolveCredential(
-      { orgId, connectionId: entry.id, cached: readCredentialCache(entry.id) },
-      {
-        acquire: (oid, connId) => acquireCredential(oid, connId),
-        saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
-      },
-    );
-
-    if (mode === 'direct') {
-      if (!entry.applicationId) {
-        throw Object.assign(new Error(`cannot run direct action for app "${appLabel}": applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
-      }
-      try {
-        // The local catalog now carries per-action url_template/headers_template;
-        // direct execution assembles the request from it (never a free-form URL).
-        const catalogRec = await getCatalog(orgId, entry.applicationId, {});
-        return await invokeDirect(
-          { orgId, connection: entry, actionSlug: params.action, params: params.params || {}, catalog: catalogRec.actions, credential },
-          {
-            acquire: (oid, connId) => acquireCredential(oid, connId),
-            saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
-          },
-        );
-      } catch (err) {
-        // Drop the cached catalog on an action/schema mismatch OR a 422 (a catalog
-        // predating url_template — direct assembly can't proceed) so the agent's
-        // next conn.catalog refetches. Re-thrown as-is (no auto-retry).
-        if ((looksLikeActionOrSchemaError(err) || err.status === 422) && entry.applicationId) invalidateCatalog(entry.applicationId);
-        throw err;
-      }
+    // Route by the connector taxonomy recorded in the index (credential_mode).
+    let mode = entry.credentialMode;
+    if (!mode) {
+      // Stale / not-yet-refreshed entry: conn.list now returns credential_mode, so
+      // refresh once and re-read — this self-heals a stale-but-valid entry. We
+      // deliberately do NOT use `acquire` to detect the mode — a proxy acquire is
+      // REJECTED server-side (ErrComposioNotAcquirable), so it cannot be a detector.
+      // If the field is STILL absent after the refresh, the connection is a true
+      // orphan (unresolvable app + no mode) and is treated as UNSUPPORTED below —
+      // we never guess 'direct'.
+      await refreshIndex(orgId, agentId);
+      const refreshed = readIndex(idxPath).connections[entry.id];
+      if (refreshed) entry = refreshed;
+      mode = entry.credentialMode;
     }
 
-    // Direct-only runtime: a non-`direct` credential_mode means this is a legacy
-    // proxy connection. Proxy is deprecated/removed — the backend now forces
-    // `direct` on custom-connector create and is deleting old proxy connections.
-    // We DO NOT silently fall back to server-side proxy execute; surface an
-    // explicit, actionable error so the direct-only doc/contract and the runtime
-    // agree (no silent-proxy path).
+    if (mode === 'proxy') {
+      // Proxy (e.g. composio): no local token, no local catalog. Execute the
+      // action SERVER-SIDE via cws-core's proxy execute endpoint (op
+      // execute-connect-action) — cws-connect resolves the action, injects the
+      // credential, and calls the provider. We never touch the credential cache
+      // or getCatalog on this path. Result is the server passthrough
+      // { status_code, body } (analogous to the direct path's { status_code,
+      // headers, body }, minus locally-observed response headers).
+      return await postForOrg(
+        orgId,
+        apiPath(`/connect/connections/${entry.id}/actions/execute`),
+        { action: params.action, params: params.params || {} },
+      );
+    }
+
+    if (mode === 'direct') {
+      // Decide the path from the local credential cache, re-acquiring on a miss so
+      // a direct connection with no cache file (authorized offline / runtime wiped
+      // / conn.clear_cache) is not wrongly downgraded (cws-connect rejects a direct
+      // connection on the proxy path with ErrDirectNotProxyable/422). See
+      // resolveCredential.
+      const { credential, mode: credMode } = await resolveCredential(
+        { orgId, connectionId: entry.id, cached: readCredentialCache(entry.id) },
+        {
+          acquire: (oid, connId) => acquireCredential(oid, connId),
+          saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+        },
+      );
+      if (credMode === 'direct') {
+        if (!entry.applicationId) {
+          throw Object.assign(new Error(`cannot run direct action for app "${appLabel}": applicationId unresolved (run conn.index {refresh:true})`), { status: 400 });
+        }
+        try {
+          // The local catalog now carries per-action url_template/headers_template;
+          // direct execution assembles the request from it (never a free-form URL).
+          const catalogRec = await getCatalog(orgId, entry.applicationId, {});
+          return await invokeDirect(
+            { orgId, connection: entry, actionSlug: params.action, params: params.params || {}, catalog: catalogRec.actions, credential },
+            {
+              acquire: (oid, connId) => acquireCredential(oid, connId),
+              saveCache: (connId, fresh) => saveCredentialCache(connId, fresh, entry.slug),
+            },
+          );
+        } catch (err) {
+          // Drop the cached catalog on an action/schema mismatch OR a 422 (a catalog
+          // predating url_template — direct assembly can't proceed) so the agent's
+          // next conn.catalog refetches. Re-thrown as-is (no auto-retry).
+          if ((looksLikeActionOrSchemaError(err) || err.status === 422) && entry.applicationId) invalidateCatalog(entry.applicationId);
+          throw err;
+        }
+      }
+      // The index said direct but the acquired credential is not direct — an
+      // inconsistent connection state. Fall through to the unsupported throw
+      // rather than execute with a token we do not hold.
+    }
+
+    // Genuinely unexpected credential_mode (neither 'proxy' nor a direct-
+    // acquirable connection). Surface an explicit, actionable error — we never
+    // guess an execution path.
     throw Object.assign(
-      new Error(`unsupported: connection ${entry.id} is not a direct connection (credential_mode: ${mode}) — proxy mode is deprecated/removed; only direct connections can be invoked. Re-create this connection (custom connectors are now created direct-only).`),
+      new Error(`unsupported: connection ${entry.id} has an unexpected credential_mode (${mode}) — expected 'direct' (local egress) or 'proxy' (server-side execute).`),
       { status: 400 },
     );
   },

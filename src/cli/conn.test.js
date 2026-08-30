@@ -374,25 +374,36 @@ test('conn.invoke guard (app path): list 返回 error+needs_reauth → 刷新规
   }
 });
 
-// --- conn.invoke direct-only: non-direct connections are unsupported ---------
+// --- conn.invoke routing by credential_mode (direct vs proxy/composio) -------
 //
-// Direct-only runtime (proxy deprecated/removed): invoking a connection whose
-// acquired credential_mode is not `direct` must fail with an explicit
-// "unsupported" error and must NEVER silently fall back to the server-side proxy
-// execute endpoint. Exercised via subprocess with a local server that answers the
-// credential-acquire with a legacy proxy credential and records every path hit.
+// conn.invoke routes on the connector taxonomy in the index (credential_mode):
+//   - proxy (composio) → SERVER-SIDE execute: POST /connections/<id>/actions/
+//     execute, WITHOUT acquiring a credential or fetching a local catalog (the
+//     inverse of the old direct-only negative assertion).
+//   - direct → LOCAL EGRESS: acquire the credential + fetch the local catalog +
+//     assemble the request here (regression).
+//   - legacy index lacking credential_mode → refresh from conn.list, re-read,
+//     then route on the refreshed mode (never uses acquire to detect composio).
+// Exercised via subprocess with a local server that records every path hit.
 
-test('conn.invoke direct-only: a non-direct (legacy proxy) connection → explicit unsupported error, NEVER a proxy execute call', async () => {
+test('conn.invoke routing: a proxy (composio) connection → SERVER-SIDE execute (POST .../actions/execute), NEVER acquire/local-catalog', async () => {
   const home = setupHome({ connections: {
-    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active' },
+    // A composio connection: credential_source composio + credential_mode proxy.
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active', credentialMode: 'proxy', credentialSource: 'composio' },
   } });
   const seen = [];
+  let executeBody = null;
   const server = createServer((req, res) => {
     seen.push(req.url);
-    if (req.url.includes('/connect/connections/c1/credential')) {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      // cws-connect returns a legacy proxy credential (no local access_token).
-      res.end(JSON.stringify({ data: { credential_mode: 'proxy', proxy_ref: 'pr-1' }, request_id: 'r1' }));
+    if (req.url.includes('/connect/connections/c1/actions/execute')) {
+      let body = '';
+      req.on('data', (d) => { body += d; });
+      req.on('end', () => {
+        try { executeBody = JSON.parse(body); } catch { executeBody = body; }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        // op execute-connect-action → { status_code, body }.
+        res.end(JSON.stringify({ data: { status_code: 200, body: { ok: true, pages: [] } }, request_id: 'r1' }));
+      });
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json' });
@@ -401,30 +412,36 @@ test('conn.invoke direct-only: a non-direct (legacy proxy) connection → explic
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address();
   try {
-    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send' }, `http://127.0.0.1:${port}`);
-    assert.equal(code, 1);
-    const err = JSON.parse(stderr);
-    assert.equal(err.status, 400);
-    assert.match(err.error, /unsupported/i);
-    assert.match(err.error, /not a direct connection|proxy.*deprecated|deprecated\/removed/i);
-    // The critical direct-only guarantee: NEVER a silent fall-back to the
-    // server-side proxy execute (or proxy) endpoint.
-    assert.ok(!seen.some((u) => u.includes('/actions/execute')), `must not call proxy execute: ${JSON.stringify(seen)}`);
-    assert.ok(!seen.some((u) => u.includes('/proxy')), `must not call the proxy endpoint: ${JSON.stringify(seen)}`);
+    const { code, stdout } = await runConn(
+      home, 'conn.invoke',
+      { connectionId: 'c1', action: 'notion/search', params: { q: 'roadmap' } },
+      `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    // The server passthrough { status_code, body } is returned as the result.
+    const out = JSON.parse(stdout);
+    assert.equal(out.status_code, 200);
+    assert.deepEqual(out.body, { ok: true, pages: [] });
+    // The execute endpoint was called with { action, params }.
+    assert.ok(seen.some((u) => u.includes('/connect/connections/c1/actions/execute')), `proxy path must call server execute: ${JSON.stringify(seen)}`);
+    assert.deepEqual(executeBody, { action: 'notion/search', params: { q: 'roadmap' } });
+    // It must NOT acquire a credential and must NOT fetch a local catalog.
+    assert.ok(!seen.some((u) => u.includes('/credential')), `composio must never acquire a credential: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => /\/connect\/applications\/[^/]+\/actions/.test(u)), `composio must never fetch a local catalog: ${JSON.stringify(seen)}`);
   } finally {
     await new Promise((r) => server.close(r));
   }
 });
 
-test('conn.invoke direct-only: a direct connection takes the DIRECT path (local egress), NOT the unsupported-proxy branch', async () => {
+test('conn.invoke routing: a direct connection takes the DIRECT path (local egress), NOT server execute', async () => {
   // A direct credential routes into the DIRECT branch, which fetches the local
   // catalog (GET /connect/applications/<appId>/actions) to assemble the request.
   // The catalog-endpoint hit proves the direct path was taken; the proxy branch
   // would instead POST /connections/<id>/actions/execute (never reached). We
   // serve an empty catalog so it stops at "unknown action" — a direct-path
-  // outcome, distinctly NOT the unsupported-proxy error.
+  // outcome, distinctly NOT the server-execute path.
   const home = setupHome({ connections: {
-    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active' },
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'direct', credentialSource: 'managed' },
   } });
   const seen = [];
   const server = createServer((req, res) => {
@@ -448,27 +465,229 @@ test('conn.invoke direct-only: a direct connection takes the DIRECT path (local 
     const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send' }, `http://127.0.0.1:${port}`);
     assert.equal(code, 1);
     const err = JSON.parse(stderr);
-    // The direct path's own downstream error — NOT the unsupported-proxy branch.
+    // The direct path's own downstream error — NOT server execute.
     assert.match(err.error, /unknown action|not in local catalog/);
-    assert.doesNotMatch(err.error, /proxy|unsupported/i);
-    // Direct path proof: the local catalog was fetched, and the proxy execute
+    assert.doesNotMatch(err.error, /unsupported/i);
+    // Direct path proof: the local catalog was fetched, and the server execute
     // endpoint was NEVER called.
     assert.ok(seen.some((u) => u.includes('/connect/applications/app-1/actions')), `direct path must fetch the local catalog: ${JSON.stringify(seen)}`);
-    assert.ok(!seen.some((u) => u.includes('/actions/execute')), `direct path must not call proxy execute: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), `direct path must not call server execute: ${JSON.stringify(seen)}`);
   } finally {
     await new Promise((r) => server.close(r));
   }
 });
 
-// --- conn.proxy / conn.execute: direct-only tombstones ----------------------
+test('conn.invoke routing (legacy index): entry lacks credential_mode → refresh from conn.list, then route proxy→server execute (no acquire-based detection)', async () => {
+  // A legacy index entry with NO credentialMode. conn.invoke must refresh from
+  // conn.list (which now returns credential_mode/credential_source), re-read the
+  // entry, and route on the refreshed mode — WITHOUT ever calling acquire to
+  // detect composio. Here the refresh reveals a composio connection → server
+  // execute.
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active' }, // no credentialMode
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({
+        data: [{ id: 'c1', application_id: 'app-1', application_slug: 'notion', application_name: 'Notion', status: 'active', credential_mode: 'proxy', credential_source: 'composio' }],
+        request_id: 'r1',
+      }));
+      return;
+    }
+    if (req.url.includes('/connect/connections/c1/actions/execute')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { status_code: 201, body: { done: true } }, request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'notion/search', params: {} }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    const out = JSON.parse(stdout);
+    assert.equal(out.status_code, 201);
+    // The refresh happened and the server-execute path was taken; acquire never was.
+    assert.ok(seen.some((u) => u.includes('/connect/agents/me/connections')), `legacy path must refresh from conn.list: ${JSON.stringify(seen)}`);
+    assert.ok(seen.some((u) => u.includes('/connect/connections/c1/actions/execute')), `must route to server execute after refresh: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => u.includes('/credential')), `must never acquire to detect composio: ${JSON.stringify(seen)}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.invoke routing (empty mode, self-heal fails): entry lacks credential_mode AND refresh does not fill it → UNSUPPORTED (never default-direct, no acquire)', async () => {
+  // A stale/orphan index entry with NO credentialMode. conn.invoke refreshes once
+  // from conn.list (self-heal) but the list STILL carries no credential_mode. The
+  // post-refresh fallback must NOT default to 'direct' — it must surface the
+  // explicit unsupported error path (the same one used for an unexpected mode) and
+  // must never acquire a credential or call server execute.
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active' }, // no credentialMode
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // conn.list STILL lacks credential_mode (truly stale/orphan backend record).
+      res.end(JSON.stringify({
+        data: [{ id: 'c1', application_id: 'app-1', application_slug: 'notion', application_name: 'Notion', status: 'active' }],
+        request_id: 'r1',
+      }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'notion/search', params: {} }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 400);
+    assert.match(err.error, /unsupported/i);
+    // The self-heal refresh was attempted...
+    assert.ok(seen.some((u) => u.includes('/connect/agents/me/connections')), `must refresh once before giving up: ${JSON.stringify(seen)}`);
+    // ...but it must NOT default to direct: never acquire, never server-execute.
+    assert.ok(!seen.some((u) => u.includes('/credential')), `empty-mode must never acquire a credential: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), `empty-mode must never call server execute: ${JSON.stringify(seen)}`);
+    assert.ok(!seen.some((u) => /\/connect\/applications\/[^/]+\/actions/.test(u)), `empty-mode must never fetch a local catalog: ${JSON.stringify(seen)}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// --- conn.catalog: never persist a full catalog for a composio app ----------
 //
-// The two proxy verbs are removed (proxy deprecated/removed). They must throw an
-// explicit unsupported/deprecated error pointing to conn.invoke — never make a
-// proxy/execute network call. COCO_API_URL defaults to an unroutable port, so a
-// clean deprecated message also proves no network happened.
+// P2-1 regression (zylos0t): a LEGACY index entry that has an applicationId but
+// lacks the connector taxonomy (credentialMode/credentialSource) must NOT be
+// treated as non-composio on face value. conn.catalog must refresh from conn.list
+// (which now returns the taxonomy) before deciding, and must NEVER writeCatalog
+// for what turns out to be a composio (proxy) app.
+
+test('conn.catalog (P2-1): legacy index (applicationId, no taxonomy) + conn.list reveals composio → refreshes AND does NOT persist a catalog', async () => {
+  const home = setupHome({ connections: {
+    // Legacy: applicationId present, but no credentialMode/credentialSource.
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      // conn.list now returns the taxonomy → this app is composio (proxy).
+      res.end(JSON.stringify({
+        data: [{ id: 'c1', application_id: 'app-1', application_slug: 'notion', application_name: 'Notion', status: 'active', credential_mode: 'proxy', credential_source: 'composio' }],
+        request_id: 'r1',
+      }));
+      return;
+    }
+    if (req.url.includes('/connect/applications/app-1/actions')) {
+      // Fetch-through is allowed (returns the catalog to the caller); the point is
+      // it must NOT be written to disk.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ toolkit: 'notion', action: 'notion/search', method: 'POST', input_schema: '{}' }], request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  const catalogFile = path.join(home, 'zylos/components/openmax/runtime/connect/action-catalog/app-1.json');
+  try {
+    const { code, stdout } = await runConn(home, 'conn.catalog', { app: 'notion' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    // The legacy-taxonomy safeguard forced a conn.list refresh before deciding.
+    assert.ok(seen.some((u) => u.includes('/connect/agents/me/connections')), `must refresh from conn.list to learn the taxonomy: ${JSON.stringify(seen)}`);
+    // The negative control: a composio app must NEVER persist a full catalog.
+    assert.ok(!fs.existsSync(catalogFile), `composio catalog must not be persisted: ${catalogFile}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.catalog (positive control): a known-direct app persists its catalog without a taxonomy refresh', async () => {
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-2', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'direct', credentialSource: 'managed' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/applications/app-2/actions')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ toolkit: 'gmail', action: 'gmail/send', method: 'POST', input_schema: '{}' }], request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  const catalogFile = path.join(home, 'zylos/components/openmax/runtime/connect/action-catalog/app-2.json');
+  try {
+    const { code, stdout } = await runConn(home, 'conn.catalog', { app: 'gmail' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    // Taxonomy is already known (direct) → no conn.list refresh needed.
+    assert.ok(!seen.some((u) => u.includes('/connect/agents/me/connections')), `known-direct must not need a taxonomy refresh: ${JSON.stringify(seen)}`);
+    // Confidently non-composio → the catalog IS persisted.
+    assert.ok(fs.existsSync(catalogFile), `direct app catalog must be persisted: ${catalogFile}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.catalog (proxy control): a known-proxy app (credentialMode only, no credentialSource) never persists AND needs no refresh', async () => {
+  // isProxyEntry keys PURELY on credentialMode==='proxy' — credentialSource is
+  // gone. A known-proxy entry is confidently proxy without any refresh, so
+  // conn.catalog must NOT hit conn.list and must NOT write a local catalog.
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-3', slug: 'notion', name: 'Notion', status: 'active', credentialMode: 'proxy' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/connect/applications/app-3/actions')) {
+      // Fetch-through is allowed (returned to the caller) but must not be persisted.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ toolkit: 'notion', action: 'notion/search', method: 'POST', input_schema: '{}' }], request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  const catalogFile = path.join(home, 'zylos/components/openmax/runtime/connect/action-catalog/app-3.json');
+  try {
+    const { code, stdout } = await runConn(home, 'conn.catalog', { app: 'notion' }, `http://127.0.0.1:${port}`);
+    assert.equal(code, 0, `expected success, got: ${stdout}`);
+    // Known-proxy from credentialMode alone → no taxonomy refresh needed.
+    assert.ok(!seen.some((u) => u.includes('/connect/agents/me/connections')), `known-proxy must not need a taxonomy refresh: ${JSON.stringify(seen)}`);
+    // Proxy → the catalog must NEVER be persisted.
+    assert.ok(!fs.existsSync(catalogFile), `proxy catalog must not be persisted: ${catalogFile}`);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// --- conn.proxy / conn.execute: removed-verb tombstones ---------------------
+//
+// The two legacy verbs are removed. They must throw an explicit "unsupported/
+// removed" error pointing to conn.invoke (which now handles BOTH direct and
+// proxy/Composio) — never make a proxy/execute network call. COCO_API_URL
+// defaults to an unroutable port, so a clean message also proves no network
+// happened.
 
 for (const command of ['conn.proxy', 'conn.execute']) {
-  test(`${command} tombstone: direct-only → 400 unsupported/deprecated, points to conn.invoke`, async () => {
+  test(`${command} tombstone: removed → 400 unsupported/removed, points to conn.invoke`, async () => {
     const home = setupHome({ connections: {
       c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active' },
     } });
