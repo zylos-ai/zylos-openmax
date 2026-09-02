@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.17.1
+version: 2.17.2
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: first decide whether it is a task or a question/chat;
@@ -138,6 +138,23 @@ If an owner authorized **more than one connection of the same app** (e.g. two Gm
 You learn what an app can do by reading its catalog **at call time**, so this one flow covers **any** connected app — you never hardcode or pre-learn a specific provider, and a newly-added connector needs no change here. If `conn.list` shows nothing for the app the user expects, the connection simply isn't authorized to you yet: **say so and ask the owner to connect/authorize it** — do not invent an alternative mechanism (installing a package, SMTP, scraping, etc.).
 
 When an owner authorizes a new connection to you, you also receive a proactive **`🔌 [Connection authorized]`** session notice naming the app — that is your cue it is ready; act on it with the same `conn.*` flow (no need to wait to be asked again).
+
+### Git over HTTPS to a connected provider — use a credential helper, never the token itself
+
+`conn.invoke` covers provider **API** actions (issues, PRs, repo queries, merge). It does **not** cover the git **transport** — a real `git push` / `git fetch` / `git ls-remote` over HTTPS, where the local `git` client must authenticate itself. When you need that against a provider you hold a **direct-mode** Connection for (e.g. a GitHub Connection with `credential_mode: direct`, whose token is cached locally under `runtime/connect/`), the following is a **sanctioned exception** to "third-party credentials only via `conn.invoke`": you MAY configure and use a **git credential helper** so the token flows only through git's credential protocol — read by a separate helper process and handed straight to `git`, **never into your context**.
+
+Hard guardrails (all required — this is what keeps it within the credential boundary):
+- **Never read, `cat`, print, or copy the token yourself**, and never put it in a remote URL, `.env`, `.gitconfig`, or any file you author. You configure the helper and run normal git; the helper (a separate process) is the only thing that touches the token.
+- The helper must be **fail-closed**: on git's `get` it validates `protocol=https` and the `host` matches an **active, direct-mode** Connection, reads that connection's token **live each call** (so revoke/refresh takes effect immediately — no active connection ⇒ no output ⇒ git fails cleanly), and returns only `username`/`password` to git. It must not log the token.
+- Configure it **repo-local and host-scoped**, not global — e.g. in the target checkout:
+  ```bash
+  git -C <repo> config --local credential.useHttpPath true
+  git -C <repo> config --local credential.https://github.com.helper '!node "<abs-path>/git-credential-helper.js"'
+  ```
+  the helper resolving the connection from `runtime/connect/` (`connections-index.<org>.json` → the `slug`+`credentialMode:"direct"`+`status:"active"` entry → `credentials/<id>.json`).
+- Then just run normal `git push` / `git fetch`. Keep using `conn.invoke` for the provider's API surface; use the credential helper **only** for the git transport `conn.invoke` cannot perform.
+
+If the Connection is **proxy** mode (no local token), this path does not apply — the token stays server-side; use `conn.invoke` API actions instead, and if a git-data write is genuinely needed, ask the owner to add the provider's git-data actions to the catalog or to authorize a direct-mode connection.
 
 ## Task Classification and Execution Flow
 

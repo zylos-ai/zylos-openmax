@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.2] — 2026-09-02
+
+### Added
+
+- **SKILL.md**: sanctioned path for git-over-HTTPS to a connected provider. `conn.invoke` covers provider API actions but not the git transport (`git push`/`fetch`/`ls-remote`); the skill now explicitly permits configuring and using a **git credential helper** for a **direct-mode** connection, as a bounded exception to "third-party credentials only via `conn.invoke`". Hard guardrails: the agent never reads/prints/copies the token or puts it in a remote URL / `.env` / `.gitconfig`; the helper is fail-closed (validates `protocol=https` + active direct-mode connection for the host, reads the token live each call so revoke/refresh applies immediately, never logs it) and configured repo-local + host-scoped. Proxy-mode connections are unaffected (token stays server-side).
+
 ## [2.17.1] — 2026-08-30
 
 ### Changed
