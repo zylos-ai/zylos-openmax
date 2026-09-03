@@ -159,8 +159,8 @@ function formatContextLine(m) {
  *
  * @param {object} conv     - { type:'dm'|'group'|'thread', id?, name? }
  * @param {object} sender   - { displayName }
- * @param {object} current  - { content:string, type?:'text'|'image'|'file',
- *                              mediaLocalPath?:string }
+ * @param {object} current  - { content:string, messageId?:string,
+ *                              type?:'text'|'image'|'file', mediaLocalPath?:string }
  * @param {Array}  [recent] - recent group messages used for `<group-context>`
  * @param {object} [opts]   - { groupName, quotedContent, threadContext,
  *                              threadRootId, smartHint }
@@ -202,6 +202,13 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   let header = `${tag}${orgSuffix}\n`;
   if (orgId) {
     header += `<org-context org-id="${escapeXml(orgId)}"/>\n`;
+  }
+  // Tool calls that cause external side effects must be tied back to the
+  // exact inbound human request. Keep the server-issued ids in a structural
+  // element outside <current-message>; user text cannot forge this because
+  // angle brackets in the message body are escaped below.
+  if (conv?.id && current?.messageId) {
+    header += `<message-context conversation-id="${escapeXml(conv.id)}" source-message-id="${escapeXml(current.messageId)}"/>\n`;
   }
   const parts = [header];
 

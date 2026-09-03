@@ -1166,6 +1166,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
       { displayName: senderName },
       {
         content: displayContent,
+        messageId: msg.id,
         type: isImage ? 'image' : (isFile ? 'file' : 'text'),
         mediaItems,
       },

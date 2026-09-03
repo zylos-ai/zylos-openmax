@@ -109,9 +109,9 @@ The Worker's "does not create Issues" / "does not communicate with humans" only 
 What the Worker **should not** do: any issue lifecycle action (such as `issue.submit_plan` / `issue.accept_plan` / `issue.deliver` / `issue.resume` / `issue.accept_delivered`), `task.reassign`, or dispatch-style `task.create` on behalf of others.
 **Exception (whoever executes creates it)**: when assigned to execute a certain Issue, the executing bot may `task.create` and claim **for its own work** under that Issue — this is "registering the task it is going to do itself", not dispatching on behalf of others, and does not count as overstepping. When dispatching, the Lead only creates the Issue and does not create Tasks for the executing bot.
 
-## Iron Rule of Service Calls (TM / KB / AS / Comm / Core all go through the CLI)
+## Iron Rule of Service Calls (TM / KB / AS / Comm / Core / Channel all go through the CLI)
 
-**All Workspace service operations — Issue / Task / Attempt / Blueprint, KnowledgeBase (KB), files (AS), proactive IM (Comm), member/project/org queries (Core) — MUST go through openmax's CLI: `src/cli/{tm,kb,as,comm,core}.js`. Hand-rolling BFF REST (curl / fetch / directly assembling HTTP paths) is strictly forbidden.**
+**All Workspace service operations — Issue / Task / Attempt / Blueprint, KnowledgeBase (KB), files (AS), proactive IM (Comm), member/project/org queries (Core), Agent IM-channel setup (Channel) — MUST go through openmax's CLI: `src/cli/{tm,kb,as,comm,core,channel}.js`. Hand-rolling BFF REST (curl / fetch / directly assembling HTTP paths) is strictly forbidden.**
 
 - **When unsure of the command/parameters**: first run `node src/cli/<svc>.js` (no args shows the command list), or check `references/<svc>-operations.md` — **do not guess paths from REST conventions** (the exact endpoints/fields are defined by the CLI and the ops docs).
 - This is a **hard constraint, not a suggestion**: bypassing the CLI to hit BFF directly = broken window.
@@ -123,6 +123,12 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 - **`comm.send` is for agent-initiated (proactive) sends only** — a message you start yourself: opening a new DM/group (`comm.create_dm` / `comm.create_group` → `comm.send`), or proactively pushing into a known `conversationId`.
 
 ## Acting on External Apps / Accounts (Connections) — recognize this first
+
+### Important: connecting an IM channel to this Agent is not `conn.*`
+
+If an owner/admin asks to **connect Feishu, Lark, DingTalk, or WeCom as an inbound chat channel for this Agent** (for example “连接飞书”, “接入 Lark”, “给我钉钉二维码”, “连接企业微信”), load `references/channel-operations.md` and invoke `channel.connect` immediately with the matching channel type. Do not call `conn.list`, do not ask for App ID/App Secret, and do not send the user to Agent Manager. The inbound envelope provides authoritative `<message-context conversation-id="..." source-message-id="..."/>` values; copy those exact server-issued values into the CLI call. The CLI itself sends the QR image and final authorization status into the current conversation, so never expose or restate its internal QR/session data.
+
+This special case is only for attaching an IM ingress to the Agent. Using an already-authorized external account (send email, query calendar, operate SaaS data, and so on) remains the generic `conn.*` flow below.
 
 Whenever a request needs a **third-party app or account** — sending or reading mail, posting or reading messages, calendar/contacts, documents/files, issue trackers, or **any** action that reaches a service or account outside this platform — do **not** conclude you "can't", and do **not** reach for SMTP, MCP servers, browser automation, locally-installed connectors, or `.env` credentials. On this platform those capabilities are delivered as **cws-connect Connections**: third-party accounts an owner authorizes directly to you. Treat "this touches an external app/account" as the trigger to use them.
 
@@ -625,5 +631,6 @@ You can generate it in one step with the CLI: `node src/cli/core.js core.fronten
 | **Comm** | IM that the Agent **proactively initiates**: conversation/message/unread/WS sync/KB page search | proactively DM a colleague, create a group, search a page in a targeted way, WS reconnect to fill gaps | `references/comm-operations.md` |
 | **Core** | Identity + member/project/role/invitation directory queries + org switching + platform agent lifecycle | `core.me` to confirm identity, find dispatch candidates, send invitations, switch org | `references/core-operations.md` |
 | **Connect** | Third-party app connections (OAuth/API): list/status, action discovery + execute, and the app-keyed capability cache under `runtime/connect/` | **any request that touches an external app/account** — send/read mail, post/read messages, calendar, docs/files, trackers, etc.: `conn.list` → `conn.catalog {app}` → `conn.invoke {app, action, params}` (credential handled for you — `conn.invoke` auto-routes by `credential_mode`: `direct` = local token, called from your own egress; `proxy`/Composio = executed server-side, no local token) | `references/conn-operations.md` |
+| **Channel** | Connect an inbound IM channel to this Agent; sends QR and terminal status back to the originating chat | owner/admin asks to connect Feishu/Lark/DingTalk/WeCom or requests its QR in the current chat: copy the exact ids from `<message-context>` into `channel.connect` | `references/channel-operations.md` |
 
 The top of each Layer 3 doc has its own four-part summary of `Purpose` / `When to load this document` / `Out of scope for this document` / `Prerequisites`; after loading it into memory, first scan this section to confirm it is the one you want, then read on to the command list.
