@@ -32,7 +32,11 @@ const SEND_SCRIPT = path.join(ROOT, 'scripts/send.js');
 const TOOL_SCRIPT = fileURLToPath(import.meta.url);
 const STATE_DIR = path.join(RUNTIME_DIR, 'channel-connect');
 const POLL_INTERVAL_MS = 3000;
-const MAX_TOOL_SESSION_SEC = 5 * 60;
+const MAX_QR_SESSION_SEC = 5 * 60;
+// cws-connect marks a Binding that remains pending for 15 minutes as error;
+// its sweep runs once per minute. Seventeen minutes leaves one full sweep
+// interval plus scheduling margin, while keeping this detached watcher bounded.
+const MAX_BINDING_WAIT_SEC = 17 * 60;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PLATFORM_CHANNELS = Object.freeze({
   feishu: { displayName: '飞书' },
@@ -142,6 +146,9 @@ export function channelStatusMessage(channelType, terminal) {
   if (terminal === 'cancelled') {
     return `${channel.displayName}授权已取消。需要时可以在聊天里重新发起。`;
   }
+  if (terminal === 'timeout') {
+    return `${channel.displayName}扫码已完成，但组件连接超时。请稍后重新发起；如果仍失败再查看服务日志。`;
+  }
   return `${channel.displayName}渠道连接失败，请在聊天里重新发起；如果仍失败再查看服务日志。`;
 }
 
@@ -174,28 +181,42 @@ export function isRetryableChannelPollError(error) {
   return status === 429 || status === 502 || status === 503 || status === 504;
 }
 
-export async function pollChannelUntilTerminal({ deadlineMs, poll, sleep, now = Date.now }) {
+function bindingStatus(result) {
+  return String(result?.binding?.status || result?.status || '').trim().toLowerCase();
+}
+
+function bindingStatusFromAuthorization(result) {
+  return String(result?.binding?.status || '').trim().toLowerCase();
+}
+
+/**
+ * Poll the provider only until QR authorization completes, then switch to the
+ * read-only Binding status endpoint. The QR's TTL must never cap the runtime
+ * install/config/restart phase.
+ */
+export async function pollChannelUntilTerminal({
+  scanDeadlineMs,
+  bindingWaitMs = MAX_BINDING_WAIT_SEC * 1000,
+  pollAuthorization,
+  pollBinding,
+  sleep,
+  now = Date.now,
+}) {
   let authorizationCompleted = false;
-  while (now() < deadlineMs) {
+  while (now() < scanDeadlineMs) {
     try {
-      const result = await poll();
+      const result = await pollAuthorization();
       const status = String(result?.status || 'error').toLowerCase();
       if (status === 'pending') {
         await sleep(POLL_INTERVAL_MS);
         continue;
       }
       if (status === 'connected') {
-        authorizationCompleted = true;
-        // Provider "connected" only means the QR authorization produced
-        // credentials. cws-connect creates a pending Binding and dispatches
-        // the upgrade/config/restart command to OpenMAX afterwards. Do not
-        // notify the user until OpenMAX reports that command completed and
-        // cws-connect promotes the Binding to connected.
-        const bindingStatus = String(result?.binding?.status || '').toLowerCase();
-        if (bindingStatus === 'connected') return 'connected';
-        if (bindingStatus === 'pending') {
-          await sleep(POLL_INTERVAL_MS);
-          continue;
+        const statusAfterAuthorization = bindingStatusFromAuthorization(result);
+        if (statusAfterAuthorization === 'connected') return 'connected';
+        if (statusAfterAuthorization === 'pending') {
+          authorizationCompleted = true;
+          break;
         }
         return 'error';
       }
@@ -203,14 +224,39 @@ export async function pollChannelUntilTerminal({ deadlineMs, poll, sleep, now = 
       return 'error';
     } catch (error) {
       if (!isRetryableChannelPollError(error)) return 'error';
-      if (now() >= deadlineMs) break;
+      if (now() >= scanDeadlineMs) break;
       await sleep(POLL_INTERVAL_MS);
     }
   }
-  // Keep the existing single deadline for Phase 1. Once authorization has
-  // completed, a deadline means the dispatched component operation did not
-  // report success in time; it is not a QR-expired outcome.
-  return authorizationCompleted ? 'error' : 'expired';
+  if (!authorizationCompleted) return 'expired';
+
+  const bindingDeadlineMs = now() + bindingWaitMs;
+  while (now() < bindingDeadlineMs) {
+    try {
+      const status = bindingStatus(await pollBinding());
+      if (status === 'connected') return 'connected';
+      if (status === 'pending') {
+        await sleep(POLL_INTERVAL_MS);
+        continue;
+      }
+      return 'error';
+    } catch (error) {
+      if (!isRetryableChannelPollError(error)) return 'error';
+      if (now() >= bindingDeadlineMs) break;
+      await sleep(POLL_INTERVAL_MS);
+    }
+  }
+
+  // Close the race at the deadline: a connect-result may have landed after
+  // the last regular read. Never report timeout without one final status read.
+  try {
+    const status = bindingStatus(await pollBinding());
+    if (status === 'connected') return 'connected';
+    if (status !== 'pending') return 'error';
+  } catch (error) {
+    if (!isRetryableChannelPollError(error)) return 'error';
+  }
+  return 'timeout';
 }
 
 async function connect(input) {
@@ -232,7 +278,7 @@ async function connect(input) {
   const token = randomUUID();
   const statePath = statePathForToken(token);
   const effectiveExpiresSec = Math.min(
-    MAX_TOOL_SESSION_SEC,
+    MAX_QR_SESSION_SEC,
     Math.max(1, Number(result.expires_in_sec) || 300),
   );
   const expiresAt = new Date(Date.now() + effectiveExpiresSec * 1000).toISOString();
@@ -240,9 +286,8 @@ async function connect(input) {
     orgId,
     channelType: plan.channelType,
     conversationId: plan.conversationId,
-    sourceMessageId: plan.sourceMessageId,
     sessionHandle: result.session_handle,
-    deadlineMs: Date.now() + effectiveExpiresSec * 1000,
+    scanDeadlineMs: Date.now() + effectiveExpiresSec * 1000,
   }), 'utf8');
 
   try {
@@ -283,30 +328,37 @@ async function watch(input) {
     return { status: 'watcher_state_missing' };
   }
 
-  let terminal = 'expired';
+  let terminal = 'error';
   try {
     terminal = await pollChannelUntilTerminal({
-      deadlineMs: state.deadlineMs,
-      poll: () => postForOrg(
+      scanDeadlineMs: state.scanDeadlineMs,
+      pollAuthorization: () => postForOrg(
           state.orgId,
           apiPath('/agent-tools/channel-connections/poll'),
           {
             channel_type: state.channelType,
-            conversation_id: state.conversationId,
-            source_message_id: state.sourceMessageId,
             session_handle: state.sessionHandle,
           },
           { timeoutMs: 30_000, quietOnSuccess: true },
         ),
+      pollBinding: () => postForOrg(
+          state.orgId,
+          apiPath('/agent-tools/channel-connections/status'),
+          { channel_type: state.channelType },
+          { timeoutMs: 30_000, quietOnSuccess: true },
+        ),
       sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
     });
-
-    const text = channelStatusMessage(state.channelType, terminal);
-    try { sendToConversation(state.orgId, state.conversationId, text); } catch {}
-    return { status: terminal };
+  } catch {
+    terminal = 'error';
   } finally {
+    try {
+      const text = channelStatusMessage(state.channelType, terminal);
+      sendToConversation(state.orgId, state.conversationId, text);
+    } catch {}
     safeUnlink(statePath);
   }
+  return { status: terminal };
 }
 
 const commands = {

@@ -39,6 +39,7 @@ test('channelStatusMessage uses provider-specific names', () => {
   assert.match(channelStatusMessage('dingtalk', 'connected'), /钉钉连接成功.*现在可以收发消息/);
   assert.match(channelStatusMessage('wecom', 'expired'), /企业微信授权二维码已过期/);
   assert.match(channelStatusMessage('lark', 'cancelled'), /Lark授权已取消/);
+  assert.match(channelStatusMessage('dingtalk', 'timeout'), /钉钉扫码已完成.*组件连接超时/);
   assert.match(channelStatusMessage('feishu', 'error'), /飞书渠道连接失败/);
 });
 
@@ -83,35 +84,43 @@ test('pollChannelUntilTerminal retries transient 503 without replacing the QR se
     { status: 'connected', binding: { status: 'connected' } },
   ];
   const terminal = await pollChannelUntilTerminal({
-    deadlineMs: 20_000,
+    scanDeadlineMs: 20_000,
     now: () => clock,
     sleep: async ms => { clock += ms; },
-    poll: async () => {
+    pollAuthorization: async () => {
       const value = statuses[calls++];
       if (value instanceof Error) throw value;
       return value;
+    },
+    pollBinding: async () => {
+      throw new Error('binding status must not be read when authorization returns connected');
     },
   });
   assert.equal(terminal, 'connected');
   assert.equal(calls, 3);
 });
 
-test('pollChannelUntilTerminal waits for the OpenMAX connect-result after QR authorization', async () => {
+test('pollChannelUntilTerminal switches to Binding status after QR authorization', async () => {
   let clock = 0;
-  let calls = 0;
-  const statuses = [
-    { status: 'connected', binding: { status: 'pending' } },
-    { status: 'connected', binding: { status: 'pending' } },
+  let authorizationCalls = 0;
+  let bindingCalls = 0;
+  const bindingStatuses = [
+    { status: 'pending', binding: { status: 'pending' } },
     { status: 'connected', binding: { status: 'connected' } },
   ];
   const terminal = await pollChannelUntilTerminal({
-    deadlineMs: 20_000,
+    scanDeadlineMs: 20_000,
     now: () => clock,
     sleep: async ms => { clock += ms; },
-    poll: async () => statuses[calls++],
+    pollAuthorization: async () => {
+      authorizationCalls += 1;
+      return { status: 'connected', binding: { status: 'pending' } };
+    },
+    pollBinding: async () => bindingStatuses[bindingCalls++],
   });
   assert.equal(terminal, 'connected');
-  assert.equal(calls, 3);
+  assert.equal(authorizationCalls, 1);
+  assert.equal(bindingCalls, 2);
 });
 
 test('pollChannelUntilTerminal fails when the dispatched Binding fails or never completes', async () => {
@@ -121,33 +130,89 @@ test('pollChannelUntilTerminal fails when the dispatched Binding fails or never 
     { status: 'connected', binding: { status: 'disconnected' } },
   ]) {
     const terminal = await pollChannelUntilTerminal({
-      deadlineMs: 20_000,
+      scanDeadlineMs: 20_000,
       now: () => 0,
       sleep: async () => {},
-      poll: async () => result,
+      pollAuthorization: async () => result,
+      pollBinding: async () => {
+        throw new Error('binding status must not be read for an invalid authorization result');
+      },
     });
     assert.equal(terminal, 'error');
   }
 
+  const bindingFailure = await pollChannelUntilTerminal({
+    scanDeadlineMs: 20_000,
+    now: () => 0,
+    sleep: async () => {},
+    pollAuthorization: async () => ({ status: 'connected', binding: { status: 'pending' } }),
+    pollBinding: async () => ({ status: 'error', binding: { status: 'error' } }),
+  });
+  assert.equal(bindingFailure, 'error');
+});
+
+test('pollChannelUntilTerminal gives Binding its own bounded wait and final read', async () => {
   let clock = 0;
+  let bindingCalls = 0;
   const timeout = await pollChannelUntilTerminal({
-    deadlineMs: 3_000,
+    scanDeadlineMs: 3_000,
+    bindingWaitMs: 3_000,
     now: () => clock,
     sleep: async ms => { clock += ms; },
-    poll: async () => ({ status: 'connected', binding: { status: 'pending' } }),
+    pollAuthorization: async () => ({ status: 'connected', binding: { status: 'pending' } }),
+    pollBinding: async () => {
+      bindingCalls += 1;
+      return { status: 'pending', binding: { status: 'pending' } };
+    },
   });
-  assert.equal(timeout, 'error');
+  assert.equal(timeout, 'timeout');
+  assert.equal(bindingCalls, 2, 'one regular read plus one final read at the deadline');
+
+  clock = 0;
+  bindingCalls = 0;
+  const connectedOnFinalRead = await pollChannelUntilTerminal({
+    scanDeadlineMs: 3_000,
+    bindingWaitMs: 3_000,
+    now: () => clock,
+    sleep: async ms => { clock += ms; },
+    pollAuthorization: async () => ({ status: 'connected', binding: { status: 'pending' } }),
+    pollBinding: async () => {
+      bindingCalls += 1;
+      return bindingCalls === 1
+        ? { status: 'pending', binding: { status: 'pending' } }
+        : { status: 'connected', binding: { status: 'connected' } };
+    },
+  });
+  assert.equal(connectedOnFinalRead, 'connected');
+  assert.equal(bindingCalls, 2);
+});
+
+test('pollChannelUntilTerminal expires when the QR is never scanned', async () => {
+  let clock = 0;
+  const terminal = await pollChannelUntilTerminal({
+    scanDeadlineMs: 3_000,
+    now: () => clock,
+    sleep: async ms => { clock += ms; },
+    pollAuthorization: async () => ({ status: 'pending' }),
+    pollBinding: async () => {
+      throw new Error('binding status must not be read before authorization');
+    },
+  });
+  assert.equal(terminal, 'expired');
 });
 
 test('pollChannelUntilTerminal does not retry permanent request errors', async () => {
   let calls = 0;
   const terminal = await pollChannelUntilTerminal({
-    deadlineMs: 20_000,
+    scanDeadlineMs: 20_000,
     now: () => 0,
     sleep: async () => {},
-    poll: async () => {
+    pollAuthorization: async () => {
       calls += 1;
       throw Object.assign(new Error('bad request'), { status: 400 });
+    },
+    pollBinding: async () => {
+      throw new Error('binding status must not be read after a permanent authorization error');
     },
   });
   assert.equal(terminal, 'error');
