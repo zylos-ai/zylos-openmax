@@ -31,6 +31,7 @@ This is a **workspace integration plugin** for the Zylos agent ecosystem.
 - `src/cli/comm.js` — Communication operations (proactive messaging)
 - `src/cli/core.js` — Organization/team/agent queries
 - `src/cli/conn.js` — Connection management (cws-connect via BFF)
+- `src/cli/channel.js` — In-chat Agent IM-channel connection (QR + background status)
 
 All CLIs follow the same pattern: `node <cli>.js <command> '<json>'`, output JSON to stdout, errors to stderr with exit code 1.
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.18.0] — 2026-09-07
+
+### Added
+
+- In-chat platform channel connection for Feishu, Lark, DingTalk and WeCom, with human confirmation before creating an authorization session, followed by QR delivery and background connection status updates.
+
+### Fixed
+
+- Separate QR authorization expiry from runtime binding waits, and report watcher errors back to the originating chat.
+
+Requires the matching cws-core confirmation API and cws-fe confirmation/QR cards. Personal WeChat and WhatsApp runtime QR login are not included in this conversational connection flow.
+
 ## [2.17.1] — 2026-08-30
 
 ### Changed
