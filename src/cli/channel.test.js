@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildChannelConfirmationMessage,
+  waitForChannelConfirmation,
   buildChannelQRMessage,
   channelStatusMessage,
   channelStartResultWithoutQR,
@@ -11,6 +13,50 @@ import {
 } from './channel.js';
 
 const CONV = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+test('confirmation cards contain display scope, not QR material or model-selected target', () => {
+  for (const channel of ['feishu', 'lark', 'dingtalk', 'wecom']) {
+    const card = buildChannelConfirmationMessage(channel, CONV, '2099-01-01T00:00:00Z');
+    assert.equal(card.content.body.schema, 'openmax.channel-confirm.v1');
+    assert.equal(card.content.body.channel_type, channel);
+    assert.deepEqual(card.content.body, card.metadata.openmax_channel_confirmation);
+    assert.equal('agent_member_id' in card.content.body, false);
+    assert.equal('qr_ref' in card.content.body, false);
+    assert.equal('session_handle' in card.content.body, false);
+  }
+  assert.throws(() => buildChannelConfirmationMessage('wechat', CONV, '2099-01-01'), /invalid/);
+  assert.throws(() => buildChannelConfirmationMessage('feishu', 'forged', '2099-01-01'), /invalid/);
+});
+
+test('confirmation waits through preparing and starting, then returns approved QR to watcher', async () => {
+  let now = 0;
+  const ready = { status: 'awaiting_user_scan', qr_ref: 'https://example.test', session_handle: 'confirmed' };
+  const states = [{ status: 'awaiting_user_confirmation' }, { status: 'starting' }, ready];
+  assert.equal(await waitForChannelConfirmation({ deadlineMs: 10_000, now: () => now,
+    sleep: async ms => { now += ms; }, poll: async () => states.shift() }), ready);
+});
+
+test('confirmation expires without treating silence as consent and never retries forbidden', async () => {
+  let now = 0;
+  await assert.rejects(waitForChannelConfirmation({ deadlineMs: 6000, now: () => now,
+    sleep: async ms => { now += ms; }, poll: async () => ({ status: 'awaiting_user_confirmation' }) }), { status: 410 });
+  let calls = 0;
+  await assert.rejects(waitForChannelConfirmation({ deadlineMs: 6000, now: () => 0,
+    sleep: async () => {}, poll: async () => { calls++; throw Object.assign(new Error('forbidden'), { status: 403 }); } }), { status: 403 });
+  assert.equal(calls, 1);
+});
+
+test('confirmation retries temporary errors but surfaces failed start', async () => {
+  let now = 0;
+  let calls = 0;
+  assert.deepEqual(await waitForChannelConfirmation({ deadlineMs: 6000, now: () => now,
+    sleep: async ms => { now += ms; }, poll: async () => {
+      if (++calls === 1) throw Object.assign(new Error('busy'), { status: 503 });
+      return { status: 'already_connected' };
+    } }), { status: 'already_connected' });
+  await assert.rejects(waitForChannelConfirmation({ deadlineMs: 6000, now: () => 0,
+    sleep: async () => {}, poll: async () => ({ status: 'error' }) }), /confirmation failed/);
+});
 
 test('planChannelConnect builds self-scoped requests for every platform authorization channel', () => {
   for (const channelType of ['feishu', 'lark', 'dingtalk', 'wecom']) {

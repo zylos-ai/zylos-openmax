@@ -12,8 +12,8 @@
  *
  * The QR and session handle are consumed inside this process and never printed
  * to stdout (which is model-visible). The tool publishes a generic structured
- * QR card message and starts a detached, bounded poller that posts the terminal
- * result back into the same conversation.
+ * confirmation card first. Only after explicit human approval does a detached,
+ * bounded poller publish the QR and terminal result in the same conversation.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -96,6 +96,40 @@ export function buildChannelQRMessage(channelType, qrRef, expiresAt) {
     metadata: { openmax_channel_qr: display },
     fallback_text: `${channel.displayName}授权二维码（请尽快扫码）`,
   };
+}
+
+export function buildChannelConfirmationMessage(channelType, confirmationId, expiresAt) {
+  const channel = PLATFORM_CHANNELS[channelType];
+  if (!channel || !UUID_RE.test(confirmationId) || !Number.isFinite(Date.parse(expiresAt))) {
+    throw bad('invalid channel confirmation');
+  }
+  const display = {
+    schema: 'openmax.channel-confirm.v1',
+    channel_type: channelType,
+    confirmation_id: confirmationId,
+    expires_at: expiresAt,
+  };
+  return {
+    client_msg_id: randomUUID(),
+    type: 'AGENT_STRUCTURED',
+    content: { content_type: 'channel_confirmation', body: display, attachments: [] },
+    metadata: { openmax_channel_confirmation: display },
+    fallback_text: `请在 OpenMAX 聊天中确认连接${channel.displayName}，确认后才会生成授权二维码。`,
+  };
+}
+
+export async function waitForChannelConfirmation({ deadlineMs, poll, sleep, now = Date.now }) {
+  while (now() < deadlineMs) {
+    try {
+      const result = await poll();
+      if (['awaiting_user_scan', 'already_connected', 'connection_in_progress'].includes(result?.status)) return result;
+      if (!['awaiting_user_confirmation', 'starting'].includes(result?.status)) throw bad('channel confirmation failed');
+    } catch (error) {
+      if (!isRetryableChannelPollError(error)) throw error;
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+  throw Object.assign(new Error('channel confirmation expired'), { status: 410 });
 }
 
 function requireOrgId(input) {
@@ -270,31 +304,28 @@ async function connect(input) {
   );
   const noQRResult = channelStartResultWithoutQR(plan.channelType, result);
   if (noQRResult) return noQRResult;
-  if (!result?.qr_ref || !result?.session_handle) {
-    throw new Error('channel connection service returned no QR session');
+  if (result?.status !== 'awaiting_user_confirmation' || !UUID_RE.test(result.confirmation_id) || !Number.isFinite(Date.parse(result.expires_at))) {
+    throw new Error('channel connection service returned no human confirmation request; update Core and OpenMAX together');
   }
 
   ensurePrivateDir();
   const token = randomUUID();
   const statePath = statePathForToken(token);
-  const effectiveExpiresSec = Math.min(
-    MAX_QR_SESSION_SEC,
-    Math.max(1, Number(result.expires_in_sec) || 300),
-  );
-  const expiresAt = new Date(Date.now() + effectiveExpiresSec * 1000).toISOString();
   writePrivate(statePath, JSON.stringify({
     orgId,
     channelType: plan.channelType,
     conversationId: plan.conversationId,
-    sessionHandle: result.session_handle,
-    scanDeadlineMs: Date.now() + effectiveExpiresSec * 1000,
+    confirmationId: result.confirmation_id,
+    // One additional minute lets an accepted click finish its bounded Start
+    // request. Core still enforces the exact five-minute human-click deadline.
+    confirmationDeadlineMs: Math.min(Date.parse(result.expires_at), Date.now() + MAX_QR_SESSION_SEC * 1000) + 60_000,
   }), 'utf8');
 
   try {
     await postForOrg(
       orgId,
       apiPath(`/conversations/${plan.conversationId}/messages`),
-      buildChannelQRMessage(plan.channelType, result.qr_ref, expiresAt),
+      buildChannelConfirmationMessage(plan.channelType, result.confirmation_id, result.expires_at),
       { timeoutMs: 30_000, quietOnSuccess: true },
     );
   } catch (error) {
@@ -312,10 +343,11 @@ async function connect(input) {
   // stdout is read by the Agent. Deliberately exclude qr_png_base64,
   // session_handle, auth_url, and local file paths.
   return {
-    status: 'awaiting_user_scan',
+    status: 'awaiting_user_confirmation',
     channel_type: plan.channelType,
-    qr_sent_to_conversation: true,
-    expires_in_sec: effectiveExpiresSec,
+    qr_sent_to_conversation: false,
+    confirmation_sent_to_conversation: true,
+    message: '请在聊天卡片中点击确认连接，之后才会生成二维码。',
   };
 }
 
@@ -329,15 +361,41 @@ async function watch(input) {
   }
 
   let terminal = 'error';
+  let scanStarted = false;
   try {
+    // Legacy state files have no confirmation ID and are never grandfathered
+    // into the mutating provider poll endpoint.
+    if (!UUID_RE.test(state.confirmationId || '')) throw bad('human confirmation required');
+    const result = await waitForChannelConfirmation({
+      deadlineMs: state.confirmationDeadlineMs,
+      poll: () => postForOrg(state.orgId, apiPath('/agent-tools/channel-connections/confirmation'), {
+        confirmation_id: state.confirmationId,
+        channel_type: state.channelType,
+        conversation_id: state.conversationId,
+      }, { timeoutMs: 30_000, quietOnSuccess: true }),
+      sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+    });
+    const noQR = channelStartResultWithoutQR(state.channelType, result);
+    if (noQR) {
+      sendToConversation(state.orgId, state.conversationId, noQR.message);
+      terminal = 'no_qr';
+      return { status: result.status };
+    }
+    const scanDeadlineMs = Date.parse(result.expires_at);
+    if (!result.qr_ref || !result.session_handle || !Number.isFinite(scanDeadlineMs) || scanDeadlineMs <= Date.now()) throw bad('invalid confirmed QR session');
+    await postForOrg(state.orgId, apiPath(`/conversations/${state.conversationId}/messages`),
+      buildChannelQRMessage(state.channelType, result.qr_ref, result.expires_at),
+      { timeoutMs: 30_000, quietOnSuccess: true });
+    scanStarted = true;
     terminal = await pollChannelUntilTerminal({
-      scanDeadlineMs: state.scanDeadlineMs,
+      scanDeadlineMs,
       pollAuthorization: () => postForOrg(
           state.orgId,
           apiPath('/agent-tools/channel-connections/poll'),
           {
             channel_type: state.channelType,
-            session_handle: state.sessionHandle,
+            session_handle: result.session_handle,
+            confirmation_id: state.confirmationId,
           },
           { timeoutMs: 30_000, quietOnSuccess: true },
         ),
@@ -349,12 +407,16 @@ async function watch(input) {
         ),
       sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
     });
-  } catch {
-    terminal = 'error';
+  } catch (error) {
+    terminal = Number(error?.status) === 410 && !scanStarted ? 'confirmation_expired' : 'error';
   } finally {
     try {
-      const text = channelStatusMessage(state.channelType, terminal);
-      sendToConversation(state.orgId, state.conversationId, text);
+      if (terminal !== 'no_qr') {
+        const text = terminal === 'confirmation_expired'
+          ? `${PLATFORM_CHANNELS[state.channelType]?.displayName || ''}连接确认已过期，尚未完成扫码连接。需要时请重新发起。`
+          : channelStatusMessage(state.channelType, terminal);
+        sendToConversation(state.orgId, state.conversationId, text);
+      }
     } catch {}
     safeUnlink(statePath);
   }

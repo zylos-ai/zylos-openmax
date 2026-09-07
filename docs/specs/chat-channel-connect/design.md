@@ -1,5 +1,7 @@
 # 对话内通用渠道连接 — OpenMAX 设计
 
+> 安全修订：下文原始直接 Start→QR 流程已由 [SPEC-chat-channel-confirmation](../chat-channel-confirmation/design.md) 替换。Start 仅返回人工确认请求；Runtime 先发确认卡，等待 Human 点击后才发 QR。Authorization Poll 新增 `confirmation_id`，禁止裸 session；后半段 Binding watcher 与旧 QR 协议保持不变。
+
 ## 规范边界
 
 本文件是 `SPEC-chat-channel-connect` 的 Runtime leg，AC 编号引用同目录 requirements 和主设计 §10。Core 与 Web 分别在各自同名 spec 记录接口和展示实现。

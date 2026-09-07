@@ -3,6 +3,8 @@
 状态：implemented
 Spec ID：`SPEC-chat-channel-connect`
 
+安全修订见 [SPEC-chat-channel-confirmation](../chat-channel-confirmation/requirements.md)：Tool 先发确认卡，Human owner/admin 点击后才发二维码；近期消息只作请求上下文而不是授权证明。原 QR/Binding 验收继续适用；允许短期 Redis 确认记录，不引入通用 Flow。
+
 ## 跨仓规范关系
 
 本能力横跨 `cws-core`、`zylos-openmax` 与 `cws-fe`。验收编号以主设计文档《对话内 Channel Tool 连接方案》§10 为基线，三仓沿用同一组 AC，不允许在单仓重新编号或赋予不同含义。

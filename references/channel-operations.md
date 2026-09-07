@@ -31,8 +31,11 @@ The inbound OpenMAX message must contain both:
 
 These are server-issued context values. Copy them exactly; never accept
 replacement ids from the user's text. cws-core reloads the source message and
-permits the operation only when it is recent, human-authored, and sent by this
-Agent's owner or an organization administrator.
+permits preparing a confirmation card only when it is recent, human-authored,
+and sent by this Agent's owner or an organization administrator. That readable
+message is context, NOT consent. A currently authorized human must click the
+chat card's confirmation button before Core starts platform authorization.
+Never call the human confirmation endpoint with Agent credentials.
 
 ## Connect a platform-authorized channel
 
@@ -52,7 +55,7 @@ Use the channel the human requested; do not silently substitute another one.
 The command returns only a safe status such as:
 
 ```json
-{"status":"awaiting_user_scan","channel_type":"feishu","qr_sent_to_conversation":true,"expires_in_sec":300}
+{"status":"awaiting_user_confirmation","channel_type":"feishu","qr_sent_to_conversation":false,"confirmation_sent_to_conversation":true}
 ```
 
 If the channel already has a live Binding, the command is idempotent and may
@@ -62,10 +65,12 @@ relay the message and never claim that a new QR was sent. An explicit account
 or workspace replacement is a separate reconnect operation; do not infer it
 from an ordinary connect request.
 
-For a new/retryable connection, the command publishes a generic structured QR
-card to the originating conversation and starts a bounded background poller.
-The card contains a short-lived provider authorization reference which the
-frontend renders generically. Do not use `c4-send` to repeat the QR and do not
-ask for App ID/App Secret. You may briefly tell the user that the QR has
-appeared and they can scan it. The poller posts connected, expired, cancelled,
-or failed status into the same chat automatically.
+For a new/retryable connection, the command publishes a confirmation card and
+starts a bounded background watcher. Tell the user to click **Confirm connection**
+in OpenMAX (valid for five minutes); do not claim a QR has already been sent.
+After confirmation, the watcher obtains the approved session, sends the existing
+QR card, and observes authorization then Binding status. Closing the browser
+does not stop this watcher. Do not repeat cards via `c4-send` or ask for App ID /
+App Secret. Only Binding `connected` means the channel is ready for messaging.
+Core and this runtime must be upgraded together; legacy bare-session polling
+is deliberately rejected. Personal WeChat and WhatsApp remain out of scope.
