@@ -20,6 +20,7 @@ import {
   writeCatalog,
 } from './connect-store.js';
 import { saveCredentialCache, deleteCredentialCache, hasCredentialCache } from './credential-cache.js';
+import { upsertMcpServer, removeMcpServer, isMcpConnection } from './mcp-config.js';
 
 // cws-core derives the caller's identity from the authenticated principal for
 // this endpoint (security fix, 2026-08-04) — agent_member_id is no longer a
@@ -42,9 +43,12 @@ export function isEventForMe(data, selfMemberId) {
 // is invokable immediately after authorize instead of paying a lazy fetch on
 // first use. cws-core derives the caller from the authenticated principal for
 // this endpoint too (security fix, 2026-08-04) — no id in the path.
-export async function warmIdentityAndCatalog(orgId, connectionId, idxPath, { get = getForOrg, catalogDir } = {}) {
+export async function warmIdentityAndCatalog(orgId, connectionId, idxPath, { get = getForOrg, catalogDir, credentialsDir } = {}) {
   const list = await get(orgId, apiPath('/connect/agents/me/connections'));
-  replaceIndexFromList(Array.isArray(list) ? list : (list?.connections || []), idxPath);
+  // Pass credentialsDir so the wholesale rebuild can re-derive an omitted
+  // connector_kind from the per-connection credential file (Problem ②) — the
+  // agent-connections list may not carry connector_kind.
+  replaceIndexFromList(Array.isArray(list) ? list : (list?.connections || []), idxPath, { credentialsDir });
   const entry = readIndex(idxPath)?.connections?.[connectionId];
   const applicationId = entry?.applicationId;
   if (!applicationId) return { applicationId: null, actionCount: 0 };
@@ -67,13 +71,19 @@ export async function warmIdentityAndCatalog(orgId, connectionId, idxPath, { get
  * @param {object} [deps] - injectable dependencies (production defaults):
  *   log, warn, post (postForOrg), get (getForOrg), connectDir (indexPathForOrg's
  *   dir override), credentialsDir (credential-cache's dir override), catalogDir
- *   (writeCatalog's dir override)
+ *   (writeCatalog's dir override), mcpExecFile (command runner injected into the
+ *   MCP sink — see mcp-config.js), mcpCwd (agent launch cwd override for the sink)
  */
 export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
   const {
     log = () => {}, warn = () => {}, post = postForOrg, get = getForOrg,
     connectDir, credentialsDir, catalogDir, notify = () => {}, notifyReauth = () => {},
+    mcpExecFile, mcpCwd,
   } = deps;
+  // Deps forwarded to the Route-A MCP sink. execFile/cwd are undefined in
+  // production (mcp-config.js supplies its real defaults) and injected in tests;
+  // log/warn always flow through so sink output shares this handler's channel.
+  const mcpDeps = { execFile: mcpExecFile, cwd: mcpCwd, log, warn };
   const { event, data } = frame.payload || {};
   if (!event || !data) return;
 
@@ -106,6 +116,12 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
     // additive upsert leaves any richer value untouched; the authoritative fill is
     // the conn.list refresh (replaceIndexFromList) below / on the next list.
     credential_mode: data.credential_mode,
+    // Connector taxonomy (Route A), when the event carries it. Threaded into the
+    // index additively (like credential_mode) so the removal path — revoke /
+    // reauth events that may NOT carry connector_kind — can still recognize an MCP
+    // connection and tear down its local MCP server. The authoritative fill is the
+    // conn.list refresh / the Acquire response below.
+    connector_kind: data.connector_kind,
     status: 'active',
   };
 
@@ -124,11 +140,26 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
       // Only a genuinely unknown/legacy non-direct, non-proxy mode is unsupported.
       // An unexpected connection from the backend must never crash the event
       // handler — just skip + log.
+      // Hoisted so the post-refresh index persistence below (which must run AFTER
+      // warmIdentityAndCatalog's wholesale replaceIndexFromList) can see the
+      // Acquire-derived MCP taxonomy.
+      let acquiredCred = null;
       if (data.credential_mode === 'direct') {
         try {
-          const cred = await acquireCredential(orgId, connectionId, { post });
-          saveCredentialCache(connectionId, cred, data.provider, credentialsDir);
+          acquiredCred = await acquireCredential(orgId, connectionId, { post });
+          saveCredentialCache(connectionId, acquiredCred, data.provider, credentialsDir);
           log(`[${slug}] direct credential acquired + cached conn=${connectionId} provider=${data.provider || '?'}`);
+          // Route A sink: an MCP connector is a direct-mode connection whose Acquire
+          // response carries connector_kind="mcp" + a structured mcp_server. Rather
+          // than route it per-action through conn.invoke, materialize it into a live
+          // local Claude Code MCP server so the runtime's own MCP host connects,
+          // discovers, and calls its tools. The Acquire response is authoritative
+          // (the WS event may not carry connector_kind). upsertMcpServer is
+          // best-effort and never throws, so it cannot break the credential path.
+          if (isMcpConnection(acquiredCred)) {
+            const r = await upsertMcpServer({ id: connectionId, slug: data.provider }, acquiredCred, mcpDeps);
+            if (r && r.ok) log(`[${slug}] MCP server materialized conn=${connectionId} name=${r.name}`);
+          }
         } catch (e) {
           warn(`[${slug}] credential acquire failed conn=${connectionId}: ${e.message}`);
         }
@@ -141,12 +172,33 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
       let applicationId = null;
       let actionCount = 0;
       try {
-        ({ applicationId, actionCount } = await warmIdentityAndCatalog(orgId, connectionId, idxPath, { get, catalogDir }));
+        ({ applicationId, actionCount } = await warmIdentityAndCatalog(orgId, connectionId, idxPath, { get, catalogDir, credentialsDir }));
         if (applicationId) {
           log(`[${slug}] identity resolved + action-catalog warmed conn=${connectionId} app=${applicationId} actions=${actionCount}`);
         }
       } catch (e) {
         warn(`[${slug}] identity/catalog warm failed conn=${connectionId}: ${e.message}`);
+      }
+      // (P1-2) Persist the Acquire-derived MCP taxonomy into the index AFTER the
+      // warm refresh. warmIdentityAndCatalog rebuilds the index wholesale from the
+      // agent-connections list (replaceIndexFromList), which may NOT carry
+      // connector_kind — so an MCP server we just materialized would leave the
+      // index entry connectorKind:null, and teardown (revoke/disconnect/reauth,
+      // which read ONLY the index) would never remove it → an orphaned local MCP
+      // server holding a dead token. Writing the Acquire-authoritative
+      // connector_kind here (additively — it fills the null without nulling
+      // slug/app/mode) guarantees a later teardown recognizes it as MCP.
+      if (isMcpConnection(acquiredCred)) {
+        try {
+          upsertConnection({
+            connection_id: connectionId,
+            application_slug: data.provider,
+            connector_kind: acquiredCred.connector_kind,
+            credential_mode: acquiredCred.credential_mode,
+          }, idxPath);
+        } catch (e) {
+          warn(`[${slug}] MCP taxonomy persist failed conn=${connectionId}: ${e.message}`);
+        }
       }
       // Surface the new capability to the agent session: without this a bot only
       // learns a connection exists if it happens to run conn.list. On authorize we
@@ -163,9 +215,20 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
     case 'connection.revoked':
     case 'connection.disconnected': {
       log(`[${slug}] ${event} conn=${connectionId}`);
+      // Recognize an MCP connection from the local index BEFORE we drop it — the
+      // revoke/disconnect event does not carry connector_kind, so the additively
+      // threaded index entry is our only local signal. Tear down its local MCP
+      // server (best-effort) so the agent no longer holds it. Read + capture the
+      // entry first; removeConnection deletes it right after.
+      const wasMcp = isMcpConnection(readIndex(idxPath).connections[connectionId]);
+      const removedSlug = readIndex(idxPath).connections[connectionId]?.slug || data.provider;
       removeConnection(connectionId, idxPath);
       deleteCredentialCache(connectionId, credentialsDir);
       log(`[${slug}] connection unindexed + credential cache cleared conn=${connectionId}`);
+      if (wasMcp) {
+        const r = await removeMcpServer({ id: connectionId, slug: removedSlug }, mcpDeps);
+        if (r && r.ok) log(`[${slug}] MCP server removed conn=${connectionId} name=${r.name}`);
+      }
       break;
     }
 
@@ -184,6 +247,22 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
           if (cred?.credential_mode === 'direct') {
             saveCredentialCache(connectionId, cred, data.provider, credentialsDir);
             log(`[${slug}] direct credential re-acquired conn=${connectionId} provider=${data.provider || '?'}`);
+            // Route A refresh: an MCP connection's token was rotated — re-materialize
+            // its local MCP server so the registered Authorization header carries the
+            // fresh token (upsert = remove-then-add). Best-effort; never throws.
+            if (isMcpConnection(cred)) {
+              const r = await upsertMcpServer({ id: connectionId, slug: data.provider }, cred, mcpDeps);
+              if (r && r.ok) log(`[${slug}] MCP server refreshed conn=${connectionId} name=${r.name}`);
+              // (P1-2) Persist the Acquire-derived MCP taxonomy so a later teardown
+              // recognizes it (the credential_updated event carries no connector_kind).
+              // Additive — fills connectorKind without nulling other index fields.
+              upsertConnection({
+                connection_id: connectionId,
+                application_slug: data.provider,
+                connector_kind: cred.connector_kind,
+                credential_mode: cred.credential_mode,
+              }, idxPath);
+            }
           } else {
             deleteCredentialCache(connectionId, credentialsDir);
             log(`[${slug}] connection no longer direct; dropped stale credential conn=${connectionId}`);
@@ -197,6 +276,14 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
 
     case 'connection.reauth_needed': {
       warn(`[${slug}] reauth_needed conn=${connectionId} app=${data.application_id || '?'} trigger=${data.trigger || '?'}`);
+      // Recognize an MCP connection from the local index (the reauth event does not
+      // carry connector_kind) before we mutate the entry. The connection stays
+      // indexed (flagged needs_reauth), but its local MCP server must go: its token
+      // is now dead and a re-acquire cannot help until a human re-authorizes, so the
+      // agent should not keep a stale server registered. Removed (best-effort) below.
+      const reauthEntry = readIndex(idxPath).connections[connectionId];
+      const reauthWasMcp = isMcpConnection(reauthEntry);
+      const reauthSlug = reauthEntry?.slug || data.provider;
       // Stop calling the provider with a now-dead credential: drop the local
       // cache so conn.invoke never assembles a request with a stale token, and a
       // re-acquire cannot help until a human re-authorizes. Proxy-mode
@@ -209,6 +296,10 @@ export async function handleConnectionEvent(orgConfig, frame, deps = {}) {
       // application_id/slug/name are carried forward additively by the upsert.
       upsertConnection({ ...indexConn, status: 'needs_reauth' }, idxPath);
       log(`[${slug}] credential cache cleared + connection flagged needs_reauth conn=${connectionId}`);
+      if (reauthWasMcp) {
+        const r = await removeMcpServer({ id: connectionId, slug: reauthSlug }, mcpDeps);
+        if (r && r.ok) log(`[${slug}] MCP server removed (needs_reauth) conn=${connectionId} name=${r.name}`);
+      }
       // Notify the owner (real DM) so a human can re-authorize. Best-effort — a
       // notify failure never breaks the cache-clear/flag path above.
       try {
