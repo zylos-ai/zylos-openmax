@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Connectors are scoped per conversation (opt-in per conversation).** `conn.list` and `conn.invoke` now accept a `conversation_id`. With one supplied, `conn.list` returns only the connectors **enabled for that conversation** — the enabled set is read from cws-core (`GET /api/v1/conversations/{id}/connectors`, the source of truth), never an agent-supplied list — and a conversation with nothing enabled returns `[]`. `conn.invoke` gates on the same set: an authorized-but-not-enabled connector is rejected with a `403` and a distinct `not_enabled_in_conversation` code (surfaced in the CLI error payload) so the agent can offer to enable it rather than treat it as unauthorized. Without a `conversation_id`, both verbs behave exactly as before. `SKILL.md` documents the resulting agent behavior (enabled-here / authorized-but-off / unauthorized / needs-reauth).
+
 ### Fixed
 
 - **A long-lived process could revoke the whole login by refreshing with a stale refresh token.** The comm-bridge caches its JWT pair in memory, while CLI verbs (comm/core, e.g. sending an onboarding card) run as separate processes sharing the same token file. When a CLI process refreshed first, it rotated the refresh token on disk; the bridge later refreshed with its cached old one. cws-core tolerates a rotated refresh token for only 10 s, so that later re-use was treated as theft and revoked the token family — every process got 401 until it re-exchanged with the api_key. `refresh()` now takes the newer pair of memory and disk, and `getAccessToken` adopts a fresh pair another process already wrote before refreshing at all. (#178)
