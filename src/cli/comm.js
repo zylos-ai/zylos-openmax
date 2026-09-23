@@ -666,10 +666,15 @@ Messages
   comm.send                 {conversationId, content, replyTo?, clientMsgId?, mentions?}
                             # content: string | {text|body, markdown?} | {type,body} | [{type,body}]
                             # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
-  comm.ask_card             {conversationId, title, summary, options, kind, askedOf, text?|blocks?, meta?}
+  comm.ask_card             {conversationId, title, summary, options, kind, askedOf, text?|blocks?, confirm?, meta?}
                             # send a choice card AND record what was asked, so the later receipt
                             #   can be decoded. Prefer this over comm.send_card for any question
                             #   you intend to act on
+                            # confirm {text, label?} adds the inline second step: the click opens a
+                            #   confirm row in the card instead of settling straight away. Pass it for
+                            #   anything you cannot undo — 'authorized' tells you WHO clicked, never
+                            #   whether they meant it. Omitting it is why the upgrade card shipped
+                            #   without that step
   comm.answered             {cardMessageId, actionId, actorMemberId}
                             # resolve a receipt against what was asked: known / authorized /
                             #   expired / actionable. Decides nothing, executes nothing

@@ -199,8 +199,9 @@ a URL, a handler, or an option id.
 ```bash
 node src/cli/comm.js comm.send_card '{
   "conversationId": "<uuid>",
-  "title": "需要确认",
-  "summary": "是否继续部署 int?",
+  "title": "部署确认",
+  "summary": "int 环境 · Issue #OpenMax-142",
+  "text": "是否继续部署 int?",
   "options": ["是", "否"]
 }'
 ```
@@ -217,7 +218,7 @@ body is no longer derived.
 | Region | What belongs there | From the signed-off prototype fixtures |
 |---|---|---|
 | `title` | the subject of the decision | `执行计划确认` |
-| `summary` | one line of context — which thing, which version, which issue | `Issue #OpenMax-142 · 实现「事件创建表单」` |
+| `summary` | where this came from and when — source and time, **not** the decision itself | `Issue #OpenMax-142 · 05/19 17:11` |
 | `blocks` | the substance the reader needs to decide | a `text` paragraph, then `fields` / `markdown` for detail |
 
 `summary` is also the plain-text projection for clients that cannot render a
@@ -271,8 +272,10 @@ node src/cli/comm.js comm.ask_card '{
   "kind": "component-upgrade",
   "askedOf": "<owner member id>",
   "title": "要升级吗",
-  "summary": "openmax 2.20.0 → 2.21.0",
-  "options": ["升级", "先不升"]
+  "summary": "openmax · 自动检查 05/19 17:11",
+  "text": "openmax 2.20.0 → 2.21.0。升级会重启服务。",
+  "options": ["升级", "先不升"],
+  "confirm": { "text": "升级会重启 openmax 服务", "label": "确认升级" }
 }'
 ```
 
@@ -280,11 +283,22 @@ node src/cli/comm.js comm.ask_card '{
 counts. Both are required, because an answer with neither cannot be acted on.
 Anything else you pass is kept verbatim for the answering side.
 
-The record lives in a JSON file under the runtime directory, so it survives a
-session change and a service restart. That directory sits under the component
-directory `zylos upgrade` replaces, so a question asked before an upgrade may
-not be there afterwards — read a missing record as absence, not corruption, and
-re-ask if the answer still matters.
+For anything irreversible, also pass `confirm: {text, label?}` — the client's
+second-confirmation step. `askedOf` and the `authorized` check cover *who*
+clicked; `confirm` is what covers *whether they meant it*. `buildChoiceRequest`
+requires `confirm.text` and rejects a malformed object, so a typo fails the send
+instead of quietly posting a card with no guard on it. `comm.ask_card` passes it
+through untouched — it strips only its own `kind`, `askedOf` and `meta`.
+
+The record lives in a JSON file under the component's runtime directory, so it
+survives a session change, a service restart, and `zylos upgrade` — that
+directory is in the component's data directory, not the skill directory the
+upgrade overwrites. That is what makes the upgrade question answerable at all:
+the upgrade it authorizes restarts the very process that asked.
+
+A record can still be missing when the receipt lands — a card this agent never
+asked, or one already retired by `comm.pending_clear`. Read a missing record as
+absence, not corruption, and re-ask if the answer still matters.
 
 When the answer arrives, `comm.answered {cardMessageId, actionId,
 actorMemberId}` reports `known` / `authorized` / `expired` / `actionable` and

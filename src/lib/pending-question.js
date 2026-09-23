@@ -13,10 +13,21 @@
  * restarts the process. In-memory state would die at exactly the moment it is
  * needed. Same reasoning, and the same shape, as connect-result-queue.js.
  *
- * `RUNTIME_DIR` sits under the component directory that `zylos upgrade`
- * replaces, so a question asked before an upgrade may be gone after it. Callers
- * read a missing record as absence, not corruption — `findPendingQuestion`
- * returns null and the answer is simply not actionable.
+ * `RUNTIME_DIR` is in the component's data directory, not the skill directory
+ * `zylos upgrade` overwrites, so the record survives an upgrade. That is
+ * load-bearing for the upgrade question specifically: the upgrade being
+ * authorized replaces the code and restarts the service, and only afterwards
+ * is the answer read back. `auto-upgrade.js` parks its marker in the same
+ * directory for the same reason.
+ *
+ * A record can still be missing when a receipt arrives: the card was never
+ * asked from here, `clearPendingQuestion` already retired it, or
+ * `recordPendingQuestion` dropped the oldest to stay under
+ * `PENDING_QUESTIONS_MAX`. `readAll` also turns an unreadable file into an
+ * empty list, so corruption is indistinguishable from absence here. Either way
+ * `findPendingQuestion` returns null and the answer is not actionable — the
+ * safe direction, since the alternative is acting on a question nobody can
+ * read back.
  */
 
 import fs from 'fs';
@@ -25,8 +36,19 @@ import { RUNTIME_DIR } from './session.js';
 
 export const PENDING_QUESTIONS_PATH = path.join(RUNTIME_DIR, 'pending-questions.json');
 
-/** Anything older than this is not answerable — see `isExpired`. */
-export const PENDING_QUESTION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * How long an answer still counts — see `isExpired`. 30 days, to match the
+ * card's own interaction window: the choice-card reference states a 30-day
+ * window for a card, and cws-comm carries the same figure as its card
+ * interaction window.
+ *
+ * It is deliberately not shorter. A local deadline tighter than the server's is
+ * the failure this module otherwise warns about — between the two, the card is
+ * still live and clickable, the person answers it, the receipt arrives, and we
+ * refuse an answer that both the server and the UI consider valid, blaming them
+ * for being late.
+ */
+export const PENDING_QUESTION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** Bound the file. Questions are rare; a runaway writer is the only way to hit this. */
 export const PENDING_QUESTIONS_MAX = 50;
@@ -81,10 +103,13 @@ export function findPendingQuestion(cardMessageId, { file = PENDING_QUESTIONS_PA
  * Whether the answer arrived too late to act on. The caller supplies `now`,
  * again so the clock is the caller's.
  *
- * 🔴 An expired question must not be executed. The upgrade case is why: a card
- * asking "upgrade to v2?" answered three weeks later names a version that is
- * no longer the one on offer, and acting on it upgrades to something nobody
- * was asked about.
+ * 🔴 This bounds the answer, it does not vouch for the action. Well inside
+ * the window an answer can still be stale — a card asking "upgrade to v2?"
+ * answered weeks later names a version that may no longer be the one on offer,
+ * and upgrading on it upgrades to something nobody was asked about. So whoever
+ * acts re-reads the current target and version first; the recorded parameters
+ * are what was asked, never the authorization to run them now. This function
+ * only says the answer arrived too late to count at all.
  */
 export function isExpired(record, now, { ttlMs = PENDING_QUESTION_TTL_MS } = {}) {
   if (!record?.askedAt) return true;
