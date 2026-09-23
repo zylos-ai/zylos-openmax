@@ -31,6 +31,7 @@ import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
+import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
@@ -1012,6 +1013,9 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
           const text = mStructured.body?.text
                    || (typeof m.content === 'string' ? m.content : '')
                    || m.content_text
+                   // Same hole as the forward path: without this a card already in
+                   // history renders as an empty turn in the replayed context.
+                   || formatStructuredForModel(m)
                    || '';
           const mType = (m.type || m.message?.type || '').toLowerCase();
           const mAttachments = Array.isArray(mStructured.attachments) ? mStructured.attachments
@@ -1050,6 +1054,10 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
      || structured.body?.text
      || (typeof msg.message?.content === 'string' ? msg.message.content : '')
      || (typeof msg.content === 'string' ? msg.content : '')
+     // A card's prose is in `body.blocks[].text`, never `body.text`, so every arm
+     // above misses it. Placed last so it changes nothing for a body that already
+     // has text — it only fills the gap that used to forward an empty string.
+     || formatStructuredForModel(msg)
      || '';
 
     const allAttachments = Array.isArray(structured.attachments) ? structured.attachments : [];

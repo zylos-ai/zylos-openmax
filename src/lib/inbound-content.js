@@ -31,6 +31,7 @@
  */
 
 import { formatReceiptForModel } from './interaction-receipt.js';
+import { formatStructuredForModel } from './structured-body.js';
 
 /**
  * Determine whether a (merged notification+detail) message has a usable body.
@@ -49,6 +50,12 @@ export function messageHasUsableContent(msg) {
   // otherwise park the whole org's inbox behind one un-advanced cursor — and the
   // forward path renders a receipt from its structured fields regardless.
   if (formatReceiptForModel(msg)) return true;
+  // A card (and every other schema-only body: `channel_qr`, `channel_confirmation`, …)
+  // carries no `content.body.text`, so none of the text arms below can reach it.
+  // Without this line such a message counts as an empty body, which does NOT just
+  // drop it — the /sync cursor stops advancing and the whole backlog behind it
+  // stalls until the give-up alarm skips past it with `possible data loss`.
+  if (formatStructuredForModel(msg)) return true;
 
   const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
 
