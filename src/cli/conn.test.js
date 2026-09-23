@@ -11,7 +11,8 @@ import {
   buildNeedsSelection, buildCandidateLabels, resolveInvokeEntry,
   planAppCreate, planAppUpdate,
   planActionDefList, planActionDefCreate, planActionDefUpdate, planActionDefDelete,
-  runAppImport,
+  runAppImport, classifyPanelFetchFailure,
+  CONNECTOR_AUTH_NOTICE_SCHEMA, buildConnectorAuthNoticeMessage, parseAuthNoticeApps, resolveAuthNoticeConnectors,
 } from './conn.js';
 
 // buildNeedsSelection / buildCandidateLabels / resolveInvokeEntry are pure (no
@@ -313,11 +314,22 @@ function runConn(home, command, params, apiUrl = 'http://127.0.0.1:1') {
   });
 }
 
+// conversationId is mandatory for conn.list / conn.invoke (fail-closed). Test
+// servers that reach the enablement gate answer the per-conversation enabled
+// set through this helper. Returns true when it handled the request.
+const CONV = 'conv-t';
+function serveEnabledSet(req, res, ids = ['c1'], convId = CONV) {
+  if (!req.url.includes(`/conversations/${convId}/connectors`)) return false;
+  res.writeHead(200, { 'content-type': 'application/json' });
+  res.end(JSON.stringify({ data: { connectors: ids.map((id) => ({ conversation_id: convId, connector_id: id, enabled: true })) }, request_id: 'r-en' }));
+  return true;
+}
+
 test('conn.invoke guard: explicit connectionId → needs_reauth 连接凭证解析前被拒（重授权提示）', async () => {
   const home = setupHome({ connections: {
     c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'needs_reauth' },
   } });
-  const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send' });
+  const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send', conversationId: CONV });
   assert.equal(code, 1);
   const err = JSON.parse(stderr);
   assert.equal(err.status, 409);
@@ -328,7 +340,7 @@ test('conn.invoke guard: explicit connectionId → expired 连接被拒（通用
   const home = setupHome({ connections: {
     c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'expired' },
   } });
-  const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send' });
+  const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send', conversationId: CONV });
   assert.equal(code, 1);
   const err = JSON.parse(stderr);
   assert.equal(err.status, 409);
@@ -339,7 +351,7 @@ test('conn.invoke guard: explicit connectionId → revoked 连接被拒', async 
   const home = setupHome({ connections: {
     c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'revoked' },
   } });
-  const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send' });
+  const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send', conversationId: CONV });
   assert.equal(code, 1);
   const err = JSON.parse(stderr);
   assert.equal(err.status, 409);
@@ -364,7 +376,7 @@ test('conn.invoke guard (app path): list 返回 error+needs_reauth → 刷新规
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address();
   try {
-    const { code, stderr } = await runConn(home, 'conn.invoke', { app: 'gmail', action: 'gmail/send' }, `http://127.0.0.1:${port}`);
+    const { code, stderr } = await runConn(home, 'conn.invoke', { app: 'gmail', action: 'gmail/send', conversationId: CONV }, `http://127.0.0.1:${port}`);
     assert.equal(code, 1);
     const err = JSON.parse(stderr);
     assert.equal(err.status, 409);
@@ -389,12 +401,13 @@ test('conn.invoke guard (app path): list 返回 error+needs_reauth → 刷新规
 test('conn.invoke routing: a proxy (composio) connection → SERVER-SIDE execute (POST .../actions/execute), NEVER acquire/local-catalog', async () => {
   const home = setupHome({ connections: {
     // A composio connection: credential_source composio + credential_mode proxy.
-    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active', credentialMode: 'proxy', credentialSource: 'composio' },
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active', credentialMode: 'proxy', credentialSource: 'composio', ownerScope: 'org' },
   } });
   const seen = [];
   let executeBody = null;
   const server = createServer((req, res) => {
     seen.push(req.url);
+    if (serveEnabledSet(req, res)) return;
     if (req.url.includes('/connect/connections/c1/actions/execute')) {
       let body = '';
       req.on('data', (d) => { body += d; });
@@ -414,7 +427,7 @@ test('conn.invoke routing: a proxy (composio) connection → SERVER-SIDE execute
   try {
     const { code, stdout } = await runConn(
       home, 'conn.invoke',
-      { connectionId: 'c1', action: 'notion/search', params: { q: 'roadmap' } },
+      { connectionId: 'c1', action: 'notion/search', params: { q: 'roadmap' }, conversationId: CONV },
       `http://127.0.0.1:${port}`,
     );
     assert.equal(code, 0, `expected success, got: ${stdout}`);
@@ -441,11 +454,12 @@ test('conn.invoke routing: a direct connection takes the DIRECT path (local egre
   // serve an empty catalog so it stops at "unknown action" — a direct-path
   // outcome, distinctly NOT the server-execute path.
   const home = setupHome({ connections: {
-    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'direct', credentialSource: 'managed' },
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'direct', credentialSource: 'managed', ownerScope: 'org' },
   } });
   const seen = [];
   const server = createServer((req, res) => {
     seen.push(req.url);
+    if (serveEnabledSet(req, res)) return;
     if (req.url.includes('/connect/connections/c1/credential')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ data: { credential_mode: 'direct', access_token: 'tok' }, request_id: 'r1' }));
@@ -462,7 +476,7 @@ test('conn.invoke routing: a direct connection takes the DIRECT path (local egre
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address();
   try {
-    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send' }, `http://127.0.0.1:${port}`);
+    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send', conversationId: CONV }, `http://127.0.0.1:${port}`);
     assert.equal(code, 1);
     const err = JSON.parse(stderr);
     // The direct path's own downstream error — NOT server execute.
@@ -489,6 +503,7 @@ test('conn.invoke routing (legacy index): entry lacks credential_mode → refres
   const seen = [];
   const server = createServer((req, res) => {
     seen.push(req.url);
+    if (serveEnabledSet(req, res)) return;
     if (req.url.includes('/connect/agents/me/connections')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({
@@ -508,7 +523,7 @@ test('conn.invoke routing (legacy index): entry lacks credential_mode → refres
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address();
   try {
-    const { code, stdout } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'notion/search', params: {} }, `http://127.0.0.1:${port}`);
+    const { code, stdout } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'notion/search', params: {}, conversationId: CONV }, `http://127.0.0.1:${port}`);
     assert.equal(code, 0, `expected success, got: ${stdout}`);
     const out = JSON.parse(stdout);
     assert.equal(out.status_code, 201);
@@ -533,6 +548,7 @@ test('conn.invoke routing (empty mode, self-heal fails): entry lacks credential_
   const seen = [];
   const server = createServer((req, res) => {
     seen.push(req.url);
+    if (serveEnabledSet(req, res)) return;
     if (req.url.includes('/connect/agents/me/connections')) {
       res.writeHead(200, { 'content-type': 'application/json' });
       // conn.list STILL lacks credential_mode (truly stale/orphan backend record).
@@ -548,7 +564,7 @@ test('conn.invoke routing (empty mode, self-heal fails): entry lacks credential_
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const { port } = server.address();
   try {
-    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'notion/search', params: {} }, `http://127.0.0.1:${port}`);
+    const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'notion/search', params: {}, conversationId: CONV }, `http://127.0.0.1:${port}`);
     assert.equal(code, 1);
     const err = JSON.parse(stderr);
     assert.equal(err.status, 400);
@@ -1455,5 +1471,646 @@ test('conn.actiondef_create (subprocess): 调用方 Authorization 头本地拒�
     assert.equal(hits.length, 0, `no request should reach cws-core, saw: ${JSON.stringify(hits)}`);
   } finally {
     await new Promise((r) => server.close(r));
+  }
+});
+
+// --- conn.invoke: personal connector must not execute in a group --------------
+//
+// A personal-scope connector is the caller's private credential. conn.invoke
+// (conversation_id is mandatory) reads that conversation's TYPE from
+// the server (source of truth — never an agent-supplied "is group" flag) and
+// refuses a personal connector anywhere that is not a confirmed DM. org-scope
+// connectors and DMs are unaffected. Exercised via subprocess with a local
+// server answering GET /conversations/<id>.
+
+test('conn.invoke: personal connector + group conversation → 403 (blocked before execute)', async () => {
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'direct', ownerScope: 'personal' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/conversations/conv-group')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { id: 'conv-group', type: 'group' }, request_id: 'r1' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(
+      home, 'conn.invoke',
+      { connectionId: 'c1', action: 'gmail/send', params: {}, conversationId: 'conv-group' },
+      `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 403);
+    assert.match(err.error, /personal connector|group conversation/);
+    // The gate reads the conversation type from the server and rejects BEFORE any
+    // execute/credential work: only the conversation GET should have been hit.
+    assert.ok(seen.some((u) => u.includes('/conversations/conv-group')), 'conversation type was fetched from the server');
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), 'no execute request should be made when blocked');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.invoke: personal connector + DM conversation → allowed (proceeds to execute)', async () => {
+  const home = setupHome({ connections: {
+    // proxy so the allowed path goes server-side execute (no local catalog/credential).
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'notion', name: 'Notion', status: 'active', credentialMode: 'proxy', credentialSource: 'composio', ownerScope: 'personal' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    // Per-conversation enablement: c1 IS enabled in this DM, so the invoke gate
+    // passes. Ordered before the conversation-type branch since both share the
+    // /conversations/conv-dm prefix.
+    if (req.url.includes('/conversations/conv-dm/connectors')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { connectors: [{ conversation_id: 'conv-dm', connector_id: 'c1', enabled: true }] }, request_id: 'r3' }));
+      return;
+    }
+    if (req.url.includes('/conversations/conv-dm')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { id: 'conv-dm', type: 'dm' }, request_id: 'r1' }));
+      return;
+    }
+    if (req.url.includes('/connect/connections/c1/actions/execute')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { status_code: 200, body: { ok: true } }, request_id: 'r2' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r0"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(
+      home, 'conn.invoke',
+      { connectionId: 'c1', action: 'notion/search', params: {}, conversationId: 'conv-dm' },
+      `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 0, `expected success, stdout=${stdout}`);
+    // DM → not blocked → proceeded to server-side execute.
+    assert.ok(seen.some((u) => u.includes('/actions/execute')), 'a DM must let a personal connector through to execute');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// --- conversation-scoped enablement (opt-in per conversation) ------------------
+//
+// conn.list with a conversationId returns only the connectors ENABLED for that
+// conversation (source of truth = cws-core GET /conversations/{id}/connectors).
+// conn.invoke with a conversationId rejects a connector that is authorized but
+// not enabled there, with a distinct not_enabled_in_conversation code so the
+// agent can offer to enable it rather than treat it as unauthorized.
+
+test('conn.list conversation-scoped: returns only connectors enabled for the conversation', async () => {
+  const home = setupHome({ connections: {} });
+  const server = createServer((req, res) => {
+    if (req.url.includes('/conversations/conv-x/connectors')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { connectors: [
+        { conversation_id: 'conv-x', connector_id: 'c1', enabled: true },
+        { conversation_id: 'conv-x', connector_id: 'c3', enabled: true },
+      ] }, request_id: 'r1' }));
+      return;
+    }
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [
+        { id: 'c1', application_slug: 'gmail', application_name: 'Gmail', status: 'active' },
+        { id: 'c2', application_slug: 'slack', application_name: 'Slack', status: 'active' },
+        { id: 'c3', application_slug: 'notion', application_name: 'Notion', status: 'active' },
+      ], request_id: 'r0' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(
+      home, 'conn.list', { conversationId: 'conv-x' }, `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 0, `expected success, stdout=${stdout}`);
+    const list = JSON.parse(stdout);
+    const ids = list.map((c) => c.id).sort();
+    assert.deepEqual(ids, ['c1', 'c3'], 'only enabled connectors c1,c3 are returned; c2 (off) is filtered out');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// Fail-closed (dev1 finding #1 / design R4-1): omitting conversationId used to
+// return the FULL authorized list and let conn.invoke run any authorized
+// connector — a bypass of the per-conversation enabled set. Both verbs now
+// refuse with conversation_context_invalid BEFORE any network call (the test
+// server records every hit and must see none).
+async function withRecordingServer(fn) {
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ data: [
+      { id: 'c1', application_slug: 'gmail', application_name: 'Gmail', status: 'active' },
+      { id: 'c2', application_slug: 'slack', application_name: 'Slack', status: 'active' },
+    ], request_id: 'r0' }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    await fn(`http://127.0.0.1:${server.address().port}`, seen);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+}
+
+for (const [label, params] of [
+  ['omitted', {}],
+  ['empty string', { conversationId: '' }],
+  ['null', { conversation_id: null }],
+  ['path-traversal shape', { conversationId: '../connect/agents/me' }],
+  ['non-string', { conversationId: 42 }],
+]) {
+  test(`conn.list conversationId ${label} → 400 conversation_context_invalid, no network, never the unfiltered list`, async () => {
+    const home = setupHome({ connections: {} });
+    await withRecordingServer(async (url, seen) => {
+      const { code, stdout, stderr } = await runConn(home, 'conn.list', params, url);
+      assert.equal(code, 1, `must refuse, stdout=${stdout}`);
+      const err = JSON.parse(stderr);
+      assert.equal(err.status, 400);
+      assert.equal(err.code, 'conversation_context_invalid');
+      assert.deepEqual(seen, [], 'refused before any request');
+    });
+  });
+
+  test(`conn.invoke conversationId ${label} → 400 conversation_context_invalid, no resolution/execute`, async () => {
+    const home = setupHome({ connections: {
+      c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'proxy', credentialSource: 'composio', ownerScope: 'org' },
+    } });
+    await withRecordingServer(async (url, seen) => {
+      const { code, stderr } = await runConn(home, 'conn.invoke', { connectionId: 'c1', action: 'gmail/send', params: {}, ...params }, url);
+      assert.equal(code, 1);
+      const err = JSON.parse(stderr);
+      assert.equal(err.status, 400);
+      assert.equal(err.code, 'conversation_context_invalid');
+      assert.deepEqual(seen, [], 'refused before any request (no execute, no credential)');
+    });
+  });
+}
+
+test('conn.list conversation-scoped: a non-array connections payload never falls through unfiltered', async () => {
+  const home = setupHome({ connections: {} });
+  const server = createServer((req, res) => {
+    if (serveEnabledSet(req, res, ['c1'])) return;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    // Wrapped shape (not a bare array) — previously returned as-is, unfiltered.
+    res.end(JSON.stringify({ data: { connections: [
+      { id: 'c1', application_slug: 'gmail', status: 'active' },
+      { id: 'c2', application_slug: 'slack', status: 'active' },
+    ] }, request_id: 'r0' }));
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const { code, stdout } = await runConn(home, 'conn.list', { conversationId: CONV }, `http://127.0.0.1:${server.address().port}`);
+    assert.equal(code, 0, stdout);
+    assert.deepEqual(JSON.parse(stdout).map((c) => c.id), ['c1']);
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.invoke conversation-scoped: authorized-but-not-enabled → 403 not_enabled_in_conversation (no execute)', async () => {
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'proxy', credentialSource: 'composio', ownerScope: 'org' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/conversations/conv-y/connectors')) {
+      // c1 is authorized but NOT enabled in this conversation (empty enabled set).
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { connectors: [] }, request_id: 'r1' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(
+      home, 'conn.invoke',
+      { connectionId: 'c1', action: 'gmail/send', params: {}, conversationId: 'conv-y' },
+      `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 403);
+    assert.equal(err.code, 'not_enabled_in_conversation');
+    assert.match(err.error, /not enabled in this conversation/);
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), 'no execute when the connector is not enabled for the conversation');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F4 readiness capability probe (design §5.1): the per-conversation connectors
+// endpoint doubles as the panel readiness signal. When it is unreachable (404 /
+// network = half-upgrade) or errors (5xx = enabled set unavailable), conn.list
+// must degrade to an EMPTY list — never the unfiltered authorized set — and
+// conn.invoke must REJECT with the matching named code. Both fail closed.
+// ---------------------------------------------------------------------------
+
+test('conn.list F4: connectors endpoint 404 (panel not ready) → empty list, never the unfiltered set', async () => {
+  const home = setupHome({ connections: {} });
+  const server = createServer((req, res) => {
+    if (req.url.includes('/conversations/conv-x/connectors')) {
+      // Endpoint not deployed on this instance (half-upgrade).
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end('{"error":{"detail":"not found"},"request_id":"r1"}');
+      return;
+    }
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [
+        { id: 'c1', application_slug: 'gmail', application_name: 'Gmail', status: 'active' },
+        { id: 'c2', application_slug: 'slack', application_name: 'Slack', status: 'active' },
+      ], request_id: 'r0' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(
+      home, 'conn.list', { conversationId: 'conv-x' }, `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 0, `expected graceful empty list, stdout=${stdout}`);
+    assert.deepEqual(JSON.parse(stdout), [], 'panel-not-ready → empty list (fail-closed), NOT the full authorized set');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.list F4: connectors endpoint 503 (enabled set unavailable) → empty list', async () => {
+  const home = setupHome({ connections: {} });
+  const server = createServer((req, res) => {
+    if (req.url.includes('/conversations/conv-x/connectors')) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end('{"error":{"detail":"upstream unavailable"},"request_id":"r1"}');
+      return;
+    }
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [
+        { id: 'c1', application_slug: 'gmail', application_name: 'Gmail', status: 'active' },
+      ], request_id: 'r0' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stdout } = await runConn(
+      home, 'conn.list', { conversationId: 'conv-x' }, `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 0, `expected graceful empty list, stdout=${stdout}`);
+    assert.deepEqual(JSON.parse(stdout), [], 'enabled-set-unavailable → empty list (fail-closed)');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.invoke F4: connectors endpoint 404 → reject connector_panel_not_ready (no execute)', async () => {
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'proxy', credentialSource: 'composio', ownerScope: 'org' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/conversations/conv-y/connectors')) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end('{"error":{"detail":"not found"},"request_id":"r1"}');
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(
+      home, 'conn.invoke',
+      { connectionId: 'c1', action: 'gmail/send', params: {}, conversationId: 'conv-y' },
+      `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 503);
+    assert.equal(err.code, 'connector_panel_not_ready');
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), 'no execute when the panel is not ready');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('conn.invoke F4: connectors endpoint 503 → reject connector_enabled_set_unavailable (no execute)', async () => {
+  const home = setupHome({ connections: {
+    c1: { id: 'c1', applicationId: 'app-1', slug: 'gmail', name: 'Gmail', status: 'active', credentialMode: 'proxy', credentialSource: 'composio', ownerScope: 'org' },
+  } });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes('/conversations/conv-y/connectors')) {
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.end('{"error":{"detail":"upstream unavailable"},"request_id":"r1"}');
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  try {
+    const { code, stderr } = await runConn(
+      home, 'conn.invoke',
+      { connectionId: 'c1', action: 'gmail/send', params: {}, conversationId: 'conv-y' },
+      `http://127.0.0.1:${port}`,
+    );
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 503);
+    assert.equal(err.code, 'connector_enabled_set_unavailable');
+    assert.ok(!seen.some((u) => u.includes('/actions/execute')), 'no execute when the enabled set is unavailable');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test('classifyPanelFetchFailure: 404/network → panel_not_ready; 5xx → enabled_set_unavailable', () => {
+  assert.equal(classifyPanelFetchFailure({ status: 404 }), 'connector_panel_not_ready');
+  assert.equal(classifyPanelFetchFailure(new Error('ECONNREFUSED')), 'connector_panel_not_ready', 'no HTTP status (network) → panel_not_ready');
+  assert.equal(classifyPanelFetchFailure({ status: 503 }), 'connector_enabled_set_unavailable');
+  assert.equal(classifyPanelFetchFailure({ status: 500 }), 'connector_enabled_set_unavailable');
+});
+
+// --- conn.check: pre-invoke availability (design §2.4 cases A/B/C) -----------
+//
+// The agent checks one app's state in THIS conversation before invoking, so it
+// can answer in plain language instead of hitting a 403 first (dev1 finding #4).
+
+async function runCheck(app, { enabled = ['c1'], list, connectorsStatus = 200, omitConversation = false } = {}) {
+  const home = setupHome({ connections: {} });
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(req.url);
+    if (req.url.includes(`/conversations/${CONV}/connectors`)) {
+      if (connectorsStatus !== 200) {
+        res.writeHead(connectorsStatus, { 'content-type': 'application/json' });
+        res.end('{"error":{"detail":"down"},"request_id":"r-x"}');
+        return;
+      }
+      serveEnabledSet(req, res, enabled);
+      return;
+    }
+    if (req.url.includes('/connect/agents/me/connections')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: list || [
+        { id: 'c1', application_slug: 'vercel', application_name: 'Vercel', status: 'active' },
+        { id: 'c2', application_slug: 'gmail', application_name: 'Gmail', status: 'active' },
+        { id: 'c3', application_slug: 'notion', application_name: 'Notion', status: 'error', needs_reauth: true },
+      ], request_id: 'r0' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const params = { app };
+    if (!omitConversation) params.conversationId = CONV;
+    const out = await runConn(home, 'conn.check', params, `http://127.0.0.1:${server.address().port}`);
+    return { ...out, seen };
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+}
+
+test('conn.check: enabled in this conversation → state enabled', async () => {
+  const { code, stdout } = await runCheck('vercel');
+  assert.equal(code, 0, stdout);
+  const out = JSON.parse(stdout);
+  assert.equal(out.state, 'enabled');
+  assert.equal(out.app_name, 'Vercel');
+  assert.deepEqual(out.connection_ids, ['c1']);
+});
+
+test('conn.check: case A authorized but not enabled → state not_enabled (matched by app name, case-insensitive)', async () => {
+  const { code, stdout } = await runCheck('GMAIL');
+  assert.equal(code, 0, stdout);
+  const out = JSON.parse(stdout);
+  assert.equal(out.state, 'not_enabled');
+  assert.equal(out.app_name, 'Gmail');
+});
+
+test('conn.check: case B no connection for the app → state not_authorized (enabled set not needed)', async () => {
+  const { code, stdout, seen } = await runCheck('jira');
+  assert.equal(code, 0, stdout);
+  assert.equal(JSON.parse(stdout).state, 'not_authorized');
+  assert.ok(!seen.some((u) => u.includes('/connectors')), 'no enabled-set lookup for an unauthorized app');
+});
+
+test('conn.check: case C connection needs re-auth → state needs_reauth', async () => {
+  const { code, stdout } = await runCheck('notion', { enabled: ['c3'] });
+  assert.equal(code, 0, stdout);
+  assert.equal(JSON.parse(stdout).state, 'needs_reauth');
+});
+
+test('conn.check: enabled set unavailable → fails closed (503 readiness code), never "enabled"', async () => {
+  const { code, stderr } = await runCheck('vercel', { connectorsStatus: 503 });
+  assert.equal(code, 1);
+  const err = JSON.parse(stderr);
+  assert.equal(err.status, 503);
+  assert.equal(err.code, 'connector_enabled_set_unavailable');
+});
+
+test('conn.check: missing conversationId → 400 conversation_context_invalid before any request', async () => {
+  const { code, stderr, seen } = await runCheck('vercel', { omitConversation: true });
+  assert.equal(code, 1);
+  assert.equal(JSON.parse(stderr).code, 'conversation_context_invalid');
+  assert.deepEqual(seen, []);
+});
+
+// --- conn.auth_notice: structured "go authorize" card (case B) --------------
+//
+// The card must parse with cws-fe's parseConnectorAuthNotice
+// (apps/web/src/lib/connector-auth-notice.ts). This is a faithful JS port of
+// that parser, so a shape drift on the agent side fails here.
+function feParseConnectorAuthNotice(message) {
+  if (message.type !== 'AGENT_STRUCTURED' || message.sender_type !== 'AGENT') return null;
+  const asRecord = (v) => (v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null);
+  const contentBody = asRecord(message.content?.body) || {};
+  const body = contentBody.schema === 'prototype.connector-auth-notice.v1'
+    ? contentBody
+    : asRecord(asRecord(message.metadata)?.connector_auth_notice);
+  if (!body || body.schema !== 'prototype.connector-auth-notice.v1') return null;
+  if (!Array.isArray(body.connector_names)) return null;
+  const connectorNames = body.connector_names.filter((n) => typeof n === 'string' && n.trim() !== '');
+  if (connectorNames.length === 0) return null;
+  const slugs = Array.isArray(body.connector_slugs) ? body.connector_slugs : [];
+  const connectorSlugs = connectorNames.map((_, i) => (typeof slugs[i] === 'string' && slugs[i].trim() !== '' ? slugs[i] : null));
+  return { connectorNames, connectorSlugs };
+}
+
+test('buildConnectorAuthNoticeMessage: exact FE schema + structured shape + metadata copy + Chinese fallback', () => {
+  assert.equal(CONNECTOR_AUTH_NOTICE_SCHEMA, 'prototype.connector-auth-notice.v1');
+  const m = buildConnectorAuthNoticeMessage([{ name: 'Notion', slug: 'notion' }, { name: 'Jira', slug: 'jira' }]);
+  assert.equal(m.type, 'AGENT_STRUCTURED');
+  assert.match(m.client_msg_id, /^[0-9a-f-]{36}$/);
+  assert.equal(m.content.content_type, 'connector_auth_notice');
+  assert.deepEqual(m.content.attachments, []);
+  assert.deepEqual(m.content.body, {
+    schema: 'prototype.connector-auth-notice.v1',
+    connector_names: ['Notion', 'Jira'],
+    connector_slugs: ['notion', 'jira'],
+  });
+  assert.deepEqual(m.metadata.connector_auth_notice, m.content.body);
+  assert.notEqual(m.metadata.connector_auth_notice, m.content.body, 'metadata is a copy, not the same object');
+  assert.match(m.fallback_text, /Notion、Jira/);
+  assert.match(m.fallback_text, /\/connections/);
+  assert.match(m.fallback_text, /授权/);
+  assert.doesNotMatch(m.fallback_text, /not_authorized|403|conversation/);
+});
+
+test('buildConnectorAuthNoticeMessage: FE parser reads it from content AND from metadata only (list hot path)', () => {
+  const m = buildConnectorAuthNoticeMessage([{ name: 'Notion', slug: 'notion' }, { name: 'Google Drive', slug: 'googledrive' }]);
+  const expected = { connectorNames: ['Notion', 'Google Drive'], connectorSlugs: ['notion', 'googledrive'] };
+  // As stored/rendered: the server stamps sender_type=AGENT on an agent post.
+  assert.deepEqual(feParseConnectorAuthNotice({ ...m, sender_type: 'AGENT' }), expected);
+  // Body trimmed by cws-comm on the list path → metadata fallback still parses.
+  assert.deepEqual(feParseConnectorAuthNotice({ ...m, sender_type: 'AGENT', content: { content_type: m.content.content_type } }), expected);
+});
+
+test('buildConnectorAuthNoticeMessage: rejects empty list and entries without name/slug', () => {
+  assert.throws(() => buildConnectorAuthNoticeMessage([]), /at least one/);
+  assert.throws(() => buildConnectorAuthNoticeMessage([{ name: 'Notion' }]), /name and slug/);
+  assert.throws(() => buildConnectorAuthNoticeMessage([{ name: ' ', slug: 'notion' }]), /name and slug/);
+});
+
+test('parseAuthNoticeApps: string or list, trimmed, case-insensitive de-dup, bounded', () => {
+  assert.deepEqual(parseAuthNoticeApps({ apps: 'notion' }), ['notion']);
+  assert.deepEqual(parseAuthNoticeApps({ apps: [' notion ', 'NOTION', 'jira'] }), ['notion', 'jira']);
+  assert.throws(() => parseAuthNoticeApps({}), /apps/);
+  assert.throws(() => parseAuthNoticeApps({ apps: [] }), /apps/);
+  assert.throws(() => parseAuthNoticeApps({ apps: [''] }), /non-empty/);
+  assert.throws(() => parseAuthNoticeApps({ apps: Array.from({ length: 11 }, (_, i) => `a${i}`) }), /at most/);
+});
+
+const CATALOG_APPS = [
+  { id: 'app-n', slug: 'notion', display_name: 'Notion' },
+  { id: 'app-j', slug: 'jira', display_name: 'Jira Cloud' },
+  { id: 'app-gd', slug: 'googledrive', display_name: 'Google Drive' },
+];
+
+test('resolveAuthNoticeConnectors: slug/name/id → index-aligned {name, slug} in request order', async () => {
+  const queries = [];
+  const list = async (q) => { queries.push(q); return CATALOG_APPS; };
+  const out = await resolveAuthNoticeConnectors(['jira', 'google drive', 'app-n'], list);
+  assert.deepEqual(out, [
+    { name: 'Jira Cloud', slug: 'jira' },
+    { name: 'Google Drive', slug: 'googledrive' },
+    { name: 'Notion', slug: 'notion' },
+  ]);
+  assert.deepEqual(queries, ['jira', 'google drive', 'app-n']);
+  // Envelope-wrapped / paginated shapes are accepted too; the same app twice collapses.
+  const out2 = await resolveAuthNoticeConnectors(['notion', 'Notion'], async () => ({ data: CATALOG_APPS }));
+  assert.deepEqual(out2, [{ name: 'Notion', slug: 'notion' }]);
+});
+
+test('resolveAuthNoticeConnectors: unknown or only-fuzzy-matching app → 404 unknown_connector (no dead-link card)', async () => {
+  await assert.rejects(resolveAuthNoticeConnectors(['confluence'], async () => CATALOG_APPS),
+    (e) => e.status === 404 && e.code === 'unknown_connector');
+  await assert.rejects(resolveAuthNoticeConnectors(['not'], async () => CATALOG_APPS),
+    (e) => e.code === 'unknown_connector');
+  await assert.rejects(resolveAuthNoticeConnectors(['x'], async () => [{ display_name: 'x' }]),
+    (e) => e.code === 'unknown_connector', 'a catalog hit without a slug is not linkable');
+});
+
+async function runAuthNotice(params) {
+  const home = setupHome({ connections: {} });
+  const seen = [];
+  const posted = [];
+  const server = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    if (req.method === 'GET' && req.url.startsWith('/api/v1/connect/applications')) {
+      const q = new URL(req.url, 'http://x').searchParams.get('query') || '';
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: CATALOG_APPS.filter((a) => a.slug.includes(q.toLowerCase()) || a.display_name.toLowerCase().includes(q.toLowerCase())), request_id: 'r-a' }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === `/api/v1/conversations/${CONV}/messages`) {
+      let buf = '';
+      req.on('data', (c) => { buf += c; });
+      req.on('end', () => {
+        posted.push(JSON.parse(buf));
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ data: { id: 'msg-1' }, request_id: 'r-p' }));
+      });
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const out = await runConn(home, 'conn.auth_notice', params, `http://127.0.0.1:${server.address().port}`);
+    return { ...out, seen, posted };
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+}
+
+test('conn.auth_notice: resolves from the catalog and posts the card to this conversation', async () => {
+  const { code, stdout, posted } = await runAuthNotice({ conversationId: CONV, apps: ['notion', 'Jira Cloud'] });
+  assert.equal(code, 0, stdout);
+  const out = JSON.parse(stdout);
+  assert.equal(out.status, 'sent');
+  assert.deepEqual(out.connectors, [{ name: 'Notion', slug: 'notion' }, { name: 'Jira Cloud', slug: 'jira' }]);
+  assert.equal(posted.length, 1);
+  assert.deepEqual(feParseConnectorAuthNotice({ ...posted[0], sender_type: 'AGENT' }),
+    { connectorNames: ['Notion', 'Jira Cloud'], connectorSlugs: ['notion', 'jira'] });
+});
+
+test('conn.auth_notice: unknown app → 404 unknown_connector and NOTHING is posted', async () => {
+  const { code, stderr, posted } = await runAuthNotice({ conversationId: CONV, apps: ['notion', 'confluence'] });
+  assert.equal(code, 1);
+  const err = JSON.parse(stderr);
+  assert.equal(err.status, 404);
+  assert.equal(err.code, 'unknown_connector');
+  assert.equal(posted.length, 0);
+});
+
+test('conn.auth_notice: missing / malformed conversationId → 400 conversation_context_invalid before any request', async () => {
+  for (const params of [{ apps: ['notion'] }, { conversationId: '../x', apps: ['notion'] }]) {
+    const { code, stderr, seen } = await runAuthNotice(params);
+    assert.equal(code, 1);
+    const err = JSON.parse(stderr);
+    assert.equal(err.status, 400);
+    assert.equal(err.code, 'conversation_context_invalid');
+    assert.deepEqual(seen, []);
   }
 });
