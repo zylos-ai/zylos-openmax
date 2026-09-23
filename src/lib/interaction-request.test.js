@@ -151,3 +151,70 @@ test('🔴 a question-level argument named like a card field must not reach the 
   assert.equal('askedOf' in body.choice, false);
   assert.equal('meta' in body.choice, false);
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-option confirm (cws-comm !521)
+//
+// The card-level confirm is applied to EVERY option, so a card mixing a
+// destructive choice with a safe one put the destructive wording on the safe
+// button too. An option may now carry its own.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("🔴 an option's own confirm reaches the body instead of being dropped", () => {
+  // This is the anti-silent-drop cell. `normalizeOption` builds its result from
+  // scratch, so any key it does not name is discarded WITHOUT an error — the
+  // card still sends and the caller sees nothing wrong. That failure mode is
+  // the reason this assertion exists.
+  const body = buildChoiceRequest({
+    ...base,
+    options: [{ label: 'Stop it', style: 'danger', confirm: { text: 'The channel goes offline' } }],
+  });
+  assert.deepEqual(body.choice.options, [
+    { label: 'Stop it', style: 'danger', confirm: { text: 'The channel goes offline' } },
+  ]);
+});
+
+test('a mixed card leaves the safe option with no confirm at all', () => {
+  const body = buildChoiceRequest({
+    ...base,
+    options: [
+      { label: 'Stop lark', style: 'danger', confirm: { text: 'Webhooks stop being handled', label: 'Stop it' } },
+      { label: 'Leave it, I will fix the credentials' },
+    ],
+  });
+  assert.deepEqual(body.choice.options, [
+    {
+      label: 'Stop lark',
+      style: 'danger',
+      confirm: { text: 'Webhooks stop being handled', label: 'Stop it' },
+    },
+    // No `confirm` key: absent means "inherit the card's", and this card sets
+    // none. Emitting an empty one here would make "inherits" and "asks nothing"
+    // indistinguishable on the wire.
+    { label: 'Leave it, I will fix the credentials' },
+  ]);
+});
+
+test('an option without a confirm gains no confirm key, so inheritance stays expressible', () => {
+  const body = buildChoiceRequest({
+    ...base,
+    options: ['Yes', 'No'],
+    confirm: { text: 'Are you sure?' },
+  });
+  // The card-level confirm is NOT copied onto the options here — cws-comm does
+  // that. Copying it on this side would hard-code today's fan-out and defeat
+  // the per-option override.
+  assert.deepEqual(body.choice.options, [{ label: 'Yes' }, { label: 'No' }]);
+  assert.deepEqual(body.choice.confirm, { text: 'Are you sure?' });
+});
+
+test("an option's confirm is validated like the card-level one, naming the option", () => {
+  assert.throws(
+    () => buildChoiceRequest({ ...base, options: [{ label: 'Go', confirm: { label: 'only a label' } }] }),
+    (err) => err instanceof InteractionRequestError && err.field === 'options[0].confirm.text',
+  );
+  assert.throws(
+    () => buildChoiceRequest({ ...base, options: [{ label: 'Go', confirm: 'not an object' }] }),
+    (err) => err instanceof InteractionRequestError && err.field === 'options[0].confirm',
+  );
+});

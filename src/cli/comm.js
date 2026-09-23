@@ -694,6 +694,11 @@ Messages
                             #   {"label":"...","style":"primary"}. Peer choices declare nothing
                             # style accepts primary | secondary | danger and nothing else — cws-comm
                             #   rejects any other value outright instead of falling back to a default
+                            # an option may carry its own {label, confirm:{text,label?}} — that confirm
+                            #   applies to THAT option only and overrides the card-level one below.
+                            #   Use it whenever one choice is destructive and another is not: the
+                            #   card-level confirm is applied to EVERY option, so on a mixed card it
+                            #   makes the safe button warn about the dangerous one's consequences
                             # KEEP the response's action_ids: they are the server's option ids, in order,
                             # and the only way to read back which option was chosen
   comm.get_messages         {conversationId, afterSeq?, beforeSeq?, limit?}

@@ -44,6 +44,20 @@ function requireText(value, field) {
  * this field — under the old model it was the reply text a settlement matched
  * on, and matching is gone, so the two collapse into one.
  */
+/**
+ * Normalize a confirm into `{text, label?}`. One expression, used for both the
+ * card-level confirm and an option's own, so the two cannot drift into slightly
+ * different shapes for the same thing.
+ */
+function normalizeConfirm(value, path) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new InteractionRequestError(path, 'must be an object');
+  }
+  const confirm = { text: requireText(value.text, `${path}.text`) };
+  if (value.label !== undefined) confirm.label = requireText(value.label, `${path}.label`);
+  return confirm;
+}
+
 function normalizeOption(option, index) {
   const at = `options[${index}]`;
   if (typeof option === 'string') return { label: requireText(option, at) };
@@ -56,6 +70,15 @@ function normalizeOption(option, index) {
   const label = requireText(option.label ?? option.text, `${at}.label`);
   const out = { label };
   if (option.style !== undefined) out.style = String(option.style);
+  // An option's own confirm overrides the card-level one for this option only.
+  // Omitting it means "inherit the card's", NOT "ask nothing" — the card-level
+  // confirm is applied to every option that declares none.
+  //
+  // It exists because the card-level one is applied uniformly, and a card that
+  // mixes a destructive choice with a safe one then puts the destructive
+  // wording on the safe button too: "leave it running" ends up asking the
+  // reader to confirm that the service will go down.
+  if (option.confirm !== undefined) out.confirm = normalizeConfirm(option.confirm, `${at}.confirm`);
   return out;
 }
 
@@ -97,12 +120,7 @@ export function buildChoiceRequest(params = {}) {
 
   const choice = { title, summary, blocks, options };
   if (params.confirm !== undefined) {
-    if (!params.confirm || typeof params.confirm !== 'object') {
-      throw new InteractionRequestError('confirm', 'must be an object');
-    }
-    const confirm = { text: requireText(params.confirm.text, 'confirm.text') };
-    if (params.confirm.label !== undefined) confirm.label = requireText(params.confirm.label, 'confirm.label');
-    choice.confirm = confirm;
+    choice.confirm = normalizeConfirm(params.confirm, 'confirm');
   }
 
   // 🔴 Refuse the send-level arguments the old card path accepted. The new

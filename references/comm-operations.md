@@ -221,6 +221,18 @@ rejects any other value fail-closed rather than falling back to a default, so a
 card asking for `success` does not send at all. `secondary` is accepted but
 redundant — it is what an undeclared option already renders as.
 
+**An option may also carry its own `confirm: {text, label?}`**, which applies to
+that option alone and overrides the card-level `confirm` below. Reach for it
+whenever one choice is destructive and another is not.
+
+🔴 The card-level `confirm` is applied to **every** option. On a card that mixes
+"stop the service" with "leave it running", that puts the destructive sentence
+on the safe button too — so the do-nothing choice asks the reader to confirm a
+consequence it does not have. That is not merely an extra click: it tells them
+something untrue about the button they are pressing, and it either scares them
+off the safe option or makes them think they misclicked. Keep the card-level
+field for the uniform case, where every option really is irreversible.
+
 **The three text regions are different things, and the client renders all of
 them** (cws-fe `SPEC-chat-card-message` AC-2: a card renders its title, its
 summary, and every recognized block). Putting the same sentence in two of them
