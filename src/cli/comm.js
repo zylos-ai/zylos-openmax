@@ -670,6 +670,8 @@ Messages
                             # send a choice card AND record what was asked, so the later receipt
                             #   can be decoded. Prefer this over comm.send_card for any question
                             #   you intend to act on
+                            # option styles work exactly as under comm.send_card below: undeclared
+                            #   renders secondary, the primary one has to be declared
                             # confirm {text, label?} adds the inline second step: the click opens a
                             #   confirm row in the card instead of settling straight away. Pass it for
                             #   anything you cannot undo — 'authorized' tells you WHO clicked, never
@@ -686,6 +688,12 @@ Messages
                             #   clientMsgId and pass the same one back — otherwise re-running
                             #   posts a second card
                             # asks a choice: options ["Yes","No"] or [{label,style?}] — at least one, no id
+                            # an option that declares no style renders SECONDARY (white/outline).
+                            #   There is no "first option is the primary one" rule: if the card has
+                            #   one action you are actually asking for, mark that one
+                            #   {"label":"...","style":"primary"}. Peer choices declare nothing
+                            # style accepts primary | secondary | danger and nothing else — cws-comm
+                            #   rejects any other value outright instead of falling back to a default
                             # KEEP the response's action_ids: they are the server's option ids, in order,
                             # and the only way to read back which option was chosen
   comm.get_messages         {conversationId, afterSeq?, beforeSeq?, limit?}

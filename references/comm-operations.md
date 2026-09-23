@@ -209,6 +209,18 @@ node src/cli/comm.js comm.send_card '{
 `options` accepts a bare string (shorthand for the button label) or
 `{label, style?}`.
 
+**An option that declares no `style` renders as a secondary button** — white /
+outline. There is no "the first option is the primary one" rule: the filled
+primary button exists only where the sender asked for one, by passing
+`style: "primary"`. So the card above renders two equal white buttons, which is
+right for a pair of peer choices and wrong for a card that has one action it
+is actually asking for — mark that one, and only that one.
+
+`style` accepts `primary`, `secondary` and `danger`, and nothing else. cws-comm
+rejects any other value fail-closed rather than falling back to a default, so a
+card asking for `success` does not send at all. `secondary` is accepted but
+redundant — it is what an undeclared option already renders as.
+
 **The three text regions are different things, and the client renders all of
 them** (cws-fe `SPEC-chat-card-message` AC-2: a card renders its title, its
 summary, and every recognized block). Putting the same sentence in two of them
@@ -274,10 +286,14 @@ node src/cli/comm.js comm.ask_card '{
   "title": "要升级吗",
   "summary": "openmax · 自动检查 05/19 17:11",
   "text": "openmax 2.20.0 → 2.21.0。升级会重启服务。",
-  "options": ["升级", "先不升"],
+  "options": [{ "label": "升级", "style": "primary" }, "先不升"],
   "confirm": { "text": "升级会重启 openmax 服务", "label": "确认升级" }
 }'
 ```
+
+Upgrading is what this card is asking for, so that option declares
+`style: "primary"` and the other one declares nothing — which is what makes it
+render secondary.
 
 `kind` says what the question is for; `askedOf` is the member whose answer
 counts. Both are required, because an answer with neither cannot be acted on.
