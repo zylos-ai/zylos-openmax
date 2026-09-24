@@ -131,8 +131,19 @@ sentence you have to parse and can misread.
 
 **Then, and only then, the path:**
 
-- **A card is sent by `comm.ask_card` itself** — it does not go through `c4-send.js`.
-- **A plain-text reply to a message routed to you → always the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
+- **Every reply to a message routed to you goes through the C4 reply path (`c4-send.js`) — card or text, one entry.** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail; reply using exactly that command. Text goes in the body as text. A card goes in as `[CARD]` followed by the card's JSON:
+
+  ```bash
+  node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax "<conversationId>" <<'EOF'
+  [CARD]{"kind":"component-upgrade","askedOf":"<member id>","title":"要升级吗","summary":"openmax · 自动检查 05/19 17:11","text":"openmax 2.20.0 → 2.21.0。升级会重启服务。","options":[{"label":"升级","style":"primary"},"先不升"]}
+  EOF
+  ```
+
+  The JSON fields are exactly `comm.ask_card`'s, minus `conversationId` (the endpoint already named it). **`kind` and `askedOf` are required** — the receipt that comes back names only the card, so an answer with neither is decodable and meaningless. A malformed payload fails the send; it is never downgraded to posting the JSON as chat text.
+
+  🔴 **Inline JSON, never a path to a file holding it.** The reply path writes the body it sent into the C4 conversation log verbatim, so inline keeps that row self-contained and the question readable from it later. A path would store a pointer, and that is what the existing `[MEDIA:…]` rows have already become — every one of them names a file that is long gone.
+
+- **`comm.ask_card` is the same card asked proactively.** Both produce one interaction-request and one pending record, so the answer decodes identically whichever you used. Reach for `comm.ask_card` when nothing routed you here — opening a question in a conversation you are starting yourself. Reach for `[CARD]` when you are replying: it is the command already printed in front of you, and it additionally leaves a row in the C4 conversation log, which `comm.ask_card` does not — a card asked that way is invisible to the history Memory Sync reads.
 
 Plain text is still right when the answer is NOT a fixed choice: an open-ended question, a long
 list, or anything needing a typed explanation. And other channels render no cards at all, so a

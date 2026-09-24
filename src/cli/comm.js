@@ -672,6 +672,18 @@ Messages
                             # send a choice card AND record what was asked, so the later receipt
                             #   can be decoded. Prefer this over comm.send_card for any question
                             #   you intend to act on
+                            # this is the PROACTIVE form. Replying to a message routed to you?
+                            #   send the same card through that message's own "reply via"
+                            #   command instead, as a [CARD]{...} body:
+                            #     c4-send.js openmax '<conv>' <<'EOF'
+                            #     [CARD]{"kind":..,"askedOf":..,"title":..,"summary":..,"text":..,"options":[..]}
+                            #     EOF
+                            #   same builder, same record, identical result — but it also leaves
+                            #   a C4 conversation-log row (this verb leaves none, so a card asked
+                            #   here is invisible to the history Memory Sync reads). Fields are
+                            #   these minus conversationId; the JSON is INLINE, never a file path,
+                            #   so the logged row stays readable on its own.
+                            #   See references/comm-operations.md and src/lib/card-message.js
                             # kind / askedOf / meta belong to the QUESTION and are consumed here;
                             #   every other key is a CARD field, checked exactly as under
                             #   comm.send_card below — body shape (text vs blocks) included

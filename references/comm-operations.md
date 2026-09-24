@@ -2,7 +2,7 @@
 
 **Purpose**: Agent-initiated IM operations — creating conversations, sending messages, pulling history, checking unread, WS reconnect gap-fill, page search. All commands go through the cws-core BFF down to cws-comm.
 
-> The reply-form rule — **decide the form first: if what you need back is one of a few fixed options, ask it with `comm.ask_card`; then the path: a plain-text reply goes through the C4 `c4-send` reply path, and `comm.send` is for agent-initiated (proactive) sends only** — lives in `SKILL.md` ("Replying: decide the FORM first, then the path"), which is always loaded. This Layer-3 doc only covers the call mechanics of those commands.
+> The reply-form rule — **decide the form first: if what you need back is one of a few fixed options, ask it as a card; then the path: every reply to a routed message goes through the C4 `c4-send` reply path — text as text, a card as `[CARD]{…}` — while `comm.ask_card` / `comm.send` are for agent-initiated (proactive) sends only** — lives in `SKILL.md` ("Replying: decide the FORM first, then the path"), which is always loaded. This Layer-3 doc only covers the call mechanics of those commands.
 
 **When to load this document**:
 
@@ -388,6 +388,64 @@ actorMemberId}` reports `known` / `authorized` / `expired` / `actionable` and
 the chosen option's index. Act only on `actionable`, then
 `comm.pending_clear {cardMessageId}` — delivery is at-least-once, and a cleared
 question turns a redelivered receipt into a no-op instead of a second execution.
+
+### The same question, asked on the reply path (`[CARD]`)
+
+`comm.ask_card` is the proactive form. When a message was routed to you, the
+card goes out through the reply command that message printed — the same command
+a text reply uses, with `[CARD]` and the card's JSON as the body:
+
+```bash
+node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax '<conv-uuid>' <<'EOF'
+[CARD]{"kind":"component-upgrade","askedOf":"<owner member id>","title":"要升级吗","summary":"openmax · 自动检查 05/19 17:11","text":"openmax 2.20.0 → 2.21.0。升级会重启服务。","options":[{"label":"升级","style":"primary"},"先不升"],"confirm":{"text":"升级会重启 openmax 服务","label":"确认升级"}}
+EOF
+```
+
+`scripts/send.js` recognizes the prefix and hands the payload to
+`src/lib/card-message.js`, which runs the SAME builder and the SAME record step
+`comm.ask_card` runs. **The two produce identical results** — one
+interaction-request, one pending record — so a receipt decodes the same way
+whichever asked it. `comm.answered` and `comm.pending_clear` are unchanged.
+
+One difference, and it is the reason this path exists alongside a working
+`comm.ask_card`:
+
+| | `comm.ask_card` | `[CARD]` on the reply path |
+|---|---|---|
+| entry | its own CLI verb | the `reply via:` command already printed with the message |
+| C4 conversation log | **no row** | one row, holding the payload verbatim |
+
+Two entries for "answer this person" is the ground a wrong choice grows in: the
+reply command is the one in front of you, so a question ends up typed as a
+sentence listing its own options. And `comm.ask_card` writing no row means a
+card interaction is missing from the history Memory Sync reads — the
+conversation remembers the text replies around it and not the question itself.
+
+**Fields.** Exactly `comm.ask_card`'s, minus `conversationId`: the endpoint
+names the conversation, so the payload may not, and a payload that sets
+`conversationId` (or `org` / `orgId` / `orgSlug` / `org_id`) is refused rather
+than overridden in silence. `kind` and `askedOf` are required here for the same
+reason they are required there. Every remaining key is a card field, checked by
+the same whitelist — a top-level `fields` is refused arriving this way too.
+
+**The JSON is inline, never a path to a file holding it.** The audit row stores
+the body verbatim, so inline makes the row self-contained: the question is
+still readable from it months later. A path would store a pointer, and the
+`[MEDIA:…]` rows already in that log are what pointers become — each names a
+file that no longer exists, so the row proves a send happened and can never
+again say what was sent. A card carries a question a human was asked and
+answered; it is the last thing that should decay that way.
+
+**Failure is loud.** A payload that is not valid JSON, is not an object, or is
+missing `kind` / `askedOf` fails the send with the reason named. It is never
+downgraded to sending the raw JSON as a chat message — that would be unreadable
+to the person and, to the agent, indistinguishable from having asked them
+something.
+
+🔴 **`action_ids` come back on stdout.** `scripts/send.js` prints its result as
+JSON, and for a card that result is `{ok, card, message_id, action_ids,
+recorded}`. That printing is the return channel of this path, not incidental
+output.
 
 ### Reading the answer back
 

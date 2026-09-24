@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A choice card can now be sent through the C4 reply path, as a `[CARD]{…}` message body.** Every inbound message prints one reply command, and until now that command could only carry text: a card had to be asked with a different verb. `scripts/send.js` recognizes a `[CARD]` prefix and hands the inline JSON to the new `src/lib/card-message.js`, which runs the same `buildChoiceRequest` and the same `recordPendingQuestion` that `comm.ask_card` runs — the two entries produce identical results, so a receipt decodes the same way whichever asked it.
+
+  Two entries for "answer this person" was the ground a wrong choice grew in: the reply command is the one printed in front of the agent, so a question that should have been a card got typed as a sentence listing its own options. The card path also inherits the reply path's audit row for free — the bridge writes the outbound body to the C4 conversation log before dispatching, so a card asked this way is finally part of the history Memory Sync reads. A card asked with `comm.ask_card` writes no such row and never was.
+
+  The payload is **inline JSON, not a path to a file holding it**, because the audit row stores the body verbatim: inline keeps that row self-contained and the question readable from it later. The `[MEDIA:…]` rows already in that log are what the alternative becomes — each names a file that is long gone, so the row proves a send happened and can never again say what was sent.
+
+  `kind` and `askedOf` are required, as they are for `comm.ask_card`; `conversationId` and the org-routing keys are refused, since the endpoint already names the target. A payload that is malformed, is not an object, or is missing either required key fails the send with the reason named — it is never downgraded to posting the raw JSON as a chat message, which would be unreadable to the person and indistinguishable, to the agent, from having asked them something.
+
 ### Changed
 
 - **`comm.send_card` now requests an interaction instead of building a card.** It posts to `POST /conversations/{id}/interaction-requests` (`interaction_type: choice`) and no longer assembles a `cws.card.v1` body locally: the agent supplies a title, summary, body blocks and option labels, and cws-comm builds the card. The response carries `action_ids` — the server's ids for the options, in the order supplied — which are the only way to read an answer back. `src/lib/interaction-request.js` replaces `buildDisplayCard` as the request builder.
