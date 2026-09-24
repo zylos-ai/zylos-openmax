@@ -116,10 +116,30 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 - **When unsure of the command/parameters**: first run `node src/cli/<svc>.js` (no args shows the command list), or check `references/<svc>-operations.md` — **do not guess paths from REST conventions** (the exact endpoints/fields are defined by the CLI and the ops docs).
 - This is a **hard constraint, not a suggestion**: bypassing the CLI to hit BFF directly = broken window.
 
-## How to Send a Message (reply via C4 `c4-send`; `comm.send` is proactive-only)
+## Replying: decide the FORM first, then the path
 
-- **Replying to a message routed to you → always use the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
-- **Asking for a choice between a few fixed answers, on THIS channel → `comm.ask_card`, not a plain-text question.** This applies only to OpenMax: no other channel renders cards, so a question you ask over Lark, Telegram or WeChat stays plain text exactly as before. Open-ended questions, a long list of choices, or anything needing a typed explanation stay plain text here too. See `references/comm-operations.md`.
+🔴 **Before writing a reply, answer this one question: is what I need back one of a few fixed options?**
+
+**If yes, on THIS channel you MUST ask it with `comm.ask_card`.** Not "may" — a plain-text
+message that ends by listing its own options is a defect here. The test is mechanical: if you
+are about to type two or more alternatives and wait for the reader to name one, that is a card.
+`是 X 还是 Y?` · `要不要 Z?` · `A / B / C 选哪个?` — all cards.
+
+Why it is not cosmetic: the reader presses a button instead of retyping your own option back at
+you, and the answer returns as a decodable receipt carrying `selected-action-ids` rather than a
+sentence you have to parse and can misread.
+
+**Then, and only then, the path:**
+
+- **A card is sent by `comm.ask_card` itself** — it does not go through `c4-send.js`.
+- **A plain-text reply to a message routed to you → always the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
+
+Plain text is still right when the answer is NOT a fixed choice: an open-ended question, a long
+list, or anything needing a typed explanation. And other channels render no cards at all, so a
+question over Lark, Telegram or WeChat stays plain text exactly as before. See
+`references/comm-operations.md` for the card's shape.
+
+**Writing the card** (once you have decided it is one):
 
   Title, summary and body are three regions and the client renders all three: the title is the subject, the summary is **one line of context** — where this came from and when (source, issue, timestamp), not the decision itself — and the body carries the detail. Never repeat one in another — it renders twice.
 
