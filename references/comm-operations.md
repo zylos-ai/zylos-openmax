@@ -2,7 +2,7 @@
 
 **Purpose**: Agent-initiated IM operations — creating conversations, sending messages, pulling history, checking unread, WS reconnect gap-fill, page search. All commands go through the cws-core BFF down to cws-comm.
 
-> The reply-vs-proactive-send behavioral rule — **replies always go through the C4 `c4-send` reply path, `comm.send` is for agent-initiated (proactive) sends only** — lives in `SKILL.md` ("How to Send a Message"), which is always loaded. This Layer-3 doc only covers `comm.send`'s call mechanics.
+> The reply-form rule — **decide the form first: if what you need back is one of a few fixed options, ask it with `comm.ask_card`; then the path: a plain-text reply goes through the C4 `c4-send` reply path, and `comm.send` is for agent-initiated (proactive) sends only** — lives in `SKILL.md` ("Replying: decide the FORM first, then the path"), which is always loaded. This Layer-3 doc only covers the call mechanics of those commands.
 
 **When to load this document**:
 
