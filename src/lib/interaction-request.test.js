@@ -32,10 +32,26 @@ test('🔴 the body is never derived from summary, because the client shows both
   assert.notEqual(withText.choice.blocks[0].text, withText.choice.summary);
 });
 
-test('explicit blocks win over text', () => {
-  const explicit = buildChoiceRequest({
+test('🔴 passing both `text` and `blocks` is refused, not resolved by precedence', () => {
+  // This used to let `blocks` win and drop `text` silently — the last silent
+  // drop left at the top level, and the caller who passed both is precisely the
+  // one who believes both are being shown.
+  const err = refusal(() => buildChoiceRequest({
     ...base,
-    text: 'ignored when blocks are given',
+    text: 'a paragraph the caller expects to see',
+    blocks: [{ type: 'markdown', text: '- a\n- b' }, { type: 'divider' }],
+    options: ['Yes'],
+  }));
+  assert.equal(err.field, 'text');
+  assert.match(err.message, /blocks/);
+});
+
+test('blocks alone still pass through untouched', () => {
+  // The control for the refusal above: it must fire on the combination, not on
+  // `blocks` itself.
+  const { text, ...noText } = base;
+  const explicit = buildChoiceRequest({
+    ...noText,
     blocks: [{ type: 'markdown', text: '- a\n- b' }, { type: 'divider' }],
     options: ['Yes'],
   });
@@ -329,6 +345,62 @@ test('🔴 a fields block inside `blocks` reaches the request body untouched', (
       ],
     },
   ];
-  const body = buildChoiceRequest({ ...base, blocks, options: ['Yes', 'No'] });
+  const { text, ...noText } = base;
+  const body = buildChoiceRequest({ ...noText, blocks, options: ['Yes', 'No'] });
   assert.deepEqual(body.choice.blocks, blocks);
+});
+
+test('🔴 an unknown key inside an option is refused, not dropped', () => {
+  // The top-level whitelist stopped at the top level. One level down the same
+  // silent drop was still reachable, and `confirm` is the field it costs most:
+  // a misspelled one removes the second step in front of an irreversible act
+  // and says nothing.
+  const err = refusal(() => buildChoiceRequest({
+    ...base,
+    options: [{ label: '清空', confirm_text: '确定?' }],
+  }));
+  assert.equal(err.field, 'options[0].confirm_text');
+  assert.match(err.message, /confirm/);
+});
+
+test('a misspelled `style` is refused rather than quietly rendering secondary', () => {
+  const err = refusal(() => buildChoiceRequest({
+    ...base,
+    options: [{ label: '升级', stye: 'primary' }],
+  }));
+  assert.equal(err.field, 'options[0].stye');
+});
+
+test('🔴 an unknown key inside a confirm is refused, at both levels it can appear', () => {
+  const card = refusal(() => buildChoiceRequest({
+    ...base,
+    options: ['Yes'],
+    confirm: { text: '会重启服务', buttonLabel: '确认' },
+  }));
+  assert.equal(card.field, 'confirm.buttonLabel');
+
+  const perOption = refusal(() => buildChoiceRequest({
+    ...base,
+    options: [{ label: '停服', confirm: { text: '会中断', labe: '确认' } }],
+  }));
+  assert.equal(perOption.field, 'options[0].confirm.labe');
+});
+
+test('every key an option and a confirm DO accept still builds', () => {
+  // The negative control for the three refusals above: a whitelist that refused
+  // a legitimate key would fail exactly the callers it exists to protect, and
+  // the refusal tests alone cannot tell the two apart.
+  const body = buildChoiceRequest({
+    ...base,
+    options: [
+      { label: '停服', style: 'danger', confirm: { text: '会中断 5 分钟', label: '确认停服' } },
+      { text: '先不停' },
+    ],
+    confirm: { text: '卡片级', label: '继续' },
+  });
+  assert.deepEqual(body.choice.options, [
+    { label: '停服', style: 'danger', confirm: { text: '会中断 5 分钟', label: '确认停服' } },
+    { label: '先不停' },
+  ]);
+  assert.deepEqual(body.choice.confirm, { text: '卡片级', label: '继续' });
 });

@@ -45,6 +45,32 @@ function requireText(value, field) {
  * on, and matching is gone, so the two collapse into one.
  */
 /**
+ * Keys an option and a confirm may carry. Closed sets, and refused the same way
+ * the top-level params are.
+ *
+ * 🔴 The top-level whitelist stops at the top level, and every failure it
+ * exists to prevent is just as reachable one level down. `{"label":"清空",
+ * "confirm_text":"确定?"}` builds, sends and renders — with no second step and
+ * no word about the key that was dropped, and that key was the one standing in
+ * front of an irreversible action. `stye` for `style` costs the card its
+ * primary button just as quietly. A misspelled key inside an option is not a
+ * smaller version of the top-level bug; for `confirm` it is the more expensive
+ * one.
+ *
+ * Whitelists for the same reason as above: the key that needs refusing is the
+ * one nobody thought of.
+ */
+const OPTION_KEYS = new Set(['label', 'text', 'style', 'confirm']);
+const CONFIRM_KEYS = new Set(['text', 'label']);
+
+function rejectUnknownKeys(obj, allowed, path, carries) {
+  for (const key of Object.keys(obj)) {
+    if (allowed.has(key)) continue;
+    throw new InteractionRequestError(`${path}.${key}`, `is not supported here; ${carries}`);
+  }
+}
+
+/**
  * Normalize a confirm into `{text, label?}`. One expression, used for both the
  * card-level confirm and an option's own, so the two cannot drift into slightly
  * different shapes for the same thing.
@@ -53,6 +79,7 @@ function normalizeConfirm(value, path) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new InteractionRequestError(path, 'must be an object');
   }
+  rejectUnknownKeys(value, CONFIRM_KEYS, path, 'a confirm carries `text` and an optional `label`');
   const confirm = { text: requireText(value.text, `${path}.text`) };
   if (value.label !== undefined) confirm.label = requireText(value.label, `${path}.label`);
   return confirm;
@@ -67,6 +94,7 @@ function normalizeOption(option, index) {
   if (option.id !== undefined) {
     throw new InteractionRequestError(`${at}.id`, 'cannot be set: cws-comm generates option ids and returns them as action_ids');
   }
+  rejectUnknownKeys(option, OPTION_KEYS, at, 'an option carries `label` (or the `text` alias), `style` and `confirm`');
   const label = requireText(option.label ?? option.text, `${at}.label`);
   const out = { label };
   if (option.style !== undefined) out.style = String(option.style);
@@ -168,6 +196,17 @@ export function buildChoiceRequest(params = {}) {
   // wrong card is worse than asking the caller for one more field.
   let blocks;
   if (params.blocks !== undefined) {
+    // 🔴 Refused, not resolved by precedence. Letting `blocks` win silently is
+    // the one silent drop this builder had left: a caller who passed both loses
+    // the `text` paragraph without a word, which is exactly what the whitelist
+    // above exists to stop. Both documents already tell callers to pass one or
+    // the other, so refusing cannot break a caller who was following them.
+    if (params.text !== undefined) {
+      throw new InteractionRequestError(
+        'text',
+        'cannot be combined with `blocks`: `text` is shorthand for a single text block, so passing both means one of the two is not being shown — send the paragraph as the first entry of `blocks` instead',
+      );
+    }
     if (!Array.isArray(params.blocks) || params.blocks.length === 0) {
       throw new InteractionRequestError('blocks', 'must be a non-empty array');
     }

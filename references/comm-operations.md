@@ -252,8 +252,10 @@ card, which is the other reason it stays a single line.
 
 `text` is shorthand for a card whose body is one paragraph — it is expanded into
 `[{"type": "text", "text": "…"}]` and sent as `blocks`. Anything richer passes
-`blocks` directly, and then **does not also pass `text`**: `blocks` wins and the
-`text` is ignored.
+`blocks` directly, and then **does not also pass `text`**: passing both is
+refused, naming `text`. It used to be resolved by precedence — `blocks` won and
+the `text` was dropped — which left the caller who passed both, and therefore
+believed both were shown, with no way to find out otherwise.
 
 cws-comm's block vocabulary:
 
@@ -319,6 +321,8 @@ Each of these is refused with the offending field named, not dropped:
 | `replyTo` / `mentions` | the endpoint has no field for either. A reply-to that vanished looks exactly like one that was never asked for |
 | `kind` / `fallbackText` | arguments of the retired card API; the interaction-requests endpoint has no field for either. (`comm.ask_card` has its own `kind` — see below — which that verb consumes itself) |
 | **any other top-level key** | the accepted set is closed: `title` `summary` `text` \| `blocks` `options` `confirm` `clientMsgId`, plus the CLI's own `conversationId` and `org`. Anything else is a caller who thinks they sent something — a top-level `fields` is the case that cost a card its content |
+| **any other key inside an option** | an option's set is closed too: `label` (or the `text` alias), `style`, `confirm`. `confirm_text` or a misspelled `style` would otherwise build, send and render — minus the second confirmation step, or minus the primary button, with nothing said |
+| **any other key inside a `confirm`** | a confirm carries `text` and an optional `label`, and nothing else |
 
 Business parameters — an operation, a URL, a handler, an amount — have no field
 here either. This verb requests a **choice**; interactive cards that carry a
