@@ -218,3 +218,117 @@ test("an option's confirm is validated like the card-level one, naming the optio
     (err) => err instanceof InteractionRequestError && err.field === 'options[0].confirm',
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unknown top-level keys
+//
+// The builder constructs its result from scratch, so a key it does not name is
+// neither used nor reported. The deny-list that used to guard this could only
+// name keys somebody had already thought of — and the one that cost a card its
+// content was `fields`, which nobody had.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The thrown InteractionRequestError, so a test can read its message. */
+function refusal(fn) {
+  try {
+    fn();
+  } catch (err) {
+    return err;
+  }
+  return assert.fail('expected buildChoiceRequest to refuse, but it returned a body');
+}
+
+test('🔴 a top-level `fields` is refused and told where it belongs, not dropped', () => {
+  // The real failure: an upgrade card passed one row per component as top-level
+  // `fields`. The request went out with the prose body and nothing else, the
+  // reader saw no versions, and NOTHING reported a problem.
+  const err = refusal(() => buildChoiceRequest({
+    ...base,
+    options: ['Yes'],
+    fields: [{ label: 'core', value: '0.7.1 → 0.8.1' }],
+  }));
+  assert.ok(err instanceof InteractionRequestError);
+  assert.equal(err.field, 'fields');
+  // Naming the key is not enough to act on — the message has to say where it
+  // goes, or the caller reads source to find out.
+  assert.match(err.message, /blocks/);
+  assert.match(err.message, /"type":"fields"/);
+});
+
+test('every block type refused at the top level names `blocks` as its destination', () => {
+  for (const type of ['markdown', 'divider', 'image', 'quote', 'artifact_list']) {
+    const err = refusal(() => buildChoiceRequest({ ...base, options: ['Yes'], [type]: 'x' }));
+    assert.equal(err.field, type);
+    assert.match(err.message, new RegExp(`"type":"${type}"`), type);
+  }
+});
+
+test('an unknown key that is not a block type is still refused, without the block hint', () => {
+  const err = refusal(() => buildChoiceRequest({ ...base, options: ['Yes'], urgency: 'high' }));
+  assert.ok(err instanceof InteractionRequestError);
+  assert.equal(err.field, 'urgency');
+  assert.doesNotMatch(err.message, /BLOCK type/);
+});
+
+test('an unknown key is reported before a missing required one', () => {
+  // The caller who mistyped a key has a key to fix; leading with `title` would
+  // send them after a field they merely also omitted.
+  assert.throws(
+    () => buildChoiceRequest({ conversationId: 'c1', fields: [] }),
+    (e) => e.field === 'fields',
+  );
+});
+
+test('🔴 the CLI arguments that ride along on the same params object still pass', () => {
+  // `comm.send_card` hands its WHOLE parsed params object to the builder, so
+  // conversationId and the org-routing keys arrive here. Rejecting them would
+  // break every real call — this is the cell that catches a whitelist written
+  // from the card schema alone.
+  for (const routing of [{}, { org: 'acme' }, { orgSlug: 'acme' }, { orgId: 'o-1' }, { org_id: 'o-1' }]) {
+    const body = buildChoiceRequest({ ...base, options: ['Yes'], ...routing });
+    assert.equal(body.interaction_type, 'choice');
+    // Routing is not card content: it must not leak into the request body.
+    for (const key of Object.keys(routing)) assert.equal(key in body.choice, false, key);
+  }
+  assert.equal('conversationId' in buildChoiceRequest({ ...base, options: ['Y'] }).choice, false);
+});
+
+test('🔴 comm.ask_card is not caught by the whitelist — it strips its own arguments first', () => {
+  // ask_card's legitimate arguments differ from send_card's. It removes them
+  // before calling, and the whitelist must not be what forces that: this asserts
+  // the verb's real call shape builds, AND that the arguments would otherwise be
+  // refused — so a future edit that stops stripping them fails loudly here
+  // rather than dropping a question's `kind` on the floor.
+  const askParams = {
+    ...base, options: ['Yes'], kind: 'component-upgrade', askedOf: 'm-1', meta: { v: 1 },
+  };
+  const { kind, askedOf, meta, ...cardParams } = askParams;
+  const body = buildChoiceRequest(cardParams);
+  assert.equal(body.interaction_type, 'choice');
+  for (const field of ['kind', 'askedOf', 'meta']) {
+    assert.throws(
+      () => buildChoiceRequest({ ...cardParams, [field]: askParams[field] }),
+      (e) => e instanceof InteractionRequestError && e.field === field,
+      field,
+    );
+  }
+});
+
+test('🔴 a fields block inside `blocks` reaches the request body untouched', () => {
+  // The other half of the fix: refusing the misplaced key is only useful if the
+  // documented destination actually works. Blocks are passed through verbatim —
+  // cws-comm owns the block vocabulary — so this pins that nothing local
+  // reshapes, reorders or filters them.
+  const blocks = [
+    { type: 'text', text: '确认升级以下组件?' },
+    {
+      type: 'fields',
+      items: [
+        { label: 'core', value: '0.7.1 → 0.8.1' },
+        { label: 'openmax', value: '2.20.0 → 2.21.0' },
+      ],
+    },
+  ];
+  const body = buildChoiceRequest({ ...base, blocks, options: ['Yes', 'No'] });
+  assert.deepEqual(body.choice.blocks, blocks);
+});

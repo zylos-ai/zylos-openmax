@@ -479,7 +479,9 @@ const COMMANDS = {
   //   skipped, forgotten, or lost to a restart between them.
   //
   //   `kind` says what the question is for, `askedOf` is the member whose
-  //   answer counts. Extra fields are kept verbatim for the answering side.
+  //   answer counts, and `meta` is kept verbatim with the record for the
+  //   answering side. Those three are this verb's own; everything else is a
+  //   card field and is validated as one.
   'comm.ask_card': async () => {
     if (!params.kind || !params.askedOf) {
       throw new Error('comm.ask_card: kind and askedOf are required — an answer with neither cannot be acted on');
@@ -670,6 +672,9 @@ Messages
                             # send a choice card AND record what was asked, so the later receipt
                             #   can be decoded. Prefer this over comm.send_card for any question
                             #   you intend to act on
+                            # kind / askedOf / meta belong to the QUESTION and are consumed here;
+                            #   every other key is a CARD field, checked exactly as under
+                            #   comm.send_card below — body shape (text vs blocks) included
                             # option styles work exactly as under comm.send_card below: undeclared
                             #   renders secondary, the primary one has to be declared
                             # confirm {text, label?} adds the inline second step: the click opens a
@@ -683,6 +688,19 @@ Messages
   comm.pending              {}                                   # questions still awaiting an answer
   comm.pending_clear        {cardMessageId}                       # forget one that has been dealt with
   comm.send_card            {conversationId, title, summary, text?|blocks?, options, confirm?, clientMsgId?}
+                            # BODY: "text" is shorthand for one paragraph; anything richer passes
+                            #   "blocks" INSTEAD (pass one or the other, never both):
+                            #     "blocks": [
+                            #       {"type":"text",  "text":"确认升级以下组件?"},
+                            #       {"type":"fields","items":[{"label":"core","value":"0.7.1 → 0.8.1"}]}
+                            #     ]
+                            #   block types: text | markdown | fields | divider | image | quote |
+                            #     artifact_list (each also takes fallback_text)
+                            #   "fields" is a BLOCK, not a top-level key — one row per item is how
+                            #     structured detail (per-component versions, amounts) is shown
+                            # the accepted top-level keys are exactly the ones above: anything else
+                            #   is REFUSED with the field named, never carried along. A top-level
+                            #   "fields" used to be dropped in silence and the card posted without it
                             # client_msg_id is generated when omitted, which only de-dupes a retry
                             #   of the same request. To survive a lost response, KEEP your own
                             #   clientMsgId and pass the same one back — otherwise re-running

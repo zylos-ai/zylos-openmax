@@ -121,7 +121,21 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 - **Replying to a message routed to you → always use the C4 reply path (`c4-send.js`).** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail — reply using exactly that command.
 - **Asking for a choice between a few fixed answers, on THIS channel → `comm.ask_card`, not a plain-text question.** This applies only to OpenMax: no other channel renders cards, so a question you ask over Lark, Telegram or WeChat stays plain text exactly as before. Open-ended questions, a long list of choices, or anything needing a typed explanation stay plain text here too. See `references/comm-operations.md`.
 
-  Title, summary and body are three regions and the client renders all three: the title is the subject, the summary is **one line of context** — where this came from and when (source, issue, timestamp), not the decision itself — and the body carries the detail. Never repeat one in another — it renders twice. Put structured detail in a `fields` block, one row per item, rather than a paragraph.
+  Title, summary and body are three regions and the client renders all three: the title is the subject, the summary is **one line of context** — where this came from and when (source, issue, timestamp), not the decision itself — and the body carries the detail. Never repeat one in another — it renders twice.
+
+  **Structured detail goes in a `fields` block, one row per item, rather than a paragraph.** A `fields` block is a BLOCK — it lives inside `blocks`, and a top-level `"fields"` is refused (it used to be dropped in silence, and the card posted without the rows):
+
+  ```json
+  "blocks": [
+    {"type": "text",   "text": "确认升级以下组件?"},
+    {"type": "fields", "items": [
+      {"label": "core",    "value": "0.7.1 → 0.8.1"},
+      {"label": "openmax", "value": "2.20.0 → 2.21.0"}
+    ]}
+  ]
+  ```
+
+  `blocks` and `text` are alternatives — `text` is shorthand for a single text block, so a card passing `blocks` must not also pass `text`. Block types: `text` · `markdown` · `fields` · `divider` · `image` · `quote` · `artifact_list`. See `references/comm-operations.md`.
 
   Use `comm.ask_card` rather than `comm.send_card` for any question you intend to **act** on. It sends the card and records what was asked in one call; a card sent without that record produces an answer that arrives decodable and meaningless, because the receipt names only the card. Pass `kind` (what the question is for) and `askedOf` (the member whose answer counts).
 

@@ -248,9 +248,59 @@ body is no longer derived.
 `summary` is also the plain-text projection for clients that cannot render a
 card, which is the other reason it stays a single line.
 
-Structured detail belongs in a `fields` block rather than a prose blob — for an
-upgrade, one row per component (`{label: "dashboard", value: "0.5.4 → 0.5.5"}`)
-reads as a table instead of a sentence someone has to parse.
+### The body: `text` or `blocks`, never both
+
+`text` is shorthand for a card whose body is one paragraph — it is expanded into
+`[{"type": "text", "text": "…"}]` and sent as `blocks`. Anything richer passes
+`blocks` directly, and then **does not also pass `text`**: `blocks` wins and the
+`text` is ignored.
+
+cws-comm's block vocabulary:
+
+| `type` | Carries | Keys besides `type` |
+|---|---|---|
+| `text` | a plain paragraph | `text` |
+| `markdown` | a paragraph with inline marks, or a list | `text` |
+| `fields` | label→value rows, one per line | `items[]` of `{label, value, inline?}` |
+| `divider` | a horizontal rule | — |
+| `image` | an image | `artifact_id` \| `url`, `alt`, `width`, `height` |
+| `quote` | a quoted passage | `text`, `author`, `message_id` |
+| `artifact_list` | attached artifacts | `items[]` of `{artifact_id, name, meta, url}` |
+
+Every block also accepts `fallback_text`, the plain-text projection for a client
+that cannot render that type; cws-comm fills one in when it is omitted.
+
+cws-comm rejects an unknown key inside a block and names it, which is why the
+per-key rules (which of `artifact_id` / `url` an image needs, the markdown
+subset, the length caps) are not restated here — see "Limits live in cws-comm"
+below. What IS here is the vocabulary, because without the type names and their
+carrier key you cannot construct a block at all.
+
+**Structured detail belongs in a `fields` block rather than a prose blob.** One
+row per item reads as a table instead of a sentence someone has to parse — for a
+component upgrade, one row per component:
+
+```bash
+node src/cli/comm.js comm.send_card '{
+  "conversationId": "<uuid>",
+  "title": "确认升级",
+  "summary": "openmax · 自动检查 05/19 17:11",
+  "blocks": [
+    {"type": "text",   "text": "确认升级以下组件?"},
+    {"type": "fields", "items": [
+      {"label": "core",    "value": "0.7.1 → 0.8.1"},
+      {"label": "openmax", "value": "2.20.0 → 2.21.0"}
+    ]}
+  ],
+  "options": [{ "label": "升级", "style": "primary" }, "先不升"],
+  "confirm": { "text": "升级会重启 openmax 服务", "label": "确认升级" }
+}'
+```
+
+🔴 **`fields` is a BLOCK type, not a top-level field.** A top-level `"fields"`
+is refused with the destination named. It used to be neither used nor reported:
+the card posted successfully carrying only the prose body, the reader saw no
+versions, and nothing anywhere said so.
 
 The response is `{message_id, seq, created_at, action_ids}`.
 
@@ -267,6 +317,8 @@ Each of these is refused with the offending field named, not dropped:
 | an option `id` | cws-comm generates ids and returns them as `action_ids`. A dropped `id` would leave you matching the answer against something the server never saw |
 | zero options | the protocol has no interaction type for a card with nothing to choose |
 | `replyTo` / `mentions` | the endpoint has no field for either. A reply-to that vanished looks exactly like one that was never asked for |
+| `kind` / `fallbackText` | arguments of the retired card API; the interaction-requests endpoint has no field for either. (`comm.ask_card` has its own `kind` — see below — which that verb consumes itself) |
+| **any other top-level key** | the accepted set is closed: `title` `summary` `text` \| `blocks` `options` `confirm` `clientMsgId`, plus the CLI's own `conversationId` and `org`. Anything else is a caller who thinks they sent something — a top-level `fields` is the case that cost a card its content |
 
 Business parameters — an operation, a URL, a handler, an amount — have no field
 here either. This verb requests a **choice**; interactive cards that carry a
@@ -309,7 +361,10 @@ render secondary.
 
 `kind` says what the question is for; `askedOf` is the member whose answer
 counts. Both are required, because an answer with neither cannot be acted on.
-Anything else you pass is kept verbatim for the answering side.
+`meta` is the third argument this verb consumes itself: it is stored verbatim
+with the record for the answering side and never reaches the card. Everything
+else you pass is a CARD field and is checked as one — an unrecognized key is
+refused, not carried along.
 
 For anything irreversible, also pass `confirm: {text, label?}` — the client's
 second-confirmation step. `askedOf` and the `authorized` check cover *who*

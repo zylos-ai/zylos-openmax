@@ -87,7 +87,74 @@ function textBlock(text) {
   return { type: 'text', text };
 }
 
+/**
+ * Every top-level key this builder knows.
+ *
+ * 🔴 It is a WHITELIST, not a deny-list, because the builder constructs its
+ * result from scratch: a key it does not name is neither used nor reported, so
+ * a caller that passes one gets a card that sends successfully and is missing
+ * what they asked for. That happened — an upgrade card carried a top-level
+ * `fields` with one row per component, and what arrived had the prose body and
+ * nothing else. A deny-list cannot catch that, because the key you need to deny
+ * is the one nobody thought of.
+ *
+ * `conversationId` and the org-routing keys are here because they are NOT card
+ * fields: `comm.send_card` hands its whole parsed params object to this
+ * function, so the CLI's own arguments arrive alongside the card's. Dropping
+ * them from this set would reject every real call.
+ *
+ * One flat set covers both callers because `comm.ask_card` strips its own three
+ * arguments (`kind`, `askedOf`, `meta`) before calling — and must keep doing so.
+ * `kind` in particular means something different to each verb, and this builder
+ * has to keep refusing it: the old card API's `kind` has no field on the
+ * interaction-requests endpoint. If a future verb needs to pass an argument
+ * through instead of stripping it, split this into a per-caller set rather than
+ * widening the shared one, or the widened key becomes silently droppable again
+ * for the other verb.
+ */
+const KNOWN_PARAMS = new Set([
+  // card fields
+  'title', 'summary', 'text', 'blocks', 'options', 'confirm', 'clientMsgId',
+  // CLI arguments that ride along on the same params object
+  'conversationId', 'org', 'orgSlug', 'orgId', 'org_id',
+]);
+
+/**
+ * cws-comm's block vocabulary, used ONLY to phrase the error when one of these
+ * names shows up as a TOP-LEVEL key — `fields` is where this whole class of bug
+ * was found, and naming the right destination is the difference between an
+ * error a caller can act on and one they have to go read source for.
+ *
+ * Nothing here validates a block. The block rules stay cws-comm's (see the
+ * no-local-caps note at the top of this file); if the server adds a type and
+ * this list lags, the only cost is a slightly less specific error message, and
+ * that type still sends fine inside `blocks`.
+ */
+const BLOCK_TYPES = new Set([
+  'text', 'markdown', 'fields', 'divider', 'image', 'quote', 'artifact_list',
+]);
+
+function rejectUnknownParams(params) {
+  for (const key of Object.keys(params)) {
+    if (KNOWN_PARAMS.has(key)) continue;
+    const hint = BLOCK_TYPES.has(key)
+      ? ` — \`${key}\` is a BLOCK type, not a top-level field: pass it inside \`blocks\`, `
+        + `e.g. {"blocks":[{"type":"text","text":"…"},{"type":"${key}", …}]}`
+      : '';
+    throw new InteractionRequestError(
+      key,
+      `is not supported by interaction-requests; the endpoint has no field for it${hint}`,
+    );
+  }
+}
+
 export function buildChoiceRequest(params = {}) {
+  // First, before any field is read: an unknown key is a caller who thinks they
+  // sent something. Report it instead of building a card without it. Running
+  // this ahead of the required-field checks means the report names the key they
+  // got wrong, not the field they merely also omitted.
+  rejectUnknownParams(params);
+
   const title = requireText(params.title, 'title');
   // summary is the one-line projection shown beside the title, and the text a
   // client that cannot render the card falls back to. It is required, and it is
@@ -121,16 +188,6 @@ export function buildChoiceRequest(params = {}) {
   const choice = { title, summary, blocks, options };
   if (params.confirm !== undefined) {
     choice.confirm = normalizeConfirm(params.confirm, 'confirm');
-  }
-
-  // 🔴 Refuse the send-level arguments the old card path accepted. The new
-  // endpoint has no field for either, so passing them through would drop them
-  // in silence — and a reply-to that vanishes looks identical to one that was
-  // never asked for.
-  for (const field of ['replyTo', 'mentions', 'kind', 'fallbackText']) {
-    if (params[field] !== undefined) {
-      throw new InteractionRequestError(field, 'is not supported by interaction-requests; the endpoint has no field for it');
-    }
   }
 
   // Always send a key, because the old card path did and a body without one
