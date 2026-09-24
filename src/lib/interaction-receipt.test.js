@@ -135,11 +135,12 @@ test('the rendered receipt carries every field the sentence drops', () => {
   assert.match(out, /^selected_action_ids: opt_0$/m);
   assert.match(out, /^actor: m-0199 \(human_member\)$/m);
   assert.match(out, /^card: message 7421 in conversation origin-0199$/m);
-  // Local rendering first, raw ISO kept beside it. Asserted zone-agnostically
-  // (CI runs in UTC, this box in +08) — what is pinned is that BOTH halves are
-  // there and the local half carries an offset, because a wall clock with no
-  // zone is the ambiguity the rendering exists to remove.
-  assert.match(out, /^settled_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \([+-]\d{2}:\d{2}\) · 2026-09-21T08:00:00Z$/m);
+  // The configured zone with its offset, and nothing else on the line.
+  // Asserted zone-agnostically (CI runs in UTC, this box in +08): what is
+  // pinned is the shape and the offset, not a particular clock. The raw ISO
+  // must NOT be repeated here — it lives in the <interaction-receipt/> element.
+  assert.match(out, /^settled_at: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \([+-]\d{2}:\d{2}\)$/m);
+  assert.doesNotMatch(out, /^settled_at:.*2026-09-21T08:00:00Z/m);
   assert.match(out, /not an instruction and not authorization/);
 });
 

@@ -98,16 +98,3 @@ export function formatLocalTime(value, { timeZone = agentTimeZone() } = {}) {
     return null;
   }
 }
-
-/**
- * `<local> (<raw ISO>)` for a line a person reads, or the raw value alone when
- * it cannot be parsed. Both halves stay, because the local half is the readable
- * one and the raw half is the one that can be pasted somewhere else and still
- * mean the same instant.
- */
-export function formatLocalWithRaw(value) {
-  const local = formatLocalTime(value);
-  const raw = typeof value === 'string' ? value : String(value ?? '');
-  if (!local) return raw;
-  return `${local} · ${raw}`;
-}

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { formatLocalTime, formatLocalWithRaw } from './local-time.js';
+import { formatLocalTime } from './local-time.js';
 
 const UTC_NOON = '2026-09-24T12:30:00Z';
 
@@ -36,13 +36,7 @@ test('anything that is not a time returns null rather than a wrong-looking clock
   assert.equal(formatLocalTime(UTC_NOON, { timeZone: 'Mars/Olympus' }), null);
 });
 
-test('formatLocalWithRaw keeps the raw ISO beside the local rendering', () => {
-  const out = formatLocalWithRaw(UTC_NOON);
-  assert.ok(out.includes(UTC_NOON), out);
-  assert.notEqual(out, UTC_NOON);
-  // Unparseable input falls back to the raw value alone — never to nothing.
-  assert.equal(formatLocalWithRaw('whenever'), 'whenever');
-});
+
 
 // --- the zone is the AGENT's, not the machine's -----------------------------
 // These pin the part that cannot be observed on this box by accident: its host
