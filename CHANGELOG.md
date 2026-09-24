@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A time the agent renders for reading is now shown in the configured timezone, with the raw UTC kept beside it.** Everything this process handles is UTC — the server sends `settled_at` as ISO-8601 with a `Z` — so a receipt answered at 20:30 local printed as `12:30`, and the reader either did the arithmetic or read the answer as eight hours older than it was. `src/lib/local-time.js` renders an instant in `TZ` (which zylos sets and pm2 passes through), always with the offset attached, so the string is not a wall clock nobody can place. The receipt line and `comm.pending` use it.
+
+  The machine-readable copies are deliberately untouched and stay UTC ISO: the `<interaction-receipt settled-at="…"/>` attribute, the `askedAt` written into `pending-questions.json`, and every comparison against `Date.now()`. A local rendering loses its meaning the moment it is copied somewhere else, so the two forms sit side by side rather than one replacing the other.
+
+
 - **`comm.send_card` now requests an interaction instead of building a card.** It posts to `POST /conversations/{id}/interaction-requests` (`interaction_type: choice`) and no longer assembles a `cws.card.v1` body locally: the agent supplies a title, summary, body blocks and option labels, and cws-comm builds the card. The response carries `action_ids` — the server's ids for the options, in the order supplied — which are the only way to read an answer back. `src/lib/interaction-request.js` replaces `buildDisplayCard` as the request builder.
 
   Three previously accepted arguments are now refused with the offending field named, rather than dropped: an option `id` (the server generates ids, and a dropped one would leave the caller matching against something the server never saw), a card with zero options (the protocol has no such interaction), and `replyTo` / `mentions` (the endpoint has no field for either). Local length and count caps are gone by design — every such rule lives in cws-comm, and a second copy drifts toward the stricter side, making a range the server accepts unreachable with an error that blames the caller.

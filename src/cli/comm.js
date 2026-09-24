@@ -27,6 +27,7 @@ import { randomUUID } from 'crypto';
 import { getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
 import { looksLikeMarkdown } from '../lib/message.js';
 import { buildChoiceRequest } from '../lib/interaction-request.js';
+import { formatLocalTime } from '../lib/local-time.js';
 import {
   clearPendingQuestion,
   findPendingQuestion,
@@ -544,7 +545,14 @@ const COMMANDS = {
   },
 
   //   Questions still waiting, and forgetting one that has been dealt with.
-  'comm.pending': () => listPendingQuestions(),
+  //
+  //   `askedAtLocal` is added for reading only; the stored `askedAt` stays the
+  //   UTC ISO string every comparison uses (`isExpired` parses it), because a
+  //   local rendering carries no zone once it is copied anywhere else.
+  'comm.pending': () => listPendingQuestions().map((r) => {
+    const local = formatLocalTime(r.askedAt);
+    return local ? { ...r, askedAtLocal: local } : r;
+  }),
   'comm.pending_clear': () => ({ cleared: clearPendingQuestion(params.cardMessageId) }),
 
   // ✅ GET /api/v1/conversations/{id}/messages/{msg_id}
