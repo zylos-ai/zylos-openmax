@@ -43,3 +43,71 @@ test('formatLocalWithRaw keeps the raw ISO beside the local rendering', () => {
   // Unparseable input falls back to the raw value alone — never to nothing.
   assert.equal(formatLocalWithRaw('whenever'), 'whenever');
 });
+
+// --- the zone is the AGENT's, not the machine's -----------------------------
+// These pin the part that cannot be observed on this box by accident: its host
+// zone and its configured zone are the same, so a resolver that read the host
+// would look correct here and be wrong on a UTC VM. Every case below therefore
+// uses a zone that is neither.
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+import { agentTimeZone } from './local-time.js';
+
+function withEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  try {
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+function zylosDirWith(envContents) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zylos-tz-'));
+  if (envContents !== null) fs.writeFileSync(path.join(dir, '.env'), envContents);
+  return dir;
+}
+
+test("🔴 with TZ unset, the zone comes from the agent's .env, not the host", () => {
+  const dir = zylosDirWith('FOO=1\nTZ=Pacific/Kiritimati\n');
+  withEnv({ TZ: undefined, ZYLOS_DIR: dir }, () => {
+    assert.equal(agentTimeZone(), 'Pacific/Kiritimati');
+    // +14 is a zone no host here would be in, so this also proves the value is
+    // used and not merely returned.
+    assert.match(formatLocalTime('2026-09-24T12:30:00Z'), /\(\+14:00\)$/);
+  });
+});
+
+test('TZ in the environment wins over the file (pm2 injects the configured value)', () => {
+  const dir = zylosDirWith('TZ=Pacific/Kiritimati\n');
+  withEnv({ TZ: 'UTC', ZYLOS_DIR: dir }, () => {
+    assert.equal(agentTimeZone(), 'UTC');
+  });
+});
+
+test('the .env line is parsed the way a shell would read it', () => {
+  const dir = zylosDirWith('export TZ = "Asia/Tokyo"   # set at provisioning\nTZ=Europe/Berlin\n');
+  withEnv({ TZ: undefined, ZYLOS_DIR: dir }, () => {
+    // Last assignment wins, quotes and trailing comment stripped.
+    assert.equal(agentTimeZone(), 'Europe/Berlin');
+  });
+});
+
+test('no .env, or no TZ line, resolves to empty so Intl picks the host zone', () => {
+  withEnv({ TZ: undefined, ZYLOS_DIR: zylosDirWith(null) }, () => {
+    assert.equal(agentTimeZone(), '');
+  });
+  withEnv({ TZ: undefined, ZYLOS_DIR: zylosDirWith('FOO=1\n') }, () => {
+    assert.equal(agentTimeZone(), '');
+  });
+});

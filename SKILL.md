@@ -154,6 +154,8 @@ question over Lark, Telegram or WeChat stays plain text exactly as before. See
 
   Title, summary and body are three regions and the client renders all three: the title is the subject, the summary is **one line of context** — where this came from and when (source, issue, timestamp), not the decision itself — and the body carries the detail. Never repeat one in another — it renders twice.
 
+  🔴 **A time in that summary line is written in the agent's configured timezone, with the offset, never raw UTC** (`自动检查 09-24 20:11 (+08)`, not `2026-09-24T12:11Z`). Every clock reachable from code here is UTC, so pasting one puts a time eight hours off under the title and the card says nothing about which zone it is. The zone is the agent's own configuration (`TZ` in `~/zylos/.env`), **not the host's** — the host is usually UTC while the agent is not.
+
   **Structured detail goes in a `fields` block, one row per item, rather than a paragraph.** A `fields` block is a BLOCK — it lives inside `blocks`, and a top-level `"fields"` is refused (it used to be dropped in silence, and the card posted without the rows):
 
   ```json

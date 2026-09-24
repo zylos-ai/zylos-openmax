@@ -15,11 +15,57 @@
  * for each other — which is why every call site here keeps the raw value
  * alongside rather than replacing it.
  *
- * The zone comes from `TZ` in the process environment, which zylos sets from
- * its own `.env` (`TZ=Asia/Singapore` at the time of writing) and pm2 passes
- * through. When `TZ` is unset, `Intl` falls back to the host zone, which is the
- * best available guess and is what every other tool on the box already prints.
+ * 🔴 The zone is the AGENT's configured one, not the machine's. They happen to
+ * match on this box, which is exactly why the difference has to be written down
+ * rather than discovered later: a zylos agent is provisioned with a timezone
+ * that lands in `~/zylos/.env` as `TZ=`, while the host it runs on is usually
+ * UTC. Reading the host zone would be right here and silently wrong on the next
+ * deployment — and the failure would look like nothing, just times that are
+ * some hours off.
+ *
+ * So the order is: `TZ` in the process environment (pm2 injects the configured
+ * value, so this is the configured zone, not the host's), then the `TZ=` line
+ * of the agent's own `.env`, and only then whatever `Intl` defaults to. The
+ * middle step is what makes a CLI run outside pm2 — where nothing exported
+ * `TZ` — still print the agent's time instead of the machine's.
  */
+
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+
+/** The agent's zylos directory, resolved exactly as agent-readiness.js does. */
+function zylosDir() {
+  return process.env.ZYLOS_DIR || path.join(process.env.HOME || os.homedir(), 'zylos');
+}
+
+/**
+ * The agent's configured zone, or '' when nothing configures one (callers then
+ * let `Intl` pick, which is the host zone — the last resort, never the first).
+ *
+ * The `.env` read is deliberately not cached: this is called a handful of times
+ * per process, and a stale zone after someone edits the file would be another
+ * quiet wrongness of exactly the kind this module exists to remove.
+ */
+export function agentTimeZone() {
+  const fromEnv = (process.env.TZ || '').trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const raw = fs.readFileSync(path.join(zylosDir(), '.env'), 'utf8');
+    // Last assignment wins, matching how a shell would source the file.
+    let found = '';
+    for (const line of raw.split('\n')) {
+      const m = /^\s*(?:export\s+)?TZ\s*=\s*(.*)$/.exec(line);
+      if (!m) continue;
+      const value = m[1].trim().replace(/^["']|["']$/g, '').split('#')[0].trim();
+      if (value) found = value;
+    }
+    return found;
+  } catch {
+    // No .env, unreadable, or no HOME: fall through to the Intl default.
+    return '';
+  }
+}
 
 /**
  * `2026-09-24 20:30:12 (+08:00)`, or null when the input is not a time.
@@ -29,7 +75,7 @@
  * one it is. Returning null (rather than throwing or echoing the input) lets a
  * caller decide between the local form and the raw one.
  */
-export function formatLocalTime(value, { timeZone = process.env.TZ } = {}) {
+export function formatLocalTime(value, { timeZone = agentTimeZone() } = {}) {
   if (value === undefined || value === null || value === '') return null;
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return null;

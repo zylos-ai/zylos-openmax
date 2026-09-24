@@ -248,6 +248,21 @@ body is no longer derived.
 `summary` is also the plain-text projection for clients that cannot render a
 card, which is the other reason it stays a single line.
 
+🔴 **The time in that line is the agent's configured timezone, never UTC.** The
+card's source line is read by a person, and every clock this process can reach
+is UTC: `new Date().toISOString()`, the server's `created_at`, `settled_at`.
+Pasting one of those puts `12:11` under the title of something that happened at
+`20:11` for the reader, and nothing on the card says which zone it is. Write it
+in the configured zone and carry the offset — `自动检查 09-24 20:11 (+08)`.
+
+The zone comes from the agent's own configuration (`TZ` in `~/zylos/.env`, which
+the service environment carries), **not from the host** — a zylos agent is
+provisioned with a timezone while the machine under it is usually UTC, so
+"whatever the box says" is right only by coincidence. `src/lib/local-time.js`
+resolves it in that order and is what the receipt rendering uses; for a summary
+line you are composing by hand, take the time from the same source rather than
+from an ISO string.
+
 ### The body: `text` or `blocks`, never both
 
 `text` is shorthand for a card whose body is one paragraph — it is expanded into
