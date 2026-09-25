@@ -31,7 +31,9 @@ JSON with this envelope:
 }
 ```
 
-`configuration` is the existing REST request body. For `timer`, preserve
+`configuration` accepts only the existing create REST fields listed here;
+unknown fields (including unknown `spec` fields) are rejected before any POST,
+not silently discarded. For `timer`, preserve
 `schedule_kind` (`cron`, `once`, `interval`), `timezone`, and its applicable
 `cron_expr`, `run_at`, `interval_seconds`, `anchor_at`. Timestamps are instants;
 do not reinterpret them in the machine timezone or convert intervals to cron.
@@ -91,12 +93,19 @@ For `webhook`, preserve `lead_member_id`, `owner_member_id`, `spec` and optional
    missing; tell the human what is still needed.
 5. After that human confirms the latest plan, call `src/cli/tm.js` with
    `event-binding.create` for timer or `webhook.create` for webhook. Pass
-   `{"org":"<verified org_id>","configuration":<confirmed configuration>}`.
+   `{"org":"<verified org_id>","source_kind":"<confirmed timer or webhook>","configuration":<confirmed configuration>}`.
+   `source_kind` is mandatory with `configuration`; the CLI rejects a mismatch
+   with the selected command and rejects fields from the other source kind.
    Use structured subprocess arguments/JSON serialization rather than embedding
    unescaped human text in shell code. Do not send envelope fields to the API.
    Do not call `issue.create`, `issue.activate`, run-now, or a scheduler to
    emulate creation. Do not reassign the lead to another agent to fix a denial.
-6. Record and report the returned binding ID, actual state and timer's next
+6. Before reporting success, compare the returned binding's `source_kind`,
+   owner, lead, spec and schedule/filter with the confirmed configuration.
+   Use `event-binding.get` for timer or `webhook.get` for webhook when needed.
+   A mismatch or unreadable result is not verified success: report uncertainty,
+   never automatically recreate or delete the binding.
+   Record and report the returned binding ID, actual state and timer's next
    trigger time if returned. Build the existing Automation page link with
    `core.frontend_url {"org":"<verified org_id>","path":"/automation"}`
    (the existing automation list; there is no detail route). This local helper
@@ -112,16 +121,42 @@ For `webhook`, preserve `lead_member_id`, `owner_member_id`, `spec` and optional
 - A known validation or permission rejection is not success: report the precise
   missing field/access and keep the proposal. Changes require confirmation again.
 - Network timeout, connection loss after submission, 5xx or an unparseable success
-  response means the write outcome may be unknown. The server has NO create
-  idempotency-key contract; `request_id` is only a conversation correlation key.
-  Never blindly repeat the POST. Read `event-binding.list` in the same org and
-  fetch candidate details with `event-binding.get` / `webhook.get`; compare the
+  response means the write outcome may be unknown. These CLI commands send no
+  create idempotency key; `request_id` is only a conversation correlation key.
+  Never blindly repeat the POST. Read `event-binding.list` with the verified
+  `org` (no binding ID needed): it lists both timer and webhook bindings.
+  Narrow by `source_kind`, owner, lead, spec and creation time, then fetch
+  candidate details with `event-binding.get` for timer or `webhook.get` for
+  webhook (the list omits webhook `event_filter`). Compare the
   complete confirmed configuration, owner, lead and creation timing. A name match
   alone is insufficient. If uncertain, report uncertainty and ask the human to
   inspect the Automation page before authorizing any further write. A missing
   entry alone is not proof a delayed write cannot complete.
+  Multiple matches remain uncertain; do not choose one by title or retry.
+  Webhooks are shared EventBinding records, not a separate list collection:
+  `event-binding.delete {org,id}` is the existing soft-delete operation for
+  either source kind. Never delete as automatic recovery; any cleanup needs
+  the human's explicit instruction for the identified binding. A recovered
+  webhook cannot recover its one-time URL from `webhook.get`; disclose that
+  limitation and leave URL rotation to the existing human-authorized setup flow.
 - After a confirmed successful result, repeated delivery or confirmation returns
   the existing result. Do not create another automation unless the human clearly
   requests a distinct automation and confirms its new plan.
 - Do not promise that clarification eliminates every possible future runtime
   wait; later execution follows its existing permissions and approval rules.
+
+## Enforcement boundary
+
+Sender verification, final-plan confirmation and conversation recovery are
+Agent instructions, not a durable CLI confirmation state machine. Reference
+regression tests protect these instructions from accidental removal; they do
+not prove a live Agent follows them. Real Agent acceptance must exercise
+wrong-human replies, revised plans, duplicate delivery and uncertain writes.
+
+Backend contract evidence: Core `internal/transport/http/event_binding.go`
+registers shared list/get/delete; `automation_webhook.go` exposes webhook
+configuration by binding ID. Work `internal/app/webhook_service.go` creates an
+EventBinding with `source_kind=webhook`; `ListEventBindingsByOrg` in
+`internal/generated/sqlc/event_binding.sql.go` filters only org and deletion,
+not source kind. Work `internal/transport/rpc/event_binding.go` authorizes and
+soft-deletes either binding through `DeleteEventBindingVersion`.

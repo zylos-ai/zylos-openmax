@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Clarify and confirm explicit automation form handoffs in the existing agent DM before creation, bypassing generic Issue intake only for that request.
 - Preserve timer cron/once/interval/timezone fields and webhook filters through org-scoped TM creation commands. Redact webhook URL credentials from RPC logs.
 - Keep existing scheduling, Issue generation, execution and acceptance behavior unchanged. Selected agents must receive this skill and CLI before enabling the new form handoff.
+- Reject mismatched creation routes and unsupported configuration fields before POST; honor explicit org selection for identity checks, document shared webhook recovery, and pin confirmation instructions with regression tests (live Agent compliance remains acceptance work).
 
 ## [2.20.0] — 2026-09-17
 

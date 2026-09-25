@@ -493,11 +493,11 @@ ATTEMPT  (all ✅ on contract-v2)
                           blockedOnApprovalRequestIds?}
 
 EVENT BINDING  (定时任务 / create-by-agent)
-  event-binding.create   {org, configuration} # exact REST body; cron/once/interval + timezone
+  event-binding.create   {org, source_kind:"timer", configuration} # supported REST body; cron/once/interval + timezone
                          Legacy: {cronExpr, leadMemberId, ownerMemberId, projectId,
                           title, description?}                                   # agent: leadMemberId=自己, ownerMemberId=对话人类
   event-binding.list     {}                                                     # 本 org 的定时任务
-  webhook.create         {org, configuration} # {lead_member_id, owner_member_id, spec, event_filter?}
+  webhook.create         {org, source_kind:"webhook", configuration} # {lead_member_id, owner_member_id, spec, event_filter?}
   webhook.get            {org, id}
   event-binding.get      {id}
   event-binding.delete   {id}                                                   # 停止后续触发, 不影响已生成的 Issue

@@ -6,6 +6,28 @@ import test from 'node:test';
 
 const cliPath = fileURLToPath(new URL('./tm.js', import.meta.url));
 
+test('wrong route and unsupported fields fail before HTTP submission', async () => {
+  let requests = 0;
+  const server = createServer((req, res) => { requests++; req.resume(); res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const params of [
+      { source_kind: 'timer', configuration: { schedule_kind: 'cron', cron_expr: '0 9 * * 1', timezone: 'UTC' } },
+      { source_kind: 'webhook', configuration: { schedule_kind: 'cron' } },
+      { source_kind: 'webhook', configuration: { spec: { title: 'Task', unsupported: true } } },
+    ]) {
+      const result = await new Promise(resolve => execFile(process.execPath, [cliPath, 'webhook.create', JSON.stringify({ org: 'org-automation', ...params })], {
+        env: { ...process.env, COCO_API_URL: `http://127.0.0.1:${server.address().port}`, COCO_AUTH_TOKEN: 'test', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0' }, timeout: 5000,
+      }, (error, stdout, stderr) => resolve({ error, stderr })));
+      assert.ok(result.error);
+      assert.match(result.stderr, /source_kind must be webhook|unsupported/);
+    }
+    assert.equal(requests, 0);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 for (const schedule of [
   { schedule_kind: 'cron', cron_expr: '0 9 * * 1', timezone: 'Asia/Singapore' },
   { schedule_kind: 'once', run_at: '2030-01-01T01:00:00Z', timezone: 'America/New_York' },
@@ -18,7 +40,7 @@ for (const schedule of [
       ...schedule,
     };
     const request = await captureRequest('event-binding.create', {
-      org: 'org-automation', request_id: 'not-an-idempotency-key', configuration,
+      org: 'org-automation', source_kind: 'timer', request_id: 'not-an-idempotency-key', configuration,
     });
     assert.equal(request.method, 'POST');
     assert.equal(request.url, '/api/v1/event-bindings');
@@ -64,7 +86,7 @@ test('ambiguous webhook server failure does not retry creation', async () => {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const result = await new Promise(resolve => execFile(process.execPath, [cliPath, 'webhook.create', JSON.stringify({
-      org: 'org-automation', configuration: {
+      org: 'org-automation', source_kind: 'webhook', configuration: {
         lead_member_id: 'agent', owner_member_id: 'human',
         spec: { project_id: 'project', title: 'Incoming' }, event_filter: '',
       },
