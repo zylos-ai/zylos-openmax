@@ -154,6 +154,18 @@ Conversations on an Issue / Task, plan explanations, state-change explanations, 
 
 `attempt.create` usually does not need to be called directly — `task.start` automatically creates the Attempt. Use it only when you need to manually start a new round of attempts.
 
+### Automation creation
+
+For explicit `automation-create-request` form handoffs, follow
+[Automation Creation](automation-creation.md) before generic Issue intake.
+`event-binding.create` and `webhook.create` accept `{org, configuration}` with
+the exact REST body. Timers preserve `schedule_kind`, `timezone`, `cron_expr`,
+`run_at`, `interval_seconds`, `anchor_at`, `lead_member_id`, `owner_member_id`
+and `spec`. Webhooks preserve `lead_member_id`, `owner_member_id`, `spec` and
+`event_filter`. Use `webhook.get {org,id}` to read a webhook configuration.
+The webhook creation result contains a secret `webhook_url`; never put it in
+public output or persistent memory. Creation POSTs have no idempotency key.
+
 ### Event Binding (4 commands)
 
 Scheduled task = `EventBinding(sourceKind=timer)`: when the time comes the platform creates an Issue and dispatches it to the lead (you), and you simply "receive a new Issue" without being aware that you were woken by cron.
@@ -318,8 +330,7 @@ node src/cli/tm.js event-binding.create '{
 Key points:
 
 - **owner=human, lead=yourself** is a hard constraint; filling it in wrong is rejected directly (see the guardrails above)
-- **Insufficient context is not blocked at creation time**: if the human insists on creating it even with incomplete information, create it anyway; when it later runs at the appointed time and finds something missing, deliver "missing XX" as the output back to that conversation, and the human then changes the binding
-- This is the main path in v0.7 (the agent calls the API directly); a later version will change it to "return an interactive card, the human clicks a button and creates it as the human"
+- For explicit form handoffs, required missing information must be resolved and the latest plan confirmed in the human's DM before creation; follow the Automation Creation workflow above.
 
 ## Relationship with SKILL.md
 
