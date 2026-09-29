@@ -8,6 +8,7 @@ import {
   formatOwnerLine,
   formatOwnerChangedMessage,
   parseOwnerLineOrgId,
+  ownerLineMatchesOrgIdToken,
   resolveZylosDir,
   sanitizeLine,
   upsertOwnerLine,
@@ -152,12 +153,12 @@ test('OWNER-CHANGED message names the exact line post-install writes, then the J
   const msg = formatOwnerChangedMessage({ ...OWNER, previousOwnerId: 'm-0', payload });
   assert.equal(msg,
     '[OWNER-CHANGED] OpenMax owner of org "Acme" (org-1) changed from m-0 to Alice (member_id m-1). ' +
-    'Update ~/zylos/memory/references.md: under "## Active IDs", replace (or add, if missing) the line starting with ' +
-    '"- Owner (OpenMax Acme org-1)" with exactly: ' + LINE + '. ' +
+    'Update ~/zylos/memory/references.md: under "## Active IDs", find the line that starts with "- Owner (OpenMax " ' +
+    'and contains " org-1): member_id " (match by org_id only — the org name in that line may be outdated) ' +
+    'and replace it with exactly: ' + LINE + '. ' +
+    'If no such line exists, add that line under "## Active IDs". Keep exactly one such line for this org_id. ' +
     'Change only this line; do not modify other channels\' owner lines or the generic "- Owner:" line. ' +
     JSON.stringify(payload));
-  assert.ok(msg.startsWith('[OWNER-CHANGED] '));
-  assert.ok(msg.includes(formatOwnerLine(OWNER)));
   assert.match(formatOwnerChangedMessage({ ...OWNER, previousOwnerId: '', payload: {} }), /changed from none to Alice/);
 });
 
@@ -223,11 +224,40 @@ test('second identical write with a hostile org name leaves bytes and mtime unch
   assert.equal(fs.statSync(ref).mtimeMs, past.getTime());
 });
 
-test('OWNER-CHANGED instruction names the same prefix and line the matcher recognizes', () => {
+test('OWNER-CHANGED instruction locates the line by org_id, not the (mutable) org name', () => {
   const owner = { orgId: 'org-1', orgName: 'Acme): forged', memberId: 'm-1', name: 'Alice' };
   const msg = formatOwnerChangedMessage({ ...owner, previousOwnerId: 'm-0', payload: {} });
   const line = formatOwnerLine(owner);
   assert.ok(msg.includes(`with exactly: ${line}. `));
-  assert.ok(msg.includes('the line starting with "- Owner (OpenMax Acme): forged org-1)"'));
+  assert.ok(msg.includes('starts with "- Owner (OpenMax " and contains " org-1): member_id "'));
+  assert.ok(!msg.includes('Acme): forged org-1)"'), 'must not tell the agent to match by org name');
   assert.equal(parseOwnerLineOrgId(line), 'org-1');
+});
+
+test('renamed org: old-name line + new-name notification → following the rule replaces in place, one line per org_id', () => {
+  const oldLine = '- Owner (OpenMax Old Name org-1): member_id m-0, display Bob';
+  const others = [
+    '- Owner (OpenMax Other org-10): member_id m-9, display Zed',
+    '- Owner (OpenMax Old Name org-2): member_id m-8, display Yan',
+    '- Owner: Gavin (lark ou_123)',
+  ];
+  const before = TEMPLATE.replace('- Owner: (not yet established)\n', `${oldLine}\n${others.join('\n')}\n`);
+  const owner = { orgId: 'org-1', orgName: 'New Name', memberId: 'm-1', name: 'Alice' };
+  const msg = formatOwnerChangedMessage({ ...owner, previousOwnerId: 'm-0', payload: {} });
+  const target = msg.match(/with exactly: (.*?)\. If no such line/)[1];
+  assert.equal(target, formatOwnerLine(owner));
+
+  // Apply the rule exactly as the message states it.
+  const lines = before.split('\n');
+  const hits = lines.map((l, i) => (ownerLineMatchesOrgIdToken(l, 'org-1') ? i : -1)).filter((i) => i >= 0);
+  assert.deepEqual(hits, [lines.indexOf(oldLine)]);
+  lines[hits[0]] = target;
+  const viaAgent = lines.join('\n');
+
+  // The direct writer (org_id parse) reaches the identical result.
+  assert.equal(upsertOwnerLine(before, owner), viaAgent);
+  const forOrg1 = viaAgent.split('\n').filter((l) => parseOwnerLineOrgId(l) === 'org-1');
+  assert.deepEqual(forOrg1, [target]);
+  for (const l of others) assert.ok(viaAgent.includes(`${l}\n`), l);
+  assert.ok(!viaAgent.includes('Old Name org-1'));
 });

@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The `[OWNER-CHANGED]` control message now tells the agent exactly which `references.md` line to write.** It previously carried only a JSON payload, leaving the agent to decide what to record and where. It now opens with an English instruction naming the line (built by the same formatter post-install uses, so the two writers produce an identical line) and the rule to change only that line, followed by the existing JSON payload, which gains `org_id` and `org_name`. The prefix, trigger and enqueue mechanics are unchanged.
+- **The `[OWNER-CHANGED]` control message now tells the agent exactly which `references.md` line to write.** It previously carried only a JSON payload, leaving the agent to decide what to record and where. It now opens with an English instruction naming the line (built by the same formatter post-install uses, so the two writers produce an identical line), telling the agent to locate the existing line by org_id rather than by the org name (which post-upgrade may refresh) and the rule to change only that line, followed by the existing JSON payload, which gains `org_id` and `org_name`. The prefix, trigger and enqueue mechanics are unchanged.
 
 ## [2.22.0] - 2026-09-28
 

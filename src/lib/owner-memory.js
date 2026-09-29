@@ -163,15 +163,31 @@ export function writeOwnerReferences({ orgs, zylosDir = resolveZylosDir(), log =
  * `[OWNER-CHANGED]` control message: an English instruction naming the exact
  * line to write, followed by the JSON payload.
  */
+/**
+ * The org-identity token the agent is told to look for: ` <org_id>): member_id `.
+ * The org name is mutable (post-upgrade refreshes it from the API), so the
+ * delegated path must locate the existing line by org_id alone — the same
+ * identity rule upsertOwnerLine uses.
+ */
+export function ownerLineIdToken(orgId) {
+  return ` ${sanitizeOrgId(orgId)}${ID_BOUNDARY}`;
+}
+
+/** The matching rule stated in the OWNER-CHANGED instruction, as code. */
+export function ownerLineMatchesOrgIdToken(line, orgId) {
+  return line.startsWith(OWNER_LINE_MARKER) && line.includes(ownerLineIdToken(orgId));
+}
+
 export function formatOwnerChangedMessage({ orgId, orgName, memberId, name, previousOwnerId, payload }) {
   const line = formatOwnerLine({ orgId, orgName, memberId, name });
-  const prefix = ownerLinePrefix({ orgId, orgName });
   const orgLabel = sanitizeOrgName(orgName) || sanitizeOrgId(orgId);
   const display = sanitizeLine(name) || '(unknown)';
   const prev = sanitizeLine(previousOwnerId) || 'none';
   const instruction =
     `OpenMax owner of org "${orgLabel}" (${sanitizeOrgId(orgId)}) changed from ${prev} to ${display} (member_id ${sanitizeLine(memberId)}). ` +
-    `Update ~/zylos/memory/references.md: under "${ACTIVE_IDS_HEADING}", replace (or add, if missing) the line starting with "${prefix}" with exactly: ${line}. ` +
+    `Update ~/zylos/memory/references.md: under "${ACTIVE_IDS_HEADING}", find the line that starts with "${OWNER_LINE_MARKER}" and contains "${ownerLineIdToken(orgId)}" ` +
+    '(match by org_id only — the org name in that line may be outdated) and replace it with exactly: ' + line + '. ' +
+    `If no such line exists, add that line under "${ACTIVE_IDS_HEADING}". Keep exactly one such line for this org_id. ` +
     'Change only this line; do not modify other channels\' owner lines or the generic "- Owner:" line.';
   return `[OWNER-CHANGED] ${instruction} ${JSON.stringify(payload)}`;
 }

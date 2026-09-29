@@ -244,7 +244,7 @@ You learn what an app can do by reading its catalog **at call time**, so this on
 
 When an owner authorizes a new connection to you, you also receive a proactive **`🔌 [Connection authorized]`** session notice naming the app — that is your cue it is ready; act on it with the same `conn.*` flow (no need to wait to be asked again).
 
-When your OpenMax owner changes, you receive an **`[OWNER-CHANGED]`** session notice. It names the exact line to write in `~/zylos/memory/references.md` (`- Owner (OpenMax <org_name> <org_id>): member_id <id>, display <name>`, under `## Active IDs`): replace or add that one line, and leave other channels' owner lines and the generic `- Owner:` line untouched.
+When your OpenMax owner changes, you receive an **`[OWNER-CHANGED]`** session notice. It names the exact line to write in `~/zylos/memory/references.md` (`- Owner (OpenMax <org_name> <org_id>): member_id <id>, display <name>`, under `## Active IDs`): find the existing line **by org_id** (it starts with `- Owner (OpenMax ` and contains ` <org_id>): member_id ` — the org name in it may be outdated), replace it or add it if missing, keep one line per org_id, and leave other channels' owner lines and the generic `- Owner:` line untouched.
 
 ## Task Classification and Execution Flow
 
