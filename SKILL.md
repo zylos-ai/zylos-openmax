@@ -1,6 +1,6 @@
 ---
 name: openmax
-version: 2.22.0
+version: 2.23.0
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
   you MUST load and follow this skill before handling the task: route explicit automation-create-request form handoffs to the creation workflow before generic Issue intake; otherwise first decide whether it is a task or a question/chat;
@@ -243,6 +243,8 @@ If an owner authorized **more than one connection of the same app** (e.g. two Gm
 You learn what an app can do by reading its catalog **at call time**, so this one flow covers **any** connected app — you never hardcode or pre-learn a specific provider, and a newly-added connector needs no change here. If `conn.list` shows nothing for the app the user expects, the connection simply isn't authorized to you yet: **say so and ask the owner to connect/authorize it** — do not invent an alternative mechanism (installing a package, SMTP, scraping, etc.).
 
 When an owner authorizes a new connection to you, you also receive a proactive **`🔌 [Connection authorized]`** session notice naming the app — that is your cue it is ready; act on it with the same `conn.*` flow (no need to wait to be asked again).
+
+When your OpenMax owner changes, you receive an **`[OWNER-CHANGED]`** session notice. It names the exact line to write in `~/zylos/memory/references.md` (`- Owner (OpenMax <org_name> <org_id>): member_id <id>, display <name>`, under `## Active IDs`): replace or add that one line, and leave other channels' owner lines and the generic `- Owner:` line untouched.
 
 ## Task Classification and Execution Flow
 

@@ -65,6 +65,7 @@ import crypto from 'crypto';
 import readline from 'readline';
 import { DEFAULT_CONFIG } from '../src/lib/config.js';
 import { ensureOpenmaxKb } from './lib/ensure-openmax-kb.js';
+import { writeOwnerReferences } from '../src/lib/owner-memory.js';
 
 const HOME = process.env.HOME;
 const DATA_DIR    = path.join(HOME, 'zylos/components/openmax');
@@ -445,6 +446,11 @@ if (config.agent?.api_key && config.server?.bff_url) {
 fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
 try { fs.chmodSync(CONFIG_PATH, 0o600); } catch {}
 console.log('[install] config.json written (0600)');
+
+// Record each org's OpenMax owner in memory/references.md so the agent's
+// session context knows its owner from the first session. Best-effort: never
+// throws, never fails the install.
+writeOwnerReferences({ orgs: config.orgs });
 
 console.log('[install] complete');
 

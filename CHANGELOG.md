@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.0] - 2026-09-29
+
+### Added
+
+- **Install now records the OpenMax owner in the agent's `memory/references.md`.** The agent learns who its owner is from `references.md`, which is loaded at every session start — not from `config.json`. After `config.json` is written, `hooks/post-install.js` writes one line per org that has an `owner.member_id`, under `## Active IDs`:
+
+  `- Owner (OpenMax <org_name> <org_id>): member_id <id>, display <name>`
+
+  An existing line for the same `org_id` is replaced in place; otherwise the line is appended after the last list line of `## Active IDs`, and if that heading is missing it is appended at the end of the file. Nothing is ever deleted, and the generic `- Owner:` line and other channels' owner lines are never touched. No owner means no write; a missing `references.md` is logged and skipped (never created); unchanged content is not rewritten; names are collapsed to a single line. The step is best-effort and can never fail the install. Logic lives in the new `src/lib/owner-memory.js`.
+
+### Changed
+
+- **The `[OWNER-CHANGED]` control message now tells the agent exactly which `references.md` line to write.** It previously carried only a JSON payload, leaving the agent to decide what to record and where. It now opens with an English instruction naming the line (built by the same formatter post-install uses, so the two writers produce an identical line) and the rule to change only that line, followed by the existing JSON payload, which gains `org_id` and `org_name`. The prefix, trigger and enqueue mechanics are unchanged.
+
 ## [2.22.0] - 2026-09-28
 
 ### Added
