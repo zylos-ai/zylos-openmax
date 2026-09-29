@@ -7,6 +7,7 @@ import path from 'path';
 import {
   formatOwnerLine,
   formatOwnerChangedMessage,
+  parseOwnerLineOrgId,
   resolveZylosDir,
   sanitizeLine,
   upsertOwnerLine,
@@ -158,4 +159,75 @@ test('OWNER-CHANGED message names the exact line post-install writes, then the J
   assert.ok(msg.startsWith('[OWNER-CHANGED] '));
   assert.ok(msg.includes(formatOwnerLine(OWNER)));
   assert.match(formatOwnerChangedMessage({ ...OWNER, previousOwnerId: '', payload: {} }), /changed from none to Alice/);
+});
+
+// Org names are display text and may contain the line's own delimiters. The
+// org_id match must not depend on them, or every install appends a duplicate.
+const HOSTILE_ORG_NAMES = [
+  'Acme): forged',
+  'Acme): member_id evil, display x',
+  'Foo):',
+  '(Acme) (org-1)',
+  'Acme "Quoted" \'single\'',
+  '**Bold** _it_ `code` [link](http://x) ~~s~~ # h',
+  'org-1',
+  ')',
+];
+
+test('delimiter-heavy org names: one line per org, replaced by org_id, idempotent', () => {
+  for (const orgName of HOSTILE_ORG_NAMES) {
+    const owner = { orgId: 'org-1', orgName, memberId: 'm-1', name: 'Alice): member_id z' };
+    const line = formatOwnerLine(owner);
+    assert.equal(parseOwnerLineOrgId(line), 'org-1', orgName);
+
+    const once = upsertOwnerLine(TEMPLATE, owner);
+    const twice = upsertOwnerLine(once, owner);
+    assert.equal(twice, once, `idempotent: ${orgName}`);
+    const count = (s) => s.split('\n').filter((l) => l.startsWith('- Owner (OpenMax ')).length;
+    assert.equal(count(once), 1, orgName);
+
+    // Owner change on the same org replaces that line, no duplicate.
+    const changed = upsertOwnerLine(once, { ...owner, memberId: 'm-2', name: 'Bob' });
+    assert.equal(count(changed), 1, orgName);
+    assert.ok(changed.includes('member_id m-2, display Bob'), orgName);
+
+    // A different org whose name mimics this one never matches it.
+    const other = upsertOwnerLine(once, { orgId: 'org-2', orgName: `${orgName} org-1`, memberId: 'm-3', name: 'C' });
+    assert.equal(count(other), 2, orgName);
+    assert.ok(other.includes(line), orgName);
+  }
+});
+
+test('boundary sequence inside an org name is broken up, other characters kept', () => {
+  assert.equal(
+    formatOwnerLine({ orgId: 'org-1', orgName: 'Acme): member_id evil', memberId: 'm-1', name: 'A' }),
+    '- Owner (OpenMax Acme) : member_id evil org-1): member_id m-1, display A',
+  );
+  assert.equal(
+    formatOwnerLine({ orgId: 'org-1', orgName: '**B** `c` [d] "e"', memberId: 'm-1', name: 'A' }),
+    '- Owner (OpenMax **B** `c` [d] "e" org-1): member_id m-1, display A',
+  );
+});
+
+test('second identical write with a hostile org name leaves bytes and mtime unchanged', () => {
+  const dir = tmpZylos(TEMPLATE);
+  const ref = path.join(dir, 'memory', 'references.md');
+  const orgs = { a: { org_id: 'org-1', org_name: 'Acme): forged', owner: { member_id: 'm-1', name: 'Alice' } } };
+  writeOwnerReferences({ orgs, zylosDir: dir, log: () => {} });
+  const bytes = fs.readFileSync(ref);
+  const past = new Date('2020-01-01T00:00:00Z');
+  fs.utimesSync(ref, past, past);
+  const res = writeOwnerReferences({ orgs, zylosDir: dir, log: () => {} });
+  assert.deepEqual(res, [{ orgId: 'org-1', changed: false }]);
+  assert.ok(fs.readFileSync(ref).equals(bytes));
+  assert.equal(fs.statSync(ref).mtimeMs, past.getTime());
+});
+
+test('OWNER-CHANGED instruction names the same prefix and line the matcher recognizes', () => {
+  const owner = { orgId: 'org-1', orgName: 'Acme): forged', memberId: 'm-1', name: 'Alice' };
+  const msg = formatOwnerChangedMessage({ ...owner, previousOwnerId: 'm-0', payload: {} });
+  const line = formatOwnerLine(owner);
+  assert.ok(msg.includes(`with exactly: ${line}. `));
+  assert.ok(msg.includes('the line starting with "- Owner (OpenMax Acme): forged org-1)"'));
+  assert.equal(parseOwnerLineOrgId(line), 'org-1');
 });

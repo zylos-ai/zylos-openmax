@@ -40,11 +40,26 @@ export function sanitizeLine(value) {
     .trim();
 }
 
+// The org-identity boundary: everything before the FIRST occurrence of this
+// string is `<org_name> <org_id>`, and the org_id is the last token there.
+// That parse is unambiguous only if neither the org name nor the org id can
+// contain the boundary, so both are normalized to make that impossible
+// (org names may contain `)`, `):`, `(`, quotes, Markdown — only the exact
+// boundary sequence is broken up; org ids never contain whitespace).
+const ID_BOUNDARY = '): member_id ';
+
+function sanitizeOrgId(orgId) {
+  return sanitizeLine(orgId).replace(/\s+/g, '');
+}
+
+function sanitizeOrgName(orgName) {
+  return sanitizeLine(orgName).replace(/\):(?= member_id)/g, ') :');
+}
+
 /** `- Owner (OpenMax <org_name> <org_id>)` — org_name omitted when empty. */
 export function ownerLinePrefix({ orgId, orgName }) {
-  const name = sanitizeLine(orgName);
-  const id = sanitizeLine(orgId);
-  return `${OWNER_LINE_MARKER}${name ? `${name} ` : ''}${id})`;
+  const name = sanitizeOrgName(orgName);
+  return `${OWNER_LINE_MARKER}${name ? `${name} ` : ''}${sanitizeOrgId(orgId)})`;
 }
 
 /** The full owner line, exactly as post-install writes it. */
@@ -53,13 +68,14 @@ export function formatOwnerLine({ orgId, orgName, memberId, name }) {
   return `${ownerLinePrefix({ orgId, orgName })}: member_id ${sanitizeLine(memberId)}, display ${display}`;
 }
 
-function isOwnerLineForOrg(line, orgId) {
-  if (!line.startsWith(OWNER_LINE_MARKER)) return false;
-  const close = line.indexOf('):');
-  if (close < 0) return false;
-  const inner = line.slice(OWNER_LINE_MARKER.length, close);
-  const tokens = inner.split(' ');
-  return tokens[tokens.length - 1] === orgId;
+/** org_id of an OpenMax owner line, or null if the line is not one. */
+export function parseOwnerLineOrgId(line) {
+  if (!line.startsWith(OWNER_LINE_MARKER)) return null;
+  const boundary = line.indexOf(ID_BOUNDARY, OWNER_LINE_MARKER.length);
+  if (boundary < 0) return null;
+  const inner = line.slice(OWNER_LINE_MARKER.length, boundary);
+  const id = inner.slice(inner.lastIndexOf(' ') + 1);
+  return id || null;
 }
 
 /**
@@ -67,12 +83,12 @@ function isOwnerLineForOrg(line, orgId) {
  * Returns the input unchanged when the line is already present verbatim.
  */
 export function upsertOwnerLine(content, owner) {
-  const orgId = sanitizeLine(owner.orgId);
+  const orgId = sanitizeOrgId(owner.orgId);
   const newLine = formatOwnerLine(owner);
   const eol = content.includes('\r\n') ? '\r\n' : '\n';
   const lines = content.split(/\r?\n/);
 
-  const idx = lines.findIndex((l) => isOwnerLineForOrg(l, orgId));
+  const idx = lines.findIndex((l) => parseOwnerLineOrgId(l) === orgId);
   if (idx >= 0) {
     if (lines[idx] === newLine) return content;
     lines[idx] = newLine;
@@ -150,11 +166,11 @@ export function writeOwnerReferences({ orgs, zylosDir = resolveZylosDir(), log =
 export function formatOwnerChangedMessage({ orgId, orgName, memberId, name, previousOwnerId, payload }) {
   const line = formatOwnerLine({ orgId, orgName, memberId, name });
   const prefix = ownerLinePrefix({ orgId, orgName });
-  const orgLabel = sanitizeLine(orgName) || sanitizeLine(orgId);
+  const orgLabel = sanitizeOrgName(orgName) || sanitizeOrgId(orgId);
   const display = sanitizeLine(name) || '(unknown)';
   const prev = sanitizeLine(previousOwnerId) || 'none';
   const instruction =
-    `OpenMax owner of org "${orgLabel}" (${sanitizeLine(orgId)}) changed from ${prev} to ${display} (member_id ${sanitizeLine(memberId)}). ` +
+    `OpenMax owner of org "${orgLabel}" (${sanitizeOrgId(orgId)}) changed from ${prev} to ${display} (member_id ${sanitizeLine(memberId)}). ` +
     `Update ~/zylos/memory/references.md: under "${ACTIVE_IDS_HEADING}", replace (or add, if missing) the line starting with "${prefix}" with exactly: ${line}. ` +
     'Change only this line; do not modify other channels\' owner lines or the generic "- Owner:" line.';
   return `[OWNER-CHANGED] ${instruction} ${JSON.stringify(payload)}`;
