@@ -25,6 +25,7 @@ import { execFile } from 'child_process';
 
 import { loadConfig, watchConfig, enabledOrgs, bindOwner, setOwner, updateOwnerName, setSelfDisplayName, updateConfig } from './lib/config.js';
 import { registerConvOrg } from './lib/conv-org.js';
+import { formatOwnerChangedMessage } from './lib/owner-memory.js';
 import { createSelfNameHydrator } from './lib/self-name-hydration.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { resolveInboundContent } from './lib/inbound-content.js';
@@ -2099,18 +2100,30 @@ async function syncOwnerFromCore(orgConfig) {
 
   // Notify the bot session so it can update memory/references.md with the new
   // owner — config.json is updated but the AI context won't see it until told.
-  notifyOwnerChanged(orgConfig.slug, coreOwnerId, ownerName, localOwnerId);
+  notifyOwnerChanged(orgConfig, coreOwnerId, ownerName, localOwnerId);
   return { nameReady: true };
 }
 
-function notifyOwnerChanged(orgSlug, newOwnerId, newOwnerName, previousOwnerId) {
-  const payload = JSON.stringify({
+function notifyOwnerChanged(orgConfig, newOwnerId, newOwnerName, previousOwnerId) {
+  const orgSlug = orgConfig.slug;
+  const payload = {
     type: 'owner-changed',
     org: orgSlug,
+    org_id: orgConfig.org_id || null,
+    org_name: orgConfig.org_name || null,
     owner: { member_id: newOwnerId, name: newOwnerName },
     previous_owner_member_id: previousOwnerId || null,
+  };
+  // Names the exact references.md line to write — same formatter post-install
+  // uses, so both writers produce an identical line.
+  const content = formatOwnerChangedMessage({
+    orgId: orgConfig.org_id || orgSlug,
+    orgName: orgConfig.org_name,
+    memberId: newOwnerId,
+    name: newOwnerName,
+    previousOwnerId,
+    payload,
   });
-  const content = `[OWNER-CHANGED] ${payload}`;
   execFile(
     process.execPath,
     [C4_CONTROL, 'enqueue', '--content', content, '--priority', '2', '--no-ack-suffix'],
