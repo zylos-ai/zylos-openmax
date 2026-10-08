@@ -24,6 +24,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Onboarding: two Agents of one owner could both send the IM card (and two Agents of one org the teammate card).** The Agent reported `im_card_sent` / `im_card_second_sent` / `partner_card_sent` only after the send succeeded, so sibling Agents deciding the same push at the same moment each sent it. cws-core (`!770`) now records each of these as an atomic claim (once per owner for the IM pushes, once per org for the teammate card; of concurrent reports exactly one gets `recorded=true`), and `references/onboarding-lead.md` now follows it: report the event **first**, send the card only on `recorded:true`, send nothing on `recorded:false`, and send nothing this turn if the report itself fails. A card send that fails after a successful claim falls back to the text form under the same claim, without reporting again. `task_cards_sent` (per Agent) is unchanged: send, then report.
 - **Onboarding: due IM / teammate cards were skipped silently.** A task-card receipt now explicitly starts the owner's first task (it is only exempt from New-Issue intake — the `<openmax-instruction>` sentence for System Member messages says so) (so the IM first push goes out the moment that task starts); on every owner turn while the record is not finished the Agent re-reads `core.onboarding_session` and evaluates every card from `events`, never from memory; "do not suggest next steps" does not cover a due card; and a channel picked earlier without connecting no longer cancels the second push (only `im_card_declined` or `user_has_im_channel: true` do).
 
+## [2.23.1] - 2026-09-30
+
+Release bump covering everything merged since the last tag, `v2.22.0` (2.23.0 was never tagged, so this is the first release that ships these changes).
+
+### Added
+
+- **Automation edits are confirmed in Agent chat** (#173). An explicit update handoff is routed into the Agent conversation before Issue intake; the Agent verifies the human, organization, target and version, sends an update confirmation card, and calls the existing update API only after verified confirmation. See the 2.23.0 entry below for the full contract.
+- **Automation final plans use the server-issued Confirm / Modify / Cancel card** (#172) instead of asking the human to quote a message. The CLI reads the registered proposal decision and sends exactly one verified card (or legacy proof); a selected option does not mean creation succeeded, and stale / cancelled / modified decisions cannot create.
+- **Trusted automation delivery and verified authorization** (#165). Automation results return to the responsible Agent's original human DM via structured delivery and linked revisions; timer and webhook create/update calls forward the authorization preview / proof fields.
+
+### Changed
+
+- **Automation setup no longer shows authorization internals to the user** (#168). `automation.authorization_propose` lets Core send one readable final plan bound to the exact configuration; protocol metadata stays private. The command validates a non-empty UUID request identity and an explicit timer timezone, and disables automatic 401 replay — only an identical proposal request may be retried to recover its receipt.
+- **Automation schedules are clarified in conversation instead of taking picker defaults** (#166). An untouched or incomplete time picker is treated as a draft; supplied description times are parsed without inventing defaults, and genuine conflicts are resolved through a choice card.
+
+### Fixed
+
+- **@mentions are carried on every chunk of a split message** (#167). Mentions are now resolved once against the whole text before splitting and attached to every chunk, so a receiving agent in `mention` mode no longer silently drops the tail of a long message addressed to it.
+- **Automation creation receipts no longer include an Automation list link** (#171). When the backend address is internal this produced an unusable URL; deriving a browser link from the BFF address is now explicitly prohibited.
+
+## [2.23.0] - 2026-09-30
+
+### Added
+
+- Route explicit automation edit-form handoffs to a dedicated update conversation before Issue intake. Verify the human, organization, current target and version; obtain a server-sent Confirm/Modify/Cancel card before updating the exact existing timer or webhook. Stale versions require a new plan and confirmation, and uncertain writes are reconciled without automatic replay.
+- Preserve webhook credentials and omit Automation list links from edit results. Update handoff eligibility requires a separately configured compatible plugin version; deploy this version before enabling that gate.
+
 ## [2.22.0] - 2026-09-28
 
 ### Added
