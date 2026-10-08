@@ -579,6 +579,7 @@ This document is the Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible
 
 - DM goes through `/conversations/dm`, Group goes through `/conversations/groups`, **not** the same generic POST entry point
 - When retrying a failed message send, **keep the same `clientMsgId`**; the server does 5-minute idempotency based on it
+- `comm.send` / `comm.send_card` / `comm.ask_card` (and the `[CARD]` reply) already re-send the same request on a `401` (token rotated mid-flight) twice within about 2 s before exiting non-zero; do not wrap them in an auth retry of your own
 - cws-core's `SendMessageRequestBody` is `additionalProperties:false` — do not pass fields outside the schema (they will be rejected)
 - The actual response is wrapped in `{data:{...}, ...}`; this CLI does not unwrap it, so the caller should take `.data` as needed
 - `comm.search` has `comm` in its name but is actually a KB page search (`/api/v1/search/pages`); v5 has no standalone full-message search
