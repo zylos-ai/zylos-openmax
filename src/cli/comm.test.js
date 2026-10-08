@@ -312,3 +312,113 @@ test('🔴 guide-card values keep their JSON type on the wire, through both CLI 
     }
   }
 });
+
+/**
+ * Run a command against a stub server that answers the first `failures`
+ * requests with `failStatus`, then 200 with `okBody`. Returns every request it
+ * received plus the CLI's exit outcome.
+ */
+async function runAgainstFlakyServer(command, params, { failures, failStatus = 401, okBody = {} }) {
+  const requests = [];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const rawBody = Buffer.concat(chunks).toString('utf8');
+      requests.push({ url: req.url, body: rawBody ? JSON.parse(rawBody) : undefined });
+      if (requests.length <= failures) {
+        res.writeHead(failStatus, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { status: failStatus, detail: `stub ${failStatus}` } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: okBody, request_id: 'test-request' }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const outcome = await new Promise((resolve) => {
+      execFile(
+        process.execPath,
+        [cliPath, command, JSON.stringify(params)],
+        {
+          env: {
+            ...process.env,
+            COCO_API_URL: `http://127.0.0.1:${port}`,
+            COCO_API_PREFIX: '/api/v1',
+            COCO_AUTH_TOKEN: 'cli-contract-token',
+            COCO_USER_TOKEN: '',
+            COCO_RPC_LOG: '0',
+          },
+        },
+        (error, stdout, stderr) => resolve({
+          ok: !error,
+          stdout,
+          failure: error ? JSON.parse(stderr.trim().split('\n').pop()) : null,
+        }),
+      );
+    });
+    return { requests, ...outcome };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+const onboardingTaskCard = {
+  conversationId: 'cv-onb', title: '我能帮你做这些', summary: '选一个开始',
+  text: '你好,我是你的助理。', cardKind: 'onboarding.task',
+  options: [{ label: '任务一' }, { label: '任务二' }, { label: '任务三' }],
+};
+
+// The client's own single 401 retry happens first (two requests); the send
+// verbs then add a bounded, backed-off retry on top. Three 401s in a row is
+// the e2e case: a token rotated by another process while the card was in
+// flight, which the immediate client retry alone did not survive.
+test('🔴 send_card survives a transient 401 burst: the SAME card is re-sent and goes out', async () => {
+  const { requests, ok } = await runAgainstFlakyServer('comm.send_card', onboardingTaskCard, { failures: 3 });
+  assert.equal(ok, true);
+  assert.equal(requests.length, 4);
+  for (const r of requests) assert.equal(r.url, '/api/v1/conversations/cv-onb/interaction-requests');
+  const ids = new Set(requests.map((r) => r.body.client_msg_id));
+  assert.equal(ids.size, 1, 'every attempt carries the same client_msg_id, so a retry cannot post twice');
+});
+
+test('🔴 ask_card re-sends on a 401 before giving up on the card', async () => {
+  // The stub's success body has no action_ids, so the verb still fails on its
+  // shape check — AFTER the retry. What matters is that the 401 did not end it.
+  const { requests, ok, failure } = await runAgainstFlakyServer('comm.ask_card', {
+    ...onboardingTaskCard, kind: 'onboarding-task', askedOf: 'm-owner',
+  }, { failures: 3 });
+  assert.equal(ok, false);
+  assert.equal(requests.length, 4);
+  assert.match(failure.error, /card was SENT/);
+  assert.equal(new Set(requests.map((r) => r.body.client_msg_id)).size, 1);
+});
+
+test('🔴 the text fallback (comm.send) gets the same retry, so it cannot die in the same window', async () => {
+  const { requests, ok } = await runAgainstFlakyServer('comm.send', {
+    conversationId: 'cv-onb', content: '1. 任务一\n2. 任务二\n3. 任务三',
+  }, { failures: 3 });
+  assert.equal(ok, true);
+  assert.equal(requests.length, 4);
+  assert.equal(new Set(requests.map((r) => r.body.client_msg_id)).size, 1);
+});
+
+test('🔴 a persistent 401 is bounded and still exits non-zero with status 401', async () => {
+  const { requests, ok, failure } = await runAgainstFlakyServer('comm.send_card', onboardingTaskCard, { failures: 100 });
+  assert.equal(ok, false);
+  assert.equal(failure.status, 401);
+  // client single retry (2) + two bounded retries, the client's own refresh
+  // throttled on those (1 each).
+  assert.equal(requests.length, 4);
+});
+
+test('🔴 a non-auth refusal is not retried — the skill falls back to text exactly as before', async () => {
+  const { requests, ok, failure } = await runAgainstFlakyServer('comm.send_card', onboardingTaskCard, {
+    failures: 100, failStatus: 422,
+  });
+  assert.equal(ok, false);
+  assert.equal(failure.status, 422);
+  assert.equal(requests.length, 1);
+});

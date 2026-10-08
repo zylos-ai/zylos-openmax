@@ -47,7 +47,7 @@ Every onboarding card goes into the owner DM (`comm.create_dm {participantId: ow
 - `decline:true` goes on the 「都不用」 option only — at most one per card, never on the task or teammate card.
 - The IM card's `trigger` (first / second push) has no card field; it lives only in `meta` and in the event you report.
 - cws-comm allows up to 16 options on `onboarding.channel` (5 on the others). If `im_channels` + 「都不用」 would exceed that, send the first 15 channels in the given order plus 「都不用」 — do not reorder.
-- **A send that fails** (the CLI exits non-zero / cws-comm refuses a field) → send the **text form** below instead, once. Task cards: then report `task_cards_sent`. IM / teammate card: the push was already claimed before the card was tried (§3) — the text form goes out under that same claim; **do not report again**. Do not retry the card in a loop, and never send both a card and its text form for the same push.
+- **A send that fails** (the CLI exits non-zero / cws-comm refuses a field) → send the **text form** below instead, once. A transient auth failure (`status: 401`, a token being rotated) is not a failure here: the send verbs (`comm.ask_card` / `comm.send_card` / `comm.send` / `[CARD]`) already re-acquire the token and re-send the same card a few times within ~2 s before exiting non-zero, so do not add a retry of your own — a non-zero exit, 401 included, means the card failed. Task cards: then report `task_cards_sent`. IM / teammate card: the push was already claimed before the card was tried (§3) — the text form goes out under that same claim; **do not report again**. Do not retry the card in a loop, and never send both a card and its text form for the same push.
 
 ## Text form (the permanent fallback)
 

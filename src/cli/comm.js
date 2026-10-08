@@ -24,7 +24,8 @@
  */
 
 import { randomUUID } from 'crypto';
-import { getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
+import { getForOrg, postForOrg, delForOrg, apiPath, reacquireToken } from '../lib/client.js';
+import { withAuthRetry } from '../lib/auth-retry.js';
 import { looksLikeMarkdown } from '../lib/message.js';
 import { assertAnswerable, buildChoiceRequest } from '../lib/interaction-request.js';
 import { formatLocalTime } from '../lib/local-time.js';
@@ -195,6 +196,19 @@ function convClient(p) {
 const get  = (path, query) => convClient(params).get(path, query);
 const post = (path, body)  => convClient(params).post(path, body);
 const del  = (path)        => convClient(params).del(path);
+
+// POST a user-visible send, re-sending it a bounded number of times on a 401
+// (auth-retry.js). Only the outbound send verbs use this: a card or message
+// that fails on a token rotated mid-flight would otherwise be reported as a
+// failed send — and for an onboarding card that means a permanent downgrade to
+// the text form. `body` is built once by the caller, so every attempt carries
+// the same client_msg_id and a retry can never post twice.
+function postWithAuthRetry(path, body, label) {
+  return withAuthRetry(() => post(path, body), {
+    label,
+    reacquire: ({ force }) => reacquireToken(resolveOrgConfig(params).org_id, { force }),
+  });
+}
 
 // Read this agent's own member record from the backend for the given org; the
 // authoritative owner_member_id lives here.
@@ -449,7 +463,11 @@ const COMMANDS = {
     if (!Array.isArray(params.mentions) && needsRosterHydration(outboundText(params), params.conversationId)) {
       console.warn(`[comm.send] unresolvable @mention in conversation ${params.conversationId}; sending without a structured mention`);
     }
-    return post(apiPath(`/conversations/${params.conversationId}/messages`), buildSendBody(params));
+    return postWithAuthRetry(
+      apiPath(`/conversations/${params.conversationId}/messages`),
+      buildSendBody(params),
+      'comm.send',
+    );
   },
 
   // ✅ POST /api/v1/conversations/{id}/interaction-requests
@@ -466,9 +484,10 @@ const COMMANDS = {
   //   the options, in the order supplied, and they are how the answer is read
   //   back later; there is no way to recover which option was which without
   //   them.
-  'comm.send_card': async () => post(
+  'comm.send_card': async () => postWithAuthRetry(
     apiPath(`/conversations/${params.conversationId}/interaction-requests`),
     buildChoiceRequest(params),
+    'comm.send_card',
   ),
 
   //   Ask a question AND remember what it was, in one call.
@@ -495,9 +514,10 @@ const COMMANDS = {
     const { kind, askedOf, meta, ...cardParams } = params;
     const request = buildChoiceRequest(cardParams);
     assertAnswerable(request, 'comm.ask_card');
-    const res = await post(
+    const res = await postWithAuthRetry(
       apiPath(`/conversations/${params.conversationId}/interaction-requests`),
       request,
+      'comm.ask_card',
     );
     const actionIds = res?.action_ids || res?.data?.action_ids;
     const messageId = res?.message_id || res?.data?.message_id;

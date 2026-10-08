@@ -50,7 +50,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { post, get, getForOrg, apiPath } from '../src/lib/client.js';
+import { post, get, getForOrg, apiPath, reacquireToken } from '../src/lib/client.js';
+import { withAuthRetry } from '../src/lib/auth-retry.js';
 import { enabledOrgs } from '../src/lib/config.js';
 import {
   parseEndpoint,
@@ -295,7 +296,18 @@ async function main() {
     const card = parseCardMessage(message);
     const media = card ? null : parseMediaPrefix(message);
     let result;
-    if (card) result = await sendCardMessage(resolveTargetConversation(ep), card);
+    if (card) {
+      // A 401 on the card (token rotated mid-flight) is re-sent a bounded
+      // number of times before it is reported as a failed send — see
+      // src/lib/auth-retry.js. The request is built once, so a retry carries
+      // the same client_msg_id and cannot post a second card.
+      result = await sendCardMessage(resolveTargetConversation(ep), card, {
+        post: (p, body) => withAuthRetry(() => post(p, body), {
+          label: '[CARD]',
+          reacquire: ({ force }) => reacquireToken(process.env.COCO_ORG_ID, { force }),
+        }),
+      });
+    }
     else if (media) result = await sendMediaMessage(ep, media.kind, media.localPath, media.caption);
     else result = await sendText(ep, message);
     markTypingDone(ep.replyTo || ep.conversationId);
