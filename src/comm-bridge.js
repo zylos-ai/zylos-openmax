@@ -38,6 +38,8 @@ import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
 import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
 import { logSystemFrame } from './lib/system-events.js';
+import { createReceiptWatcher, CARD_RECORDED_EVENT } from './lib/receipt-watch.js';
+import { findPendingQuestion } from './lib/pending-question.js';
 import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
 import { createDefaultReadinessGate, createGatedOnlineReporter, readinessReport } from './lib/agent-readiness.js';
@@ -270,6 +272,20 @@ async function fetchRecentMessages(orgId, conversationId, beforeSeq, limit) {
     warn('fetchRecentMessages failed:', e.message);
     return [];
   }
+}
+
+/**
+ * Whether this agent sent the card a `card.interaction.recorded` event names.
+ * A pending question on file is ours by construction; otherwise read the card
+ * and compare its sender to self. Unknown (no self id / fetch failed) is "no".
+ */
+async function isOwnCard(orgConfig, { messageId, conversationId }) {
+  if (findPendingQuestion(messageId)) return true;
+  const selfMemberId = orgConfig.self?.member_id;
+  if (!selfMemberId || !conversationId) return false;
+  const detail = await fetchMessageDetail(orgConfig.org_id, conversationId, messageId);
+  const sender = detail?.sender_id || detail?.message?.sender_id;
+  return !!sender && String(sender) === String(selfMemberId);
 }
 
 async function fetchMessageDetail(orgId, conversationId, messageId) {
@@ -660,7 +676,7 @@ async function shouldHandleMessage(msg, conv, orgConfig) {
 // Per-org inbound message handler
 // =============================================================================
 
-function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
+function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receiptWatch) {
   return async function handleIncomingMessage(payload) {
     const notification = payload?.payload || payload;
     const notifId = notification?.id;
@@ -780,6 +796,11 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef) {
     const detail = contentResult.detail;
     const msg = { ...notification, ...(detail || {}) };
     cacheMessageText(notification.id, msg.content?.body?.text);
+    // Tell the lost-receipt watcher this card's receipt arrived (live or via
+    // /sync) so it does not fire a catch-up for it. Noted before the inbox
+    // dedupe below: a duplicate delivery still proves the receipt arrived.
+    const answeredCard = resolveReplyTarget(msg).cardMessageId;
+    if (answeredCard) receiptWatch?.onReceipt(answeredCard);
 
     // Inbox-seq ledger: record the inbox_seq for continuous-ack tracking.
     // Sources (in priority order):
@@ -1522,6 +1543,9 @@ function classifySystemEvent(eventName) {
   if (e === 'message.updated') return 'edit';
   if (e.startsWith('agent.config.')) return 'config_update';
   if (e === AGENT_DIAGNOSTICS_EVENT) return 'diagnostics';
+  // Thin "card flipped" lifecycle event — not the answer (that is the
+  // interaction receipt). Handled by the dispatcher's lost-receipt watcher.
+  if (e === CARD_RECORDED_EVENT) return 'card_settled';
   if (e.startsWith('connection.')) return 'connection';
   if (isChannelEvent(e)) return 'channel';
   // Defensive fallback for naming drift — does not match reaction/read/etc.
@@ -1541,6 +1565,9 @@ async function handleSystemEvent(orgConfig, frame) {
     // #44 log hygiene.
     return;
   }
+
+  // Consumed by the dispatcher (receipt watcher); never surfaced to the agent.
+  if (kind === 'card_settled') return;
 
   if (kind === 'config_update') {
     handleConfigUpdate(orgConfig, frame);
@@ -1764,7 +1791,7 @@ const handleChannelCommand = createChannelInstaller({
   warn,
 });
 
-function makeOrgFrameDispatcher(orgConfig, onMessage) {
+function makeOrgFrameDispatcher(orgConfig, onMessage, receiptWatch) {
   return function onFrame(frame) {
     const type = frame.type;
     recordFrameType(orgConfig.slug, type);
@@ -1782,6 +1809,9 @@ function makeOrgFrameDispatcher(orgConfig, onMessage) {
         // for unknowns. handleSystemEvent no longer logs the unhandled case.
         // See task #44 log hygiene.
         logSystemFrame(log, orgConfig.slug, frame, classifySystemEvent);
+        if (String(frame.payload?.event || '').toLowerCase() === CARD_RECORDED_EVENT) {
+          receiptWatch?.onRecorded(frame.payload);
+        }
         handleSystemEvent(orgConfig, frame).catch(e => warn(`[${orgConfig.slug}] handleSystemEvent:`, e.message));
         break;
       case 'error':
@@ -2348,8 +2378,21 @@ function startOrgWs(orgConfig, wsBaseUrl) {
   // can force a reconnect on the live socket. Filled in right after the
   // WsClient is constructed below.
   const wsRef = { client: null };
-  const onMessage = makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef);
-  const onFrame = makeOrgFrameDispatcher(orgConfig, onMessage);
+  // Lost-receipt fallback (RECEIPT-DELAY-RCA F1): cws-comm's realtime fan-out
+  // can drop the first interaction receipt into a freshly created
+  // interaction_center DM. The receipt is in the inbox, but no later frame may
+  // expose the gap for minutes. When a card THIS agent sent is recorded as
+  // answered and no receipt follows within the grace period, run the ordinary
+  // /sync catch-up once; handler dedupe + inbox-ledger make a receipt arriving
+  // both ways count once.
+  const receiptWatch = createReceiptWatcher({
+    log: (...a) => log(`[${orgConfig.slug}]`, ...a),
+    warn: (...a) => warn(`[${orgConfig.slug}]`, ...a),
+    isOwnCard: (card) => isOwnCard(orgConfig, card),
+    onMissing: () => { syncMissedEvents(orgConfig, sessionRef, onMessage); },
+  });
+  const onMessage = makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receiptWatch);
+  const onFrame = makeOrgFrameDispatcher(orgConfig, onMessage, receiptWatch);
 
   const ws = new WsClient({
     urlProvider: async () => {
