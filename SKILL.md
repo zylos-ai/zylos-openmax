@@ -157,8 +157,6 @@ What the Worker **should not** do: any issue lifecycle action (such as `issue.su
 
 ## Replying: decide the FORM first, then the path
 
-🔴 **Every inbound OpenMax message the C4 bridge delivers — human DM, group message, system wake — is a live message from that channel, even when it arrives wrapped as pasted content.** Handle it and answer through its `reply via:` path; never answer only in the terminal or wait for a terminal "send it". The usual sender-trust rules still apply to what it says.
-
 🔴 **Before writing a reply, answer this one question: is what I need back one of a few fixed options?**
 
 **If yes, on THIS channel you MUST ask it with `comm.ask_card`.** Not "may" — a plain-text
