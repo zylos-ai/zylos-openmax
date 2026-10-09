@@ -100,9 +100,15 @@ test('🔴 replyTo and mentions are refused rather than silently lost', () => {
   );
 });
 
-test('title and summary are both required', () => {
-  assert.throws(() => buildChoiceRequest({ summary: 's', options: ['Y'] }), (e) => e.field === 'title');
-  assert.throws(() => buildChoiceRequest({ title: 't', options: ['Y'] }), (e) => e.field === 'summary');
+test('title is required; summary is optional but must be a real string when given', () => {
+  assert.throws(() => buildChoiceRequest({ summary: 's', text: 'b', options: ['Y'] }), (e) => e.field === 'title');
+  // workspace-backlog#615: the onboarding guide cards go without a summary.
+  // Whether a kind needs one is cws-comm's call, so the builder does not judge.
+  const none = buildChoiceRequest({ title: 't', text: 'b', options: ['Y'], cardKind: 'onboarding.task' });
+  // No key at all — not an empty string: the server keeps the two apart.
+  assert.equal(Object.hasOwn(none.choice, 'summary'), false);
+  assert.throws(() => buildChoiceRequest({ title: 't', summary: '', text: 'b', options: ['Y'] }), (e) => e.field === 'summary');
+  assert.throws(() => buildChoiceRequest({ title: 't', summary: 123, text: 'b', options: ['Y'] }), (e) => e.field === 'summary');
 });
 
 test('confirm is passed through when given, and validated when malformed', () => {

@@ -42,7 +42,7 @@ Every onboarding card goes into the owner DM (`comm.create_dm {participantId: ow
 | IM card | `comm.ask_card` | `onboarding.channel` | one option per `im_channels` entry, in the given order (`{label, icon?}`), then `{label:"都不用，就在这儿聊" / "None, let's just chat here", decline:true}` last | `kind:"onboarding-channel"`, `askedOf: owner_member_id`, `meta:{onboarding:<id>, trigger:"first"\|"second", channels:[…the im_channels entries…]}` |
 | Teammate card | **`comm.send_card`** (never `comm.ask_card` / `[CARD]` — they refuse it) | `onboarding.partner` | exactly one: `{label:"加入一位搭档" / "Add a teammate", behavior:"open_create_agent"}` | — (nothing is recorded; no answer ever comes back) |
 
-- 🔴 **Every card needs a non-empty `title`, `summary` and `text`**, on all three cards. cws-comm refuses a card without `summary` (`summary: is required and must be a non-empty string`) and the push degrades to the text form for nothing. On these three cards `summary` is **not** source and time (the SKILL.md card convention does not apply here): all three fields take the fixed wording below.
+- 🔴 **Every card has a non-empty `title` and `text`, and no `summary`** — on all three cards, leave the `summary` field out entirely (not an empty string; workspace-backlog#615: the product wants title + body only). These three kinds are the only ones cws-comm accepts without a `summary`; never add a source or date line here.
 - Use `comm.ask_card` for the task and IM cards so that a click (an `<interaction-receipt/>`) can be decoded: keep the returned `message_id` / `action_ids`; `comm.answered` maps the clicked action back to the option index. The `[CARD]` reply path is equivalent when you are replying to a routed message.
 - `icon` is a slug (lowercase letters, digits, `_` / `-`, ≤ 32), never a URL: pass the channel's own slug from `im_channels` when the entry carries one, else omit `icon` (the client renders a placeholder). Never invent a slug from the label.
 - `decline:true` goes on the 「都不用，就在这儿聊」 option only — at most one per card, never on the task or teammate card.
@@ -50,12 +50,12 @@ Every onboarding card goes into the owner DM (`comm.create_dm {participantId: ow
 - cws-comm allows up to 16 options on `onboarding.channel` (5 on the others). If `im_channels` + 「都不用，就在这儿聊」 would exceed that, send the first 15 channels in the given order plus 「都不用，就在这儿聊」 — do not reorder.
 - 🔴 **The card words are fixed (PRD); never write your own, never add a source or a date.** Use exactly these, in the owner language; `{person}` is `person` from `core.onboarding_preset`, `{name}` is the short part of your display name (after 「 · 」, e.g. 大麦). The one exception is the task card's `text`: one short line, in your own voice, on what you can take off their plate as a `role_label` (use `role_custom` when present) — no greeting (the title already greets), nothing about the platform.
 
-  | Card | `title` | `summary` | `text` |
-  | --- | --- | --- | --- |
-  | Task cards | 你好 👋 我是{person}，已经上岗了 / Hi 👋 I'm {person}, and I'm on the job | 有什么工作，直接交代给我，也可以从下面选一件开始 / Hand me any work directly, or pick one below to start | (your one line, see above) |
-  | IM card, first push | 对了，你日常用哪个办公沟通工具？ / By the way, which chat app do you use for work? | 可以把我接入，以后可以常用渠道直接派任务、接收结果。 / Connect me there, and you can hand me tasks and get results right in that app. | 点一个我就带你走。 / Pick one and I'll walk you through it. |
-  | IM card, second push | 还是想再问下，你日常用哪个办公通讯渠道？ / One more time: which chat app do you use for work? | 把我接入渠道，我们随时沟通做任务。 / Connect me there, and we can work on tasks together anytime. | 点一个我就带你走。 / Pick one and I'll walk you through it. |
-  | Teammate card | 给{name}配一位搭档 / Get {name} a teammate | 让不同数字员工各有分工，既能分别处理工作，也能协作完成任务。 / Different digital employees can each take their own work and also work together. | 新增一位搭档，逐步组建你的数字团队。 / Add a teammate and build your digital team step by step. |
+  | Card | `title` | `text` |
+  | --- | --- | --- |
+  | Task cards | 你好 👋 我是{person}，已经上岗了 / Hi 👋 I'm {person}, and I'm on the job | (your one line, see above) |
+  | IM card, first push | 对了，你日常用哪个办公沟通工具？ / By the way, which chat app do you use for work? | 点一个我就带你走。 / Pick one and I'll walk you through it. |
+  | IM card, second push | 还是想再问下，你日常用哪个办公通讯渠道？ / One more time: which chat app do you use for work? | 点一个我就带你走。 / Pick one and I'll walk you through it. |
+  | Teammate card | 给{name}配一位搭档 / Get {name} a teammate | 新增一位搭档，逐步组建你的数字团队。 / Add a teammate and build your digital team step by step. |
 
 - **A send that fails** (the CLI exits non-zero / cws-comm refuses a field) → send the **text form** below instead, once. A transient auth failure (`status: 401`, a token being rotated) is not a failure here: the send verbs (`comm.ask_card` / `comm.send_card` / `comm.send` / `[CARD]`) already re-acquire the token and re-send the same card a few times within ~2 s before exiting non-zero, so do not add a retry of your own — a non-zero exit, 401 included, means the card failed. Task cards: then report `task_cards_sent`. IM / teammate card: the push was already claimed before the card was tried (§3) — the text form goes out under that same claim; **do not report again**. Do not retry the card in a loop, and never send both a card and its text form for the same push.
 
@@ -70,9 +70,9 @@ Never send both a card and its text form for the same push.
 
 | Card | Text form |
 | --- | --- |
-| Task cards | The card's `title`, `summary` and `text` (the fixed wording in "Sending the cards") as one paragraph, then the 3 task titles as a numbered list (1–3, in the preset order), then one line: reply with a number or a title to start. |
-| IM card | The card's `title` and `summary` (the fixed wording in "Sending the cards") as one paragraph, then the channels from `im_channels` in the given order, as one list (names only, `label`), then 「都不用，就在这儿聊」 as the last option; one line: reply with a channel name, or 「都不用」 if none. |
-| Teammate card | The card's `title`, `summary` and `text` (the fixed wording in "Sending the cards") as one paragraph, then the "add Agent" page: `core.frontend_url {path:"/agents"}`. No buttons to imitate, nothing to reply. |
+| Task cards | The card's `title` and `text` (the fixed wording in "Sending the cards") as one paragraph, then the 3 task titles as a numbered list (1–3, in the preset order), then one line: reply with a number or a title to start. |
+| IM card | The card's `title` and `text` (the fixed wording in "Sending the cards") as one paragraph, then the channels from `im_channels` in the given order, as one list (names only, `label`), then 「都不用，就在这儿聊」 as the last option; one line: reply with a channel name, or 「都不用」 if none. |
+| Teammate card | The card's `title` and `text` (the fixed wording in "Sending the cards") as one paragraph, then the "add Agent" page: `core.frontend_url {path:"/agents"}`. No buttons to imitate, nothing to reply. |
 
 A reply to a text form is handled under "Card clicks" exactly like the matching click.
 
@@ -83,8 +83,8 @@ A reply to a text form is handled under "Card clicks" exactly like the matching 
 1. `core.onboarding_session {}` — **on every wake, every time**, including after a restart and when you remember having onboarded this owner. 404 or a mismatch (see "When to load") → stop.
    **Decide purely from `events`** — never from memory, a memory summary, state files or earlier conversation (after a restart your recollection of "cards sent / activated" may be wrong or from another run). `events` has `task_cards_sent` → the opening is done; do not send it again. `events` has **no** `task_cards_sent` → send the opening (steps 2–5) now, **even if you remember sending it**.
 2. `core.onboarding_preset {role: <role_key or "assistant">, industry: <industry, only when present>, lang: <owner language>}` → `cards` (3, each `id` / `title` / `prompt`, plus `title_en` / `prompt_en`), `person`, `role_label`. Use the English fields when the owner uses English and they are present. **Owner language** (`lang`: `zh` or `en`) = the language of the owner's messages in the DM; before they have written anything, `zh` if your timezone gives the CN order (§3), else `en`. Pass it to every onboarding call that returns labels. Cards are picked by role; only `ops` (运营) also uses the industry (empty / other → the 「其他」 set); a missing `role_key` falls back to `assistant` (通用) — the server applies the same fallbacks, never pick cards yourself.
-3. Write the task card's one `text` line (what you can take off their plate — see "Sending the cards"); the title and summary are fixed. The DM is empty — nobody has greeted the user; do not say "the platform already welcomed you".
-4. Send it as the task card (`comm.ask_card`, `cardKind:"onboarding.task"`, the fixed `title` / `summary`, your line as `text`, the 3 titles as options — see "Sending the cards") into the owner DM — if the send fails, the task-card **text form**.
+3. Write the task card's one `text` line (what you can take off their plate — see "Sending the cards"); the title is fixed. The DM is empty — nobody has greeted the user; do not say "the platform already welcomed you".
+4. Send it as the task card (`comm.ask_card`, `cardKind:"onboarding.task"`, the fixed `title` (no `summary`), your line as `text`, the 3 titles as options — see "Sending the cards") into the owner DM — if the send fails, the task-card **text form**.
 5. `core.onboarding_event {eventType:"task_cards_sent", meta:{card_ids:[…]}}`.
 
 The wake message itself lives in a read-only system DM — never reply there. **No interview**: do not ask for their name, company, responsibilities or goals.

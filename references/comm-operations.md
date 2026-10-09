@@ -248,6 +248,12 @@ body is no longer derived.
 `summary` is also the plain-text projection for clients that cannot render a
 card, which is the other reason it stays a single line.
 
+`summary` is required on every card **except the three onboarding guide cards**
+(`onboarding.task` / `.channel` / `.partner`, below), which go without one
+(workspace-backlog#615): omit the field there — do not send an empty string.
+Whether a kind needs it is cws-comm's call; it refuses a missing `summary` on any
+other kind with the field named.
+
 🔴 **The time in that line is the agent's configured timezone, never UTC.** The
 card's source line is read by a person, and every clock this process can reach
 is UTC: `new Date().toISOString()`, the server's `created_at`, `settled_at`.
@@ -372,12 +378,14 @@ cws-comm currently allows up to 16 options on `onboarding.channel` and 5 on ever
 other kind. That is the server's rule, not this CLI's: an over-count is refused
 by cws-comm with the field named.
 
+These cards carry a `title` and a body (`text`) and **no `summary`** — leave the
+field out entirely; the source-and-time line of other cards does not apply here.
+
 ```bash
 node src/cli/comm.js comm.send_card '{
   "conversationId": "<uuid>",
   "cardKind": "onboarding.channel",
   "title": "对了，你日常用哪个办公沟通工具？",
-  "summary": "可以把我接入，以后可以常用渠道直接派任务、接收结果。",
   "text": "点一个我就带你走。",
   "options": [{"label": "飞书", "icon": "lark"}, {"label": "企业微信", "icon": "wecom"}, {"label": "都不用，就在这儿聊", "decline": true}]
 }'
@@ -394,7 +402,6 @@ node src/cli/comm.js comm.send_card '{
   "conversationId": "<uuid>",
   "cardKind": "onboarding.partner",
   "title": "给大麦配一位搭档",
-  "summary": "让不同数字员工各有分工，既能分别处理工作，也能协作完成任务。",
   "text": "新增一位搭档，逐步组建你的数字团队。",
   "options": [{"label": "加入一位搭档", "behavior": "open_create_agent"}]
 }'

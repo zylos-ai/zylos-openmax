@@ -698,7 +698,7 @@ Messages
   comm.send                 {conversationId, content, replyTo?, clientMsgId?, mentions?}
                             # content: string | {text|body, markdown?} | {type,body} | [{type,body}]
                             # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
-  comm.ask_card             {conversationId, title, summary, options, kind, askedOf, text?|blocks?, confirm?, cardKind?, meta?}
+  comm.ask_card             {conversationId, title, summary?, options, kind, askedOf, text?|blocks?, confirm?, cardKind?, meta?}
                             # send a choice card AND record what was asked, so the later receipt
                             #   can be decoded. Prefer this over comm.send_card for any question
                             #   you intend to act on
@@ -729,7 +729,7 @@ Messages
                             #   expired / actionable. Decides nothing, executes nothing
   comm.pending              {}                                   # questions still awaiting an answer
   comm.pending_clear        {cardMessageId}                       # forget one that has been dealt with
-  comm.send_card            {conversationId, title, summary, text?|blocks?, options, confirm?, cardKind?, clientMsgId?}
+  comm.send_card            {conversationId, title, summary?, text?|blocks?, options, confirm?, cardKind?, clientMsgId?}
                             # cardKind picks an onboarding card family: onboarding.task |
                             #   onboarding.channel | onboarding.partner (omitted = plain choice card).
                             #   NOT "kind" — that is ask_card's "what the question is for"

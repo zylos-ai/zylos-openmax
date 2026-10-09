@@ -234,10 +234,13 @@ export function buildChoiceRequest(params = {}) {
   rejectUnknownParams(params);
 
   const title = requireText(params.title, 'title');
-  // summary is the one-line projection shown beside the title, and the text a
-  // client that cannot render the card falls back to. It is required, and it is
-  // NOT the card body — see the blocks check below.
-  const summary = requireText(params.summary, 'summary');
+  // summary is the one-line line under the title, and the text a client that
+  // cannot render the card falls back to. It is NOT the card body — see the
+  // blocks check below. Optional here: the three onboarding guide kinds go
+  // without one (workspace-backlog#615), and whether a kind needs it is
+  // cws-comm's call — it still refuses a missing summary on every other kind,
+  // naming the field. Only the type is checked: given means a real string.
+  const summary = params.summary === undefined ? undefined : requireText(params.summary, 'summary');
 
   // 🔴 The body is not defaulted from `summary`. It used to be, and the card
   // then rendered the same sentence twice — once in the header beside the
@@ -274,7 +277,10 @@ export function buildChoiceRequest(params = {}) {
   }
   const options = params.options.map(normalizeOption);
 
-  const choice = { title, summary, blocks, options };
+  // An absent summary leaves no key at all, not an empty string: cws-comm keeps
+  // "there is none" and "an empty one was sent" apart.
+  const choice = { title, blocks, options };
+  if (summary !== undefined) choice.summary = summary;
   // `cardKind`, not `kind`: comm.ask_card and `[CARD]` already use `kind` for
   // what the question is for, and strip it before calling here. Reusing the
   // name would give one word two meanings on the same payload. The value is
