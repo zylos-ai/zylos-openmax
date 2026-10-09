@@ -378,6 +378,14 @@ cws-comm currently allows up to 16 options on `onboarding.channel` and 5 on ever
 other kind. That is the server's rule, not this CLI's: an over-count is refused
 by cws-comm with the field named.
 
+The one local check on these cards: `comm.ask_card` and `[CARD]` re-read
+`im_channels` (`GET /onboarding/profile-options`) and refuse an
+`onboarding.channel` card whose non-decline options leave out any channel
+(matched by `label` / `label_zh` / `label_en`; over the 16-option cap, the first
+15). `visible` on a channel is only the client's 「5 + 其他 N 个渠道」 collapse
+hint — send every entry. If that read itself fails, the card goes out unchecked
+with a warning.
+
 These cards carry a `title` and a body (`text`) and **no `summary`** — leave the
 field out entirely; the source-and-time line of other cards does not apply here.
 

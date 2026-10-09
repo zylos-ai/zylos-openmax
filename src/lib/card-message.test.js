@@ -238,7 +238,9 @@ test('[CARD] carries cardKind and the option fields, and keeps its own kind apar
     options: [{ label: '飞书', icon: 'lark' }, { label: '都不用', decline: true }],
   })));
   const post = stubPost();
-  await sendCardMessage('cv-9', parsed, { post, recordQuestion() {} });
+  // The onboarding.channel guard reads the channel list first; stub it.
+  const fetchProfileOptions = async () => ({ im_channels: [{ type: 'feishu', label: '飞书', label_zh: '飞书', label_en: 'Feishu', visible: true }] });
+  await sendCardMessage('cv-9', parsed, { post, recordQuestion() {}, fetchProfileOptions });
   const sent = post.calls[0].body;
   assert.equal(sent.choice.kind, 'onboarding.channel');
   assert.deepEqual(sent.choice.options, [{ label: '飞书', icon: 'lark' }, { label: '都不用', decline: true }]);
@@ -256,4 +258,18 @@ test('🔴 [CARD] keeps guide-card values\' JSON type on the wire', async () => 
     assert.deepEqual(sent.choice.kind, v, JSON.stringify(v));
     assert.deepEqual(sent.choice.options[0], { label: 'x', behavior: v, icon: v, decline: v }, JSON.stringify(v));
   }
+});
+
+test('🔴 [CARD] refuses an onboarding.channel card missing im_channels entries — nothing is posted', async () => {
+  const im = ['企业微信', '飞书', 'WhatsApp'].map((label, i) => ({ type: `t${i}`, label, label_zh: label, label_en: label, visible: i < 2 }));
+  const parsed = parseCardMessage(asMessage(card({
+    cardKind: 'onboarding.channel',
+    options: [{ label: '企业微信' }, { label: '飞书' }, { label: '都不用', decline: true }],
+  })));
+  const post = stubPost();
+  await assert.rejects(
+    () => sendCardMessage('cv-9', parsed, { post, recordQuestion() {}, fetchProfileOptions: async () => ({ im_channels: im }) }),
+    /\[CARD\]: onboarding\.channel card refused.*missing: WhatsApp/,
+  );
+  assert.equal(post.calls.length, 0);
 });

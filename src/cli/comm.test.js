@@ -22,6 +22,13 @@ async function captureRequest(command, params, { allowFailure = false } = {}) {
   let sawRequest = false;
   const requestPromise = new Promise((resolve) => { resolveRequest = resolve; });
   const server = createServer((req, res) => {
+    // comm.ask_card's onboarding.channel guard reads the channel list first;
+    // answer it with no im_channels (guard skips) and keep waiting for the send.
+    if (req.url.startsWith('/api/v1/onboarding/profile-options')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: {} }));
+      return;
+    }
     sawRequest = true;
     const chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
@@ -421,4 +428,81 @@ test('🔴 a non-auth refusal is not retried — the skill falls back to text ex
   assert.equal(ok, false);
   assert.equal(failure.status, 422);
   assert.equal(requests.length, 1);
+});
+
+// ── onboarding.channel guard, end to end through the CLI ───────────────────
+// The stub serves `profileOptions` (or `profileStatus`) on GET profile-options
+// and `{}` on the card POST, so a card that passes the guard still exits on the
+// "card was SENT" shape check — which proves it was posted — without writing a
+// pending record.
+async function runWithProfileOptions(params, { profileOptions, profileStatus = 200 }) {
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    req.resume();
+    req.on('end', () => {
+      if (req.url.startsWith('/api/v1/onboarding/profile-options')) {
+        res.writeHead(profileStatus, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(profileStatus === 200 ? { data: profileOptions } : { error: { status: profileStatus, detail: 'stub' } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: {} }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const outcome = await new Promise((resolve) => {
+      execFile(process.execPath, [cliPath, 'comm.ask_card', JSON.stringify(params)], {
+        env: {
+          ...process.env, COCO_API_URL: `http://127.0.0.1:${port}`, COCO_API_PREFIX: '/api/v1',
+          COCO_AUTH_TOKEN: 'cli-contract-token', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0',
+        },
+      }, (error, stdout, stderr) => resolve({
+        ok: !error, stderr,
+        failure: error ? JSON.parse(stderr.trim().split('\n').pop()) : null,
+      }));
+    });
+    return { requests, ...outcome };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+const IM12 = ['企业微信', '个人微信', '飞书', '钉钉', 'Lark', 'WhatsApp', 'Telegram', 'Slack', 'Discord', 'Microsoft Teams', 'LINE', '邮箱']
+  .map((label, i) => ({ type: `t${i}`, label, label_zh: label, label_en: label, visible: i < 5 }));
+const imCard = (labels) => ({
+  conversationId: 'cv-im', title: '对了，你日常用哪个办公沟通工具？', text: '可以把我接入。',
+  cardKind: 'onboarding.channel', kind: 'onboarding-channel', askedOf: 'm-owner',
+  meta: { onboarding: 'o1', trigger: 'first' },
+  options: [...labels.map((label) => ({ label })), { label: '都不用，就在这儿聊', decline: true }],
+});
+const cardPosts = (requests) => requests.filter((r) => r.url.endsWith('/interaction-requests'));
+
+test('🔴 ask_card refuses an onboarding.channel card missing the visible:false channels — nothing is posted', async () => {
+  const { requests, ok, failure } = await runWithProfileOptions(
+    imCard(IM12.slice(0, 5).map((c) => c.label)), { profileOptions: { im_channels: IM12 } },
+  );
+  assert.equal(ok, false);
+  assert.match(failure.error, /onboarding\.channel card refused/);
+  assert.match(failure.error, /visible/);
+  assert.equal(cardPosts(requests).length, 0, 'the card never reached cws-comm');
+});
+
+test('ask_card sends an onboarding.channel card carrying all 12 channels', async () => {
+  const { requests, failure } = await runWithProfileOptions(
+    imCard(IM12.map((c) => c.label)), { profileOptions: { im_channels: IM12 } },
+  );
+  assert.equal(cardPosts(requests).length, 1);
+  assert.match(failure.error, /card was SENT/);
+});
+
+test('ask_card still sends the channel card when the channel-list fetch fails', async () => {
+  const { requests, failure, stderr } = await runWithProfileOptions(
+    imCard(IM12.slice(0, 5).map((c) => c.label)), { profileStatus: 500 },
+  );
+  assert.equal(cardPosts(requests).length, 1);
+  assert.match(failure.error, /card was SENT/);
+  assert.match(stderr, /guard skipped/);
 });

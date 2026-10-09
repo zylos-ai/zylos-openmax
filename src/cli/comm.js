@@ -28,6 +28,7 @@ import { getForOrg, postForOrg, delForOrg, apiPath, reacquireToken } from '../li
 import { withAuthRetry } from '../lib/auth-retry.js';
 import { looksLikeMarkdown } from '../lib/message.js';
 import { assertAnswerable, buildChoiceRequest } from '../lib/interaction-request.js';
+import { assertAllImChannels } from '../lib/onboarding-channel-guard.js';
 import { formatLocalTime } from '../lib/local-time.js';
 import {
   clearPendingQuestion,
@@ -193,7 +194,7 @@ function convClient(p) {
 // -bare commands (list_conversations / create_dm / create_group / get_messages /
 // send / get_message / unread / mark_read / search / sync) without touching each
 // call site.
-const get  = (path, query) => convClient(params).get(path, query);
+const get  = (path, query, opts) => convClient(params).get(path, query, opts);
 const post = (path, body)  => convClient(params).post(path, body);
 const del  = (path)        => convClient(params).del(path);
 
@@ -514,6 +515,12 @@ const COMMANDS = {
     const { kind, askedOf, meta, ...cardParams } = params;
     const request = buildChoiceRequest(cardParams);
     assertAnswerable(request, 'comm.ask_card');
+    // onboarding.channel: refuse a card that drops any im_channels entry
+    // (e.g. the visible:false ones — a display hint only). A failed fetch
+    // warns and lets the card go. See src/lib/onboarding-channel-guard.js.
+    await assertAllImChannels(request, {
+      fetchProfileOptions: () => get(apiPath('/onboarding/profile-options'), undefined, { timeoutMs: 8000 }),
+    }, 'comm.ask_card');
     const res = await postWithAuthRetry(
       apiPath(`/conversations/${params.conversationId}/interaction-requests`),
       request,
@@ -738,6 +745,9 @@ Messages
                             #   (never a URL), behavior:"open_create_agent" (partner card only:
                             #   opens the add-agent dialog, answers nothing). channel card: up to 16
                             #   options. See references/comm-operations.md "Onboarding guide cards"
+                            # ask_card / [CARD] refuse an onboarding.channel card that leaves out
+                            #   any im_channels entry (visible:false included — visible is only
+                            #   the client's 5 + "其他 N 个渠道" collapse hint)
                             # a partner card MUST go through send_card: ask_card and [CARD] refuse a
                             #   card on which no option answers, since no receipt would ever arrive
                             # BODY: "text" is shorthand for one paragraph; anything richer passes
