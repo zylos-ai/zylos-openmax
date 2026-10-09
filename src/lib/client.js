@@ -32,7 +32,7 @@
  */
 
 import { loadConfig, resolveDefaultOrgId } from './config.js';
-import { getAccessToken, invalidate as invalidateToken } from './token.js';
+import { getAccessToken, invalidate as invalidateToken, exchange as exchangeToken } from './token.js';
 import { cfAccessHeaders } from './cf-access.js';
 import { redactSecrets } from './redact.js';
 
@@ -97,6 +97,21 @@ async function resolveToken(orgId) {
   } catch {
     return loadConfig().agent?.api_key || '';
   }
+}
+
+/**
+ * Re-acquire the agent JWT for an org after a 401 the built-in single retry
+ * did not cure (see auth-retry.js). Drops the cached token so the next request
+ * re-reads the shared token file — adopting a pair another process has just
+ * rotated — and with `force` mints a fresh one from the api_key, which cannot
+ * be a revoked token. A no-op while an explicit bearer override is in effect
+ * (setApiKey / COCO_USER_TOKEN / COCO_AUTH_TOKEN): there is nothing to renew.
+ */
+export async function reacquireToken(orgId, { force = false } = {}) {
+  if (activeApiKey || process.env.COCO_USER_TOKEN || process.env.COCO_AUTH_TOKEN) return;
+  const effectiveOrgId = orgId || resolveDefaultOrgId() || '';
+  invalidateToken(effectiveOrgId);
+  if (force) await exchangeToken(effectiveOrgId);
 }
 
 function resolveCoreHeaders() {

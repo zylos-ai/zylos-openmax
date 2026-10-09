@@ -212,3 +212,64 @@ test('sanity: the real recorder is what this module calls', () => {
   // swapped for a no-op the cell above would still pass on its injected one.
   assert.equal(typeof recordPendingQuestion, 'function');
 });
+
+// ------------------------------------------------------- onboarding guide cards
+
+test('🔴 a [CARD] no one can answer is refused before it is posted or recorded', async () => {
+  // `[CARD]` records a pending question; a partner card's only button opens a
+  // dialog and never produces a receipt, so the record would wait forever.
+  const parsed = parseCardMessage(asMessage(card({
+    cardKind: 'onboarding.partner',
+    options: [{ label: '加入一位搭档', behavior: 'open_create_agent' }],
+  })));
+  const post = stubPost();
+  let recorded = false;
+  await assert.rejects(
+    sendCardMessage('cv-9', parsed, { post, recordQuestion() { recorded = true; } }),
+    (e) => e.field === 'options' && /comm\.send_card/.test(e.message),
+  );
+  assert.equal(post.calls.length, 0, 'nothing may be posted');
+  assert.equal(recorded, false, 'nothing may be recorded');
+});
+
+test('[CARD] carries cardKind and the option fields, and keeps its own kind apart', async () => {
+  const parsed = parseCardMessage(asMessage(card({
+    cardKind: 'onboarding.channel',
+    options: [{ label: '飞书', icon: 'lark' }, { label: '都不用', decline: true }],
+  })));
+  const post = stubPost();
+  // The onboarding.channel guard reads the channel list first; stub it.
+  const fetchProfileOptions = async () => ({ im_channels: [{ type: 'feishu', label: '飞书', label_zh: '飞书', label_en: 'Feishu', visible: true }] });
+  await sendCardMessage('cv-9', parsed, { post, recordQuestion() {}, fetchProfileOptions });
+  const sent = post.calls[0].body;
+  assert.equal(sent.choice.kind, 'onboarding.channel');
+  assert.deepEqual(sent.choice.options, [{ label: '飞书', icon: 'lark' }, { label: '都不用', decline: true }]);
+  assert.equal(parsed.kind, 'component-upgrade', 'the question kind stays the question\'s');
+});
+
+test('🔴 [CARD] keeps guide-card values\' JSON type on the wire', async () => {
+  for (const v of [false, null, '']) {
+    const parsed = parseCardMessage(asMessage(card({
+      cardKind: v, options: [{ label: 'x', behavior: v, icon: v, decline: v }, 'y'],
+    })));
+    const post = stubPost();
+    await sendCardMessage('cv-9', parsed, { post, recordQuestion() {} });
+    const sent = post.calls[0].body;
+    assert.deepEqual(sent.choice.kind, v, JSON.stringify(v));
+    assert.deepEqual(sent.choice.options[0], { label: 'x', behavior: v, icon: v, decline: v }, JSON.stringify(v));
+  }
+});
+
+test('🔴 [CARD] refuses an onboarding.channel card missing im_channels entries — nothing is posted', async () => {
+  const im = ['企业微信', '飞书', 'WhatsApp'].map((label, i) => ({ type: `t${i}`, label, label_zh: label, label_en: label, visible: i < 2 }));
+  const parsed = parseCardMessage(asMessage(card({
+    cardKind: 'onboarding.channel',
+    options: [{ label: '企业微信' }, { label: '飞书' }, { label: '都不用', decline: true }],
+  })));
+  const post = stubPost();
+  await assert.rejects(
+    () => sendCardMessage('cv-9', parsed, { post, recordQuestion() {}, fetchProfileOptions: async () => ({ im_channels: im }) }),
+    /\[CARD\]: onboarding\.channel card refused.*missing: WhatsApp/,
+  );
+  assert.equal(post.calls.length, 0);
+});

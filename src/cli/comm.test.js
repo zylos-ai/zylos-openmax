@@ -22,6 +22,13 @@ async function captureRequest(command, params, { allowFailure = false } = {}) {
   let sawRequest = false;
   const requestPromise = new Promise((resolve) => { resolveRequest = resolve; });
   const server = createServer((req, res) => {
+    // comm.ask_card's onboarding.channel guard reads the channel list first;
+    // answer it with no im_channels (guard skips) and keep waiting for the send.
+    if (req.url.startsWith('/api/v1/onboarding/profile-options')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: {} }));
+      return;
+    }
     sawRequest = true;
     const chunks = [];
     req.on('data', (chunk) => chunks.push(chunk));
@@ -249,4 +256,270 @@ test('send_card refuses a card with no options', async () => {
   });
   assert.match(failure.error, /^options: /);
   assert.equal(failure.status, undefined, 'no HTTP round trip happened');
+});
+
+test('🔴 send_card carries the onboarding guide-card fields to the wire', async () => {
+  const request = await captureRequest('comm.send_card', {
+    conversationId: 'cv-card-g1', title: '选择渠道', summary: '把 agent 接到你常用的地方',
+    text: '选一个渠道。', cardKind: 'onboarding.channel',
+    options: [{ label: '飞书', icon: 'lark' }, { label: '都不用', decline: true }],
+  });
+  assert.equal(request.body.choice.kind, 'onboarding.channel');
+  assert.deepEqual(request.body.choice.options, [
+    { label: '飞书', icon: 'lark' },
+    { label: '都不用', decline: true },
+  ]);
+});
+
+test('send_card sends a partner card whose only button opens the dialog', async () => {
+  const request = await captureRequest('comm.send_card', {
+    conversationId: 'cv-card-g2', title: '找个搭档', summary: '再加一位 agent',
+    text: '加入一位搭档,分担工作。', cardKind: 'onboarding.partner',
+    options: [{ label: '加入一位搭档', behavior: 'open_create_agent' }],
+  });
+  assert.equal(request.body.choice.kind, 'onboarding.partner');
+  assert.equal(request.body.choice.options[0].behavior, 'open_create_agent');
+});
+
+test('🔴 ask_card refuses a card no one can answer, before anything is sent', async () => {
+  // It would record a pending question that never receives a receipt.
+  const failure = await captureFailure('comm.ask_card', {
+    conversationId: 'cv-card-g3', title: '找个搭档', summary: '再加一位 agent',
+    text: '加入一位搭档。', cardKind: 'onboarding.partner',
+    options: [{ label: '加入一位搭档', behavior: 'open_create_agent' }],
+    kind: 'onboarding-partner', askedOf: 'm-owner',
+  });
+  assert.match(failure.error, /^options: /);
+  assert.match(failure.error, /comm\.send_card/);
+  assert.equal(failure.status, undefined, 'no HTTP round trip happened');
+});
+
+test('ask_card keeps its own `kind` separate from the card family', async () => {
+  const request = await captureRequest('comm.ask_card', {
+    conversationId: 'cv-card-g4', title: '选择渠道', summary: 's', text: 'body',
+    cardKind: 'onboarding.channel', options: ['飞书', { label: '都不用', decline: true }],
+    kind: 'channel-choice', askedOf: 'm-owner',
+  }, { allowFailure: true });
+  assert.equal(request.body.choice.kind, 'onboarding.channel');
+});
+
+test('🔴 guide-card values keep their JSON type on the wire, through both CLI verbs', async () => {
+  for (const [command, extra] of [
+    ['comm.send_card', {}],
+    ['comm.ask_card', { kind: 'k', askedOf: 'm-owner' }],
+  ]) {
+    for (const v of [false, null, '']) {
+      const request = await captureRequest(command, {
+        conversationId: 'cv-card-t', title: 't', summary: 's', text: 'b',
+        cardKind: v, options: [{ label: 'x', behavior: v, icon: v, decline: v }, 'y'], ...extra,
+      }, { allowFailure: true });
+      const label = `${command} ${JSON.stringify(v)}`;
+      assert.deepEqual(request.body.choice.kind, v, label);
+      assert.deepEqual(request.body.choice.options[0], { label: 'x', behavior: v, icon: v, decline: v }, label);
+    }
+  }
+});
+
+/**
+ * Run a command against a stub server that answers the first `failures`
+ * requests with `failStatus`, then 200 with `okBody`. Returns every request it
+ * received plus the CLI's exit outcome.
+ */
+async function runAgainstFlakyServer(command, params, { failures, failStatus = 401, okBody = {} }) {
+  const requests = [];
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => {
+      const rawBody = Buffer.concat(chunks).toString('utf8');
+      requests.push({ url: req.url, body: rawBody ? JSON.parse(rawBody) : undefined });
+      if (requests.length <= failures) {
+        res.writeHead(failStatus, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: { status: failStatus, detail: `stub ${failStatus}` } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: okBody, request_id: 'test-request' }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const outcome = await new Promise((resolve) => {
+      execFile(
+        process.execPath,
+        [cliPath, command, JSON.stringify(params)],
+        {
+          env: {
+            ...process.env,
+            COCO_API_URL: `http://127.0.0.1:${port}`,
+            COCO_API_PREFIX: '/api/v1',
+            COCO_AUTH_TOKEN: 'cli-contract-token',
+            COCO_USER_TOKEN: '',
+            COCO_RPC_LOG: '0',
+          },
+        },
+        (error, stdout, stderr) => resolve({
+          ok: !error,
+          stdout,
+          failure: error ? JSON.parse(stderr.trim().split('\n').pop()) : null,
+        }),
+      );
+    });
+    return { requests, ...outcome };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+const onboardingTaskCard = {
+  conversationId: 'cv-onb', title: '我能帮你做这些', summary: '选一个开始',
+  text: '你好,我是你的助理。', cardKind: 'onboarding.task',
+  options: [{ label: '任务一' }, { label: '任务二' }, { label: '任务三' }],
+};
+
+// The client's own single 401 retry happens first (two requests); the send
+// verbs then add a bounded, backed-off retry on top. Three 401s in a row is
+// the e2e case: a token rotated by another process while the card was in
+// flight, which the immediate client retry alone did not survive.
+test('🔴 send_card survives a transient 401 burst: the SAME card is re-sent and goes out', async () => {
+  const { requests, ok } = await runAgainstFlakyServer('comm.send_card', onboardingTaskCard, { failures: 3 });
+  assert.equal(ok, true);
+  assert.equal(requests.length, 4);
+  for (const r of requests) assert.equal(r.url, '/api/v1/conversations/cv-onb/interaction-requests');
+  const ids = new Set(requests.map((r) => r.body.client_msg_id));
+  assert.equal(ids.size, 1, 'every attempt carries the same client_msg_id, so a retry cannot post twice');
+});
+
+test('🔴 ask_card re-sends on a 401 before giving up on the card', async () => {
+  // The stub's success body has no action_ids, so the verb still fails on its
+  // shape check — AFTER the retry. What matters is that the 401 did not end it.
+  const { requests, ok, failure } = await runAgainstFlakyServer('comm.ask_card', {
+    ...onboardingTaskCard, kind: 'onboarding-task', askedOf: 'm-owner',
+  }, { failures: 3 });
+  assert.equal(ok, false);
+  assert.equal(requests.length, 4);
+  assert.match(failure.error, /card was SENT/);
+  assert.equal(new Set(requests.map((r) => r.body.client_msg_id)).size, 1);
+});
+
+test('🔴 the text fallback (comm.send) gets the same retry, so it cannot die in the same window', async () => {
+  const { requests, ok } = await runAgainstFlakyServer('comm.send', {
+    conversationId: 'cv-onb', content: '1. 任务一\n2. 任务二\n3. 任务三',
+  }, { failures: 3 });
+  assert.equal(ok, true);
+  assert.equal(requests.length, 4);
+  assert.equal(new Set(requests.map((r) => r.body.client_msg_id)).size, 1);
+});
+
+test('🔴 a persistent 401 is bounded and still exits non-zero with status 401', async () => {
+  const { requests, ok, failure } = await runAgainstFlakyServer('comm.send_card', onboardingTaskCard, { failures: 100 });
+  assert.equal(ok, false);
+  assert.equal(failure.status, 401);
+  // client single retry (2) + two bounded retries, the client's own refresh
+  // throttled on those (1 each).
+  assert.equal(requests.length, 4);
+});
+
+test('🔴 a non-auth refusal is not retried — the skill falls back to text exactly as before', async () => {
+  const { requests, ok, failure } = await runAgainstFlakyServer('comm.send_card', onboardingTaskCard, {
+    failures: 100, failStatus: 422,
+  });
+  assert.equal(ok, false);
+  assert.equal(failure.status, 422);
+  assert.equal(requests.length, 1);
+});
+
+// ── onboarding.channel guard, end to end through the CLI ───────────────────
+// The stub serves `profileOptions` (or `profileStatus`) on GET profile-options
+// and `{}` on the card POST, so a card that passes the guard still exits on the
+// "card was SENT" shape check — which proves it was posted — without writing a
+// pending record.
+async function runWithProfileOptions(params, { profileOptions, profileStatus = 200, env = {} }) {
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    req.resume();
+    req.on('end', () => {
+      if (req.url.startsWith('/api/v1/onboarding/profile-options')) {
+        res.writeHead(profileStatus, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(profileStatus === 200 ? { data: profileOptions } : { error: { status: profileStatus, detail: 'stub' } }));
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: {} }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const outcome = await new Promise((resolve) => {
+      execFile(process.execPath, [cliPath, 'comm.ask_card', JSON.stringify(params)], {
+        env: {
+          ...process.env, COCO_API_URL: `http://127.0.0.1:${port}`, COCO_API_PREFIX: '/api/v1',
+          COCO_AUTH_TOKEN: 'cli-contract-token', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0',
+          ...env,
+        },
+      }, (error, stdout, stderr) => resolve({
+        ok: !error, stderr,
+        failure: error ? JSON.parse(stderr.trim().split('\n').pop()) : null,
+      }));
+    });
+    return { requests, ...outcome };
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+const IM12 = ['企业微信', '个人微信', '飞书', '钉钉', 'Lark', 'WhatsApp', 'Telegram', 'Slack', 'Discord', 'Microsoft Teams', 'LINE', '邮箱']
+  .map((label, i) => ({ type: `t${i}`, label, label_zh: label, label_en: label, visible: i < 5 }));
+const imCard = (labels) => ({
+  conversationId: 'cv-im', title: '对了，你日常用哪个办公沟通工具？', text: '可以把我接入。',
+  cardKind: 'onboarding.channel', kind: 'onboarding-channel', askedOf: 'm-owner',
+  meta: { onboarding: 'o1', trigger: 'first' },
+  options: [...labels.map((label) => ({ label })), { label: '都不用，就在这儿聊', decline: true }],
+});
+const cardPosts = (requests) => requests.filter((r) => r.url.endsWith('/interaction-requests'));
+
+test('🔴 ask_card refuses an onboarding.channel card missing the visible:false channels — nothing is posted', async () => {
+  const { requests, ok, failure } = await runWithProfileOptions(
+    imCard(IM12.slice(0, 5).map((c) => c.label)), { profileOptions: { im_channels: IM12 } },
+  );
+  assert.equal(ok, false);
+  assert.match(failure.error, /onboarding\.channel card refused/);
+  assert.match(failure.error, /visible/);
+  assert.equal(cardPosts(requests).length, 0, 'the card never reached cws-comm');
+});
+
+test('ask_card sends an onboarding.channel card carrying all 12 channels', async () => {
+  const { requests, failure } = await runWithProfileOptions(
+    imCard(IM12.map((c) => c.label)), { profileOptions: { im_channels: IM12 } },
+  );
+  assert.equal(cardPosts(requests).length, 1);
+  assert.match(failure.error, /card was SENT/);
+});
+
+test('🔴 ask_card re-reads im_channels with the im_order its TZ selects, and refuses a reordered card', async () => {
+  for (const [tz, want] of [['Asia/Shanghai', 'cn'], ['UTC', 'intl']]) {
+    const { requests, failure } = await runWithProfileOptions(
+      imCard(IM12.map((c) => c.label)), { profileOptions: { im_channels: IM12 }, env: { TZ: tz } },
+    );
+    const fetches = requests.filter((r) => r.url.startsWith('/api/v1/onboarding/profile-options'));
+    assert.equal(fetches.length, 1, tz);
+    assert.match(fetches[0].url, new RegExp(`[?&]im_order=${want}(&|$)`), tz);
+    assert.match(failure.error, /card was SENT/, tz);
+  }
+  const reordered = [IM12[1].label, IM12[0].label, ...IM12.slice(2).map((c) => c.label)];
+  const { requests, failure } = await runWithProfileOptions(imCard(reordered), { profileOptions: { im_channels: IM12 } });
+  assert.match(failure.error, /wrong order/);
+  assert.equal(cardPosts(requests).length, 0);
+});
+
+test('ask_card still sends the channel card when the channel-list fetch fails', async () => {
+  const { requests, failure, stderr } = await runWithProfileOptions(
+    imCard(IM12.slice(0, 5).map((c) => c.label)), { profileStatus: 500 },
+  );
+  assert.equal(cardPosts(requests).length, 1);
+  assert.match(failure.error, /card was SENT/);
+  assert.match(stderr, /guard skipped/);
 });

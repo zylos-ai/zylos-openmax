@@ -248,6 +248,12 @@ body is no longer derived.
 `summary` is also the plain-text projection for clients that cannot render a
 card, which is the other reason it stays a single line.
 
+`summary` is required on every card **except the three onboarding guide cards**
+(`onboarding.task` / `.channel` / `.partner`, below), which go without one
+(workspace-backlog#615): omit the field there — do not send an empty string.
+Whether a kind needs it is cws-comm's call; it refuses a missing `summary` on any
+other kind with the field named.
+
 🔴 **The time in that line is the agent's configured timezone, never UTC.** The
 card's source line is read by a person, and every clock this process can reach
 is UTC: `new Date().toISOString()`, the server's `created_at`, `settled_at`.
@@ -334,9 +340,9 @@ Each of these is refused with the offending field named, not dropped:
 | an option `id` | cws-comm generates ids and returns them as `action_ids`. A dropped `id` would leave you matching the answer against something the server never saw |
 | zero options | the protocol has no interaction type for a card with nothing to choose |
 | `replyTo` / `mentions` | the endpoint has no field for either. A reply-to that vanished looks exactly like one that was never asked for |
-| `kind` / `fallbackText` | arguments of the retired card API; the interaction-requests endpoint has no field for either. (`comm.ask_card` has its own `kind` — see below — which that verb consumes itself) |
-| **any other top-level key** | the accepted set is closed: `title` `summary` `text` \| `blocks` `options` `confirm` `clientMsgId`, plus the CLI's own `conversationId` and `org`. Anything else is a caller who thinks they sent something — a top-level `fields` is the case that cost a card its content |
-| **any other key inside an option** | an option's set is closed too: `label` (or the `text` alias), `style`, `confirm`. `confirm_text` or a misspelled `style` would otherwise build, send and render — minus the second confirmation step, or minus the primary button, with nothing said |
+| `kind` / `fallbackText` | arguments of the retired card API. The card family is `cardKind` (see "Onboarding guide cards" below); `kind` stays refused so that it keeps a single meaning — `comm.ask_card`'s "what the question is for", which that verb consumes itself |
+| **any other top-level key** | the accepted set is closed: `title` `summary` `text` \| `blocks` `options` `confirm` `clientMsgId` `cardKind`, plus the CLI's own `conversationId` and `org`. Anything else is a caller who thinks they sent something — a top-level `fields` is the case that cost a card its content |
+| **any other key inside an option** | an option's set is closed too: `label` (or the `text` alias), `style`, `confirm`, and for onboarding cards `behavior`, `decline`, `icon`. `confirm_text` or a misspelled `style` would otherwise build, send and render — minus the second confirmation step, or minus the primary button, with nothing said |
 | **any other key inside a `confirm`** | a confirm carries `text` and an optional `label`, and nothing else |
 
 Business parameters — an operation, a URL, a handler, an amount — have no field
@@ -351,6 +357,71 @@ holds all of it and names the offending field when something violates it. This
 CLI deliberately does **not** restate those rules. A second copy drifts, and it
 drifts toward the stricter side — a local cap tighter than the server's makes a
 range the server accepts unreachable, with an error that blames you for it.
+
+### Onboarding guide cards (`cardKind`)
+
+Three onboarding cards have their own family, and the client renders each one
+with its own component: `onboarding.task`, `onboarding.channel` and
+`onboarding.partner`. Pick one with **`cardKind`**. Without it the card is a plain
+choice card (`interaction.choice`). It is `cardKind` rather than `kind` because
+`comm.ask_card` and `[CARD]` already use `kind` for what the question is for.
+
+Three option fields exist only for these cards:
+
+| Option field | What it does | Where cws-comm accepts it |
+|---|---|---|
+| `decline: true` | marks the "none of these" option. You cannot name its id (cws-comm generates ids), so cws-comm records the generated id in the card for the client — the client never guesses it from position | onboarding kinds; at most one per card; only on an option that answers |
+| `icon` | an icon **slug** such as `lark` — lowercase letters, digits, `_` and `-`, starting with a letter or digit, at most 32 — never a URL. The client resolves it, and renders a neutral placeholder for a slug it does not know | onboarding kinds |
+| `behavior: "open_create_agent"` | the button opens the client's "add agent" dialog. It answers nothing and sends nothing, and it takes no target — there is nothing to point it anywhere else | `onboarding.partner` only |
+
+cws-comm currently allows up to 16 options on `onboarding.channel` and 5 on every
+other kind. That is the server's rule, not this CLI's: an over-count is refused
+by cws-comm with the field named.
+
+The one local check on these cards: `comm.ask_card` and `[CARD]` re-read
+`im_channels` (`GET /onboarding/profile-options`) and refuse an
+`onboarding.channel` card whose non-decline options are not exactly that list,
+in that order: the re-read uses the same `im_order` your `TZ` selects (CN for
+`Asia/Shanghai` / `Asia/Urumqi`, else international), options are compared item
+by item (matched by `label` / `label_zh` / `label_en`), and over the 16-option
+cap the expected list is exactly the first 15. A missing channel, an extra or
+repeated one, or a reordered list is refused, and the error says which.
+`visible` on a channel is only the client's 「5 + 其他 N 个渠道」 collapse hint —
+send every entry. If that read itself fails, the card goes out unchecked
+with a warning.
+
+These cards carry a `title` and a body (`text`) and **no `summary`** — leave the
+field out entirely; the source-and-time line of other cards does not apply here.
+
+```bash
+node src/cli/comm.js comm.send_card '{
+  "conversationId": "<uuid>",
+  "cardKind": "onboarding.channel",
+  "title": "对了，你日常用哪个办公沟通工具？",
+  "text": "可以把我接入，以后可以常用渠道直接派任务、接收结果。",
+  "options": [{"label": "飞书", "icon": "lark"}, {"label": "企业微信", "icon": "wecom"}, {"label": "都不用，就在这儿聊", "decline": true}]
+}'
+```
+
+🔴 **The partner card goes through `comm.send_card`, never `comm.ask_card` or
+`[CARD]`.** Its only button opens a dialog; cws-comm refuses to record a click on
+it as an answer, so no receipt ever comes back. The two recording entries would
+leave a pending question that waits forever, so they refuse a card on which no
+option answers — before anything is sent.
+
+```bash
+node src/cli/comm.js comm.send_card '{
+  "conversationId": "<uuid>",
+  "cardKind": "onboarding.partner",
+  "title": "给大麦配一位搭档",
+  "text": "让不同数字员工各有分工，既能分别处理工作，也能协作完成任务。新增一位搭档，逐步组建你的数字团队。",
+  "options": [{"label": "加入一位搭档", "behavior": "open_create_agent"}]
+}'
+```
+
+As with every other field, the values are cws-comm's to judge: an unknown
+`cardKind`, `behavior` or icon shape, or `decline` on a plain card, is refused by
+the server with the field named, not here.
 
 ### Asking a question you intend to act on
 
@@ -527,6 +598,7 @@ This document is the Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible
 
 - DM goes through `/conversations/dm`, Group goes through `/conversations/groups`, **not** the same generic POST entry point
 - When retrying a failed message send, **keep the same `clientMsgId`**; the server does 5-minute idempotency based on it
+- `comm.send` / `comm.send_card` / `comm.ask_card` (and the `[CARD]` reply) already re-send the same request on a `401` (token rotated mid-flight) twice within about 2 s before exiting non-zero; do not wrap them in an auth retry of your own
 - cws-core's `SendMessageRequestBody` is `additionalProperties:false` — do not pass fields outside the schema (they will be rejected)
 - The actual response is wrapped in `{data:{...}, ...}`; this CLI does not unwrap it, so the caller should take `.data` as needed
 - `comm.search` has `comm` in its name but is actually a KB page search (`/api/v1/search/pages`); v5 has no standalone full-message search

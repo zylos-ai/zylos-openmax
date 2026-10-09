@@ -24,9 +24,11 @@
  */
 
 import { randomUUID } from 'crypto';
-import { getForOrg, postForOrg, delForOrg, apiPath } from '../lib/client.js';
+import { getForOrg, postForOrg, delForOrg, apiPath, reacquireToken } from '../lib/client.js';
+import { withAuthRetry } from '../lib/auth-retry.js';
 import { looksLikeMarkdown } from '../lib/message.js';
-import { buildChoiceRequest } from '../lib/interaction-request.js';
+import { assertAnswerable, buildChoiceRequest } from '../lib/interaction-request.js';
+import { assertAllImChannels } from '../lib/onboarding-channel-guard.js';
 import { formatLocalTime } from '../lib/local-time.js';
 import {
   clearPendingQuestion,
@@ -192,9 +194,22 @@ function convClient(p) {
 // -bare commands (list_conversations / create_dm / create_group / get_messages /
 // send / get_message / unread / mark_read / search / sync) without touching each
 // call site.
-const get  = (path, query) => convClient(params).get(path, query);
+const get  = (path, query, opts) => convClient(params).get(path, query, opts);
 const post = (path, body)  => convClient(params).post(path, body);
 const del  = (path)        => convClient(params).del(path);
+
+// POST a user-visible send, re-sending it a bounded number of times on a 401
+// (auth-retry.js). Only the outbound send verbs use this: a card or message
+// that fails on a token rotated mid-flight would otherwise be reported as a
+// failed send — and for an onboarding card that means a permanent downgrade to
+// the text form. `body` is built once by the caller, so every attempt carries
+// the same client_msg_id and a retry can never post twice.
+function postWithAuthRetry(path, body, label) {
+  return withAuthRetry(() => post(path, body), {
+    label,
+    reacquire: ({ force }) => reacquireToken(resolveOrgConfig(params).org_id, { force }),
+  });
+}
 
 // Read this agent's own member record from the backend for the given org; the
 // authoritative owner_member_id lives here.
@@ -449,7 +464,11 @@ const COMMANDS = {
     if (!Array.isArray(params.mentions) && needsRosterHydration(outboundText(params), params.conversationId)) {
       console.warn(`[comm.send] unresolvable @mention in conversation ${params.conversationId}; sending without a structured mention`);
     }
-    return post(apiPath(`/conversations/${params.conversationId}/messages`), buildSendBody(params));
+    return postWithAuthRetry(
+      apiPath(`/conversations/${params.conversationId}/messages`),
+      buildSendBody(params),
+      'comm.send',
+    );
   },
 
   // ✅ POST /api/v1/conversations/{id}/interaction-requests
@@ -466,9 +485,10 @@ const COMMANDS = {
   //   the options, in the order supplied, and they are how the answer is read
   //   back later; there is no way to recover which option was which without
   //   them.
-  'comm.send_card': async () => post(
+  'comm.send_card': async () => postWithAuthRetry(
     apiPath(`/conversations/${params.conversationId}/interaction-requests`),
     buildChoiceRequest(params),
+    'comm.send_card',
   ),
 
   //   Ask a question AND remember what it was, in one call.
@@ -489,13 +509,23 @@ const COMMANDS = {
     }
     // Strip this verb's own arguments before building the request. `kind`,
     // `askedOf` and `meta` describe the QUESTION, not the card, and the card
-    // builder refuses every field the endpoint has no place for — including a
-    // `kind`, which the old card API used for something else entirely. Passing
-    // them through made this verb throw on its own required argument.
+    // builder refuses all three — `kind` included, because the card family is
+    // `cardKind` there. Passing them through made this verb throw on its own
+    // required argument.
     const { kind, askedOf, meta, ...cardParams } = params;
-    const res = await post(
+    const request = buildChoiceRequest(cardParams);
+    assertAnswerable(request, 'comm.ask_card');
+    // onboarding.channel: refuse a card whose options are not exactly
+    // im_channels (first 15 over the cap) in order, re-read with the im_order
+    // the Agent's TZ selects (visible:false is a display hint only). A failed fetch
+    // warns and lets the card go. See src/lib/onboarding-channel-guard.js.
+    await assertAllImChannels(request, {
+      fetchProfileOptions: (imOrder) => get(apiPath('/onboarding/profile-options'), { im_order: imOrder }, { timeoutMs: 8000 }),
+    }, 'comm.ask_card');
+    const res = await postWithAuthRetry(
       apiPath(`/conversations/${params.conversationId}/interaction-requests`),
-      buildChoiceRequest(cardParams),
+      request,
+      'comm.ask_card',
     );
     const actionIds = res?.action_ids || res?.data?.action_ids;
     const messageId = res?.message_id || res?.data?.message_id;
@@ -676,7 +706,7 @@ Messages
   comm.send                 {conversationId, content, replyTo?, clientMsgId?, mentions?}
                             # content: string | {text|body, markdown?} | {type,body} | [{type,body}]
                             # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
-  comm.ask_card             {conversationId, title, summary, options, kind, askedOf, text?|blocks?, confirm?, meta?}
+  comm.ask_card             {conversationId, title, summary?, options, kind, askedOf, text?|blocks?, confirm?, cardKind?, meta?}
                             # send a choice card AND record what was asked, so the later receipt
                             #   can be decoded. Prefer this over comm.send_card for any question
                             #   you intend to act on
@@ -707,7 +737,20 @@ Messages
                             #   expired / actionable. Decides nothing, executes nothing
   comm.pending              {}                                   # questions still awaiting an answer
   comm.pending_clear        {cardMessageId}                       # forget one that has been dealt with
-  comm.send_card            {conversationId, title, summary, text?|blocks?, options, confirm?, clientMsgId?}
+  comm.send_card            {conversationId, title, summary?, text?|blocks?, options, confirm?, cardKind?, clientMsgId?}
+                            # cardKind picks an onboarding card family: onboarding.task |
+                            #   onboarding.channel | onboarding.partner (omitted = plain choice card).
+                            #   NOT "kind" — that is ask_card's "what the question is for"
+                            # onboarding options may also carry: decline:true ("none of these";
+                            #   cws-comm records its generated id for the client), icon:"<slug>"
+                            #   (never a URL), behavior:"open_create_agent" (partner card only:
+                            #   opens the add-agent dialog, answers nothing). channel card: up to 16
+                            #   options. See references/comm-operations.md "Onboarding guide cards"
+                            # ask_card / [CARD] refuse an onboarding.channel card that leaves out
+                            #   any im_channels entry (visible:false included — visible is only
+                            #   the client's 5 + "其他 N 个渠道" collapse hint)
+                            # a partner card MUST go through send_card: ask_card and [CARD] refuse a
+                            #   card on which no option answers, since no receipt would ever arrive
                             # BODY: "text" is shorthand for one paragraph; anything richer passes
                             #   "blocks" INSTEAD (pass one or the other, never both):
                             #     "blocks": [

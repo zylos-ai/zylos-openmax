@@ -27,9 +27,10 @@
  * dispatch.
  */
 
-import { post, apiPath } from './client.js';
-import { buildChoiceRequest } from './interaction-request.js';
+import { post, get, apiPath } from './client.js';
+import { assertAnswerable, buildChoiceRequest } from './interaction-request.js';
 import { recordPendingQuestion } from './pending-question.js';
+import { assertAllImChannels } from './onboarding-channel-guard.js';
 
 export const CARD_PREFIX = '[CARD]';
 
@@ -132,6 +133,14 @@ export async function sendCardMessage(conversationId, parsed, deps = {}) {
   const nowIso = deps.now ? deps.now() : new Date().toISOString();
 
   const request = buildChoiceRequest(parsed.card);
+  assertAnswerable(request, '[CARD]');
+  // Same onboarding.channel guard as comm.ask_card (exact im_channels in order, same im_order, or refuse;
+  // a failed fetch never blocks). See onboarding-channel-guard.js.
+  await assertAllImChannels(request, {
+    fetchProfileOptions: deps.fetchProfileOptions
+      || ((imOrder) => get(apiPath('/onboarding/profile-options'), { im_order: imOrder }, { timeoutMs: 8000 })),
+    warn: deps.warn,
+  }, '[CARD]');
   const res = await postFn(apiPath(`/conversations/${conversationId}/interaction-requests`), request);
 
   const actionIds = res?.action_ids || res?.data?.action_ids;
