@@ -419,6 +419,8 @@ node src/cli/comm.js comm.send_card '{
 }'
 ```
 
+(「大麦」 here stands for your own name — the short part of your `core.me` display name, see `references/onboarding-lead.md`; never the preset `person`.)
+
 As with every other field, the values are cws-comm's to judge: an unknown
 `cardKind`, `behavior` or icon shape, or `decline` on a plain card, is refused by
 the server with the field named, not here.
