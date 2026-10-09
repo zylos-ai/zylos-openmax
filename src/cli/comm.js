@@ -515,11 +515,12 @@ const COMMANDS = {
     const { kind, askedOf, meta, ...cardParams } = params;
     const request = buildChoiceRequest(cardParams);
     assertAnswerable(request, 'comm.ask_card');
-    // onboarding.channel: refuse a card that drops any im_channels entry
-    // (e.g. the visible:false ones — a display hint only). A failed fetch
+    // onboarding.channel: refuse a card whose options are not exactly
+    // im_channels (first 15 over the cap) in order, re-read with the im_order
+    // the Agent's TZ selects (visible:false is a display hint only). A failed fetch
     // warns and lets the card go. See src/lib/onboarding-channel-guard.js.
     await assertAllImChannels(request, {
-      fetchProfileOptions: () => get(apiPath('/onboarding/profile-options'), undefined, { timeoutMs: 8000 }),
+      fetchProfileOptions: (imOrder) => get(apiPath('/onboarding/profile-options'), { im_order: imOrder }, { timeoutMs: 8000 }),
     }, 'comm.ask_card');
     const res = await postWithAuthRetry(
       apiPath(`/conversations/${params.conversationId}/interaction-requests`),

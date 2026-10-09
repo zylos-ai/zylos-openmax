@@ -435,7 +435,7 @@ test('🔴 a non-auth refusal is not retried — the skill falls back to text ex
 // and `{}` on the card POST, so a card that passes the guard still exits on the
 // "card was SENT" shape check — which proves it was posted — without writing a
 // pending record.
-async function runWithProfileOptions(params, { profileOptions, profileStatus = 200 }) {
+async function runWithProfileOptions(params, { profileOptions, profileStatus = 200, env = {} }) {
   const requests = [];
   const server = createServer((req, res) => {
     requests.push({ method: req.method, url: req.url });
@@ -458,6 +458,7 @@ async function runWithProfileOptions(params, { profileOptions, profileStatus = 2
         env: {
           ...process.env, COCO_API_URL: `http://127.0.0.1:${port}`, COCO_API_PREFIX: '/api/v1',
           COCO_AUTH_TOKEN: 'cli-contract-token', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0',
+          ...env,
         },
       }, (error, stdout, stderr) => resolve({
         ok: !error, stderr,
@@ -496,6 +497,22 @@ test('ask_card sends an onboarding.channel card carrying all 12 channels', async
   );
   assert.equal(cardPosts(requests).length, 1);
   assert.match(failure.error, /card was SENT/);
+});
+
+test('🔴 ask_card re-reads im_channels with the im_order its TZ selects, and refuses a reordered card', async () => {
+  for (const [tz, want] of [['Asia/Shanghai', 'cn'], ['UTC', 'intl']]) {
+    const { requests, failure } = await runWithProfileOptions(
+      imCard(IM12.map((c) => c.label)), { profileOptions: { im_channels: IM12 }, env: { TZ: tz } },
+    );
+    const fetches = requests.filter((r) => r.url.startsWith('/api/v1/onboarding/profile-options'));
+    assert.equal(fetches.length, 1, tz);
+    assert.match(fetches[0].url, new RegExp(`[?&]im_order=${want}(&|$)`), tz);
+    assert.match(failure.error, /card was SENT/, tz);
+  }
+  const reordered = [IM12[1].label, IM12[0].label, ...IM12.slice(2).map((c) => c.label)];
+  const { requests, failure } = await runWithProfileOptions(imCard(reordered), { profileOptions: { im_channels: IM12 } });
+  assert.match(failure.error, /wrong order/);
+  assert.equal(cardPosts(requests).length, 0);
 });
 
 test('ask_card still sends the channel card when the channel-list fetch fails', async () => {

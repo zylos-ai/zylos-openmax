@@ -134,11 +134,11 @@ export async function sendCardMessage(conversationId, parsed, deps = {}) {
 
   const request = buildChoiceRequest(parsed.card);
   assertAnswerable(request, '[CARD]');
-  // Same onboarding.channel guard as comm.ask_card (all im_channels or refuse;
+  // Same onboarding.channel guard as comm.ask_card (exact im_channels in order, same im_order, or refuse;
   // a failed fetch never blocks). See onboarding-channel-guard.js.
   await assertAllImChannels(request, {
     fetchProfileOptions: deps.fetchProfileOptions
-      || (() => get(apiPath('/onboarding/profile-options'), undefined, { timeoutMs: 8000 })),
+      || ((imOrder) => get(apiPath('/onboarding/profile-options'), { im_order: imOrder }, { timeoutMs: 8000 })),
     warn: deps.warn,
   }, '[CARD]');
   const res = await postFn(apiPath(`/conversations/${conversationId}/interaction-requests`), request);

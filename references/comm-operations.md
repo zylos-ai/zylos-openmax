@@ -380,10 +380,14 @@ by cws-comm with the field named.
 
 The one local check on these cards: `comm.ask_card` and `[CARD]` re-read
 `im_channels` (`GET /onboarding/profile-options`) and refuse an
-`onboarding.channel` card whose non-decline options leave out any channel
-(matched by `label` / `label_zh` / `label_en`; over the 16-option cap, the first
-15). `visible` on a channel is only the client's 「5 + 其他 N 个渠道」 collapse
-hint — send every entry. If that read itself fails, the card goes out unchecked
+`onboarding.channel` card whose non-decline options are not exactly that list,
+in that order: the re-read uses the same `im_order` your `TZ` selects (CN for
+`Asia/Shanghai` / `Asia/Urumqi`, else international), options are compared item
+by item (matched by `label` / `label_zh` / `label_en`), and over the 16-option
+cap the expected list is exactly the first 15. A missing channel, an extra or
+repeated one, or a reordered list is refused, and the error says which.
+`visible` on a channel is only the client's 「5 + 其他 N 个渠道」 collapse hint —
+send every entry. If that read itself fails, the card goes out unchecked
 with a warning.
 
 These cards carry a `title` and a body (`text`) and **no `summary`** — leave the
