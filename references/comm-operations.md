@@ -386,7 +386,7 @@ node src/cli/comm.js comm.send_card '{
   "conversationId": "<uuid>",
   "cardKind": "onboarding.channel",
   "title": "对了，你日常用哪个办公沟通工具？",
-  "text": "点一个我就带你走。",
+  "text": "可以把我接入，以后可以常用渠道直接派任务、接收结果。",
   "options": [{"label": "飞书", "icon": "lark"}, {"label": "企业微信", "icon": "wecom"}, {"label": "都不用，就在这儿聊", "decline": true}]
 }'
 ```
@@ -402,7 +402,7 @@ node src/cli/comm.js comm.send_card '{
   "conversationId": "<uuid>",
   "cardKind": "onboarding.partner",
   "title": "给大麦配一位搭档",
-  "text": "新增一位搭档，逐步组建你的数字团队。",
+  "text": "让不同数字员工各有分工，既能分别处理工作，也能协作完成任务。新增一位搭档，逐步组建你的数字团队。",
   "options": [{"label": "加入一位搭档", "behavior": "open_create_agent"}]
 }'
 ```
