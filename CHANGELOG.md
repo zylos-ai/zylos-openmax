@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Onboarding: the opening task card introduced the Agent as the role's preset persona, not by its own name.** The card title 「你好 👋 我是{person}，已经上岗了」 filled `{person}` from `core.onboarding_preset`, the role's default persona (e.g. 大麦). As a result, an Agent the owner renamed at first run, or an add-on Agent bought with its own name (e.g. 「销售测试1283」), still called itself 大麦. The title now uses `{name}`, like the teammate card does. `{name}` is the Agent's own display name, read from `core.me` when the card is built: the part after the last 「 · 」 (「运营助手 · 小张」 → 小张), or the whole name when there is none. `references/onboarding-lead.md` and `core-operations.md` now say that `person` is never the Agent's name. `src/lib/onboarding-lead-reference.test.js` pins the wording and the `{name}` rule.
+
 ## [2.24.0] - 2026-10-09
 
 Onboarding guide cards (#170): a new Agent now runs its own onboarding — a self-introduction with three task cards, then the IM card and the teammate card when each is due — and sends those cards itself. JWT single-flight refresh (#178) is not in this release.
