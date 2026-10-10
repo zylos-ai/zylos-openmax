@@ -17,8 +17,9 @@
  * Message body forms:
  *   plain text         → content=[{type:"text", body:<text>}]
  *   markdown-looking   → content=[{type:"markdown", body:<text>}]   (heuristic)
- *   [MEDIA:image]/path → upload via as.js → content=[{type:"image", body:<media_id>}]
- *   [MEDIA:file]/path  → upload via as.js → content=[{type:"file",  body:<media_id>}]
+ *   [MEDIA:image]/path → upload via as.js → type IMAGE, content.attachments[].artifact_id=<artifactId>
+ *   [MEDIA:file]/path  → upload via as.js → type FILE,  content.attachments[].artifact_id=<artifactId>
+ *                         (see sendMediaMessage — the media id is NOT renderable)
  *   [CARD]{...json...}  → POST .../interaction-requests (a choice card), and
  *                         record what was asked — see src/lib/card-message.js
  *
