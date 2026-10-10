@@ -218,6 +218,13 @@ function readDisk(orgIdOrEmpty) {
   catch { return null; }
 }
 
+/** The pair that expires later — the most recently issued one. */
+function newerState(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  return (b.access_token_expires_at || 0) > (a.access_token_expires_at || 0) ? b : a;
+}
+
 function writeDisk(orgIdOrEmpty, state) {
   try {
     // mkdir/writeFileSync mode only applies on creation; chmod an
@@ -268,7 +275,10 @@ export async function exchange(orgIdArg) {
 export async function refresh(orgIdArg) {
   const oid = orgIdArg || '';
   return withInflight(`refresh:${oid}`, async () => {
-    let s = _stateByOrg.get(oid) || readDisk(oid);
+    // Never refresh with a refresh token another process has already rotated:
+    // cws-core accepts a rotated one for only 10 s, later re-use revokes the
+    // whole token family. The token file is shared, so take the newer pair.
+    let s = newerState(_stateByOrg.get(oid), readDisk(oid));
     if (!s?.refresh_token) return exchange(oid);
     try {
       const body = oid ? { refresh_token: s.refresh_token, org_id: oid }
@@ -309,9 +319,14 @@ export async function getAccessToken(orgIdArg) {
     s = readDisk(oid);
     if (s) _stateByOrg.set(oid, s);
   }
-  const now = Date.now();
-  if (s?.access_token && s.access_token_expires_at - now > REFRESH_MARGIN_MS) {
-    return s.access_token;
+  const fresh = (st) => st?.access_token && st.access_token_expires_at - Date.now() > REFRESH_MARGIN_MS;
+  if (fresh(s)) return s.access_token;
+  // Near expiry: another process (comm-bridge or a CLI verb) may already have
+  // refreshed and written the new pair to the shared file — adopt it.
+  const disk = readDisk(oid);
+  if (fresh(disk)) {
+    _stateByOrg.set(oid, disk);
+    return disk.access_token;
   }
   if (s?.refresh_token) return refresh(oid);
   return exchange(oid);
