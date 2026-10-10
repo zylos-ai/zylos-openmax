@@ -153,7 +153,7 @@ After the underlying cws-core receives the prepare / finalize, it calls cws-as v
 | Parameter | Type | Description |
 | --- | --- | --- |
 | `filePath` | string | **Required**, local absolute path |
-| `conversationId` | uuid | **Set this → IM upload** (conversation attachment). The return contains `mediaId` for `comm.send` attachments |
+| `conversationId` | uuid | **Set this → IM upload** (conversation attachment). The return contains `mediaId` and `artifactId`; message attachments must reference **`artifactId`** |
 | `parentId` | uuid | Only used for KB upload; the id of some folder node in the KB tree; if omitted, attaches to the KB root |
 | `mediaType` | `image\|video\|audio\|voice\|file\|sticker` | Defaults to `file`; affects automatic MIME inference |
 | `contentType` | string | Explicit MIME (overrides mediaType inference) |
@@ -165,8 +165,8 @@ Return (IM mode):
 
 ```json
 {
-  "mediaId":       "art_01JDKF7M2NQRSTUVWXYZ012345",
-  "artifactId":    "art_01JDKF7M2NQRSTUVWXYZ012345",
+  "mediaId":       "01a12147-a2d9-7f0d-bd37-c315232404bb",
+  "artifactId":    "01a12147-a3f1-7c22-9e10-5b6d0c7e1f42",
   "fileName":      "Q2-product-plan.pdf",
   "mimeType":      "application/pdf",
   "sizeBytes":     5242880,
@@ -174,7 +174,9 @@ Return (IM mode):
 }
 ```
 
-KB mode additionally carries the `nodeId` + `treeNode` fields. `mediaId` is an alias for `artifactId` (backward compatibility for historical callers).
+KB mode additionally carries the `nodeId` + `treeNode` fields.
+
+⚠️ **IM mode: `mediaId` and `artifactId` are different ids** (`media_id` / `artifact_id` from finalize). A chat message's `attachments[].artifact_id` must be the **`artifactId`**; using `mediaId` yields an image/file that never loads. Only in **KB mode** is `mediaId` an alias of `artifactId` (backward compatibility).
 
 ### `as.url` details
 
@@ -217,7 +219,7 @@ Inside `scripts/send.js`:
 
 1. Parses `[MEDIA:image]/tmp/chart.png`
 2. `as.uploadMedia('/tmp/chart.png', {mediaType:'image'})` → `{artifactId, mediaId, ...}`
-3. `POST /api/v1/conversations/{id}/messages` body `{content:[{type:"image", body:"<media_id>"}], ...}`
+3. `POST /api/v1/conversations/{id}/messages` body `{type:"IMAGE", content:{content_type:"image", body:{file_name}, attachments:[{artifact_id:<artifactId>, file_name, content_type, size_bytes}]}}`
 
 ### Agent views an image the user sent (`comm-bridge.js` takes this automatically)
 
@@ -276,11 +278,11 @@ This document is a Layer 3 sub-skill of [`SKILL.md`](../SKILL.md), responsible o
 ## AS-specific Notes
 
 - Artifacts are immutable; "modifying" = creating anew, leaving the old one as history
-- `artifact_id` is in ULID form (`art_01JDKF...`, server-generated)
+- `artifact_id` / `media_id` are server-generated UUIDs (e.g. `01a12147-a2d9-7f0d-...`)
 - Single-file size limit is 5 GB (exceeding returns `payload_too_large` 413)
 - `mime_type` blacklist: executable files (`.exe` / `.sh`, etc.) return `unsupported_media_type` 415
 - Pre-signed PUT URL TTL is 1 hour; on timeout you need to re-call the corresponding prepare endpoint (IM: `POST /api/v1/conversations/{cid}/uploads/prepare`; KB: `POST /api/v1/uploads/prepare`) to get a new `upload_token` + `upload_url`
 - For large files (>100MB), cws-as automatically selects Multipart mode (`upload_mode:"multipart"`); the current `uploadMedia()` is still a single PUT, and the large-file scenario needs to be extended (marked TODO)
 - `as.resolve` is for inter-service calls: artifacts without permission are skipped rather than 403, to avoid one failure dragging down the whole batch
-- `media_id` / `artifactId` are synonyms (backward compatibility), and both are given in the return
+- Both `mediaId` and `artifactId` are returned. In **IM mode they differ** and message attachments must use `artifactId`; only in KB mode are they synonyms
 - Choosing wrong between IM mode vs KB mode is the most common pitfall — different return fields + different downstream operation visibility, see "⚠ Which upload path do you take" above

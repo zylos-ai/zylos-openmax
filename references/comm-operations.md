@@ -24,7 +24,7 @@
 
 - Before calling, first run `core.me` to get the current `member_id`; when creating a DM / Group it is the implicit "me"
 - Before a DM, first run `core.member_list` to find the other party's member_id
-- Before referencing a message attachment, first run `as.upload` to get the `media_id`
+- To send an image / file, prefer the outbound path `c4-send.js openmax <conv> "[MEDIA:image]/abs/path"` (see `as-operations.md`). If you call `comm.send` yourself, first run `as.upload` (IM mode) and reference the returned **`artifactId`** — not `mediaId` (see "Sending a message with an attachment" below)
 - Full parameter dependency tree, see [`SKILL.md` Efficiency Shortcuts > Parameter Resolution](../SKILL.md)
 
 ---
@@ -78,19 +78,22 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 | Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.send` | Send a message; `content` supports string / markdown / array structure | `{conversationId, content, replyTo?, clientMsgId?, mentions?}` | `POST /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.send` | Send a message; `content` supports string / markdown / a pre-built content object (for images / files) | `{conversationId, content, replyTo?, clientMsgId?, mentions?}` | `POST /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_messages` | Pull the historical message list (seq-based range) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_message` | Get details of a single message (expands content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
-`content` accepts four kinds of input, which the CLI automatically normalizes into cws-core's `MessageContent[]`:
+`content` accepts these inputs (see `buildSendBody` in `src/cli/comm.js`):
 
 ```text
-"hello"                              → [{type:"text",     body:"hello"}]
-"# header\n..."                      → [{type:"markdown", body:"# header\n..."}]   (heuristic)
-{text:"hi", markdown:true}           → [{type:"markdown", body:"hi"}]
-{type:"image", body:"<media_id>"}    → [{type:"image",    body:"<media_id>"}]
-[{type:"text", body:"..."}, ...]     → passed through as-is (already in array form)
+"hello"                                          → text message
+"# header\n..."                                  → markdown message (heuristic)
+{text:"hi"}                                      → text / markdown (auto-detect)
+{content_type:"image", body:{file_name},         → IMAGE message (pre-built; type inferred from content_type)
+ attachments:[{artifact_id, file_name,
+               content_type, size_bytes}]}
 ```
+
+⚠️ **Not supported — do not use:** an array of parts (`[{type:"text",...},{type:"image",...}]`) or `{type:"image", body:"<id>"}`. They are **not** normalized: an array is sent as an **empty text message**, and `{type:"image", body:"<id>"}` is sent as a **text message containing the id**. The call still returns 200, so nothing tells you it went wrong.
 
 `clientMsgId` is used for server-side 5-minute idempotent deduplication; if not provided, `cmsg_<uuid>` is auto-generated. For retries of the same logical message, use the same id.
 
@@ -154,22 +157,37 @@ node src/cli/comm.js comm.send '{
 
 ### Sending a message with an attachment in a group
 
+Simplest (recommended) — the outbound script does the upload and builds the message for you:
+
 ```bash
-# 1. First upload the attachment (IM mode, with conversationId), get the media_id
+node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax '<conv-uuid>' '[MEDIA:file]/tmp/weekly.pdf'
+```
+
+Doing it by hand with the CLI:
+
+```bash
+# 1. Upload the attachment (IM mode, with conversationId)
 node src/cli/as.js as.upload '{
   "conversationId":"<conv-uuid>",
   "filePath":"/tmp/weekly.pdf",
   "mediaType":"file"
 }'
-# -> {mediaId:"<media-uuid>", ...}
+# -> {mediaId:"<media-uuid>", artifactId:"<artifact-uuid>", fileName, mimeType, sizeBytes, ...}
+#    In IM mode mediaId and artifactId are DIFFERENT ids. The message must carry artifactId.
 
-# 2. Send a message referencing the media_id
+# 2. Send a message whose attachment references the artifactId
 node src/cli/comm.js comm.send '{
   "conversationId":"<conv-uuid>",
-  "content":[{"type":"text","body":"This week's weekly report"},
-             {"type":"file","body":"<media-uuid>"}]
+  "content":{
+    "content_type":"file",
+    "body":{"file_name":"weekly.pdf","text":"This week'"'"'s weekly report"},
+    "attachments":[{"artifact_id":"<artifact-uuid>","file_name":"weekly.pdf",
+                    "content_type":"application/pdf","size_bytes":5242880}]
+  }
 }'
 ```
+
+For an image use `"content_type":"image"` and the image MIME. Referencing `mediaId` instead of `artifactId` gives an image that never loads (cws-as has no record of the media id).
 
 ### Filling gaps after a WS reconnect
 
