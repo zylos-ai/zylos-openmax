@@ -15,8 +15,8 @@
  * parseEndpoint for backward compatibility.
  *
  * Message body forms:
- *   plain text         → content=[{type:"text", body:<text>}]
- *   markdown-looking   → content=[{type:"markdown", body:<text>}]   (heuristic)
+ *   plain text         → content={content_type:"text", body:{text}}
+ *   markdown-looking   → content={content_type:"markdown", body:{text}}   (heuristic)
  *   [MEDIA:image]/path → upload via as.js → type IMAGE, content.attachments[].artifact_id=<artifactId>
  *   [MEDIA:file]/path  → upload via as.js → type FILE,  content.attachments[].artifact_id=<artifactId>
  *                         (see sendMediaMessage — the media id is NOT renderable)
