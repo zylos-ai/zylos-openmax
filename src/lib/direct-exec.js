@@ -17,6 +17,9 @@
  *      optional auth_injection descriptor placing it in a custom header/query)
  *      plus any templated headers,
  *   4. makes the HTTP request FROM THIS HOST directly to the provider, and
+ *      (B2: an action whose headers_template carries the reserved
+ *      X-Openmax-Token-Exchange header gets a Meta PAGE token derived from the
+ *      connection's user token instead — see meta-page-token.js),
  *   5. returns the SAME shape the server execute path returns —
  *      `{ status_code, headers, body }` — as a raw passthrough (the provider
  *      body is never transformed; the LLM reads it).
@@ -60,6 +63,19 @@ import * as mediaEncoder from './request-spec/encoders/media.js';
 import * as multipartRelatedEncoder from './request-spec/encoders/multipart-related.js';
 import * as multipartFormEncoder from './request-spec/encoders/multipart-form.js';
 import * as batchMixedEncoder from './request-spec/encoders/batch-mixed.js';
+import {
+  findExchangeMarker,
+  isExchangeHeaderName,
+  parseExchangeMarker,
+  validateGraphId,
+  graphVersionOf,
+  isGraphOrigin,
+  isGraphTokenError,
+  createPageTokenResolver,
+  defaultPageTokenCache,
+  TOKEN_EXCHANGE_HEADER,
+  META_GRAPH_ORIGIN,
+} from './meta-page-token.js';
 
 // Cap on the provider response we read into memory (mirrors the server-side
 // 10MB read limit). A larger body is truncated (and flagged) rather than
@@ -536,6 +552,9 @@ export function assembleBase(actionDef, params = {}, token, urlPlaceholders = {}
   const headerTemplate = (actionDef.headers_template && typeof actionDef.headers_template === 'object') ? actionDef.headers_template : {};
   for (const [hk, hv] of Object.entries(headerTemplate)) {
     if (hk.toLowerCase() === 'authorization') continue; // never let the template override our injected auth
+    // Reserved executor directive (B2 Meta page-token exchange) — consumed by
+    // invokeDirect, NEVER sent to the provider.
+    if (isExchangeHeaderName(hk)) continue;
     headers[hk] = fillTemplateValue(hv, params, uph, consumed);
   }
 
@@ -1022,6 +1041,8 @@ async function invokeDownload({
  *   - saveCache(connectionId, cred) → persist the refreshed credential
  *   - now()            (default Date.now) — for expiry math / tests
  *   - skewMs, audit, log, warn
+ *   - pageTokenCache   (default module-level in-memory cache) — B2 Meta Page
+ *                      token cache, see meta-page-token.js
  */
 export async function invokeDirect(
   { orgId, connection, actionSlug, params = {}, catalog, credential },
@@ -1036,6 +1057,7 @@ export async function invokeDirect(
     audit = defaultAudit,
     log = () => {},
     warn = () => {},
+    pageTokenCache = defaultPageTokenCache,
   } = deps;
 
   const actionDef = resolveActionDef(catalog, actionSlug);
@@ -1053,10 +1075,16 @@ export async function invokeDirect(
   // absent, none of this runs and the normal action-template flow below is
   // entirely unaffected.
   const hasSpec = actionDef.request_spec !== undefined && actionDef.request_spec !== null && actionDef.request_spec !== '';
+  // B2 × request_spec: the page-token exchange is only wired into the plain
+  // (assembleRequest) path. A request_spec action carrying the reserved
+  // X-Openmax-Token-Exchange marker fails closed BEFORE any network call —
+  // never silently strip the marker and send the user token instead.
+  if (hasSpec) refuseExchangeMarker(actionDef, 'actions with a request_spec');
   if (hasSpec && params && params._download != null) {
     throw specError(400, '_download cannot be combined with this action (it builds its own request body); use the plain download action instead');
   }
   if (params && params._download != null) {
+    refuseExchangeMarker(actionDef, '_download');
     return invokeDownload({
       catalog, actionDef, download: params._download, credential,
       orgId, connId: connection.id,
@@ -1104,38 +1132,71 @@ export async function invokeDirect(
     }, { ...deps, fetchImpl, acquire, saveCache, audit, log, warn });
   }
 
-  let assembled = assembleRequest(
-    actionDef,
-    params,
-    cred && cred.access_token,
-    cred && cred.url_placeholders,
-    cred && cred.token_type,
-    cred && cred.auth_injection,
-  );
-  auditDirectCall(assembled.method, actionDef.url_template, params, audit);
-  let result = await sendDirect(assembled, { fetchImpl });
+  // B2 — optional Meta Page access-token exchange, declared by the action's
+  // reserved X-Openmax-Token-Exchange header. Absent → exchange stays null and
+  // everything below behaves exactly as before.
+  const exchange = prepareExchange(actionDef, params, connId, { fetchImpl, pageTokenCache, audit });
+  const sendParams = exchange ? exchange.sendParams : params;
+
+  // Assemble + send with a credential. With an exchange, the Page token derived
+  // from the credential's user token replaces it (canonical Authorization:
+  // Bearer, no auth_injection), and the final URL is re-checked to be Graph.
+  const send = async (c, { forceExchange = false } = {}) => {
+    let token = c && c.access_token;
+    let tokenType = c && c.token_type;
+    let authInjection = c && c.auth_injection;
+    if (exchange) {
+      token = await exchange.resolver.resolve(c && c.access_token, exchange.kind, exchange.id, { force: forceExchange });
+      tokenType = 'bearer';
+      authInjection = null;
+    }
+    const assembled = assembleRequest(actionDef, sendParams, token, c && c.url_placeholders, tokenType, authInjection);
+    if (exchange && !isGraphOrigin(assembled.url)) {
+      throw Object.assign(new Error(`refusing to send a derived Page access token outside ${META_GRAPH_ORIGIN}`), { status: 422 });
+    }
+    auditDirectCall(assembled.method, actionDef.url_template, params, audit);
+    return sendDirect(assembled, { fetchImpl });
+  };
+
+  // Re-acquire the connection credential once (reactive backstop). Returns true
+  // when a fresh credential was obtained; a throwing acquire is surfaced.
+  let refreshed = false;
+  const refreshCred = async () => {
+    const fresh = await acquire(orgId, connId); // if refresh itself throws, surface it
+    if (!fresh || !fresh.access_token) return false;
+    saveCache(connId, fresh);
+    cred = fresh;
+    refreshed = true;
+    return true;
+  };
+
+  let result;
+  try {
+    result = await send(cred);
+  } catch (e) {
+    // The page-token exchange itself got Graph 190: the USER token is
+    // invalid/expired. Same reactive-refresh-once rule as a provider 401.
+    if (!(e && e.graphTokenInvalid && acquire && isTokenRefreshable(cred))) throw e;
+    log(`[conn.direct] user token rejected during page-token exchange conn=${connId}; reactive refresh + retry once`);
+    if (!(await refreshCred())) throw e;
+    result = await send(cred);
+  }
+
+  // B2: Graph rejected the (possibly cached) Page token (code 190) → drop it,
+  // re-derive from the user token and retry ONCE. A second 190 is surfaced.
+  if (exchange && isGraphTokenError(result)) {
+    log(`[conn.direct] page token rejected (Graph 190) conn=${connId}; invalidate + re-derive + retry once`);
+    exchange.resolver.invalidate(cred && cred.access_token, exchange.kind, exchange.id);
+    result = await send(cred, { forceExchange: true });
+  }
 
   // Reactive refresh backstop (refreshable/OAuth only): a provider 401 → refresh
   // ONCE and retry. This covers no-expiry OAuth (GitHub) and any token whose
   // proactive refresh was skipped/stale. An api_key is NOT refreshed here — its
   // 401 is surfaced as-is. A second 401 is likewise surfaced (no loop).
-  if (result.status_code === 401 && acquire && isTokenRefreshable(cred)) {
+  if (!refreshed && result.status_code === 401 && acquire && isTokenRefreshable(cred)) {
     log(`[conn.direct] provider 401 conn=${connId}; reactive refresh + retry once`);
-    const fresh = await acquire(orgId, connId); // if refresh itself throws, surface it
-    if (fresh && fresh.access_token) {
-      saveCache(connId, fresh);
-      cred = fresh;
-      assembled = assembleRequest(
-        actionDef,
-        params,
-        cred.access_token,
-        cred.url_placeholders,
-        cred.token_type,
-        cred.auth_injection,
-      );
-      auditDirectCall(assembled.method, actionDef.url_template, params, audit);
-      result = await sendDirect(assembled, { fetchImpl });
-    }
+    if (await refreshCred()) result = await send(cred);
   }
 
   return result;
@@ -1212,10 +1273,13 @@ async function invokeRequestSpec({ orgId, connId, actionDef, params, catalog, an
   // ③ prefetch (read-only GETs of same-catalog actions)
   let prefetch = {};
   if (spec.prefetch) {
-    const pf = await runPrefetch(spec.prefetch, { params, catalog }, (def, p) => sendBuilt(() => {
-      const r = base(def, p);
-      return { method: 'GET', url: r.url, headers: r.headers };
-    }));
+    const pf = await runPrefetch(spec.prefetch, { params, catalog }, (def, p) => {
+      refuseExchangeMarker(def, 'request_spec prefetch steps');
+      return sendBuilt(() => {
+        const r = base(def, p);
+        return { method: 'GET', url: r.url, headers: r.headers };
+      });
+    });
     if (pf.failed) return pf.failed;
     prefetch = pf.results;
   }
@@ -1310,6 +1374,7 @@ async function sendBatch({ spec, params, catalog, actionDef, origin, base, assem
     const def = resolveActionDef(catalog, it.action);
     if (!def || `${def.toolkit}/${def.action}` !== it.action) throw specError(400, `${b.items_param}[${i}]: action "${it.action}" is not in the local catalog`);
     if (def.request_spec) throw specError(400, `${b.items_param}[${i}]: action "${it.action}" cannot be batched (it has its own request_spec)`);
+    refuseExchangeMarker(def, `batch items (${b.items_param}[${i}])`);
     const subParams = it.params && typeof it.params === 'object' && !Array.isArray(it.params) ? it.params : {};
     if (subParams._download != null) throw specError(400, `${b.items_param}[${i}]: _download cannot be batched`);
     const sv = validateParams(subParams, def.input_schema);
@@ -1338,4 +1403,62 @@ async function sendBatch({ spec, params, catalog, actionDef, origin, base, assem
     : typeof res.body === 'string' ? res.body : JSON.stringify(res.body);
   const results = parseBatchResponse(text, ct, packed);
   return { status_code: res.status_code, headers: res.headers, body: { results } };
+}
+
+/**
+ * B2 — fail closed (422) when an action that is executed through the
+ * request_spec engine (the action itself, a prefetch step, or a batch item)
+ * declares the X-Openmax-Token-Exchange marker. The exchange is only wired into
+ * the plain invokeDirect path; there the marker would otherwise be stripped by
+ * assembleBase and the connection's USER token sent instead.
+ */
+function refuseExchangeMarker(def, where) {
+  if (findExchangeMarker(def) === null) return;
+  throw specError(422,
+    `${TOKEN_EXCHANGE_HEADER} is not supported for ${where} (refused for ${def.toolkit}/${def.action}); `
+    + 'the Page access-token exchange only runs on plain direct actions');
+}
+
+/**
+ * B2 — prepare the Meta Page token exchange for an action, or return null when
+ * the action carries no X-Openmax-Token-Exchange marker (unchanged behavior).
+ *
+ * Fails closed BEFORE any network call: unknown/malformed marker (422), action
+ * not on https://graph.facebook.com (422), id param missing/non-numeric (400).
+ * The id param, when it is not itself a url_template placeholder (e.g. an
+ * object-keyed action like POST /{object_id}/comments that takes page_id only
+ * to pick the token), is removed from the params that are assembled so it
+ * never leaks into the request body.
+ */
+function prepareExchange(actionDef, params, connId, { fetchImpl, pageTokenCache, audit }) {
+  const marker = findExchangeMarker(actionDef);
+  if (marker === null) return null;
+  const { kind, param } = parseExchangeMarker(marker);
+  if (!isGraphOrigin(actionDef.url_template)) {
+    throw Object.assign(
+      new Error(`${TOKEN_EXCHANGE_HEADER} is only supported on ${META_GRAPH_ORIGIN} actions (refused for ${actionDef.toolkit}/${actionDef.action})`),
+      { status: 422 },
+    );
+  }
+  const id = validateGraphId(params ? params[param] : undefined, param);
+  let sendParams = params;
+  if (!String(actionDef.url_template).includes(`{${param}}`)) {
+    sendParams = { ...params };
+    delete sendParams[param];
+  }
+  // Fixed-origin GET for the exchange: no caller URL, redirects not followed,
+  // response read through the same capped normalizer as every provider call.
+  const graphGet = async (url, userToken) => {
+    if (!url.startsWith(`${META_GRAPH_ORIGIN}/`)) throw new Error('internal: exchange URL must be on the Graph origin');
+    const res = await fetchImpl(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${userToken}` },
+      redirect: 'manual',
+    });
+    return normalizeResponse(res);
+  };
+  const resolver = createPageTokenResolver({
+    connId, cache: pageTokenCache, graphGet, version: graphVersionOf(actionDef.url_template), audit,
+  });
+  return { kind, id, sendParams, resolver };
 }
