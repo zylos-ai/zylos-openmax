@@ -587,3 +587,45 @@ test('1089-① restart with an open continuation → failed / runtime_restarted 
   assert.equal(JSON.stringify(store.readRun(reg.runId)), parentBefore);
 });
 
+test('1089-② end to end: guard skip writes the skip file → the log reply settles → unregistered cleared → the next reply selects the run', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir } = h;
+  const reg = await startedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  // A smart-mode (not @) message of the same group arrives and is absorbed mid-turn.
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV);
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  activity.pollNow();
+  assert.ok(store.readActive().unregistered[CONV]);
+  assert.equal(store.readRun(reg.runId).focus, false);
+
+  // The agent answers the smart message first: send.js skips (no claim, no agent_run).
+  const p1 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store });
+  assert.equal(p1, null);
+  assert.equal(store.readSkip(reg.runId).at, clock.now());
+  append(bashSend('toolu_s1'));
+  append(toolOk('toolu_s1'));
+  clock.advance(700);
+  activity.pollNow();
+  const r = store.readRun(reg.runId);
+  assert.equal(r.state, 'active', 'not done: that reply was not the run\'s');
+  assert.equal(r.ambiguous_reply, true);
+  assert.equal(r.focus, true);
+  assert.equal(store.readActive().unregistered?.[CONV], undefined, 'guard lifted');
+  assert.equal(states(sent, reg.runId).includes('done'), false);
+
+  // Then the @ message: the run with its full agent_run, done on delivery.
+  const p2 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store });
+  assert.equal(p2.runId, reg.runId);
+  assert.ok(Array.isArray(p2.firstAgentRun.steps));
+  p2.settle('ok');
+  append(bashSend('toolu_s2'));
+  append(toolOk('toolu_s2'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(states(sent, reg.runId).at(-1), 'done');
+  assert.equal(sent.filter((f) => f.payload.run_id === reg.runId).at(-1).payload.end_reason, undefined);
+  assert.match(activity.statsLine(), /reply_deferred_unregistered=1/);
+  activity.stop();
+});

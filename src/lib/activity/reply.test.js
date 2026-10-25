@@ -335,7 +335,35 @@ test('10-22: a run closed on its delivered reply, still listed, gives later repl
   assert.equal(plan(c, 'x', ended + 1000), null, 'closed at turn end / no_reply: not selectable');
 });
 
-// ── OPENM-1089 ① ──
+// ── OPENM-1089 ② ──
+
+test('1089-②: guard skip writes runs/<id>.skip for the earliest unclaimed run; a skip write failure never throws', () => {
+  const s = setup({ runs: [{ run_id: 'r_0000000a' }, { run_id: 'r_0000000b' }], unregistered: T0 + 500 });
+  const sel = selectRun({ store: s.store, active: s.store.readActive(), convId: CONV });
+  assert.equal(sel.run, null);
+  assert.equal(sel.candidate.run_id, 'r_0000000a');
+  assert.equal(plan(s, 'hello', T0 + 7000), null, 'no agent_run, as before');
+  assert.deepEqual(s.store.readSkip('r_0000000a'), { at: T0 + 7000, unreg: T0 + 500 });
+  assert.equal(s.store.readSkip('r_0000000b'), null);
+  assert.equal(s.store.claimExists('r_0000000a'), false);
+  s.store.removeRun('r_0000000a');
+  assert.equal(fs.existsSync(path.join(s.store.dir, 'r_0000000a.skip')), false, 'removeRun cleans the skip file');
+
+  const broken = setup({ unregistered: T0 + 500 });
+  broken.store.writeSkip = () => { throw Object.assign(new Error('EACCES'), { code: 'EACCES' }); };
+  assert.equal(plan(broken), null, 'never throws into the send path');
+  assert.equal(broken.store.readSendStats().agent_run_skipped_unregistered, 1);
+  assert.equal(broken.store.readSendStats().agent_run_error, undefined);
+});
+
+test('1089-②: focus run present → no skip file, behaviour unchanged; no guard → no skip file', () => {
+  const s = setup({ runs: [{ run_id: 'r_0000000a', focus: true }], unregistered: T0 + 500 });
+  assert.ok(plan(s).firstAgentRun.steps);
+  assert.equal(s.store.readSkip('r_0000000a'), null);
+  const s2 = setup();
+  assert.ok(plan(s2).firstAgentRun.steps);
+  assert.equal(s2.store.readSkip('r_0000000a'), null);
+});
 
 test('1089-①: a continuation listed with focus is selected over its closed parent and carries its own full agent_run', () => {
   const s = setup({

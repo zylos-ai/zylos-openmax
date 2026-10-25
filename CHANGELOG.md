@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Agent activity: work after the first reply is no longer lost (OPENM-1089 ①).** A delivered reply still closes its run with the full `agent_run`, but when the agent keeps working visibly in the same turn (a tool step, not just text) a continuation run opens — a new `run_id` for the same source message, live frames, carried in full by the next reply. Only in turns of that run's own conversation with no other input; at most 10 per turn; one still unanswered at turn end closes `done` without `no_reply`. `agent_run` shape unchanged; the stats line gains `continuations=N`.
+- **Agent activity: a group reply the send guard skipped no longer closes the run (OPENM-1089 ②).** When `send.js`'s guard leaves `agent_run` off a reply because a smart-mode (not @) message of the same group may be what it answers, it now writes `runs/<run_id>.skip`; attribution then counts that reply as the answer to the smart-mode message, not the run (`ambiguous_reply`), lifts the guard, and the next reply carries the run's full summary. No later reply → `done` after the grace, without `no_reply`. The stats line gains `reply_deferred_unregistered=N`.
 
 ## [2.29.0] - 2026-10-23
 

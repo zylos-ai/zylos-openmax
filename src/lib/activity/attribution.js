@@ -69,6 +69,16 @@
  * carries the reference, as before). At most MAX_CONTINUATIONS_PER_TURN per
  * turn; none while blocked (③) or degraded. A continuation still unanswered
  * at turn end closes done without no_reply: its parent was answered.
+ *
+ * Guard-skipped replies (OPENM-1089 ②): send.js's group guard may decide a
+ * reply answers an unregistered smart-mode message, not the run (no claim, no
+ * agent_run; it leaves runs/<run_id>.skip). The sender's decision wins: when
+ * such a log reply settles ok (replySkipped), the run is NOT completed — it
+ * goes back to unanswered with ambiguous_reply, the send answers the pending
+ * unmarked openmax message of the same endpoint instead, the guard for the
+ * conversation is cleared (onAmbiguousReply) so the next reply selects the
+ * run, and the queue moves on. No later reply → done after the no-reply
+ * grace, without no_reply (the merged reply may well have answered it).
  */
 
 import { classifyTool } from './classify.js';
@@ -107,6 +117,10 @@ export function createAttribution({
   // OPENM-1089 ①: build + register a continuation run of `parent` (index.js);
   // null when it cannot be created.
   spawnContinuation = () => null,
+  // OPENM-1089 ②: send.js's guard skipped this run's latest reply (skip file).
+  replySkipped = () => false,
+  // OPENM-1089 ②: a guard-skipped reply was settled — clear the conversation's guard.
+  onAmbiguousReply = () => {},
 } = {}) {
   const runs = new Map();
   /**
@@ -395,6 +409,28 @@ export function createAttribution({
     return run;
   }
 
+  /**
+   * OPENM-1089 ②: a log reply to `run` went out, but send.js's group guard
+   * decided it answers an unregistered (smart-mode) message: the sender's
+   * decision wins. The run is not answered (ambiguous_reply); the send
+   * answers that openmax message; the guard is lifted for the next reply.
+   */
+  function deferReply(run) {
+    if (!isOpen(run) || run.state !== 'replied') return;
+    run.state = 'active';
+    run.replied_at = null;
+    run.ambiguous_reply = true;
+    stats.reply_deferred_unregistered = (stats.reply_deferred_unregistered || 0) + 1;
+    persist(run);
+    if (turn) {
+      const ne = normEndpoint(run.endpoint);
+      const item = turn.queue.find((it) => it.foreign && !it.answered && it.reply
+        && it.reply.channel === 'openmax' && normEndpoint(it.reply.endpoint) === ne);
+      if (item) item.answered = true;
+    }
+    try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id); } catch {}
+    if (turn && turn.owners.includes(run)) applyFocus(2, now());
+  }
 
   /**
    * A send that answered a merged-in foreign message failed: the message is
@@ -450,10 +486,19 @@ export function createAttribution({
   function settleSend(entry, ok) {
     for (const id of entry.runIds) {
       const run = runs.get(id);
-      if (ok) completeOnReply(run, 'log');
-      else revertReply(run);
+      if (!ok) revertReply(run);
+      else if (isOpen(run) && run.state === 'replied' && skippedBySender(run)) deferReply(run);
+      else completeOnReply(run, 'log');
     }
     if (!ok) for (const it of entry.items) reopenItem(it);
+  }
+
+  function skippedBySender(run) {
+    try {
+      return replySkipped(run) === true;
+    } catch {
+      return false;
+    }
   }
 
   /** The reply call that marked `run` replied failed: the run is not answered. */
@@ -858,7 +903,8 @@ export function createAttribution({
           continue;
         }
         if (run._awaitNoReply && t - run.turn_ended_at >= NO_REPLY_GRACE_MS) {
-          closeRun(run, 'done', 'no_reply');
+          // A guard-skipped reply probably answered it as well (OPENM-1089 ②).
+          closeRun(run, 'done', run.ambiguous_reply === true ? null : 'no_reply');
           continue;
         }
         // A run recovered from a previous process waits for onWsOpen, which ends

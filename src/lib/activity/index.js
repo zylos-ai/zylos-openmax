@@ -27,7 +27,7 @@ import TaskRegistry from '../task-registry.js';
 import { newRunId, formatMarker } from './marker.js';
 import {
   EMIT_TICK_MS, POLL_INTERVAL_MS, DISCOVERY_INTERVAL_MS, RUN_FILE_RETENTION_MS, SPILL_READ_BYTES,
-  REPLY_REF_WINDOW_MS,
+  REPLY_REF_WINDOW_MS, REPLY_SKIP_SLACK_MS,
 } from './constants.js';
 
 const OFF_VALUES = new Set(['0', 'false', 'off', 'no']);
@@ -271,6 +271,18 @@ export function createActivity({
     }
   }
 
+  /**
+   * OPENM-1089 ②: send.js's group guard skipped the run's latest reply — a
+   * skip file no older than the replied mark (minus slack) and no claim.
+   */
+  function replySkipped(run) {
+    if (store.claimExists(run.run_id)) return false;
+    const skip = store.readSkip(run.run_id);
+    const at = Number(skip?.at);
+    if (!Number.isFinite(at)) return false;
+    return at >= (Number(run.replied_at) || 0) - REPLY_SKIP_SLACK_MS;
+  }
+
   const emitter = createEmitter({
     now,
     stats,
@@ -286,6 +298,15 @@ export function createActivity({
     persist: persistRun,
     readSpillHead,
     spawnContinuation,
+    replySkipped,
+    // The guard-skipped reply answered the smart-mode message: the next reply
+    // of this conversation is the run's again.
+    onAmbiguousReply: (conv) => {
+      if (conv && unregistered[conv] != null) {
+        delete unregistered[conv];
+        syncActive();
+      }
+    },
     onRunClosed: (run) => {
       const form = replyForm(run);
       stats.run_reply_form[form] = (stats.run_reply_form[form] || 0) + 1;
@@ -556,6 +577,7 @@ export function createActivity({
         `closed_on_reply=${fmtCounts(stats.closed_on_reply || {})}`,
         `reply_failed=${stats.reply_failed || 0}`,
         `continuations=${stats.continuations || 0}`,
+        `reply_deferred_unregistered=${stats.reply_deferred_unregistered || 0}`,
         `runs_closed=${fmtCounts(stats.runs_closed)}`,
         `run_reply_form=${fmtCounts(stats.run_reply_form)}`,
         `server_errors=${fmtCounts(stats.server_errors)}`,

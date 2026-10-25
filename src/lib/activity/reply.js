@@ -29,6 +29,11 @@
  * and lists it with focus — the next reply selects it (focus first), claims it
  * and carries ITS full agent_run. Without a continuation the next reply gets
  * the parent's reference form, as above.
+ *
+ * Group guard (OPENM-1089 ②): when selectRun skips (an unregistered smart-mode
+ * message may be what this reply answers), runs/<run_id>.skip records it for
+ * the run that would have been chosen, so attribution does not count the log
+ * reply as that run's answer. Best effort: a failed write changes nothing.
  */
 
 import crypto from 'crypto';
@@ -65,7 +70,8 @@ function liveRuns(store, active, convId, now = Date.now()) {
 
 /**
  * Pick the run a reply to `convId` belongs to.
- * @returns {{ run: object|null, skipped?: string }}
+ * @returns {{ run: object|null, skipped?: string, candidate?: object }}
+ *   candidate: the run a guard skip passed over.
  */
 export function selectRun({ store, active, convId, now = Date.now() }) {
   const runs = liveRuns(store, active, convId, now).filter((r) => active?.gate?.[r.org_id] === 'open');
@@ -78,7 +84,7 @@ export function selectRun({ store, active, convId, now = Date.now() }) {
     // Group guard: an unregistered (smart, not @) input arrived after the
     // earliest unanswered run — this reply may well answer that one instead.
     const unreg = active?.unregistered?.[convId];
-    if (unreg && unreg > earliest.created_at) return { run: null, skipped: 'agent_run_skipped_unregistered' };
+    if (unreg && unreg > earliest.created_at) return { run: null, skipped: 'agent_run_skipped_unregistered', candidate: earliest };
     return { run: earliest };
   }
   return { run: runs[runs.length - 1] };
@@ -98,8 +104,12 @@ export function planReplyMetadata({ convId, kind, bodyHash, newKey, now = Date.n
   try {
     const active = store.readActive();
     if (!active || !convId) return null;
-    const { run, skipped } = selectRun({ store, active, convId, now });
+    const { run, skipped, candidate } = selectRun({ store, active, convId, now });
     if (skipped) store.bumpSendStat(skipped);
+    if (candidate) {
+      // Tell attribution this reply is not the run's (best effort).
+      try { store.writeSkip(candidate.run_id, { at: now, unreg: active.unregistered?.[convId] ?? null }); } catch {}
+    }
     if (!run) return null;
 
     const ref = agentRunRef(run.run_id);
