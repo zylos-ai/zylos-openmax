@@ -732,3 +732,33 @@ test('1089-② review R2: B arrives after the send call started but BEFORE send.
   assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
   activity.stop();
 });
+
+test('1089-② review R3: smart A reaches the runtime only after the skipped send settled → A keeps the guard; the next send does not claim the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await startedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  // A Lark message in front: the run has no focus.
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: larkMsg } });
+  activity.pollNow();
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV);                 // smart A at the bridge, still on its way to C4
+  const unregA = store.readActive().unregistered[CONV];
+  clock.advance(100);
+  append(bashSend('toolu_s1'));
+  clock.advance(50);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  clock.advance(200);
+  append(toolOk('toolu_s1'));
+  activity.pollNow();
+  assert.equal(store.readActive().unregistered?.[CONV], unregA, 'nothing acknowledged: the guard stays');
+  // A is delivered to the runtime only now.
+  clock.advance(500);
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  activity.pollNow();
+  const smart = activity.attribution.turn.queue.find((it) => it.foreign && it.reply?.channel === 'openmax');
+  assert.equal(smart.answered, false, 'A is pending');
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
+  assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
+  activity.stop();
+});

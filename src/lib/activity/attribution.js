@@ -79,9 +79,10 @@
  * unmarked openmax message of the same endpoint that was pending when the
  * call started (the earliest-arrived one, snapshotted then: a message that
  * arrives while the send is in flight is never acknowledged by it). The
- * guard is updated on the same boundary (onAmbiguousReply with the call's
- * start time): index.js consumes the earliest smart-mode arrival from before
- * the call start and keeps the guard while any other one is outstanding, so
+ * guard is updated on the same boundary, and only when such a message was
+ * acknowledged (onAmbiguousReply with the call's start time): index.js pairs
+ * it FIFO with the earliest smart-mode arrival from before the call start and
+ * keeps the guard while any other one is outstanding, so
  * only when none is left does the next reply select the run; the queue moves
  * on. No later reply → done after the no-reply
  * grace, without no_reply (the merged reply may well have answered it).
@@ -432,8 +433,12 @@ export function createAttribution({
     stats.reply_deferred_unregistered = (stats.reply_deferred_unregistered || 0) + 1;
     persist(run);
     // Only the message this send could have answered (pending at its start).
-    if (item && !item.answered && turn && turn.queue.includes(item)) item.answered = true;
-    try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id, { skip, startAt }); } catch {}
+    // The guard is touched only when that message was really acknowledged: a
+    // smart-mode input still on its way to the runtime is not answered yet.
+    if (item && !item.answered && turn && turn.queue.includes(item)) {
+      item.answered = true;
+      try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id, { skip, startAt }); } catch {}
+    }
     if (turn && turn.owners.includes(run)) applyFocus(2, now());
   }
 

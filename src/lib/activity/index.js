@@ -311,8 +311,9 @@ export function createActivity({
     readSpillHead,
     spawnContinuation,
     replySkipped,
-    // The guard-skipped reply answered ONE smart-mode message: the earliest
-    // that arrived before the send call started (the same boundary attribution
+    // Called only when the guard-skipped reply acknowledged ONE smart-mode
+    // message seen in the runtime log; paired FIFO with the earliest arrival
+    // record from before the send call started (the same boundary attribution
     // used to pick the message it acknowledges). Any other arrival — before
     // the call (not yet seen in the log) or during it (send prep can take a
     // while, so send.js may already have recorded it as the guard) — keeps the

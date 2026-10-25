@@ -1857,3 +1857,15 @@ test('1089-② review: a smart message arriving while the skipped send is in fli
   assert.equal(attr.turn.focus, null, 'B in front: no focus for the run yet');
   assert.deepEqual(finishes, []);
 });
+
+test('1089-② review R3: a skipped send with no smart message pending at its start acknowledges nothing and leaves the guard alone', () => {
+  const got = [];
+  const { attr, mkRun } = harness({ replySkipped: () => SKIP, onAmbiguousReply: (...a) => got.push(a) });
+  const a = mkRun('r_0000000a', CONV_A);
+  attr.handle(minput('user', omBody(a)));
+  attr.handle(minput('queued_command', larkBody('在吗')));             // no focus, no smart item
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A), 1000));
+  attr.handle(toolEnd('s1', 1500));
+  assert.equal(a.ambiguous_reply, true, 'the sender\'s decision still wins for the run');
+  assert.deepEqual(got, [], 'no acknowledged message: the guard is not touched');
+});
