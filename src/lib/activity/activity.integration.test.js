@@ -807,3 +807,54 @@ test('1089-② review R4: smart A arrives before any run, the run is injected, B
   assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
   activity.stop();
 });
+
+for (const [total, lifted] of [[50, true], [51, false]]) {
+  test(`1089-② review R5: a burst of ${total} smart messages (cap 50), the oldest delivered last → ${lifted ? 'all recorded: the guard lifts once all are answered' : 'one evicted: the guard stays and the next send does not claim the run'}`, async () => {
+    const h = setup();
+    const { activity, clock, append, runsDir } = h;
+    const reg = await startedRun(h);
+    const store = createRunStore({ dir: runsDir });
+    append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: larkMsg } });
+    activity.pollNow();                                 // no focus for the run
+    const ids = Array.from({ length: total }, (_, i) => String(9100000000000 + i));
+    for (const id of ids) {
+      clock.advance(10);
+      activity.noteUnregisteredInput(CONV, id);
+    }
+    // All but the oldest reach the runtime and are answered one by one (each skipped by the guard).
+    for (const id of ids.slice(1)) {
+      clock.advance(10);
+      append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg(id) } });
+    }
+    activity.pollNow();
+    for (let i = 1; i < total; i++) {
+      clock.advance(10);
+      append(bashSend(`toolu_b${i}`));
+      assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: `b${i}`, newKey: () => `c_b${i}`, now: clock.now(), store }), null);
+      clock.advance(10);
+      append(toolOk(`toolu_b${i}`));
+      activity.pollNow();
+    }
+    // The oldest is answered (acknowledged by id) only after it is delivered.
+    clock.advance(10);
+    append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg(ids[0]) } });
+    activity.pollNow();
+    const pendingOldest = activity.attribution.turn.queue.find((it) => it.msgId === ids[0]);
+    assert.equal(pendingOldest.answered, false);
+    if (!lifted) {
+      assert.ok(store.readActive().unregistered?.[CONV], 'the guard stays: a record was evicted unanswered');
+      assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'n', newKey: () => 'c_n', now: clock.now(), store }), null);
+      assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
+    } else {
+      assert.ok(store.readActive().unregistered?.[CONV], 'the oldest is still outstanding');
+      append(bashSend('toolu_a'));
+      assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'a', newKey: () => 'c_a', now: clock.now(), store }), null);
+      clock.advance(10);
+      append(toolOk('toolu_a'));
+      activity.pollNow();
+      assert.equal(store.readActive().unregistered?.[CONV], undefined, 'every recorded message answered: guard lifted');
+      assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'n', newKey: () => 'c_n', now: clock.now(), store }).runId, reg.runId);
+    }
+    activity.stop();
+  });
+}

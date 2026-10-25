@@ -150,6 +150,11 @@ export function createActivity({
   // acknowledgement of an older one never removes a newer one's record.
   // unregistered[conv] (send.js's guard) follows the latest outstanding one.
   const unregArrivals = {};
+  // conv → true once a still-unanswered record was evicted (cap / 24 h): its
+  // message may still be pending in the runtime, so settlements never lift
+  // the guard again; it ends with the guard itself (no run of the
+  // conversation listed any more — the guard's existing expiry).
+  const unregEvicted = {};
   let lastActive = null;
 
   function openRuns() {
@@ -174,6 +179,7 @@ export function createActivity({
       (byConv[key] || (byConv[key] = [])).push(r.run_id);
     }
     for (const conv of Object.keys(unregistered)) if (!byConv[conv]) delete unregistered[conv];
+    for (const conv of Object.keys(unregEvicted)) if (!byConv[conv]) delete unregEvicted[conv];
     const body = { v: 1, by_conversation: byConv, gate: { ...gates }, unregistered: { ...unregistered } };
     const sig = JSON.stringify(body);
     if (sig === lastActive) return;
@@ -322,7 +328,9 @@ export function createActivity({
       if (i === -1) return;
       list.splice(i, 1);
       if (!list.length) delete unregArrivals[conv];
-      if (unregistered[conv] == null) return;
+      // A record was evicted unanswered: no proof every outstanding message
+      // was answered — the guard stays as it is.
+      if (unregistered[conv] == null || unregEvicted[conv]) return;
       if (list.length) unregistered[conv] = Math.max(...list.map((a) => a.at));
       else delete unregistered[conv];
       syncActive();
@@ -523,9 +531,12 @@ export function createActivity({
       if (!conv) return;
       const t = now();
       if (sourceMessageId != null) {
-        const list = (unregArrivals[conv] || []).filter((a) => t - a.at < RUN_FILE_RETENTION_MS);
+        const prev = unregArrivals[conv] || [];
+        const list = prev.filter((a) => t - a.at < RUN_FILE_RETENTION_MS);
         list.push({ id: String(sourceMessageId), at: t });
-        unregArrivals[conv] = list.slice(-MAX_UNREG_ARRIVALS);
+        const kept = list.slice(-MAX_UNREG_ARRIVALS);
+        if (kept.length < prev.length + 1) unregEvicted[conv] = true;
+        unregArrivals[conv] = kept;
       }
       if (!openRuns().some((r) => (r.reply_conversation_id || r.conversation_id) === conv)) return;
       unregistered[conv] = t;
