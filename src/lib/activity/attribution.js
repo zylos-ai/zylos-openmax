@@ -73,11 +73,15 @@
  * Guard-skipped replies (OPENM-1089 ②): send.js's group guard may decide a
  * reply answers an unregistered smart-mode message, not the run (no claim, no
  * agent_run; it leaves runs/<run_id>.skip). The sender's decision wins: when
- * such a log reply settles ok (replySkipped), the run is NOT completed — it
- * goes back to unanswered with ambiguous_reply, the send answers the pending
- * unmarked openmax message of the same endpoint instead, the guard for the
- * conversation is cleared (onAmbiguousReply) so the next reply selects the
- * run, and the queue moves on. No later reply → done after the no-reply
+ * such a log reply settles ok (replySkipped: a skip file written while THIS
+ * call ran, by the log records' own timestamps), the run is NOT completed —
+ * it goes back to unanswered with ambiguous_reply, and the send answers the
+ * unmarked openmax message of the same endpoint that was pending when the
+ * call started (the earliest-arrived one, snapshotted then: a message that
+ * arrives while the send is in flight is never acknowledged by it). The
+ * guard for the conversation is cleared (onAmbiguousReply) only if it is
+ * still the one this skip saw, so the next reply selects the run; the queue
+ * moves on. No later reply → done after the no-reply
  * grace, without no_reply (the merged reply may well have answered it).
  */
 
@@ -148,6 +152,9 @@ export function createAttribution({
    */
   const sendCalls = new Map();
   let turn = null;
+  // Arrival order of merged-in foreign messages (the queue reorders them).
+  let itemSeq = 0;
+  const newForeignItem = (seg) => ({ ...foreignItem(seg), seq: ++itemSeq });
   let degraded = false;
 
   const isOpen = (run) => run && run.state !== 'closed';
@@ -415,20 +422,16 @@ export function createAttribution({
    * decision wins. The run is not answered (ambiguous_reply); the send
    * answers that openmax message; the guard is lifted for the next reply.
    */
-  function deferReply(run) {
+  function deferReply(run, item, skip) {
     if (!isOpen(run) || run.state !== 'replied') return;
     run.state = 'active';
     run.replied_at = null;
     run.ambiguous_reply = true;
     stats.reply_deferred_unregistered = (stats.reply_deferred_unregistered || 0) + 1;
     persist(run);
-    if (turn) {
-      const ne = normEndpoint(run.endpoint);
-      const item = turn.queue.find((it) => it.foreign && !it.answered && it.reply
-        && it.reply.channel === 'openmax' && normEndpoint(it.reply.endpoint) === ne);
-      if (item) item.answered = true;
-    }
-    try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id); } catch {}
+    // Only the message this send could have answered (pending at its start).
+    if (item && !item.answered && turn && turn.queue.includes(item)) item.answered = true;
+    try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id, skip); } catch {}
     if (turn && turn.owners.includes(run)) applyFocus(2, now());
   }
 
@@ -483,21 +486,27 @@ export function createAttribution({
   }
 
   /** A send call's final outcome (see sendCalls). Idempotent per run / item. */
-  function settleSend(entry, ok) {
+  function settleSend(entry, ok, endAt) {
     for (const id of entry.runIds) {
       const run = runs.get(id);
       if (!ok) revertReply(run);
-      else if (isOpen(run) && run.state === 'replied' && skippedBySender(run)) deferReply(run);
-      else completeOnReply(run, 'log');
+      else {
+        const skip = isOpen(run) && run.state === 'replied'
+          ? skippedBySender(run, { startAt: entry.at, endAt }) : null;
+        if (skip) deferReply(run, entry.skipItems?.[id] || null, skip);
+        else completeOnReply(run, 'log');
+      }
     }
     if (!ok) for (const it of entry.items) reopenItem(it);
   }
 
-  function skippedBySender(run) {
+  /** The skip record send.js left for THIS send of `run`, or null. */
+  function skippedBySender(run, window) {
     try {
-      return replySkipped(run) === true;
+      const skip = replySkipped(run, window);
+      return skip && typeof skip === 'object' ? skip : null;
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -653,7 +662,21 @@ export function createAttribution({
     }
     // The call's end tells whether the sends went out (settleSend).
     if (replied.length || marked.length) {
-      sendCalls.set(input.callId, { send: { runIds: replied.map((r) => r.run_id), items: [...marked] } });
+      // OPENM-1089 ②: per replied run, the unmarked openmax message of its
+      // endpoint pending right now (earliest arrived) — what this send answers
+      // if send.js's guard skipped it. The call's log time bounds the skip file.
+      const skipItems = {};
+      for (const r of replied) {
+        const ne = normEndpoint(r.endpoint);
+        const it = turn.queue
+          .filter((q) => q.foreign && !q.answered && q.reply && q.reply.channel === 'openmax'
+            && normEndpoint(q.reply.endpoint) === ne)
+          .sort((a, b) => (a.seq || 0) - (b.seq || 0))[0];
+        if (it) skipItems[r.run_id] = it;
+      }
+      sendCalls.set(input.callId, {
+        send: { runIds: replied.map((r) => r.run_id), items: [...marked], skipItems, at: t },
+      });
     }
 
     if (external && unknownExternal) {
@@ -685,7 +708,7 @@ export function createAttribution({
         if (ok !== null) {
           // Settled once: every key of this send goes (concurrent poll aliases too).
           for (const [k, v] of [...sendCalls]) if (v.send === send) sendCalls.delete(k);
-          settleSend(send, ok);
+          settleSend(send, ok, input.at);
         }
       }
     }
@@ -817,7 +840,7 @@ export function createAttribution({
                 setFocusFlags(run);
               } else {
                 newTurn(true, file);
-                turn.queue.push(foreignItem(seg));
+                turn.queue.push(newForeignItem(seg));
               }
               return;
             }
@@ -831,7 +854,7 @@ export function createAttribution({
                 enterTurn(it.run, t);
                 deliver(it.run, { id: nextEventId(it.run), kind: 'notice', code: 'merged_turn', at: t });
               } else {
-                turn.queue.push(foreignItem(it.seg));
+                turn.queue.push(newForeignItem(it.seg));
               }
             }
             applyFocus(4, t);
@@ -858,7 +881,7 @@ export function createAttribution({
                 deliver(run, { id: nextEventId(run), kind: 'notice', code: 'merged_turn', at: t });
               }
             } else if (!run) {
-              foreignNow.push(foreignItem(seg));
+              foreignNow.push(newForeignItem(seg));
             }
           }
           if (foreignNow.length) {

@@ -87,9 +87,10 @@ export const RUN_FILE_RETENTION_MS = 24 * 60 * 60 * 1000;
 // at most this many per runtime turn.
 export const MAX_CONTINUATIONS_PER_TURN = 10;
 // A guard-skipped send (runs/<id>.skip, OPENM-1089 ②) explains a log reply
-// when send.js wrote the skip file no earlier than this before the log marked
-// the run replied (the log may be read a poll or two after send.js ran).
-export const REPLY_SKIP_SLACK_MS = 5_000;
+// when send.js wrote the skip file between the send call's start and end as
+// the LOG RECORDS date them (not when the collector read them: a backlog may
+// delay that arbitrarily), widened by this much for timestamp rounding.
+export const REPLY_SKIP_SLACK_MS = 1_000;
 
 // ── emitter ────────────────────────────────────────────────────────────────
 export const EMIT_TICK_MS = 250;

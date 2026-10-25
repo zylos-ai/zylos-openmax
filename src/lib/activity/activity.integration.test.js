@@ -629,3 +629,75 @@ test('1089-② end to end: guard skip writes the skip file → the log reply set
   assert.match(activity.statsLine(), /reply_deferred_unregistered=1/);
   activity.stop();
 });
+
+/** A started run plus a smart-mode message of the same group absorbed mid-turn. */
+async function guardedRun(h) {
+  const reg = await startedRun(h);
+  h.clock.advance(100);
+  h.activity.noteUnregisteredInput(CONV);
+  h.append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  h.activity.pollNow();
+  return reg;
+}
+
+test('1089-② review: a newer smart message arriving while the skipped send is in flight keeps the guard; the next reply does not claim the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await guardedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  const unregA = store.readActive().unregistered[CONV];
+  append(bashSend('toolu_s1'));
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  assert.equal(store.readSkip(reg.runId).unreg, unregA);
+  // Smart B arrives (bridge + log) before the send's result is collected.
+  clock.advance(300);
+  activity.noteUnregisteredInput(CONV);
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  clock.advance(200);
+  append(toolOk('toolu_s1'));
+  activity.pollNow();
+  const unregB = store.readActive().unregistered?.[CONV];
+  assert.ok(unregB > unregA, 'the guard for B stays');
+  const r = store.readRun(reg.runId);
+  assert.equal(r.state, 'active');
+  assert.equal(r.ambiguous_reply, true);
+  assert.equal(r.focus, false, 'B is pending: no focus');
+  // The answer to B is skipped again — it never claims the run.
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
+  assert.equal(store.claimExists(reg.runId), false);
+  activity.stop();
+});
+
+test('1089-② review: the send record collected late (log backlog) still honours the skip — the window is the records\' own timestamps', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir } = h;
+  const reg = await guardedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  append(bashSend('toolu_s1'));
+  clock.advance(50);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  clock.advance(400);
+  append(toolOk('toolu_s1'));
+  clock.advance(30_000);                                // read 30 s later
+  activity.pollNow();
+  const r = store.readRun(reg.runId);
+  assert.equal(r.state, 'active', 'deferred, not closed');
+  assert.equal(r.ambiguous_reply, true);
+  assert.equal(states(sent, reg.runId).includes('done'), false);
+  activity.stop();
+});
+
+test('1089-② review: a skip file older than the send call (an earlier skipped send) is not this send\'s — the run completes', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir } = h;
+  const reg = await guardedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  store.writeSkip(reg.runId, { at: clock.now() - 10_000, unreg: 1 });
+  append(bashSend('toolu_s1'));
+  append(toolOk('toolu_s1'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(states(sent, reg.runId).at(-1), 'done');
+  assert.equal(store.readRun(reg.runId).ambiguous_reply, undefined);
+  activity.stop();
+});

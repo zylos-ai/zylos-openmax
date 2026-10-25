@@ -272,15 +272,19 @@ export function createActivity({
   }
 
   /**
-   * OPENM-1089 ②: send.js's group guard skipped the run's latest reply — a
-   * skip file no older than the replied mark (minus slack) and no claim.
+   * OPENM-1089 ②: send.js's group guard skipped THIS send of the run — no
+   * claim, and a skip file written inside the send call's own window as the
+   * log records date it (startAt = the call record, endAt = its result),
+   * so collection latency never matters. Returns the skip record or null.
    */
-  function replySkipped(run) {
-    if (store.claimExists(run.run_id)) return false;
+  function replySkipped(run, { startAt, endAt } = {}) {
+    if (store.claimExists(run.run_id)) return null;
     const skip = store.readSkip(run.run_id);
     const at = Number(skip?.at);
-    if (!Number.isFinite(at)) return false;
-    return at >= (Number(run.replied_at) || 0) - REPLY_SKIP_SLACK_MS;
+    if (!Number.isFinite(at) || !Number.isFinite(startAt)) return null;
+    if (at < startAt - REPLY_SKIP_SLACK_MS) return null;           // an earlier send's skip
+    if (Number.isFinite(endAt) && at > endAt + REPLY_SKIP_SLACK_MS) return null;   // a later send's
+    return skip;
   }
 
   const emitter = createEmitter({
@@ -300,9 +304,10 @@ export function createActivity({
     spawnContinuation,
     replySkipped,
     // The guard-skipped reply answered the smart-mode message: the next reply
-    // of this conversation is the run's again.
-    onAmbiguousReply: (conv) => {
-      if (conv && unregistered[conv] != null) {
+    // of this conversation is the run's again — unless a newer smart-mode
+    // message arrived meanwhile (the guard is no longer the one it saw).
+    onAmbiguousReply: (conv, skip) => {
+      if (conv && unregistered[conv] != null && skip?.unreg != null && unregistered[conv] === skip.unreg) {
         delete unregistered[conv];
         syncActive();
       }

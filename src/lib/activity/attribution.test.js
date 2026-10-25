@@ -1738,7 +1738,8 @@ test('1089-①: a foreign input absorbed after the continuation opened → conti
 // ── OPENM-1089 ②: a reply send.js's group guard skipped ──
 
 /** A group run r plus a smart-mode (unmarked) message of the same group, absorbed mid-turn. */
-function guardHarness({ skipped = () => true, ...opts } = {}) {
+const SKIP = { at: 0, unreg: 1 };
+function guardHarness({ skipped = () => SKIP, ...opts } = {}) {
   const ambiguous = [];
   const h = harness({ replySkipped: (run) => skipped(run), onAmbiguousReply: (conv) => ambiguous.push(conv), ...opts });
   const a = h.mkRun('r_0000000a', CONV_A);
@@ -1768,7 +1769,7 @@ test('1089-②: a log reply that send.js skipped → run stays open (ambiguous_r
 
 test('1089-②: the next reply completes the run done; without the skip the first reply completes it (unchanged)', () => {
   let skip = true;
-  const { attr, a, finishes } = guardHarness({ skipped: () => skip });
+  const { attr, a, finishes } = guardHarness({ skipped: () => (skip ? SKIP : null) });
   attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A)));
   attr.handle(toolEnd('s1', 1));
   skip = false;                                       // send.js claimed the run this time
@@ -1776,7 +1777,7 @@ test('1089-②: the next reply completes the run done; without the skip the firs
   attr.handle(toolEnd('s2', 2));
   assert.deepEqual(finishes, [['r_0000000a', 'done', null]]);
 
-  const h = guardHarness({ skipped: () => false });
+  const h = guardHarness({ skipped: () => null });
   h.attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A)));
   h.attr.handle(toolEnd('s1', 1));
   assert.deepEqual(h.finishes, [['r_0000000a', 'done', null]]);
@@ -1815,7 +1816,7 @@ test('1089-②: a replySkipped that throws counts as not skipped (fail open to t
 
 test('1089-②: Codex exec send settled on the poll also honours the skip', () => {
   const ambiguous = [];
-  const { attr, mkRun, finishes } = harness({ replySkipped: () => true, onAmbiguousReply: (c) => ambiguous.push(c) });
+  const { attr, mkRun, finishes } = harness({ replySkipped: () => SKIP, onAmbiguousReply: (c) => ambiguous.push(c) });
   const b = mkRun('r_0000000b', CONV_A);
   const feed = codexFeed(attr);
   // The smart message and the run merged into one input.
@@ -1830,4 +1831,29 @@ test('1089-②: Codex exec send settled on the poll also honours the skip', () =
   assert.equal(b.ambiguous_reply, true);
   assert.deepEqual(ambiguous, [CONV_A]);
   assert.equal(attr.turn.focus, b);
+});
+
+test('1089-② review: a smart message arriving while the skipped send is in flight is not acknowledged by it; the window is the log records\' own times', () => {
+  const windows = [];
+  const got = [];
+  const { attr, mkRun, finishes } = harness({
+    replySkipped: (run, w) => { windows.push(w); return SKIP; },
+    onAmbiguousReply: (conv, skip) => got.push([conv, skip]),
+  });
+  const a = mkRun('r_0000000a', CONV_A);
+  attr.handle(minput('user', omBody(a)));
+  attr.handle(minput('queued_command', omBody(null, { conv: CONV_A })));          // smart A
+  const itemA = attr.turn.queue.find((it) => it.foreign);
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A), 1000));          // answers A (skipped)
+  attr.handle(minput('queued_command', omBody(null, { conv: CONV_A })));          // smart B, mid-flight
+  const itemB = attr.turn.queue.find((it) => it.foreign && it !== itemA);
+  assert.equal(attr.turn.queue[0], itemB, 'B is in front of the queue');
+  attr.handle(toolEnd('s1', 1500));
+  assert.deepEqual(windows, [{ startAt: 1000, endAt: 1500 }]);
+  assert.deepEqual(got, [[CONV_A, SKIP]]);
+  assert.equal(itemA.answered, true, 'the message pending at the send start is the one answered');
+  assert.equal(itemB.answered, false, 'B is still pending');
+  assert.equal(a.state, 'active');
+  assert.equal(attr.turn.focus, null, 'B in front: no focus for the run yet');
+  assert.deepEqual(finishes, []);
 });
