@@ -33,6 +33,8 @@ import {
 const OFF_VALUES = new Set(['0', 'false', 'off', 'no']);
 const ON_VALUES = new Set(['1', 'true', 'on', 'yes']);
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+// Per conversation: smart-mode arrival records kept for the send guard.
+const MAX_UNREG_ARRIVALS = 50;
 
 /** TaskRegistry task names. The three hot ones run only while a run is open. */
 export const ACTIVITY_TASKS = Object.freeze({
@@ -143,8 +145,10 @@ export function createActivity({
   const throttle = createThrottledLogger({ warn, now });
   const gates = {};
   const unregistered = {};
-  // conv → arrival times of smart-mode inputs not yet known answered (oldest
-  // first); unregistered[conv] is the latest of them (send.js's guard).
+  // conv → [{ id, at }] smart-mode inputs (server message id, bridge arrival)
+  // not yet known answered — recorded whether or not a run is open, so the
+  // acknowledgement of an older one never removes a newer one's record.
+  // unregistered[conv] (send.js's guard) follows the latest outstanding one.
   const unregArrivals = {};
   let lastActive = null;
 
@@ -169,12 +173,7 @@ export function createActivity({
       const key = r.reply_conversation_id || r.conversation_id;
       (byConv[key] || (byConv[key] = [])).push(r.run_id);
     }
-    for (const conv of Object.keys(unregistered)) {
-      if (!byConv[conv]) {
-        delete unregistered[conv];
-        delete unregArrivals[conv];
-      }
-    }
+    for (const conv of Object.keys(unregistered)) if (!byConv[conv]) delete unregistered[conv];
     const body = { v: 1, by_conversation: byConv, gate: { ...gates }, unregistered: { ...unregistered } };
     const sig = JSON.stringify(body);
     if (sig === lastActive) return;
@@ -312,23 +311,20 @@ export function createActivity({
     spawnContinuation,
     replySkipped,
     // Called only when the guard-skipped reply acknowledged ONE smart-mode
-    // message seen in the runtime log; paired FIFO with the earliest arrival
-    // record from before the send call started (the same boundary attribution
-    // used to pick the message it acknowledges). Any other arrival — before
-    // the call (not yet seen in the log) or during it (send prep can take a
-    // while, so send.js may already have recorded it as the guard) — keeps the
-    // guard; only when none is left is the next reply the run's again.
-    onAmbiguousReply: (conv, { startAt } = {}) => {
+    // message seen in the runtime log, identified by its server message id:
+    // only THAT arrival record goes (none without an id, or for an id never
+    // recorded). The guard stays at the latest outstanding arrival and is
+    // lifted only when none is left.
+    onAmbiguousReply: (conv, { msgId } = {}) => {
       const list = conv ? unregArrivals[conv] : null;
-      if (!list || !Number.isFinite(startAt)) return;
-      const i = list.findIndex((u) => u <= startAt);
+      if (!list || msgId == null) return;
+      const i = list.findIndex((a) => a.id === String(msgId));
       if (i === -1) return;
       list.splice(i, 1);
-      if (list.length) unregistered[conv] = list[list.length - 1];
-      else {
-        delete unregistered[conv];
-        delete unregArrivals[conv];
-      }
+      if (!list.length) delete unregArrivals[conv];
+      if (unregistered[conv] == null) return;
+      if (list.length) unregistered[conv] = Math.max(...list.map((a) => a.at));
+      else delete unregistered[conv];
       syncActive();
     },
     onRunClosed: (run) => {
@@ -521,14 +517,18 @@ export function createActivity({
     },
 
     /** An unregistered group input (smart mode, no @) was forwarded to C4. */
-    noteUnregisteredInput(endpoint) {
+    noteUnregisteredInput(endpoint, sourceMessageId) {
       stats.runs_skipped_not_mentioned += 1;
       const conv = replyConversationOf(endpoint);
       if (!conv) return;
-      if (!openRuns().some((r) => (r.reply_conversation_id || r.conversation_id) === conv)) return;
       const t = now();
+      if (sourceMessageId != null) {
+        const list = (unregArrivals[conv] || []).filter((a) => t - a.at < RUN_FILE_RETENTION_MS);
+        list.push({ id: String(sourceMessageId), at: t });
+        unregArrivals[conv] = list.slice(-MAX_UNREG_ARRIVALS);
+      }
+      if (!openRuns().some((r) => (r.reply_conversation_id || r.conversation_id) === conv)) return;
       unregistered[conv] = t;
-      (unregArrivals[conv] || (unregArrivals[conv] = [])).push(t);
       syncActive();
     },
 

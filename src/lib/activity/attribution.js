@@ -79,12 +79,12 @@
  * unmarked openmax message of the same endpoint that was pending when the
  * call started (the earliest-arrived one, snapshotted then: a message that
  * arrives while the send is in flight is never acknowledged by it). The
- * guard is updated on the same boundary, and only when such a message was
- * acknowledged (onAmbiguousReply with the call's start time): index.js pairs
- * it FIFO with the earliest smart-mode arrival from before the call start and
- * keeps the guard while any other one is outstanding, so
- * only when none is left does the next reply select the run; the queue moves
- * on. No later reply → done after the no-reply
+ * guard is updated only when such a message was acknowledged, by its
+ * identity (onAmbiguousReply with its server message id): index.js removes
+ * that message's arrival record only — none for a message without an id —
+ * and keeps the guard while any other recorded smart-mode message is
+ * outstanding, so only when none is left does the next reply select the run;
+ * the queue moves on. No later reply → done after the no-reply
  * grace, without no_reply (the merged reply may well have answered it).
  */
 
@@ -92,7 +92,7 @@ import { classifyTool } from './classify.js';
 import { isVisibleTool, thinkingBody } from './present.js';
 import { startDetail, endDetail } from './tool-detail.js';
 import { normalizeDetail } from './detail.js';
-import { resolveMarkedRun, normEndpoint, parseMarker } from './marker.js';
+import { resolveMarkedRun, normEndpoint, parseMarker, sourceMessageIdFromSpillHead } from './marker.js';
 import {
   NO_REPLY_GRACE_MS, ACTIVE_IDLE_TIMEOUT_MS, QUEUED_NO_START_TIMEOUT_MS, REPLY_REF_WINDOW_MS,
   MAX_CONTINUATIONS_PER_TURN,
@@ -157,7 +157,21 @@ export function createAttribution({
   let turn = null;
   // Arrival order of merged-in foreign messages (the queue reorders them).
   let itemSeq = 0;
-  const newForeignItem = (seg) => ({ ...foreignItem(seg), seq: ++itemSeq });
+  const newForeignItem = (seg) => {
+    const it = { ...foreignItem(seg), seq: ++itemSeq };
+    // An unmarked openmax message: its server message id (the bridge's
+    // <message-context> header, inline or in the spill file) identifies it
+    // to the send guard's arrival records (OPENM-1089 ②).
+    if (it.reply?.channel === 'openmax') {
+      const ctx = seg?.ctx || {};
+      let id = ctx.sourceMessageId || null;
+      if (!id && ctx.spillPath && readSpillHead) {
+        try { id = sourceMessageIdFromSpillHead(readSpillHead(ctx.spillPath)); } catch { id = null; }
+      }
+      if (id) it.msgId = String(id);
+    }
+    return it;
+  };
   let degraded = false;
 
   const isOpen = (run) => run && run.state !== 'closed';
@@ -437,7 +451,7 @@ export function createAttribution({
     // smart-mode input still on its way to the runtime is not answered yet.
     if (item && !item.answered && turn && turn.queue.includes(item)) {
       item.answered = true;
-      try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id, { skip, startAt }); } catch {}
+      try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id, { skip, startAt, msgId: item.msgId || null }); } catch {}
     }
     if (turn && turn.owners.includes(run)) applyFocus(2, now());
   }

@@ -490,6 +490,8 @@ test('10-22 R2-1 (reviewer repro): merged Lark A + openmax B, A\'s reply fails �
 
 const bashSend = (id) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: `node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${CONV}" <<'EOF'\nx\nEOF` } }] } });
 const toolOk = (id) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+/** An unregistered smart-mode message of the same group (no marker), server id `id`. */
+const smartMsg = (id) => omMsg('').replace('source-message-id="7383920118271"', `source-message-id="${id}"`);
 const toolUse = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
 
 /** A run whose turn started and whose gate is open. */
@@ -594,8 +596,8 @@ test('1089-② end to end: guard skip writes the skip file → the log reply set
   const store = createRunStore({ dir: runsDir });
   // A smart-mode (not @) message of the same group arrives and is absorbed mid-turn.
   clock.advance(100);
-  activity.noteUnregisteredInput(CONV);
-  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  activity.noteUnregisteredInput(CONV, '9000000000001');
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000001') } });
   activity.pollNow();
   assert.ok(store.readActive().unregistered[CONV]);
   assert.equal(store.readRun(reg.runId).focus, false);
@@ -634,8 +636,8 @@ test('1089-② end to end: guard skip writes the skip file → the log reply set
 async function guardedRun(h) {
   const reg = await startedRun(h);
   h.clock.advance(100);
-  h.activity.noteUnregisteredInput(CONV);
-  h.append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  h.activity.noteUnregisteredInput(CONV, '9000000000001');
+  h.append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000001') } });
   h.activity.pollNow();
   return reg;
 }
@@ -651,8 +653,8 @@ test('1089-② review: a newer smart message arriving while the skipped send is 
   assert.equal(store.readSkip(reg.runId).unreg, unregA);
   // Smart B arrives (bridge + log) before the send's result is collected.
   clock.advance(300);
-  activity.noteUnregisteredInput(CONV);
-  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  activity.noteUnregisteredInput(CONV, '9000000000002');
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000002') } });
   clock.advance(200);
   append(toolOk('toolu_s1'));
   activity.pollNow();
@@ -710,14 +712,14 @@ test('1089-② review R2: B arrives after the send call started but BEFORE send.
   clock.advance(100);
   append(bashSend('toolu_s1'));                         // the agent's answer to A starts
   clock.advance(100);
-  activity.noteUnregisteredInput(CONV);                 // smart B reaches the bridge …
+  activity.noteUnregisteredInput(CONV, '9000000000002');                 // smart B reaches the bridge …
   activity.pollNow();
   const unregB = store.readActive().unregistered[CONV];
   // … while send.js is still preparing: it plans now and records B's guard.
   clock.advance(100);
   assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
   assert.equal(store.readSkip(reg.runId).unreg, unregB);
-  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000002') } });
   clock.advance(200);
   append(toolOk('toolu_s1'));
   activity.pollNow();
@@ -742,7 +744,7 @@ test('1089-② review R3: smart A reaches the runtime only after the skipped sen
   append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: larkMsg } });
   activity.pollNow();
   clock.advance(100);
-  activity.noteUnregisteredInput(CONV);                 // smart A at the bridge, still on its way to C4
+  activity.noteUnregisteredInput(CONV, '9000000000001');                 // smart A at the bridge, still on its way to C4
   const unregA = store.readActive().unregistered[CONV];
   clock.advance(100);
   append(bashSend('toolu_s1'));
@@ -754,10 +756,53 @@ test('1089-② review R3: smart A reaches the runtime only after the skipped sen
   assert.equal(store.readActive().unregistered?.[CONV], unregA, 'nothing acknowledged: the guard stays');
   // A is delivered to the runtime only now.
   clock.advance(500);
-  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000001') } });
   activity.pollNow();
   const smart = activity.attribution.turn.queue.find((it) => it.foreign && it.reply?.channel === 'openmax');
   assert.equal(smart.answered, false, 'A is pending');
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
+  assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
+  activity.stop();
+});
+
+test('1089-② review R4: smart A arrives before any run, the run is injected, B reaches the bridge but is delivered after the settlement → acking A never consumes B; B keeps the guard and the next send does not claim the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const store = createRunStore({ dir: runsDir });
+  await activity.collector.discover();
+  // Smart A with no run open: recorded by id, no guard yet; the runtime takes it.
+  activity.noteUnregisteredInput(CONV, '9000000000001');
+  clock.advance(100);
+  append({ type: 'user', message: { role: 'user', content: smartMsg('9000000000001') } });
+  // The @ message of the same group registers a run and is injected into the turn.
+  clock.advance(100);
+  const reg = activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: '7383920118271', endpoint: CONV });
+  activity.confirmRun(reg.runId, '{"ok":true,"id":43}\n');
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg(reg.marker) } });
+  activity.pollNow();
+  clock.advance(2100);
+  activity.emitter.tick();                              // gate open
+  assert.equal(store.readRun(reg.runId).focus, false, 'A is in front');
+  // Smart B reaches the bridge (guard = B) but not yet the runtime.
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV, '9000000000002');
+  const unregB = store.readActive().unregistered[CONV];
+  assert.ok(unregB);
+  // The agent answers A; send.js skips because of B's guard.
+  clock.advance(100);
+  append(bashSend('toolu_s1'));
+  clock.advance(50);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  clock.advance(200);
+  append(toolOk('toolu_s1'));
+  activity.pollNow();
+  assert.equal(store.readActive().unregistered?.[CONV], unregB, 'A acknowledged by id; B\'s record and guard stay');
+  // B is delivered only now.
+  clock.advance(500);
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000002') } });
+  activity.pollNow();
+  const items = activity.attribution.turn.queue.filter((it) => it.foreign);
+  assert.deepEqual(items.map((it) => [it.msgId, it.answered]), [['9000000000002', false], ['9000000000001', true]]);
   assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
   assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
   activity.stop();
