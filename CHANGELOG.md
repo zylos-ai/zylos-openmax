@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Agent activity: work after the first reply is no longer lost (OPENM-1089 ①).** A delivered reply still closes its run with the full `agent_run`, but when the agent keeps working visibly in the same turn (a tool step, not just text) a continuation run opens — a new `run_id` for the same source message, live frames, carried in full by the next reply. Only in turns of that run's own conversation with no other input; at most 10 per turn; one still unanswered at turn end closes `done` without `no_reply`. `agent_run` shape unchanged; the stats line gains `continuations=N`.
+
 ## [2.29.0] - 2026-10-23
 
 Consolidates every change since 2.26.5 (the unreleased 2.27.0 – 2.28.1 entries are folded in here).

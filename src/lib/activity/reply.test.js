@@ -334,3 +334,21 @@ test('10-22: a run closed on its delivered reply, still listed, gives later repl
   const c = setup({ runs: [{ run_id: 'r_0000000a', state: 'closed', ended_at: ended }] });
   assert.equal(plan(c, 'x', ended + 1000), null, 'closed at turn end / no_reply: not selectable');
 });
+
+// ── OPENM-1089 ① ──
+
+test('1089-①: a continuation listed with focus is selected over its closed parent and carries its own full agent_run', () => {
+  const s = setup({
+    runs: [
+      { run_id: 'r_0000000a', state: 'closed', closed_on_reply: true, ended_at: T0 + 2000 },
+      { run_id: 'r_0000000b', focus: true, continues: 'r_0000000a', segment: 2 },
+    ],
+  });
+  s.store.createClaim('r_0000000a', { v: 2, state: 'delivered', client_msg_id: 'c_old' });
+  const p = plan(s, 'final answer', T0 + 6000);
+  assert.equal(p.runId, 'r_0000000b');
+  assert.equal(p.firstAgentRun.run_id, 'r_0000000b');
+  assert.ok(Array.isArray(p.firstAgentRun.steps));
+  assert.equal('continues' in p.firstAgentRun, false, 'agent_run shape unchanged (no new field)');
+  assert.equal(classifyAgentRun({ raw: p.firstAgentRun }).verdict, 'ok');
+});

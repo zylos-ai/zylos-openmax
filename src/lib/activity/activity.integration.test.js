@@ -369,7 +369,9 @@ test('10-22 terminal state: done goes out when the reply is delivered, not at tu
   assert.deepEqual(plan2.firstAgentRun, { schema_version: 3, run_id: reg.runId, ref: true });
 
   // The turn keeps going for 20 s (memory work) and ends: no frame regresses the run.
-  const n = sent.length;
+  // OPENM-1089 ①: that visible step opens a continuation run (its own run_id),
+  // which the turn end closes done (no no_reply: the parent was answered).
+  const n = states(sent, reg.runId).length;
   clock.advance(20_000);
   append({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_9', name: 'Edit', input: { file_path: '/m/state.md', old_string: 'a', new_string: 'b' } }] } });
   append({ type: 'system', subtype: 'turn_duration', durationMs: 23000 });
@@ -378,10 +380,16 @@ test('10-22 terminal state: done goes out when the reply is delivered, not at tu
   clock.advance(200_000);
   activity.pollNow();
   activity.emitter.tick();
-  assert.equal(sent.length, n, 'no frame for the run after its terminal frame');
+  assert.equal(states(sent, reg.runId).length, n, 'no frame for the run after its terminal frame');
+  const cont = sent.find((f) => f.payload.run_id !== reg.runId)?.payload;
+  assert.equal(cont.source_message_id, '7383920118271', 'continuation of the same source message');
+  assert.equal(states(sent, cont.run_id).at(-1), 'done');
+  assert.equal(sent.at(-1).payload.end_reason, undefined);
+  assert.equal(store.readRun(cont.run_id).continues, reg.runId);
   assert.equal(store.readActive().by_conversation[CONV], undefined, 'turn ended: no longer listed');
   assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h3', newKey: () => 'c_3', now: clock.now(), store }), null);
-  assert.match(activity.statsLine(), /runs_closed=\{done:1\}/);
+  assert.match(activity.statsLine(), /runs_closed=\{done:2\}/);
+  assert.match(activity.statsLine(), /continuations=1/);
   assert.deepEqual(warns, []);
   activity.stop();
 });
@@ -477,3 +485,105 @@ test('10-22 R2-1 (reviewer repro): merged Lark A + openmax B, A\'s reply fails �
     activity.stop();
   }
 });
+
+// ── OPENM-1089 ──
+
+const bashSend = (id) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: `node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${CONV}" <<'EOF'\nx\nEOF` } }] } });
+const toolOk = (id) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+const toolUse = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+
+/** A run whose turn started and whose gate is open. */
+async function startedRun(h) {
+  const reg = h.activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: '7383920118271', endpoint: CONV });
+  h.activity.confirmRun(reg.runId, '{"ok":true,"id":42}\n');
+  await h.activity.collector.discover();
+  h.clock.advance(200);
+  h.append({ type: 'user', message: { role: 'user', content: omMsg(reg.marker) } });
+  h.activity.pollNow();
+  h.clock.advance(2100);
+  h.activity.emitter.tick();                            // gate open
+  return reg;
+}
+
+test('1089-① end to end: reply 1 delivered → later log steps open a continuation in active.json → the next reply carries its full agent_run', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir, warns } = h;
+  const reg = await startedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  append(toolUse('toolu_1', 'Grep', { pattern: 'price' }));
+  append(toolOk('toolu_1'));
+  activity.pollNow();
+  // Reply 1 ("收到，我来查"): claim → delivered.
+  const p1 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store });
+  assert.equal(p1.firstAgentRun.run_id, reg.runId);
+  p1.settle('ok');
+  append(bashSend('toolu_s1'));
+  append(toolOk('toolu_s1'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(store.readRun(reg.runId).state, 'closed');
+
+  // The agent keeps working: a visible step opens r1′.
+  clock.advance(1000);
+  append(toolUse('toolu_2', 'Read', { file_path: '/data/quote.xlsx' }));
+  append(toolOk('toolu_2'));
+  activity.pollNow();
+  const ids = store.readActive().by_conversation[CONV];
+  const contId = ids.find((id) => id !== reg.runId);
+  assert.ok(contId, 'the continuation is listed for send.js');
+  const cont = store.readRun(contId);
+  assert.equal(cont.continues, reg.runId);
+  assert.equal(cont.segment, 2);
+  assert.equal(cont.focus, true);
+  assert.equal(cont.source_message_id, '7383920118271');
+  clock.advance(600);
+  activity.emitter.tick();
+  const contFrames = sent.filter((f) => f.payload.run_id === contId);
+  assert.ok(contFrames.length >= 1, 'live frames for the continuation');
+  assert.equal(contFrames[0].payload.source_message_id, '7383920118271');
+  assert.ok(contFrames.some((f) => f.payload.steps.some((s) => s.category === 'read')));
+  for (const f of contFrames) assert.deepEqual(validateFrameV3(f.payload), []);
+
+  // Reply 2 (the answer): send.js picks the focused continuation, full snapshot.
+  const p2 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store });
+  assert.equal(p2.runId, contId);
+  assert.equal(p2.firstAgentRun.run_id, contId);
+  assert.ok(p2.firstAgentRun.steps.some((s) => s.category === 'read'));
+  assert.equal(classifyAgentRun({ raw: p2.firstAgentRun }).verdict, 'ok');
+  p2.settle('ok');
+  append(bashSend('toolu_s2'));
+  append(toolOk('toolu_s2'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(states(sent, contId).at(-1), 'done');
+  assert.equal(store.readRun(contId).state, 'closed');
+  assert.match(activity.statsLine(), /continuations=1/);
+  assert.deepEqual(warns, []);
+  activity.stop();
+});
+
+test('1089-① restart with an open continuation → failed / runtime_restarted on ws open; the parent untouched', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await startedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  const p1 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store });
+  p1.settle('ok');
+  activity.pollNow();
+  append(toolUse('toolu_2', 'Read', { file_path: '/x' }));
+  activity.pollNow();
+  const contId = store.listRunIds().find((id) => id !== reg.runId);
+  assert.ok(contId);
+  activity.stop();
+  const parentBefore = JSON.stringify(store.readRun(reg.runId));
+
+  const ws2Sent = [];
+  const again = createActivity({ config: { activity: { enabled: true } }, env: {}, runsDir, homeDir: os.tmpdir(), zylosDir: os.tmpdir(), runtime: 'claude' });
+  again.start();
+  again.bindOrgWs(ORG, { trySend: (f) => { ws2Sent.push(f); return true; } });
+  again.onWsOpen(ORG);
+  again.stop();
+  assert.deepEqual(ws2Sent.map((f) => [f.payload.run_id, f.payload.state, f.payload.end_reason]), [[contId, 'failed', 'runtime_restarted']]);
+  assert.equal(JSON.stringify(store.readRun(reg.runId)), parentBefore);
+});
+

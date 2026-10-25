@@ -56,6 +56,19 @@
  * is settled by the write_stdin poll that sees it exit (sendCalls).
  * Closing is idempotent and never regressed: turn end, timers and restart
  * handling skip closed runs.
+ *
+ * Continuation runs (OPENM-1089 ①): a reply closes its run (above), but the
+ * agent often answers first ("收到，我来查") and keeps working. In a turn
+ * that is not foreign and whose owners share one conversation, the answered
+ * run is continuable: the next VISIBLE tool step of the turn with no unreplied
+ * owner left (not commentary, not a reply / wait call) opens a continuation —
+ * a new run_id for the same source message (spawnContinuation, built by
+ * index.js like a registered run), which takes focus, streams live and is
+ * carried in full by the next reply. Each reply closes the current segment;
+ * no visible step between two replies → no continuation (the second reply
+ * carries the reference, as before). At most MAX_CONTINUATIONS_PER_TURN per
+ * turn; none while blocked (③) or degraded. A continuation still unanswered
+ * at turn end closes done without no_reply: its parent was answered.
  */
 
 import { classifyTool } from './classify.js';
@@ -65,6 +78,7 @@ import { normalizeDetail } from './detail.js';
 import { resolveMarkedRun, normEndpoint, parseMarker } from './marker.js';
 import {
   NO_REPLY_GRACE_MS, ACTIVE_IDLE_TIMEOUT_MS, QUEUED_NO_START_TIMEOUT_MS, REPLY_REF_WINDOW_MS,
+  MAX_CONTINUATIONS_PER_TURN,
 } from './constants.js';
 
 const MAX_RUN_EVENTS = 2000;
@@ -90,6 +104,9 @@ export function createAttribution({
   persist = () => {},
   onRunClosed = () => {},
   readSpillHead,
+  // OPENM-1089 ①: build + register a continuation run of `parent` (index.js);
+  // null when it cannot be created.
+  spawnContinuation = () => null,
 } = {}) {
   const runs = new Map();
   /**
@@ -275,6 +292,9 @@ export function createAttribution({
       if (!isOpen(run)) continue;
       if (run.state === 'replied') closeRun(run, 'done');
       else if (interrupted) closeRun(run, 'failed', 'interrupted');
+      // A continuation nobody answered (e.g. memory work after the reply): its
+      // parent was answered — done, no no-reply grace.
+      else if (run.continues) closeRun(run, 'done');
       else {
         run.turn_ended_at = t;
         run._awaitNoReply = true;
@@ -301,7 +321,10 @@ export function createAttribution({
   }
 
   function newTurn(foreign, file) {
-    turn = { id: `${file || 'log'}:${now()}`, owners: [], queue: [], foreign, focus: null, sticky: null, blocked: false, file };
+    turn = {
+      id: `${file || 'log'}:${now()}`, owners: [], queue: [], foreign, focus: null, sticky: null, blocked: false, file,
+      lastAnswered: null, continuations: 0,
+    };
     return turn;
   }
 
@@ -324,9 +347,54 @@ export function createAttribution({
     stats.closed_on_reply = stats.closed_on_reply || {};
     stats.closed_on_reply[via] = (stats.closed_on_reply[via] || 0) + 1;
     closeRun(run, 'done');
-    if (turn && turn.owners.includes(run)) applyFocus(2, now());
+    if (turn && turn.owners.includes(run)) {
+      noteAnswered(run);
+      applyFocus(2, now());
+    }
     return true;
   }
+
+  /**
+   * OPENM-1089 ①: remember the run the turn last answered; it may be
+   * continued when the turn is the run's own (not foreign, one conversation).
+   */
+  function noteAnswered(run) {
+    turn.lastAnswered = run;
+    const convs = new Set(turn.owners.map((r) => r.conversation_id));
+    run._continuable = !turn.foreign && convs.size === 1;
+  }
+
+  /**
+   * OPENM-1089 ①: a visible tool step starts with no run to take it — open a
+   * continuation of the run the turn last answered, when every condition
+   * holds. Returns the new run (focused) or null.
+   */
+  function maybeContinue(cls, t) {
+    if (!turn || turn.focus || turn.blocked || turn.foreign || degraded) return null;
+    if (turn.owners.some(unreplied)) return null;
+    const parent = turn.lastAnswered;
+    if (!parent || parent._continuable !== true) return null;
+    if (!isVisibleTool({ kind: 'tool', category: cls.category })) return null;
+    if (turn.continuations >= MAX_CONTINUATIONS_PER_TURN) return null;
+    let run = null;
+    try {
+      run = spawnContinuation(parent);
+    } catch {
+      run = null;
+    }
+    if (!run) return null;
+    turn.continuations += 1;
+    runs.set(run.run_id, run);
+    turn.owners.push(run);
+    turn.queue.push({ run });
+    enterTurn(run, t);
+    turn.focus = run;
+    setFocusFlags(run);
+    emitter.emitNow(run);
+    stats.continuations = (stats.continuations || 0) + 1;
+    return run;
+  }
+
 
   /**
    * A send that answered a merged-in foreign message failed: the message is
@@ -519,7 +587,9 @@ export function createAttribution({
 
     // External sends pause attribution BEFORE this operation is attributed:
     // only an openmax run this operation itself answers gets the step.
-    const target = replied[0] || (external ? null : turn.focus);
+    let target = replied[0] || (external ? null : turn.focus);
+    // OPENM-1089 ①: work after the reply opens a continuation run.
+    if (!target && !external && !answered.length) target = maybeContinue(cls, t);
     if (target && unreplied(target)) startTool(target, input.callId, cls, t, input.name, input.input);
     else stats.attribution_unfocused_events += 1;
     for (const run of replied) markReplied(run, 'log', { pauseFocus: external });

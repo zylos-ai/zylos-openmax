@@ -7,7 +7,7 @@ const CONV_A = '019f0000-aaaa-7bbb-8ccc-00000000000a';
 const CONV_B = '019f0000-aaaa-7bbb-8ccc-00000000000b';
 const REPLY_VIA = (ch, ep) => ` ---- reply via: node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "${ch}" "${ep}"`;
 
-function harness() {
+function harness({ spawn = false, ...opts } = {}) {
   let t = 1760000000000;
   const clock = { now: () => t, advance: (ms) => { t += ms; } };
   const stats = {
@@ -21,10 +21,27 @@ function harness() {
     pushEvent(run, ev) { (run._pushed || (run._pushed = [])).push(ev); },
     finish(run, s, r) { finishes.push([run.run_id, s, r]); },
     untrack() {},
+    emitNow(run) { run._emitted = (run._emitted || 0) + 1; },
+  };
+  // OPENM-1089 ①: what index.js spawnContinuation builds, minus the files.
+  let nCont = 0;
+  const spawned = [];
+  const spawnContinuation = (parent) => {
+    const run = {
+      run_id: `r_c${String(++nCont).padStart(7, '0')}`, org_id: parent.org_id, conversation_id: parent.conversation_id,
+      reply_conversation_id: parent.reply_conversation_id, context_conversation_id: parent.context_conversation_id,
+      source_message_id: parent.source_message_id, endpoint: parent.endpoint, c4_id: null, created_at: clock.now(),
+      exec_started_at: clock.now(), state: 'queued', seq: 0, next_event: 1, events: [], dropped: 0,
+      continues: parent.run_id, segment: (parent.segment || 1) + 1,
+    };
+    spawned.push(run);
+    return run;
   };
   const attr = createAttribution({
     now: clock.now, emitter, stats, throttle: { warn: (...a) => throttled.push(a) },
     readSpillHead: () => null,
+    ...(spawn ? { spawnContinuation } : {}),
+    ...opts,
   });
   const mkRun = (id, conv, { c4 = null, endpoint = conv } = {}) => {
     const run = {
@@ -36,7 +53,7 @@ function harness() {
     attr.addRun(run);
     return run;
   };
-  return { attr, clock, stats, finishes, throttled, mkRun };
+  return { attr, clock, stats, finishes, throttled, mkRun, spawned };
 }
 
 /** An openmax C4 body as the runtime log shows it (inline, with reply-via). */
@@ -1534,3 +1551,187 @@ test('R4 controls: direct Codex exec exit 0 → done at once; exit 1 → failure
     assert.equal(a.state, isError ? 'active' : 'closed');
   }
 });
+
+// ── OPENM-1089 ①: continuation runs ──
+
+/** A single-run turn whose first reply ("收到") went out and closed the run. */
+function answered(h, { id = 'r_0000000a', conv = CONV_A } = {}) {
+  const a = h.mkRun(id, conv);
+  a.source_message_id = '7383920118271';
+  h.attr.handle(minput('user', omBody(a)));
+  h.attr.handle(toolStart('g1', 'Grep', { pattern: 'x' }));
+  h.attr.handle(toolStart('s1', 'Bash', sendTo('openmax', conv)));
+  h.attr.handle(toolEnd('s1', 1));
+  assert.equal(a.state, 'closed');
+  return a;
+}
+
+test('1089-①: reply 1 closes r1 done; a visible tool after it opens continuation r1′ (new run_id, same source_message_id, continues=r1)', () => {
+  const h = harness({ spawn: true });
+  const a = answered(h);
+  assert.deepEqual(h.finishes, [['r_0000000a', 'done', null]]);
+  assert.equal(h.spawned.length, 0, 'the reply alone opens nothing');
+  h.attr.handle(toolStart('q1', 'Read', { file_path: '/x/report.md' }, 5));
+  assert.equal(h.spawned.length, 1);
+  const c = h.spawned[0];
+  assert.notEqual(c.run_id, a.run_id);
+  assert.equal(c.source_message_id, a.source_message_id);
+  assert.equal(c.continues, a.run_id);
+  assert.equal(c.segment, 2);
+  assert.equal(c.state, 'active');
+  assert.equal(c.focus, true);
+  assert.equal(h.attr.turn.focus, c);
+  assert.equal(c._emitted, 1, 'its first frame goes out right away');
+  assert.deepEqual(kinds(c), ['tool:read'], 'the step that opened it is its first step');
+  assert.deepEqual(kinds(a), ['tool:search_files'], 'the parent is untouched');
+  h.attr.handle(commentary('查到了，整理一下'));
+  h.attr.handle(toolEnd('q1', 6));
+  assert.deepEqual(kinds(c), ['tool:read', 'commentary', 'tool:read:end']);
+  assert.equal(h.stats.continuations, 1);
+});
+
+test('1089-①: reply 2 is attributed to r1′ and closes it done; the next step opens r1″ (segment 3)', () => {
+  const h = harness({ spawn: true });
+  answered(h);
+  h.attr.handle(toolStart('q1', 'Read', { file_path: '/x' }));
+  const c = h.spawned[0];
+  h.attr.handle(toolStart('s2', 'Bash', sendTo('openmax', CONV_A)));
+  assert.equal(c.state, 'replied', 'reply 2 marks the continuation');
+  h.attr.handle(toolEnd('s2', 2));
+  assert.equal(c.state, 'closed');
+  assert.equal(c.closed_on_reply, true);
+  assert.deepEqual(h.finishes.at(-1), [c.run_id, 'done', null]);
+  h.attr.handle(toolStart('q2', 'WebFetch', { url: 'https://a.example.com' }));
+  assert.equal(h.spawned.length, 2);
+  assert.equal(h.spawned[1].continues, c.run_id);
+  assert.equal(h.spawned[1].segment, 3);
+  // The claim path closes a continuation too.
+  assert.equal(h.attr.noteReplyDelivered(h.spawned[1].run_id), true);
+  assert.equal(h.spawned[1].state, 'closed');
+});
+
+test('1089-①: two replies back-to-back with no visible step in between → no continuation (reply 2 is nobody\'s: send.js gives r1\'s ref)', () => {
+  const h = harness({ spawn: true });
+  answered(h);
+  h.attr.handle(toolStart('s2', 'Bash', sendTo('openmax', CONV_A)));
+  h.attr.handle(toolEnd('s2', 2));
+  assert.equal(h.spawned.length, 0);
+  h.attr.handle({ t: 'turn_end', at: 3 });
+  assert.equal(h.finishes.length, 1);
+});
+
+test('1089-①: commentary alone after the reply never opens a continuation (stays unfocused, dropped)', () => {
+  const h = harness({ spawn: true });
+  const a = answered(h);
+  const before = h.stats.attribution_unfocused_events;
+  h.attr.handle(commentary('回复完了，总结一下这轮'));
+  assert.equal(h.spawned.length, 0);
+  assert.equal(h.stats.attribution_unfocused_events, before + 1);
+  assert.deepEqual(kinds(a), ['tool:search_files']);
+});
+
+test('1089-①: waiting / reply calls never open a continuation', () => {
+  const h = harness({ spawn: true });
+  answered(h);
+  h.attr.handle(toolStart('w1', 'TaskOutput', { task_id: 'x' }));
+  h.attr.handle(toolStart('w2', 'BashOutput', { bash_id: 'x' }));
+  h.attr.handle(toolStart('s2', 'Bash', sendTo('openmax', CONV_A)));
+  h.attr.handle(toolStart('s3', 'Bash', { command: `node /h/zylos/src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","text":"x"}'` }));
+  assert.equal(h.spawned.length, 0);
+});
+
+test('1089-①: continuation unreplied at turn end → done without no_reply (no grace)', () => {
+  const h = harness({ spawn: true });
+  answered(h);
+  h.attr.handle(toolStart('m1', 'Edit', { file_path: '/m/state.md', old_string: 'a', new_string: 'b' }));
+  const c = h.spawned[0];
+  h.attr.handle({ t: 'turn_end', at: 9 });
+  assert.equal(c.state, 'closed');
+  assert.deepEqual(h.finishes.at(-1), [c.run_id, 'done', null]);
+  h.clock.advance(200_000);
+  h.attr.tick();
+  assert.equal(h.finishes.length, 2, 'nothing more after the grace');
+  // An interrupted turn still fails it.
+  const h2 = harness({ spawn: true });
+  answered(h2);
+  h2.attr.handle(toolStart('m1', 'Edit', { file_path: '/m/state.md', old_string: 'a', new_string: 'b' }));
+  h2.attr.handle({ t: 'turn_end', at: 9, interrupted: true });
+  assert.deepEqual(h2.finishes.at(-1), [h2.spawned[0].run_id, 'failed', 'interrupted']);
+});
+
+test('1089-①: no continuation in a foreign turn, when blocked, when degraded, or past MAX_CONTINUATIONS_PER_TURN', () => {
+  // Foreign turn: Lark first, then the run.
+  const f = harness({ spawn: true });
+  const a = f.mkRun('r_0000000a', CONV_A);
+  f.attr.handle(minput('user', larkBody('x') + omBody(a)));
+  f.attr.handle(toolStart('l1', 'Bash', sendTo('lark', 'oc_1')));
+  f.attr.handle(toolEnd('l1', 1));
+  f.attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A)));
+  f.attr.handle(toolEnd('s1', 2));
+  assert.equal(a.state, 'closed');
+  f.attr.handle(toolStart('q1', 'Read', { file_path: '/x' }));
+  assert.equal(f.spawned.length, 0, 'foreign turn');
+
+  // Blocked (③): a send to an unknown channel after the reply.
+  const b = harness({ spawn: true });
+  answered(b);
+  b.attr.handle(toolStart('x1', 'Bash', { command: 'node /x/c4-send.js "lark" "oc_9" "hi"' }));
+  assert.equal(b.attr.turn.blocked, true);
+  b.attr.handle(toolStart('q1', 'Read', { file_path: '/x' }));
+  assert.equal(b.spawned.length, 0, 'blocked');
+
+  // Degraded collector.
+  const d = harness({ spawn: true });
+  answered(d);
+  d.attr.degradeAll();
+  d.attr.handle(toolStart('q1', 'Read', { file_path: '/x' }));
+  assert.equal(d.spawned.length, 0, 'degraded');
+
+  // Cap per turn.
+  const m = harness({ spawn: true });
+  answered(m);
+  for (let i = 0; i < 12; i++) {
+    m.attr.handle(toolStart(`q${i}`, 'Read', { file_path: `/x${i}` }));
+    m.attr.handle(toolStart(`s${i}`, 'Bash', sendTo('openmax', CONV_A)));
+    m.attr.handle(toolEnd(`s${i}`, i));
+  }
+  assert.equal(m.spawned.length, 10);
+  assert.equal(m.stats.continuations, 10);
+
+  // Owners in two conversations: the answered run is not continuable.
+  const x = harness({ spawn: true });
+  const a1 = x.mkRun('r_0000000a', CONV_A);
+  const b1 = x.mkRun('r_0000000b', CONV_B);
+  x.attr.handle(minput('user', omBody(a1) + omBody(b1)));
+  x.attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A)));
+  x.attr.handle(toolEnd('s1', 1));
+  x.attr.handle(toolStart('s2', 'Bash', sendTo('openmax', CONV_B)));
+  x.attr.handle(toolEnd('s2', 2));
+  x.attr.handle(toolStart('q1', 'Read', { file_path: '/x' }));
+  assert.equal(x.spawned.length, 0, 'mixed conversations');
+
+  // spawnContinuation failing (or not wired): the step stays unattributed.
+  const n = harness({ spawnContinuation: () => { throw new Error('disk full'); } });
+  answered(n);
+  n.attr.handle(toolStart('q1', 'Read', { file_path: '/x' }));
+  assert.equal(n.attr.turn.focus, null);
+});
+
+test('1089-①: a foreign input absorbed after the continuation opened → continuation loses focus until the foreign item is answered', () => {
+  const h = harness({ spawn: true });
+  answered(h);
+  h.attr.handle(toolStart('q1', 'Read', { file_path: '/x' }));
+  const c = h.spawned[0];
+  h.attr.handle(minput('queued_command', larkBody('在吗')));
+  assert.equal(h.attr.turn.focus, null);
+  h.attr.handle(toolStart('l0', 'Bash', { command: 'ls /lark' }));
+  h.attr.handle(commentary('先回 Lark'));
+  assert.deepEqual(kinds(c), ['tool:read'], 'Lark work never reaches the continuation');
+  assert.equal(h.spawned.length, 1, 'and opens no other continuation (foreign turn)');
+  h.attr.handle(toolStart('l1', 'Bash', sendTo('lark', 'oc_1')));
+  h.attr.handle(toolEnd('l1', 1));
+  assert.equal(h.attr.turn.focus, c, 'answered: the continuation is back in focus');
+  h.attr.handle(toolStart('q2', 'Grep', { pattern: 'y' }));
+  assert.deepEqual(kinds(c), ['tool:read', 'tool:search_files']);
+});
+

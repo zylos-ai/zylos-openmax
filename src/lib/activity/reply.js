@@ -22,6 +22,13 @@
  *     a retry with the same first-chunk body reuses K (cws-comm de-dupes on
  *     (org_id, client_msg_id) with no time limit) and the full summary; a
  *     retry with a different body uses a new key and only the reference.
+ *
+ * One run = one segment of the turn (OPENM-1089 ①): the delivered reply closes
+ * its run; when the agent keeps working visibly afterwards, comm-bridge opens a
+ * continuation run (new run_id, same source message, `continues` = the parent)
+ * and lists it with focus — the next reply selects it (focus first), claims it
+ * and carries ITS full agent_run. Without a continuation the next reply gets
+ * the parent's reference form, as above.
  */
 
 import crypto from 'crypto';

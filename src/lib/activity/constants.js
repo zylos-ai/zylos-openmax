@@ -82,6 +82,10 @@ export const ACTIVE_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 // done / no_reply this long after it was registered.
 export const QUEUED_NO_START_TIMEOUT_MS = 5 * 60 * 1000;
 export const RUN_FILE_RETENTION_MS = 24 * 60 * 60 * 1000;
+// Continuation runs (OPENM-1089 ①): after a reply closed the run, later
+// visible steps of the same turn open a new run for the same source message —
+// at most this many per runtime turn.
+export const MAX_CONTINUATIONS_PER_TURN = 10;
 
 // ── emitter ────────────────────────────────────────────────────────────────
 export const EMIT_TICK_MS = 250;

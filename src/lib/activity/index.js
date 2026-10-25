@@ -210,6 +210,67 @@ export function createActivity({
     }
   }
 
+  /** A fresh run record (registerRun and continuation runs share it). */
+  function newRun({ orgId, conversationId, replyConversationId, contextConversationId, sourceMessageId, endpoint }) {
+    const runId = newRunId((id) => !!attribution.getRun(id) || fs.existsSync(store.runPath(id)));
+    return {
+      v: 1,
+      run_id: runId,
+      org_id: orgId,
+      conversation_id: conversationId,
+      reply_conversation_id: replyConversationId || replyConversationOf(endpoint) || conversationId,
+      context_conversation_id: contextConversationId || conversationId,
+      source_message_id: sourceMessageId != null ? String(sourceMessageId) : null,
+      endpoint,
+      c4_channel: 'openmax',
+      c4_id: null,
+      created_at: now(),
+      state: 'created',
+      turn_id: null,
+      seq: 0,
+      next_event: 1,
+      events: [],
+      dropped: 0,
+      focus: false,
+      status_only: false,
+      replied_at: null,
+      turn_ended_at: null,
+      ended_at: null,
+      reason: null,
+    };
+  }
+
+  /**
+   * OPENM-1089 ①: a continuation of `parent` (its reply already closed it):
+   * same source message and destination, a new run_id. Tracked by the
+   * emitter; attribution puts it in the turn, focuses it and sends its first
+   * frame. Never throws (null: no continuation).
+   */
+  function spawnContinuation(parent) {
+    try {
+      const run = newRun({
+        orgId: parent.org_id,
+        conversationId: parent.conversation_id,
+        replyConversationId: parent.reply_conversation_id,
+        contextConversationId: parent.context_conversation_id,
+        sourceMessageId: parent.source_message_id,
+        endpoint: parent.endpoint,
+      });
+      run.continues = parent.run_id;
+      run.segment = (Number.isInteger(parent.segment) ? parent.segment : 1) + 1;
+      run.state = 'queued';
+      run.exec_started_at = run.created_at;
+      if (attribution.degraded) run.status_only = true;
+      attribution.addRun(run);
+      emitter.track(run);
+      startHot();
+      return run;
+    } catch (err) {
+      throttle.warn('continuation_run', err.message);
+      return null;
+    }
+  }
+
   const emitter = createEmitter({
     now,
     stats,
@@ -224,6 +285,7 @@ export function createActivity({
     throttle,
     persist: persistRun,
     readSpillHead,
+    spawnContinuation,
     onRunClosed: (run) => {
       const form = replyForm(run);
       stats.run_reply_form[form] = (stats.run_reply_form[form] || 0) + 1;
@@ -374,33 +436,8 @@ export function createActivity({
 
     registerRun({ orgId, conversationId, contextConversationId, sourceMessageId, endpoint }) {
       try {
-        const runId = newRunId((id) => !!attribution.getRun(id) || fs.existsSync(store.runPath(id)));
-        const t = now();
-        const run = {
-          v: 1,
-          run_id: runId,
-          org_id: orgId,
-          conversation_id: conversationId,
-          reply_conversation_id: replyConversationOf(endpoint) || conversationId,
-          context_conversation_id: contextConversationId || conversationId,
-          source_message_id: sourceMessageId != null ? String(sourceMessageId) : null,
-          endpoint,
-          c4_channel: 'openmax',
-          c4_id: null,
-          created_at: t,
-          state: 'created',
-          turn_id: null,
-          seq: 0,
-          next_event: 1,
-          events: [],
-          dropped: 0,
-          focus: false,
-          status_only: false,
-          replied_at: null,
-          turn_ended_at: null,
-          ended_at: null,
-          reason: null,
-        };
+        const run = newRun({ orgId, conversationId, contextConversationId, sourceMessageId, endpoint });
+        const runId = run.run_id;
         attribution.addRun(run);
         store.writeRun(run);
         stats.runs_registered += 1;
@@ -518,6 +555,7 @@ export function createActivity({
         `merged_inputs=${stats.merged_inputs || 0}`,
         `closed_on_reply=${fmtCounts(stats.closed_on_reply || {})}`,
         `reply_failed=${stats.reply_failed || 0}`,
+        `continuations=${stats.continuations || 0}`,
         `runs_closed=${fmtCounts(stats.runs_closed)}`,
         `run_reply_form=${fmtCounts(stats.run_reply_form)}`,
         `server_errors=${fmtCounts(stats.server_errors)}`,
