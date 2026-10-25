@@ -1,119 +1,163 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureOpenmaxKb, cmpVer, KB_PIN, KB_NAME, KB_REPO } from './ensure-openmax-kb.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {
+  ensureOpenmaxKb, ensureOpenmaxProductFaq, isInstalled, probeCloned, zylosDir,
+  FAQ_NAME, FAQ_REPO, LEGACY_NAME, TIMEOUT_MS,
+} from './ensure-openmax-kb.js';
 
-// Build an injectable deps harness that records logs and zylos invocations.
-function harness({ region = '', version = null, cloned = true, runImpl } = {}) {
+const ADD = ['add', FAQ_REPO, '--yes'];
+const UPGRADE = ['upgrade', FAQ_NAME, '--yes'];
+const UNINSTALL = ['uninstall', LEGACY_NAME, '--purge', '--yes'];
+
+// Stateful fake registry: `reg` is the set of registered names, `cloned` the set of
+// names with repo/.git present. runImpl may mutate both to simulate zylos side effects.
+function harness({ region = '', reg = [], cloned = [], runImpl } = {}) {
   const logs = [], warns = [], errors = [], runs = [];
+  const state = { reg: new Set(reg), cloned: new Set(cloned) };
   const deps = {
     env: { DEPLOY_REGION: region },
     log: (m) => logs.push(m),
     warn: (m) => warns.push(m),
     error: (m) => errors.push(m),
-    readVersion: () => version,
-    probe: () => cloned,
-    run: (args) => { runs.push(args); if (runImpl) runImpl(args); },
+    installed: (n) => state.reg.has(n),
+    probe: (n) => state.cloned.has(n),
+    run: (args) => { runs.push(args); if (runImpl) runImpl(args, state); },
   };
-  return { deps, logs, warns, errors, runs, all: () => [...logs, ...warns, ...errors].join('\n') };
+  return { deps, state, logs, warns, errors, runs };
 }
 
-test('cmpVer boundaries', () => {
-  assert.equal(cmpVer('0.1.0', '0.1.0'), 0);
-  assert.equal(cmpVer('0.1.0', '0.2.0'), -1);
-  assert.equal(cmpVer('1.0.0', '0.9.9'), 1);
-  assert.equal(cmpVer('0.2.0', '0.1.9'), 1);
-  assert.equal(cmpVer('0.10.0', '0.9.0'), 1); // numeric, not lexical
+// Default "zylos works" simulation.
+function okZylos(args, state) {
+  if (args[0] === 'add') { state.reg.add(FAQ_NAME); state.cloned.add(FAQ_NAME); }
+  if (args[0] === 'uninstall') { state.reg.delete(args[1]); state.cloned.delete(args[1]); }
+}
+
+test('constants: TIMEOUT_MS is 60s, names/repo as planned', () => {
+  assert.equal(TIMEOUT_MS, 60000);
+  assert.equal(FAQ_REPO, 'openmaxai/zylos-openmax-product-faq');
+  assert.equal(FAQ_NAME, 'openmax-product-faq');
+  assert.equal(LEGACY_NAME, 'openmax-kb');
+  assert.equal(ensureOpenmaxProductFaq, ensureOpenmaxKb);
 });
 
-test('DEPLOY_REGION=cn short-circuits (no zylos call)', () => {
-  const h = harness({ region: 'cn', version: null });
+test('① only legacy → add faq (latest, no pin) → ok → uninstall openmax-kb --purge --yes', () => {
+  const h = harness({ reg: [LEGACY_NAME], cloned: [LEGACY_NAME], runImpl: okZylos });
+  ensureOpenmaxKb(h.deps);
+  assert.deepEqual(h.runs, [ADD, UNINSTALL]);
+  assert.ok(!h.state.reg.has(LEGACY_NAME));
+  assert.equal(h.warns.length, 0);
+  assert.equal(h.errors.length, 0);
+});
+
+test('② both installed → upgrade faq → purge legacy', () => {
+  const h = harness({ reg: [FAQ_NAME, LEGACY_NAME], cloned: [FAQ_NAME, LEGACY_NAME], runImpl: okZylos });
+  ensureOpenmaxKb(h.deps);
+  assert.deepEqual(h.runs, [UPGRADE, UNINSTALL]);
+});
+
+test('③a faq add fails (not registered) → no uninstall, warn retry', () => {
+  const h = harness({ reg: [LEGACY_NAME], cloned: [LEGACY_NAME], runImpl: (a) => { if (a[0] === 'add') throw new Error('boom'); } });
+  assert.doesNotThrow(() => ensureOpenmaxKb(h.deps));
+  assert.deepEqual(h.runs, [ADD]);
+  assert.match(h.errors.join('\n'), /install failed \(non-fatal/);
+  assert.match(h.warns.join('\n'), /not installed \(install did not complete; will retry on next run\)/);
+  assert.match(h.warns.join('\n'), /keeping openmax-kb/);
+});
+
+test('③b faq add "succeeds" but empty shell (registered, no repo/.git) → no uninstall, warn', () => {
+  const h = harness({ reg: [LEGACY_NAME], runImpl: (a, s) => { if (a[0] === 'add') s.reg.add(FAQ_NAME); } });
+  ensureOpenmaxKb(h.deps);
+  assert.deepEqual(h.runs, [ADD]);
+  assert.match(h.warns.join('\n'), /registered but repo\/\.git missing — empty shell/);
+  assert.ok(h.state.reg.has(LEGACY_NAME));
+});
+
+test('③c faq upgrade fails and faq is an empty shell → no uninstall', () => {
+  const h = harness({ reg: [FAQ_NAME, LEGACY_NAME], cloned: [LEGACY_NAME], runImpl: (a) => { if (a[0] === 'upgrade') throw new Error('nope'); } });
+  ensureOpenmaxKb(h.deps);
+  assert.deepEqual(h.runs, [UPGRADE]);
+  assert.match(h.errors.join('\n'), /upgrade failed \(non-fatal/);
+  assert.match(h.warns.join('\n'), /empty shell/);
+});
+
+test('upgrade throws but faq is still ok → still purges legacy (gate is ok(faq), not exit code)', () => {
+  const h = harness({
+    reg: [FAQ_NAME, LEGACY_NAME], cloned: [FAQ_NAME, LEGACY_NAME],
+    runImpl: (a, s) => { if (a[0] === 'upgrade') throw new Error('upgrade exit 1'); okZylos(a, s); },
+  });
+  ensureOpenmaxKb(h.deps);
+  assert.deepEqual(h.runs, [UPGRADE, UNINSTALL]);
+  assert.match(h.errors.join('\n'), /upgrade failed/);
+});
+
+test('④ DEPLOY_REGION=cn short-circuits (no zylos call)', () => {
+  const h = harness({ region: 'CN', reg: [LEGACY_NAME] });
   ensureOpenmaxKb(h.deps);
   assert.equal(h.runs.length, 0);
   assert.match(h.logs.join('\n'), /DEPLOY_REGION=cn — skip/);
 });
 
-test('installed >= pin AND cloned → skip, no run', () => {
-  const h = harness({ version: '0.1.0', cloned: true });
-  ensureOpenmaxKb(h.deps);
-  assert.equal(h.runs.length, 0);
-  assert.match(h.logs.join('\n'), new RegExp(`${KB_NAME}@0\\.1\\.0 >= pin ${KB_PIN} — skip`));
-});
-
-test('N2-1: installed >= pin BUT repo missing → warn empty shell, no run (skip path is probed too)', () => {
-  const h = harness({ version: '0.2.0', cloned: false });
-  ensureOpenmaxKb(h.deps);
-  assert.equal(h.runs.length, 0, 'must not call zylos on skip path');
-  assert.match(h.warns.join('\n'), /registered but repo\/\.git missing — empty shell/);
-});
-
-test('installed < pin → upgrade once', () => {
-  const h = harness({ version: '0.0.9', cloned: true });
-  ensureOpenmaxKb(h.deps);
-  assert.equal(h.runs.length, 1);
-  assert.deepEqual(h.runs[0], ['upgrade', KB_NAME, '--yes']);
-});
-
-test('not installed → add @pin once', () => {
-  const h = harness({ version: null, cloned: true });
-  ensureOpenmaxKb(h.deps);
-  assert.equal(h.runs.length, 1);
-  assert.deepEqual(h.runs[0], ['add', `${KB_REPO}@${KB_PIN}`, '--yes']);
-});
-
-test('zylos throws → non-fatal (does not throw), logs error', () => {
-  const h = harness({ version: null, cloned: false, runImpl: () => { throw new Error('boom'); } });
-  assert.doesNotThrow(() => ensureOpenmaxKb(h.deps));
-  assert.match(h.errors.join('\n'), /install failed \(non-fatal/);
-});
-
-test('timeout-style error surfaces e.stderr (N1-1)', () => {
+test('⑤ nested 60s timeout kill (ETIMEDOUT + e.stderr) does not throw and surfaces stderr', () => {
   const h = harness({
-    version: null, cloned: false,
-    runImpl: () => { const e = new Error('spawnSync zylos ETIMEDOUT'); e.stderr = 'CHILD-STDERR-BEFORE-HANG'; throw e; },
+    reg: [LEGACY_NAME], cloned: [LEGACY_NAME],
+    runImpl: () => { const e = new Error('spawnSync zylos ETIMEDOUT'); e.code = 'ETIMEDOUT'; e.signal = 'SIGKILL'; e.stderr = 'CHILD-STDERR-BEFORE-HANG'; throw e; },
   });
-  ensureOpenmaxKb(h.deps);
+  assert.doesNotThrow(() => ensureOpenmaxKb(h.deps));
+  assert.deepEqual(h.runs, [ADD]);
   assert.match(h.errors.join('\n'), /ETIMEDOUT/);
   assert.match(h.errors.join('\n'), /stderr: .*CHILD-STDERR-BEFORE-HANG/);
 });
 
-test('N4-1: upgrade fails but old clone present → attribute to failure, not release lag', () => {
-  const h = harness({ version: '0.0.9', cloned: true, runImpl: () => { throw new Error('nope'); } });
+test('⑥ only faq → only upgrade, no uninstall', () => {
+  const h = harness({ reg: [FAQ_NAME], cloned: [FAQ_NAME], runImpl: okZylos });
   ensureOpenmaxKb(h.deps);
-  const w = h.warns.join('\n');
-  assert.match(w, /upgrade failed \(see error above\); current registered version 0\.0\.9/);
-  assert.doesNotMatch(w, /may lag KB_PIN/, 'must not blame kb release cadence on a failed upgrade');
+  assert.deepEqual(h.runs, [UPGRADE]);
+  assert.equal(h.warns.length, 0);
 });
 
-test('add succeeds → probe true, version now >= pin → ✓', () => {
-  // readVersion is called again in finally; simulate registry now showing the pin.
-  let calls = 0;
-  const deps = {
-    env: {}, log: [], warn: [], error: [],
-  };
-  const logs = [], warns = [], errors = [], runs = [];
-  ensureOpenmaxKb({
-    env: {},
-    log: (m) => logs.push(m), warn: (m) => warns.push(m), error: (m) => errors.push(m),
-    readVersion: () => (calls++ === 0 ? null : KB_PIN), // absent first, pin after add
-    probe: () => true,
-    run: (args) => runs.push(args),
+test('neither installed → add faq only', () => {
+  const h = harness({ runImpl: okZylos });
+  ensureOpenmaxKb(h.deps);
+  assert.deepEqual(h.runs, [ADD]);
+});
+
+test('uninstall failure is non-fatal (warn, retry next run)', () => {
+  const h = harness({
+    reg: [FAQ_NAME, LEGACY_NAME], cloned: [FAQ_NAME],
+    runImpl: (a) => { if (a[0] === 'uninstall') { const e = new Error('locked'); e.stderr = 'LOCK-HELD'; throw e; } },
   });
-  assert.deepEqual(runs[0], ['add', `${KB_REPO}@${KB_PIN}`, '--yes']);
-  assert.match(logs.join('\n'), new RegExp(`✓ ${KB_NAME}@${KB_PIN.replace(/\./g, '\\.')}`));
-  assert.equal(warns.length, 0);
+  assert.doesNotThrow(() => ensureOpenmaxKb(h.deps));
+  assert.deepEqual(h.runs, [UPGRADE, UNINSTALL]);
+  assert.match(h.warns.join('\n'), /openmax-kb uninstall failed \(non-fatal; will retry on next run\).*LOCK-HELD/);
 });
 
-test('finally: install failed before registry (cur=null, no clone) → "not installed, will retry" (self-heals, not "needs attention")', () => {
-  const h = harness({ version: null, cloned: false });
-  ensureOpenmaxKb(h.deps);
-  const w = h.warns.join('\n');
-  assert.match(w, /not installed \(install did not complete; will retry on next run\)/);
-  assert.doesNotMatch(w, /needs attention/, 'a not-installed failure self-heals; must not be flagged for attention');
-  assert.doesNotMatch(w, /registered but/, 'must not claim registered when cur=null');
+test('helper that throws unexpectedly is still non-fatal', () => {
+  const h = harness();
+  h.deps.installed = () => { throw new Error('weird'); };
+  assert.doesNotThrow(() => ensureOpenmaxKb(h.deps));
+  assert.match(h.errors.join('\n'), /ensure failed unexpectedly/);
 });
 
-test('finally: upgrade path but repo missing (cur set, no clone) → registered empty-shell needs attention', () => {
-  const h = harness({ version: '0.0.9', cloned: false });
-  ensureOpenmaxKb(h.deps);
-  assert.match(h.warns.join('\n'), /openmax-kb@0\.0\.9 registered but repo\/\.git missing — empty shell.*needs attention/);
+test('isInstalled / probeCloned honor ZYLOS_DIR', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-faq-'));
+  const prev = process.env.ZYLOS_DIR;
+  process.env.ZYLOS_DIR = dir;
+  try {
+    assert.equal(zylosDir(), dir);
+    fs.mkdirSync(path.join(dir, '.zylos'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.zylos/components.json'), JSON.stringify({ [FAQ_NAME]: { version: '0.2.0' } }));
+    assert.equal(isInstalled(FAQ_NAME), true);
+    assert.equal(isInstalled(LEGACY_NAME), false);
+    const repo = path.join(dir, 'components', FAQ_NAME, 'repo');
+    assert.equal(probeCloned(FAQ_NAME), false);
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(repo, 'README.md'), 'x');
+    assert.equal(probeCloned(FAQ_NAME), true);
+  } finally {
+    if (prev === undefined) delete process.env.ZYLOS_DIR; else process.env.ZYLOS_DIR = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

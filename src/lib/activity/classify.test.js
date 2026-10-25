@@ -19,6 +19,7 @@ test('maps tools onto every display category plus the two hidden ones (reply, wa
     ['TaskOutput', {}, 'waiting'],
     ['TodoWrite', {}, 'tool'],
     ['Bash', { command: 'node ~/zylos/.claude/skills/openmax-kb/scripts/q.js x' }, 'kb'],
+    ['Bash', { command: 'node ~/zylos/.claude/skills/openmax-product-faq/scripts/kb.js ask "x"' }, 'kb'],
     ['Bash', { command: 'node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "conv" <<EOF' }, 'reply'],
   ];
   const seen = new Set();
@@ -57,6 +58,8 @@ test('objects (D3: not hidden): search terms, domains, file names, patterns, ski
   assert.equal(classifyTool('Glob', { pattern: 'src/**/*.ts' }).object, 'src/**/*.ts');
   assert.deepEqual(classifyTool('Skill', { skill: 'pdf' }), { category: 'skill', signals: {}, object: 'pdf' });
   assert.deepEqual(classifyTool('Skill', { skill: 'openmax-kb' }), { category: 'kb', signals: {} });
+  assert.deepEqual(classifyTool('Skill', { skill: 'openmax-product-faq' }), { category: 'kb', signals: {} });
+  assert.deepEqual(classifyTool('Skill', { skill: 'openmax-product-faq-x' }), { category: 'skill', signals: {}, object: 'openmax-product-faq-x' });
   assert.equal(classifyTool('WebSearch', { query: 'x'.repeat(100) }).object.length <= 60, true);
 });
 
