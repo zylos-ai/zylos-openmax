@@ -1850,7 +1850,7 @@ test('1089-② review: a smart message arriving while the skipped send is in fli
   assert.equal(attr.turn.queue[0], itemB, 'B is in front of the queue');
   attr.handle(toolEnd('s1', 1500));
   assert.deepEqual(windows, [{ startAt: 1000, endAt: 1500 }]);
-  assert.deepEqual(got, [[CONV_A, SKIP]]);
+  assert.deepEqual(got, [[CONV_A, { skip: SKIP, startAt: 1000 }]], 'the guard is updated on the call-start boundary');
   assert.equal(itemA.answered, true, 'the message pending at the send start is the one answered');
   assert.equal(itemB.answered, false, 'B is still pending');
   assert.equal(a.state, 'active');

@@ -701,3 +701,34 @@ test('1089-② review: a skip file older than the send call (an earlier skipped 
   assert.equal(store.readRun(reg.runId).ambiguous_reply, undefined);
   activity.stop();
 });
+
+test('1089-② review R2: B arrives after the send call started but BEFORE send.js plans (guard already B) → B stays pending, the guard stays, the next send does not claim the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await guardedRun(h);                      // smart A
+  const store = createRunStore({ dir: runsDir });
+  clock.advance(100);
+  append(bashSend('toolu_s1'));                         // the agent's answer to A starts
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV);                 // smart B reaches the bridge …
+  activity.pollNow();
+  const unregB = store.readActive().unregistered[CONV];
+  // … while send.js is still preparing: it plans now and records B's guard.
+  clock.advance(100);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  assert.equal(store.readSkip(reg.runId).unreg, unregB);
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg('') } });
+  clock.advance(200);
+  append(toolOk('toolu_s1'));
+  activity.pollNow();
+  const r = store.readRun(reg.runId);
+  assert.equal(r.state, 'active');
+  assert.equal(r.ambiguous_reply, true);
+  assert.equal(r.focus, false, 'B is pending: no focus');
+  const q = activity.attribution.turn.queue.filter((it) => it.foreign);
+  assert.deepEqual(q.map((it) => it.answered).sort(), [false, true], 'A answered, B pending');
+  assert.equal(store.readActive().unregistered?.[CONV], unregB, 'the guard for B stays');
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
+  assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
+  activity.stop();
+});

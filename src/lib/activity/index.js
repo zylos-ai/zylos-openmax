@@ -143,6 +143,9 @@ export function createActivity({
   const throttle = createThrottledLogger({ warn, now });
   const gates = {};
   const unregistered = {};
+  // conv → arrival times of smart-mode inputs not yet known answered (oldest
+  // first); unregistered[conv] is the latest of them (send.js's guard).
+  const unregArrivals = {};
   let lastActive = null;
 
   function openRuns() {
@@ -166,7 +169,12 @@ export function createActivity({
       const key = r.reply_conversation_id || r.conversation_id;
       (byConv[key] || (byConv[key] = [])).push(r.run_id);
     }
-    for (const conv of Object.keys(unregistered)) if (!byConv[conv]) delete unregistered[conv];
+    for (const conv of Object.keys(unregistered)) {
+      if (!byConv[conv]) {
+        delete unregistered[conv];
+        delete unregArrivals[conv];
+      }
+    }
     const body = { v: 1, by_conversation: byConv, gate: { ...gates }, unregistered: { ...unregistered } };
     const sig = JSON.stringify(body);
     if (sig === lastActive) return;
@@ -303,14 +311,24 @@ export function createActivity({
     readSpillHead,
     spawnContinuation,
     replySkipped,
-    // The guard-skipped reply answered the smart-mode message: the next reply
-    // of this conversation is the run's again — unless a newer smart-mode
-    // message arrived meanwhile (the guard is no longer the one it saw).
-    onAmbiguousReply: (conv, skip) => {
-      if (conv && unregistered[conv] != null && skip?.unreg != null && unregistered[conv] === skip.unreg) {
+    // The guard-skipped reply answered ONE smart-mode message: the earliest
+    // that arrived before the send call started (the same boundary attribution
+    // used to pick the message it acknowledges). Any other arrival — before
+    // the call (not yet seen in the log) or during it (send prep can take a
+    // while, so send.js may already have recorded it as the guard) — keeps the
+    // guard; only when none is left is the next reply the run's again.
+    onAmbiguousReply: (conv, { startAt } = {}) => {
+      const list = conv ? unregArrivals[conv] : null;
+      if (!list || !Number.isFinite(startAt)) return;
+      const i = list.findIndex((u) => u <= startAt);
+      if (i === -1) return;
+      list.splice(i, 1);
+      if (list.length) unregistered[conv] = list[list.length - 1];
+      else {
         delete unregistered[conv];
-        syncActive();
+        delete unregArrivals[conv];
       }
+      syncActive();
     },
     onRunClosed: (run) => {
       const form = replyForm(run);
@@ -507,7 +525,9 @@ export function createActivity({
       const conv = replyConversationOf(endpoint);
       if (!conv) return;
       if (!openRuns().some((r) => (r.reply_conversation_id || r.conversation_id) === conv)) return;
-      unregistered[conv] = now();
+      const t = now();
+      unregistered[conv] = t;
+      (unregArrivals[conv] || (unregArrivals[conv] = [])).push(t);
       syncActive();
     },
 

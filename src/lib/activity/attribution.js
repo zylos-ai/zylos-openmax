@@ -79,9 +79,11 @@
  * unmarked openmax message of the same endpoint that was pending when the
  * call started (the earliest-arrived one, snapshotted then: a message that
  * arrives while the send is in flight is never acknowledged by it). The
- * guard for the conversation is cleared (onAmbiguousReply) only if it is
- * still the one this skip saw, so the next reply selects the run; the queue
- * moves on. No later reply → done after the no-reply
+ * guard is updated on the same boundary (onAmbiguousReply with the call's
+ * start time): index.js consumes the earliest smart-mode arrival from before
+ * the call start and keeps the guard while any other one is outstanding, so
+ * only when none is left does the next reply select the run; the queue moves
+ * on. No later reply → done after the no-reply
  * grace, without no_reply (the merged reply may well have answered it).
  */
 
@@ -422,7 +424,7 @@ export function createAttribution({
    * decision wins. The run is not answered (ambiguous_reply); the send
    * answers that openmax message; the guard is lifted for the next reply.
    */
-  function deferReply(run, item, skip) {
+  function deferReply(run, item, skip, startAt) {
     if (!isOpen(run) || run.state !== 'replied') return;
     run.state = 'active';
     run.replied_at = null;
@@ -431,7 +433,7 @@ export function createAttribution({
     persist(run);
     // Only the message this send could have answered (pending at its start).
     if (item && !item.answered && turn && turn.queue.includes(item)) item.answered = true;
-    try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id, skip); } catch {}
+    try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id, { skip, startAt }); } catch {}
     if (turn && turn.owners.includes(run)) applyFocus(2, now());
   }
 
@@ -493,7 +495,7 @@ export function createAttribution({
       else {
         const skip = isOpen(run) && run.state === 'replied'
           ? skippedBySender(run, { startAt: entry.at, endAt }) : null;
-        if (skip) deferReply(run, entry.skipItems?.[id] || null, skip);
+        if (skip) deferReply(run, entry.skipItems?.[id] || null, skip, entry.at);
         else completeOnReply(run, 'log');
       }
     }
