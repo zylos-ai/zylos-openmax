@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A restart of the openmax plugin no longer fails the run in progress (OPENM-1108).** A run left open by the previous plugin process (e.g. `zylos upgrade openmax` or `pm2 restart zylos-openmax` mid-run) used to end `failed` / `runtime_restarted` ("Agent 重启，本次处理中断") although the agent session went on and its reply was delivered as an ordinary message. Such a run now ends `done` with no `end_reason`; tool steps still running end `ok` at the close, on the terminal frame (sent after a step-less probe on the new connection) and in the run file, so the FE marks none as interrupted. Replies after the restart are not re-attached to the old run. `failed` / `runtime_restarted` stays reserved for an agent runtime restart (the session log switching).
+
 ## [2.29.0] - 2026-10-23
 
 Consolidates every change since 2.26.5 (the unreleased 2.27.0 – 2.28.1 entries are folded in here).

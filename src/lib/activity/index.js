@@ -25,6 +25,7 @@ import { createCollector, readRuntimeName } from './collector.js';
 import { createThrottledLogger } from './throttled-log.js';
 import TaskRegistry from '../task-registry.js';
 import { newRunId, formatMarker } from './marker.js';
+import { isVisibleTool } from './present.js';
 import {
   EMIT_TICK_MS, POLL_INTERVAL_MS, DISCOVERY_INTERVAL_MS, RUN_FILE_RETENTION_MS, SPILL_READ_BYTES,
   REPLY_REF_WINDOW_MS,
@@ -73,6 +74,11 @@ export function replyConversationOf(endpoint) {
   } catch {
     return null;
   }
+}
+
+/** A tool step of `run` that has not ended yet. */
+function hasOpenToolStep(run) {
+  return (run.events || []).some((ev) => isVisibleTool(ev) && ev.ended_at == null);
 }
 
 function newStats() {
@@ -352,7 +358,13 @@ export function createActivity({
       if (t - (run.created_at || 0) >= RUN_FILE_RETENTION_MS) {
         run.state = 'closed';
         run.ended_at = t;
-        run.reason = 'runtime_restarted';
+        run.reason = null;
+        for (const ev of run.events || []) {
+          if (ev.kind === 'tool' && ev.ended_at == null) {
+            ev.ended_at = Math.max(t, Number(ev.at) || 0);
+            ev.error = false;
+          }
+        }
         try { store.writeRun(run); } catch {}
         attribution.addRun(run);
         continue;
@@ -454,11 +466,21 @@ export function createActivity({
 
     onWsOpen(orgId) {
       emitter.onWsOpen(orgId);
-      // Runs left open by a previous process end now, once this org can hear it.
+      // Runs left open by a previous openmax process end now, once this org
+      // can hear it. Only the plugin restarted (not the agent runtime), so
+      // they end normally — done, no end reason, open steps ended (OPENM-1108).
       for (const run of [...attribution.runs.values()]) {
         if (run._restartPending && run.org_id === orgId && run.state !== 'closed') {
           run._restartPending = false;
-          attribution.closeRun(run, 'failed', 'runtime_restarted');
+          // The first frame after a connect is a step-less probe: when the run
+          // has steps to end, send that probe first so the terminal frame can
+          // carry them (the previous process already sent these steps here).
+          const binding = emitter.bindings.get(orgId);
+          if (binding?.probePending && hasOpenToolStep(run)) {
+            emitter.setState(run, 'thinking');
+            emitter.emitNow(run);
+          }
+          attribution.closeLeftoverRun(run);
         }
       }
     },
