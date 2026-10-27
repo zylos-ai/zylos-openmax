@@ -684,7 +684,7 @@ test('1089-① end to end: reply 1 delivered → later log steps open a continua
   activity.stop();
 });
 
-test('1089-① restart with an open continuation → failed / runtime_restarted on ws open; the parent untouched', async () => {
+test('1089-① plugin restart with an open continuation → done without an end reason on ws open (OPENM-1108); the parent untouched', async () => {
   const h = setup();
   const { activity, clock, append, runsDir } = h;
   const reg = await startedRun(h);
@@ -705,7 +705,14 @@ test('1089-① restart with an open continuation → failed / runtime_restarted 
   again.bindOrgWs(ORG, { trySend: (f) => { ws2Sent.push(f); return true; } });
   again.onWsOpen(ORG);
   again.stop();
-  assert.deepEqual(ws2Sent.map((f) => [f.payload.run_id, f.payload.state, f.payload.end_reason]), [[contId, 'failed', 'runtime_restarted']]);
+  const terminal = ws2Sent.filter((f) => f.payload.state === 'done' || f.payload.state === 'failed');
+  assert.deepEqual(terminal.map((f) => [f.payload.run_id, f.payload.state, 'end_reason' in f.payload]), [[contId, 'done', false]], 'a plugin restart is not a failure (OPENM-1108)');
+  assert.equal(ws2Sent.every((f) => f.payload.run_id === contId), true);
+  assert.equal(ws2Sent.flatMap((f) => f.payload.steps || []).some((s) => s.status === 'running' || s.wait_for), false, 'no running step on the wire');
+  const contFile = store.readRun(contId);
+  assert.equal(contFile.state, 'closed');
+  assert.equal(contFile.reason, null);
+  assert.ok(contFile.events.filter((e) => e.kind === 'tool').every((e) => e.ended_at != null && e.error !== true), 'the continuation\'s steps are ended');
   assert.equal(JSON.stringify(store.readRun(reg.runId)), parentBefore);
 });
 
