@@ -247,6 +247,33 @@ test('interrupted turn (Codex) → failed / interrupted; runtime restart → fai
   assert.deepEqual(h2.finishes, [['r_0000000b', 'failed', 'runtime_restarted']]);
 });
 
+test('OPENM-1108: a run left open by a plugin restart closes done (no reason), its open tool steps ended ok', () => {
+  const { attr, mkRun, finishes } = harness();
+  const a = mkRun('r_0000000a', CONV_A);
+  attr.handle(input('user', omBody(a)), { file: '/s.jsonl' });
+  attr.handle(toolStart('t1', 'Read', { file_path: '/x.md' }, 1));
+  attr.handle(toolEnd('t1', 2));
+  attr.handle(toolStart('t2', 'Bash', { command: 'sleep 60' }, 3));
+  // The new process only knows the run from its file: no turn, no calls.
+  const fresh = harness();
+  const r = { ...a, events: a.events.map((e) => ({ ...e })), _pushed: undefined };
+  fresh.attr.addRun(r);
+  fresh.clock.advance(5_000);
+  fresh.attr.closeLeftoverRun(r);
+  assert.deepEqual(fresh.finishes, [['r_0000000a', 'done', null]], 'not failed / runtime_restarted');
+  assert.equal(r.state, 'closed');
+  assert.ok(r.events.every((e) => e.kind !== 'tool' || e.ended_at != null), 'no step left running');
+  const t2 = r.events.find((e) => e.kind === 'tool' && e.category === 'command');
+  assert.equal(t2.error, false);
+  assert.equal(t2.ended_at, fresh.clock.now());
+  assert.deepEqual(kinds(r), ['tool:command:end'], 'only the open step is re-sent, ended');
+  fresh.attr.closeLeftoverRun(r);
+  assert.equal(fresh.finishes.length, 1, 'idempotent');
+  // The genuine agent-runtime restart path is unchanged.
+  attr.noteRuntimeRestart();
+  assert.deepEqual(finishes, [['r_0000000a', 'failed', 'runtime_restarted']]);
+});
+
 test('(1) Lark-format inputs carrying a live run marker are ignored everywhere; the run gets nothing', () => {
   const { attr, mkRun, stats } = harness();
   const a = mkRun('r_0000000a', CONV_A);
@@ -349,7 +376,7 @@ test('a run that never started closes done / no_reply after 5 min; a started run
   assert.deepEqual(finishes, [['r_0000000a', 'done', 'no_reply'], ['r_0000000c', 'done', 'no_reply']]);
   assert.equal(q.state, 'closed');
   assert.equal(b.state, 'active', 'a started run keeps turn end + grace / the idle cap');
-  assert.equal(r.state, 'queued', 'a recovered run waits for onWsOpen (runtime_restarted)');
+  assert.equal(r.state, 'queued', 'a recovered run waits for onWsOpen');
 });
 
 test('comm.ask (choice or form) marks the owner replying in that conversation and closes the run at turn end', () => {

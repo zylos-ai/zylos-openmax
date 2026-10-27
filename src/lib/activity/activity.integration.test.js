@@ -134,7 +134,7 @@ test('inbound → queued → thinking → tool → done frames, and the reply ag
   activity.stop();
 });
 
-test('restart recovery: an open run from the previous process ends failed / runtime_restarted once the org connects', () => {
+test('plugin restart recovery (OPENM-1108): an open run from the previous process ends done, without an end reason, once the org connects', () => {
   const { activity, sent, runsDir } = setup();
   const reg = activity.registerRun({ orgId: ORG, conversationId: CONV, endpoint: CONV });
   activity.confirmRun(reg.runId, '{"ok":true,"id":1}');
@@ -149,10 +149,130 @@ test('restart recovery: an open run from the previous process ends failed / runt
   again.stop();
   assert.equal(sent.length, before);
   assert.equal(ws2Sent.length, 1);
-  assert.equal(ws2Sent[0].payload.state, 'failed');
-  assert.equal(ws2Sent[0].payload.end_reason, 'runtime_restarted');
+  assert.equal(ws2Sent[0].payload.state, 'done', 'a plugin restart is not a failure');
+  assert.equal('end_reason' in ws2Sent[0].payload, false, 'never runtime_restarted (that is the agent runtime)');
   assert.equal('reason' in ws2Sent[0].payload, false);
   assert.equal(ws2Sent[0].payload.sequence, 2, 'sequence continues from the run file');
+  const file = createRunStore({ dir: runsDir }).readRun(reg.runId);
+  assert.equal(file.state, 'closed');
+  assert.equal(file.reason, null);
+});
+
+test('plugin restart recovery (OPENM-1108): a running step is ended ok on the terminal frame and in the run file', async () => {
+  const { activity, clock, sent, append, runsDir } = setup();
+  const reg = activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: '7383920118271', endpoint: CONV });
+  activity.confirmRun(reg.runId, '{"ok":true,"id":1}');
+  await activity.collector.discover();
+  const body = `${reg.marker}[OPENMAX DM] (org: Acme)\n<message-context conversation-id="${CONV}" source-message-id="7383920118271"/>\n<current-message>\nAlice said: hi\n</current-message> ---- reply via: node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${CONV}"`;
+  clock.advance(200);
+  append({ type: 'user', message: { role: 'user', content: body } });
+  append({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'Read', input: { file_path: '/x/a.md' } }] } });
+  append({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'a' }] } });
+  append({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_2', name: 'Bash', input: { command: 'zylos upgrade openmax', description: '升级 openmax' } }] } });
+  activity.pollNow();
+  clock.advance(600);
+  activity.emitter.tick();
+  const liveSteps = sent.flatMap((f) => f.payload.steps);
+  assert.ok(liveSteps.some((s) => s.kind === 'tool' && s.category === 'command' && s.status === 'running'), 'the FE saw the step running');
+  activity.stop();
+
+  // The plugin restarts mid-step (the agent session goes on).
+  clock.advance(5_000);
+  const ws2Sent = [];
+  const again = createActivity({ config: { activity: { enabled: true } }, env: {}, now: clock.now, runsDir, homeDir: os.tmpdir(), zylosDir: os.tmpdir(), runtime: 'claude' });
+  again.start();
+  again.bindOrgWs(ORG, { trySend: (f) => { ws2Sent.push(JSON.parse(JSON.stringify(f))); return true; } });
+  again.onWsOpen(ORG);
+  again.stop();
+
+  assert.equal(ws2Sent.length, 2, 'a step-less probe, then the terminal frame carrying the ended step');
+  assert.equal(ws2Sent[0].payload.state, 'thinking');
+  assert.deepEqual(ws2Sent[0].payload.steps, []);
+  const last = ws2Sent[1].payload;
+  assert.equal(last.state, 'done');
+  assert.equal('end_reason' in last, false);
+  assert.deepEqual(validateFrameV3(last), []);
+  const ended = last.steps.find((s) => s.kind === 'tool' && s.category === 'command');
+  assert.equal(ended.status, 'ok', 'no step the FE would show as interrupted');
+  assert.equal(ended.ended_at, clock.now());
+  assert.equal(ended.wait_for, undefined);
+  assert.deepEqual(ws2Sent.map((f) => f.payload.sequence), [...ws2Sent.map((f) => f.payload.sequence)].sort((a, b) => a - b));
+
+  const file = createRunStore({ dir: runsDir }).readRun(reg.runId);
+  assert.equal(file.state, 'closed');
+  assert.equal(file.reason, null);
+  assert.equal(file.ended_at, clock.now());
+  const tools = file.events.filter((e) => e.kind === 'tool');
+  assert.ok(tools.length >= 2);
+  assert.ok(tools.every((e) => e.ended_at != null && e.error !== true), 'every tool step in the run file is ended');
+});
+
+test('plugin restart recovery (OPENM-1108): a run that went status-only after its step was seen running still ends the step in the run file', async () => {
+  const { activity, clock, sent, append, runsDir } = setup();
+  const reg = activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: '7383920118271', endpoint: CONV });
+  activity.confirmRun(reg.runId, '{"ok":true,"id":1}');
+  await activity.collector.discover();
+  const body = `${reg.marker}[OPENMAX DM] (org: Acme)\n<message-context conversation-id="${CONV}" source-message-id="7383920118271"/>\n<current-message>\nAlice said: hi\n</current-message> ---- reply via: node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${CONV}"`;
+  clock.advance(200);
+  append({ type: 'user', message: { role: 'user', content: body } });
+  append({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'zylos upgrade openmax', description: '升级 openmax' } }] } });
+  activity.pollNow();
+  clock.advance(600);
+  activity.emitter.tick();
+  assert.ok(sent.flatMap((f) => f.payload.steps).some((s) => s.kind === 'tool' && s.category === 'command' && s.status === 'running'), 'the FE saw the step running');
+  // The collector falls back to status-only; the flag is saved with the run.
+  activity.attribution.degradeAll();
+  const run = activity.attribution.getRun(reg.runId);
+  assert.equal(run.status_only, true);
+  const store = createRunStore({ dir: runsDir });
+  store.writeRun(run);
+  activity.stop();
+  assert.equal(store.readRun(reg.runId).status_only, true);
+
+  clock.advance(5_000);
+  const ws2Sent = [];
+  const again = createActivity({ config: { activity: { enabled: true } }, env: {}, now: clock.now, runsDir, homeDir: os.tmpdir(), zylosDir: os.tmpdir(), runtime: 'claude' });
+  again.start();
+  again.bindOrgWs(ORG, { trySend: (f) => { ws2Sent.push(JSON.parse(JSON.stringify(f))); return true; } });
+  again.onWsOpen(ORG);
+  again.stop();
+
+  const last = ws2Sent.at(-1).payload;
+  assert.equal(last.state, 'done');
+  assert.equal('end_reason' in last, false);
+  assert.deepEqual(validateFrameV3(last), []);
+  assert.equal(ws2Sent.flatMap((f) => f.payload.steps || []).some((s) => s.status === 'running' || s.wait_for), false, 'no running step on the wire');
+  const file = store.readRun(reg.runId);
+  assert.equal(file.state, 'closed');
+  assert.equal(file.reason, null);
+  const tools = file.events.filter((e) => e.kind === 'tool');
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].ended_at, clock.now(), 'the step is ended in the run file, not left running');
+  assert.equal(tools[0].error, false);
+});
+
+test('plugin restart recovery: a run file older than the retention closes without runtime_restarted, its steps ended', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'om-act-old-'));
+  const runsDir = path.join(home, 'runs');
+  const store = createRunStore({ dir: runsDir });
+  const t = Date.now();
+  const old = {
+    v: 1, run_id: 'r_0000abcd', org_id: ORG, conversation_id: CONV, reply_conversation_id: CONV, endpoint: CONV,
+    created_at: t - 25 * 60 * 60 * 1000, state: 'active', seq: 3, next_event: 2, dropped: 0, reason: null,
+    events: [{ id: 'e1', kind: 'tool', category: 'command', at: t - 25 * 60 * 60 * 1000 + 10 }],
+  };
+  store.writeRun(old);
+  const ws2Sent = [];
+  const again = createActivity({ config: { activity: { enabled: true } }, env: {}, now: () => t, runsDir, homeDir: home, zylosDir: home, runtime: 'claude' });
+  again.start();
+  const after = store.readRun(old.run_id);
+  assert.equal(after.state, 'closed');
+  assert.equal(after.reason, null, 'not runtime_restarted');
+  assert.ok(after.events.every((e) => e.ended_at != null && e.error === false));
+  again.bindOrgWs(ORG, { trySend: (f) => { ws2Sent.push(f); return true; } });
+  again.onWsOpen(ORG);
+  again.stop();
+  assert.equal(ws2Sent.length, 0, 'a stale run sends nothing');
 });
 
 test('dropRun: C4 refused the message → no frame, no files', () => {

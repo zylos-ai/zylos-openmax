@@ -800,6 +800,33 @@ export function createAttribution({
     },
     closeRun,
 
+    /**
+     * A run left open by the previous openmax process (OPENM-1108). Only the
+     * plugin restarted — the agent session went on and its reply goes out as
+     * an ordinary message — so the run ends normally: `done`, no end reason
+     * (runtime_restarted stays reserved for noteRuntimeRestart). Its tool
+     * steps still running end `ok` at the close, so neither the frame nor the
+     * run file leaves a step the FE would mark interrupted.
+     *
+     * The stored events are ended in place rather than through deliver(): a
+     * run that went status-only after its steps were recorded (degradeAll /
+     * noteUnknownShape, persisted across the restart) would have deliver()
+     * skip the rewrite and leave the step running in the run file. The wire
+     * copy still goes through the emitter, which drops it under status-only.
+     */
+    closeLeftoverRun(run) {
+      if (!isOpen(run)) return;
+      const t = now();
+      for (const ev of run.events || []) {
+        if (ev.kind !== 'tool' || ev.ended_at != null) continue;
+        ev.ended_at = Math.max(t, Number(ev.at) || 0);
+        ev.error = false;
+        touch(run, t);
+        emitter.pushEvent(run, ev);
+      }
+      closeRun(run, 'done');
+    },
+
     /** Collector fell back to status-only: no process events for any run. */
     degradeAll() {
       degraded = true;
