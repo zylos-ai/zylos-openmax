@@ -696,6 +696,10 @@ test('1089-① plugin restart with an open continuation → done without an end 
   activity.pollNow();
   const contId = store.listRunIds().find((id) => id !== reg.runId);
   assert.ok(contId);
+  clock.advance(600);
+  activity.emitter.tick();
+  const contTools = store.readRun(contId).events.filter((e) => e.kind === 'tool');
+  assert.ok(contTools.length >= 1 && contTools.some((e) => e.ended_at == null), 'the continuation run file holds a running tool step before the restart');
   activity.stop();
   const parentBefore = JSON.stringify(store.readRun(reg.runId));
 
@@ -709,10 +713,13 @@ test('1089-① plugin restart with an open continuation → done without an end 
   assert.deepEqual(terminal.map((f) => [f.payload.run_id, f.payload.state, 'end_reason' in f.payload]), [[contId, 'done', false]], 'a plugin restart is not a failure (OPENM-1108)');
   assert.equal(ws2Sent.every((f) => f.payload.run_id === contId), true);
   assert.equal(ws2Sent.flatMap((f) => f.payload.steps || []).some((s) => s.status === 'running' || s.wait_for), false, 'no running step on the wire');
+  assert.ok(terminal[0].payload.steps.some((s) => s.kind === 'tool' && s.status === 'ok'), 'the done frame carries the step, ended ok');
   const contFile = store.readRun(contId);
   assert.equal(contFile.state, 'closed');
   assert.equal(contFile.reason, null);
-  assert.ok(contFile.events.filter((e) => e.kind === 'tool').every((e) => e.ended_at != null && e.error !== true), 'the continuation\'s steps are ended');
+  const contFileTools = contFile.events.filter((e) => e.kind === 'tool');
+  assert.ok(contFileTools.length >= 1);
+  assert.ok(contFileTools.every((e) => e.ended_at != null && e.error !== true), 'the continuation\'s steps are ended');
   assert.equal(JSON.stringify(store.readRun(reg.runId)), parentBefore);
 });
 

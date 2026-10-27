@@ -979,7 +979,7 @@ export function createAttribution({
           continue;
         }
         // A run recovered from a previous process waits for onWsOpen, which ends
-        // it failed / runtime_restarted once its org can hear the frame.
+        // it done, without an end reason, once its org can hear the frame (OPENM-1108).
         if ((run.state === 'queued' || run.state === 'created') && !run._restartPending
           && t - (run.created_at || 0) >= QUEUED_NO_START_TIMEOUT_MS) {
           closeRun(run, 'done', 'no_reply');
