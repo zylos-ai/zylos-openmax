@@ -375,6 +375,7 @@ The `proj://<uuid>` and `issue://<uuid>` in a message are canonical references t
 **Trigger (do this for every message)**: for any user message received via the openmax component, first decide whether it **is a "task" (a work goal)**, rather than a simple Q&A / chat.
 
 - **Not a task** (simple Q&A, chat, query) → answer directly, do not run the flow below.
+  - If the message is a question about OpenMax the product itself, invoke the openmax-product-faq skill first and answer per its rules. (This is the product FAQ, not the Workspace KnowledgeBase used by Issues.)
 - A human explicitly calling something a **task** or **work**, or asking you to create, write, organize, analyze, research, change, or deliver an output, is a task even when the output is short or can be produced entirely in the conversation. Do not reclassify it as chat merely because it is easy or immediate.
 - **Is a task and references an existing Issue** → read and continue that Issue's existing lifecycle; do not run new-Issue intake and do not create a duplicate Issue.
 - **Is a task and does not reference an existing Issue** → run the new-Issue intake below before calling `issue.create` or starting an Issue-backed flow.

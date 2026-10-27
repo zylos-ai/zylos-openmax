@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Product KB companion migrated from `openmax-kb` to `openmax-product-faq`.** The install / upgrade hook (`hooks/lib/ensure-openmax-kb.js`) now runs `zylos upgrade openmax-product-faq --yes` when it is installed, otherwise `zylos add openmaxai/zylos-openmax-product-faq --yes` (latest release, no version pin). Only after `openmax-product-faq` is confirmed installed (registered in `components.json` and its `repo/.git` present) does it remove the legacy component with `zylos uninstall openmax-kb --purge --yes` (skill dir, data dir and registry entry). If the new component is missing or an empty shell, `openmax-kb` is kept and the migration is retried on the next openmax install / upgrade. Every step stays non-fatal; the nested `zylos` call timeout is raised from 30 s to 60 s (still SIGKILL). `DEPLOY_REGION=cn` still skips. `ZYLOS_DIR` is honoured for the registry and data paths.
+- **Activity classification recognises both skill names.** `Skill` calls to `openmax-product-faq` or `openmax-kb`, and commands under `skills/openmax-product-faq/` or `skills/openmax-kb/`, are classified as `kb`.
+- **SKILL.md Q&A rule.** In the task vs question / chat branch, a question about OpenMax the product itself now invokes the `openmax-product-faq` skill first and is answered per its rules (distinct from the Workspace KnowledgeBase).
+
 ## [2.29.0] - 2026-10-23
 
 Consolidates every change since 2.26.5 (the unreleased 2.27.0 – 2.28.1 entries are folded in here).

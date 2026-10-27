@@ -320,6 +320,7 @@ if (legacyKeysSeen.length > 0) {
   console.log('[post-upgrade] permissions hardened: config.json (0600), runtime/tokens/ + runtime/group-logs/ (0700 dir / 0600 files).');
 }
 
-// Ensure the openmax-kb companion is present at >= pin (idempotent, non-fatal,
-// time-bounded). On upgrade this also back-fills kb onto already-deployed agents.
+// Ensure the openmax-product-faq companion is installed (latest) and purge the legacy
+// openmax-kb once the new one is confirmed (idempotent, non-fatal, time-bounded). On
+// upgrade this also back-fills / migrates already-deployed agents.
 ensureOpenmaxKb();
