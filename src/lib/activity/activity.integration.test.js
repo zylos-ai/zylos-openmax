@@ -207,6 +207,50 @@ test('plugin restart recovery (OPENM-1108): a running step is ended ok on the te
   assert.ok(tools.every((e) => e.ended_at != null && e.error !== true), 'every tool step in the run file is ended');
 });
 
+test('plugin restart recovery (OPENM-1108): a run that went status-only after its step was seen running still ends the step in the run file', async () => {
+  const { activity, clock, sent, append, runsDir } = setup();
+  const reg = activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: '7383920118271', endpoint: CONV });
+  activity.confirmRun(reg.runId, '{"ok":true,"id":1}');
+  await activity.collector.discover();
+  const body = `${reg.marker}[OPENMAX DM] (org: Acme)\n<message-context conversation-id="${CONV}" source-message-id="7383920118271"/>\n<current-message>\nAlice said: hi\n</current-message> ---- reply via: node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${CONV}"`;
+  clock.advance(200);
+  append({ type: 'user', message: { role: 'user', content: body } });
+  append({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'zylos upgrade openmax', description: '升级 openmax' } }] } });
+  activity.pollNow();
+  clock.advance(600);
+  activity.emitter.tick();
+  assert.ok(sent.flatMap((f) => f.payload.steps).some((s) => s.kind === 'tool' && s.category === 'command' && s.status === 'running'), 'the FE saw the step running');
+  // The collector falls back to status-only; the flag is saved with the run.
+  activity.attribution.degradeAll();
+  const run = activity.attribution.getRun(reg.runId);
+  assert.equal(run.status_only, true);
+  const store = createRunStore({ dir: runsDir });
+  store.writeRun(run);
+  activity.stop();
+  assert.equal(store.readRun(reg.runId).status_only, true);
+
+  clock.advance(5_000);
+  const ws2Sent = [];
+  const again = createActivity({ config: { activity: { enabled: true } }, env: {}, now: clock.now, runsDir, homeDir: os.tmpdir(), zylosDir: os.tmpdir(), runtime: 'claude' });
+  again.start();
+  again.bindOrgWs(ORG, { trySend: (f) => { ws2Sent.push(JSON.parse(JSON.stringify(f))); return true; } });
+  again.onWsOpen(ORG);
+  again.stop();
+
+  const last = ws2Sent.at(-1).payload;
+  assert.equal(last.state, 'done');
+  assert.equal('end_reason' in last, false);
+  assert.deepEqual(validateFrameV3(last), []);
+  assert.equal(ws2Sent.flatMap((f) => f.payload.steps || []).some((s) => s.status === 'running' || s.wait_for), false, 'no running step on the wire');
+  const file = store.readRun(reg.runId);
+  assert.equal(file.state, 'closed');
+  assert.equal(file.reason, null);
+  const tools = file.events.filter((e) => e.kind === 'tool');
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].ended_at, clock.now(), 'the step is ended in the run file, not left running');
+  assert.equal(tools[0].error, false);
+});
+
 test('plugin restart recovery: a run file older than the retention closes without runtime_restarted, its steps ended', () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'om-act-old-'));
   const runsDir = path.join(home, 'runs');

@@ -648,13 +648,22 @@ export function createAttribution({
      * (runtime_restarted stays reserved for noteRuntimeRestart). Its tool
      * steps still running end `ok` at the close, so neither the frame nor the
      * run file leaves a step the FE would mark interrupted.
+     *
+     * The stored events are ended in place rather than through deliver(): a
+     * run that went status-only after its steps were recorded (degradeAll /
+     * noteUnknownShape, persisted across the restart) would have deliver()
+     * skip the rewrite and leave the step running in the run file. The wire
+     * copy still goes through the emitter, which drops it under status-only.
      */
     closeLeftoverRun(run) {
       if (!isOpen(run)) return;
       const t = now();
-      for (const ev of [...(run.events || [])]) {
+      for (const ev of run.events || []) {
         if (ev.kind !== 'tool' || ev.ended_at != null) continue;
-        deliver(run, { ...ev, ended_at: Math.max(t, Number(ev.at) || 0), error: false });
+        ev.ended_at = Math.max(t, Number(ev.at) || 0);
+        ev.error = false;
+        touch(run, t);
+        emitter.pushEvent(run, ev);
       }
       closeRun(run, 'done');
     },
