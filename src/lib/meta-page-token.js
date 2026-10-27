@@ -26,7 +26,8 @@
  *     in the path, and redirects are not followed.
  *   - The action using the marker must itself target https://graph.facebook.com,
  *     so a (custom) catalog entry cannot use the marker to send a derived page
- *     token to another host.
+ *     token to another host, and the main request carrying the page token is
+ *     sent with redirect:'manual' (a 3xx is returned as-is, never followed).
  *   - Tokens are never logged or put in error messages (errors carry Graph's
  *     error code/type/message, scrubbed of any token string, and the page/IG id).
  *
@@ -42,14 +43,22 @@
  * one process is seen by the next. All file IO is best-effort: a cache failure
  * never fails an invoke, it only costs an extra exchange. The file is removed
  * with the credential (deleteCredentialCache: revoke / needs_reauth /
- * conn.clear_cache). PageTokenCache (in-memory) remains for tests / injection.
+ * conn.clear_cache), leftover `<connectionId>.page-tokens.json.<pid>.<rand>.tmp`
+ * files included. Because that deletion runs in another process (comm-bridge)
+ * and may land while an exchange is in flight, every write first checks that
+ * `<connectionId>.json` still exists and still holds the user token the entries
+ * were derived from (key hash); otherwise nothing is written and the page-token
+ * file is removed. The check is repeated before and after the rename.
+ * PageTokenCache (in-memory) remains for tests / injection.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CREDENTIALS_DIR, PAGE_TOKENS_SUFFIX, pageTokensPath } from './credential-cache.js';
+import {
+  CREDENTIALS_DIR, PAGE_TOKENS_SUFFIX, credentialPath, deletePageTokenCache, isPageTokensTmpFile, pageTokensPath,
+} from './credential-cache.js';
 
 export const TOKEN_EXCHANGE_HEADER = 'X-Openmax-Token-Exchange';
 export const META_GRAPH_ORIGIN = 'https://graph.facebook.com';
@@ -203,10 +212,27 @@ export class FilePageTokenCache extends PageTokenCache {
     this.map = null; // unused: the file is the store
   }
 
+  connIdOf(k) { return String(k).split('|', 1)[0]; }
+
   fileFor(k) {
-    const connId = String(k).split('|', 1)[0];
+    const connId = this.connIdOf(k);
     return SAFE_CONN_ID_RE.test(connId) ? pageTokensPath(connId, this.dir) : null;
   }
+
+  // Hash of the user token currently in the connection's credential file, or
+  // null when the file is gone / unreadable / has no token. Page tokens may
+  // only be persisted while the credential they were derived from is still the
+  // live one: comm-bridge (another process) may delete or rewrite it — revoke,
+  // needs_reauth, re-auth — while an exchange is in flight in conn.invoke.
+  liveUserTokenHash(connId) {
+    try {
+      const cred = JSON.parse(fs.readFileSync(credentialPath(connId, this.dir), 'utf8'));
+      return cred && typeof cred.access_token === 'string' && cred.access_token ? tokenHash(cred.access_token) : null;
+    } catch { return null; }
+  }
+
+  // Drop a connection's page-token file and any leftover tmp files.
+  purge(connId) { deletePageTokenCache(connId, this.dir); }
 
   // Valid, unexpired entries of a file ({} when absent / unreadable / malformed).
   readEntries(file) {
@@ -222,30 +248,45 @@ export class FilePageTokenCache extends PageTokenCache {
     return out;
   }
 
-  writeEntries(file, entries) {
+  /**
+   * Persist `entries` for one connection, guarded against the credential being
+   * revoked / re-authorized concurrently: only entries keyed on the hash of the
+   * user token CURRENTLY in `<connId>.json` are kept; if the credential is gone
+   * (or nothing matches) the page-token file and its tmp files are removed
+   * instead. The check is repeated right before the rename, and once more
+   * after it — if the credential vanished in between, the just-written file is
+   * deleted, so a revoke can never leave page tokens behind.
+   */
+  writeEntries(file, connId, entries) {
     try {
-      if (Object.keys(entries).length === 0) {
-        try { fs.unlinkSync(file); } catch {}
-        return;
+      const live = this.liveUserTokenHash(connId);
+      const kept = {};
+      if (live) {
+        for (const [k, e] of Object.entries(entries)) if (String(k).split('|')[1] === live) kept[k] = e;
       }
+      if (Object.keys(kept).length === 0) { this.purge(connId); return; }
       fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
       try { fs.chmodSync(this.dir, 0o700); } catch {}
+      // Deterministic prefix `<connId>.page-tokens.json.` so cleanup
+      // (deletePageTokenCache / clear) can find a tmp left by a crash.
       const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
       try {
-        fs.writeFileSync(tmp, JSON.stringify({ version: PAGE_TOKENS_FILE_VERSION, entries }), { mode: 0o600 });
+        fs.writeFileSync(tmp, JSON.stringify({ version: PAGE_TOKENS_FILE_VERSION, entries: kept }), { mode: 0o600 });
         try { fs.chmodSync(tmp, 0o600); } catch {}
+        if (this.liveUserTokenHash(connId) !== live) { this.purge(connId); return; }
         fs.renameSync(tmp, file);
-      } catch {
+      } finally {
         try { fs.unlinkSync(tmp); } catch {}
       }
+      if (this.liveUserTokenHash(connId) !== live) this.purge(connId);
     } catch {}
   }
 
   // Read-modify-write one file (readEntries already prunes expired entries).
-  update(file, fn) {
+  update(file, connId, fn) {
     const entries = this.readEntries(file);
     fn(entries);
-    this.writeEntries(file, entries);
+    this.writeEntries(file, connId, entries);
   }
 
   get(k) {
@@ -267,20 +308,20 @@ export class FilePageTokenCache extends PageTokenCache {
     }
     const expiresAt = this.now() + this.ttlMs;
     for (const [file, list] of byFile) {
-      this.update(file, (entries) => { for (const [k, v] of list) entries[k] = { value: v, expiresAt }; });
+      this.update(file, this.connIdOf(list[0][0]), (entries) => { for (const [k, v] of list) entries[k] = { value: v, expiresAt }; });
     }
   }
 
   delete(k) {
     const file = this.fileFor(k);
-    if (file) this.update(file, (entries) => { delete entries[k]; });
+    if (file) this.update(file, this.connIdOf(k), (entries) => { delete entries[k]; });
   }
 
   clear() {
     let names = [];
     try { names = fs.readdirSync(this.dir); } catch {}
     for (const n of names) {
-      if (n.endsWith(PAGE_TOKENS_SUFFIX)) { try { fs.unlinkSync(path.join(this.dir, n)); } catch {} }
+      if (n.endsWith(PAGE_TOKENS_SUFFIX) || isPageTokensTmpFile(n)) { try { fs.unlinkSync(path.join(this.dir, n)); } catch {} }
     }
   }
 }

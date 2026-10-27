@@ -48,9 +48,30 @@ function isPageTokensFile(name) {
   return name.endsWith(PAGE_TOKENS_SUFFIX);
 }
 
-/** Best-effort removal of a connection's derived Meta Page-token file. */
+// Atomic writes of the sidecar go through `<connectionId>.page-tokens.json.<pid>.<rand>.tmp`;
+// a crash between write and rename can leave one behind (it holds page tokens).
+const PAGE_TOKENS_TMP_RE = /\.page-tokens\.json\.[0-9]+\.[0-9a-f]+\.tmp$/;
+
+/** True for a leftover page-token tmp file (any connection). */
+export function isPageTokensTmpFile(name) {
+  return PAGE_TOKENS_TMP_RE.test(name);
+}
+
+function pageTokensTmpIdOf(name) {
+  return isPageTokensTmpFile(name) ? name.replace(PAGE_TOKENS_TMP_RE, '') : null;
+}
+
+/**
+ * Best-effort removal of a connection's derived Meta Page-token file and of any
+ * leftover tmp file of it.
+ */
 export function deletePageTokenCache(connectionId, dir = CREDENTIALS_DIR) {
   try { fs.unlinkSync(pageTokensPath(connectionId, dir)); } catch {}
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch {}
+  for (const n of names) {
+    if (pageTokensTmpIdOf(n) === String(connectionId)) { try { fs.unlinkSync(path.join(dir, n)); } catch {} }
+  }
 }
 
 /**
@@ -170,8 +191,8 @@ export function listCachedCredentials(dir = CREDENTIALS_DIR) {
 
 /**
  * Clear one connection's cache, or all when connectionId is falsy. Removes the
- * credential files and the derived Meta Page-token files. Returns cleared ids
- * (connections that had either file; a credential id is listed once).
+ * credential files, the derived Meta Page-token files and their leftover tmp
+ * files. Returns cleared ids (connections that had any such file; listed once).
  */
 export function clearCachedCredentials(connectionId, dir = CREDENTIALS_DIR) {
   if (connectionId) {
@@ -188,6 +209,7 @@ export function clearCachedCredentials(connectionId, dir = CREDENTIALS_DIR) {
   for (const f of names) {
     let id = null;
     if (isPageTokensFile(f)) id = f.slice(0, -PAGE_TOKENS_SUFFIX.length);
+    else if (isPageTokensTmpFile(f)) id = pageTokensTmpIdOf(f);
     else if (isCredentialFile(f)) id = f.slice(0, -'.json'.length);
     if (id === null) continue;
     try { fs.unlinkSync(path.join(dir, f)); } catch {}

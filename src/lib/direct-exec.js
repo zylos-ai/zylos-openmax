@@ -825,12 +825,16 @@ async function normalizeResponse(res) {
   return { status_code: res.status, headers, body: buf.toString('base64'), body_encoding: 'base64' };
 }
 
-export async function sendDirect(assembled, { fetchImpl = fetch } = {}) {
-  const res = await fetchImpl(assembled.url, {
+export async function sendDirect(assembled, { fetchImpl = fetch, redirect } = {}) {
+  const init = {
     method: assembled.method,
     headers: assembled.headers,
     body: encodeAssembledBody(assembled),
-  });
+  };
+  // Only set when asked (B2 page-token calls use 'manual'); every other call
+  // keeps fetch's default options untouched.
+  if (redirect) init.redirect = redirect;
+  const res = await fetchImpl(assembled.url, init);
   return normalizeResponse(res);
 }
 
@@ -1158,7 +1162,9 @@ export async function invokeDirect(
       throw Object.assign(new Error(`refusing to send a derived Page access token outside ${META_GRAPH_ORIGIN}`), { status: 422 });
     }
     auditDirectCall(assembled.method, actionDef.url_template, params, audit);
-    return sendDirect(assembled, { fetchImpl });
+    // A derived Page token must never ride a redirect off the Graph origin:
+    // with an exchange the 3xx is returned as-is (same rule as _download).
+    return sendDirect(assembled, exchange ? { fetchImpl, redirect: 'manual' } : { fetchImpl });
   };
 
   // Re-acquire the connection credential once (reactive backstop). Returns true
@@ -1173,24 +1179,32 @@ export async function invokeDirect(
     return true;
   };
 
-  let result;
-  try {
-    result = await send(cred);
-  } catch (e) {
-    // The page-token exchange itself got Graph 190: the USER token is
-    // invalid/expired. Same reactive-refresh-once rule as a provider 401.
-    if (!(e && e.graphTokenInvalid && acquire && isTokenRefreshable(cred))) throw e;
-    log(`[conn.direct] user token rejected during page-token exchange conn=${connId}; reactive refresh + retry once`);
-    if (!(await refreshCred())) throw e;
-    result = await send(cred);
-  }
+  // send() plus the exchange-time Graph 190 rule: the page-token exchange
+  // itself got 190 → the USER token is invalid/expired → refresh the
+  // credential and retry, at most ONCE per invoke (shared `refreshed` flag, so
+  // neither this nor the provider-401 backstop below can loop). Used for the
+  // first send AND the forced re-derive after a page-token 190.
+  const sendHandlingUserToken190 = async (opts) => {
+    try {
+      return await send(cred, opts);
+    } catch (e) {
+      if (refreshed || !(e && e.graphTokenInvalid && acquire && isTokenRefreshable(cred))) throw e;
+      log(`[conn.direct] user token rejected during page-token exchange conn=${connId}; reactive refresh + retry once`);
+      if (!(await refreshCred())) throw e;
+      return send(cred, opts);
+    }
+  };
+
+  let result = await sendHandlingUserToken190();
 
   // B2: Graph rejected the (possibly cached) Page token (code 190) → drop it,
-  // re-derive from the user token and retry ONCE. A second 190 is surfaced.
+  // re-derive from the user token and retry ONCE. A second 190 is surfaced. If
+  // the forced re-derive finds the user token itself rejected, the credential
+  // is refreshed once (unless already refreshed this invoke) as above.
   if (exchange && isGraphTokenError(result)) {
     log(`[conn.direct] page token rejected (Graph 190) conn=${connId}; invalidate + re-derive + retry once`);
     exchange.resolver.invalidate(cred && cred.access_token, exchange.kind, exchange.id);
-    result = await send(cred, { forceExchange: true });
+    result = await sendHandlingUserToken190({ forceExchange: true });
   }
 
   // Reactive refresh backstop (refreshable/OAuth only): a provider 401 → refresh
