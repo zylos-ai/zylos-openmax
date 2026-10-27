@@ -369,7 +369,9 @@ test('10-22 terminal state: done goes out when the reply is delivered, not at tu
   assert.deepEqual(plan2.firstAgentRun, { schema_version: 3, run_id: reg.runId, ref: true });
 
   // The turn keeps going for 20 s (memory work) and ends: no frame regresses the run.
-  const n = sent.length;
+  // OPENM-1089 ①: that visible step opens a continuation run (its own run_id),
+  // which the turn end closes done (no no_reply: the parent was answered).
+  const n = states(sent, reg.runId).length;
   clock.advance(20_000);
   append({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_9', name: 'Edit', input: { file_path: '/m/state.md', old_string: 'a', new_string: 'b' } }] } });
   append({ type: 'system', subtype: 'turn_duration', durationMs: 23000 });
@@ -378,10 +380,16 @@ test('10-22 terminal state: done goes out when the reply is delivered, not at tu
   clock.advance(200_000);
   activity.pollNow();
   activity.emitter.tick();
-  assert.equal(sent.length, n, 'no frame for the run after its terminal frame');
+  assert.equal(states(sent, reg.runId).length, n, 'no frame for the run after its terminal frame');
+  const cont = sent.find((f) => f.payload.run_id !== reg.runId)?.payload;
+  assert.equal(cont.source_message_id, '7383920118271', 'continuation of the same source message');
+  assert.equal(states(sent, cont.run_id).at(-1), 'done');
+  assert.equal(sent.at(-1).payload.end_reason, undefined);
+  assert.equal(store.readRun(cont.run_id).continues, reg.runId);
   assert.equal(store.readActive().by_conversation[CONV], undefined, 'turn ended: no longer listed');
   assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h3', newKey: () => 'c_3', now: clock.now(), store }), null);
-  assert.match(activity.statsLine(), /runs_closed=\{done:1\}/);
+  assert.match(activity.statsLine(), /runs_closed=\{done:2\}/);
+  assert.match(activity.statsLine(), /continuations=1/);
   assert.deepEqual(warns, []);
   activity.stop();
 });
@@ -477,3 +485,376 @@ test('10-22 R2-1 (reviewer repro): merged Lark A + openmax B, A\'s reply fails �
     activity.stop();
   }
 });
+
+// ── OPENM-1089 ──
+
+const bashSend = (id) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Bash', input: { command: `node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${CONV}" <<'EOF'\nx\nEOF` } }] } });
+const toolOk = (id) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'ok' }] } });
+/** An unregistered smart-mode message of the same group (no marker), server id `id`. */
+const smartMsg = (id) => omMsg('').replace('source-message-id="7383920118271"', `source-message-id="${id}"`);
+const toolUse = (id, name, input) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
+
+/** A run whose turn started and whose gate is open. */
+async function startedRun(h) {
+  const reg = h.activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: '7383920118271', endpoint: CONV });
+  h.activity.confirmRun(reg.runId, '{"ok":true,"id":42}\n');
+  await h.activity.collector.discover();
+  h.clock.advance(200);
+  h.append({ type: 'user', message: { role: 'user', content: omMsg(reg.marker) } });
+  h.activity.pollNow();
+  h.clock.advance(2100);
+  h.activity.emitter.tick();                            // gate open
+  return reg;
+}
+
+test('1089-① end to end: reply 1 delivered → later log steps open a continuation in active.json → the next reply carries its full agent_run', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir, warns } = h;
+  const reg = await startedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  append(toolUse('toolu_1', 'Grep', { pattern: 'price' }));
+  append(toolOk('toolu_1'));
+  activity.pollNow();
+  // Reply 1 ("收到，我来查"): claim → delivered.
+  const p1 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store });
+  assert.equal(p1.firstAgentRun.run_id, reg.runId);
+  p1.settle('ok');
+  append(bashSend('toolu_s1'));
+  append(toolOk('toolu_s1'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(store.readRun(reg.runId).state, 'closed');
+
+  // The agent keeps working: a visible step opens r1′.
+  clock.advance(1000);
+  append(toolUse('toolu_2', 'Read', { file_path: '/data/quote.xlsx' }));
+  append(toolOk('toolu_2'));
+  activity.pollNow();
+  const ids = store.readActive().by_conversation[CONV];
+  const contId = ids.find((id) => id !== reg.runId);
+  assert.ok(contId, 'the continuation is listed for send.js');
+  const cont = store.readRun(contId);
+  assert.equal(cont.continues, reg.runId);
+  assert.equal(cont.segment, 2);
+  assert.equal(cont.focus, true);
+  assert.equal(cont.source_message_id, '7383920118271');
+  clock.advance(600);
+  activity.emitter.tick();
+  const contFrames = sent.filter((f) => f.payload.run_id === contId);
+  assert.ok(contFrames.length >= 1, 'live frames for the continuation');
+  assert.equal(contFrames[0].payload.source_message_id, '7383920118271');
+  assert.ok(contFrames.some((f) => f.payload.steps.some((s) => s.category === 'read')));
+  for (const f of contFrames) assert.deepEqual(validateFrameV3(f.payload), []);
+
+  // Reply 2 (the answer): send.js picks the focused continuation, full snapshot.
+  const p2 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store });
+  assert.equal(p2.runId, contId);
+  assert.equal(p2.firstAgentRun.run_id, contId);
+  assert.ok(p2.firstAgentRun.steps.some((s) => s.category === 'read'));
+  assert.equal(classifyAgentRun({ raw: p2.firstAgentRun }).verdict, 'ok');
+  p2.settle('ok');
+  append(bashSend('toolu_s2'));
+  append(toolOk('toolu_s2'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(states(sent, contId).at(-1), 'done');
+  assert.equal(store.readRun(contId).state, 'closed');
+  assert.match(activity.statsLine(), /continuations=1/);
+  assert.deepEqual(warns, []);
+  activity.stop();
+});
+
+test('1089-① restart with an open continuation → failed / runtime_restarted on ws open; the parent untouched', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await startedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  const p1 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store });
+  p1.settle('ok');
+  activity.pollNow();
+  append(toolUse('toolu_2', 'Read', { file_path: '/x' }));
+  activity.pollNow();
+  const contId = store.listRunIds().find((id) => id !== reg.runId);
+  assert.ok(contId);
+  activity.stop();
+  const parentBefore = JSON.stringify(store.readRun(reg.runId));
+
+  const ws2Sent = [];
+  const again = createActivity({ config: { activity: { enabled: true } }, env: {}, runsDir, homeDir: os.tmpdir(), zylosDir: os.tmpdir(), runtime: 'claude' });
+  again.start();
+  again.bindOrgWs(ORG, { trySend: (f) => { ws2Sent.push(f); return true; } });
+  again.onWsOpen(ORG);
+  again.stop();
+  assert.deepEqual(ws2Sent.map((f) => [f.payload.run_id, f.payload.state, f.payload.end_reason]), [[contId, 'failed', 'runtime_restarted']]);
+  assert.equal(JSON.stringify(store.readRun(reg.runId)), parentBefore);
+});
+
+test('1089-② end to end: guard skip writes the skip file → the log reply settles → unregistered cleared → the next reply selects the run', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir } = h;
+  const reg = await startedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  // A smart-mode (not @) message of the same group arrives and is absorbed mid-turn.
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV, '9000000000001');
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000001') } });
+  activity.pollNow();
+  assert.ok(store.readActive().unregistered[CONV]);
+  assert.equal(store.readRun(reg.runId).focus, false);
+
+  // The agent answers the smart message first: send.js skips (no claim, no agent_run).
+  const p1 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store });
+  assert.equal(p1, null);
+  assert.equal(store.readSkip(reg.runId).at, clock.now());
+  append(bashSend('toolu_s1'));
+  append(toolOk('toolu_s1'));
+  clock.advance(700);
+  activity.pollNow();
+  const r = store.readRun(reg.runId);
+  assert.equal(r.state, 'active', 'not done: that reply was not the run\'s');
+  assert.equal(r.ambiguous_reply, true);
+  assert.equal(r.focus, true);
+  assert.equal(store.readActive().unregistered?.[CONV], undefined, 'guard lifted');
+  assert.equal(states(sent, reg.runId).includes('done'), false);
+
+  // Then the @ message: the run with its full agent_run, done on delivery.
+  const p2 = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store });
+  assert.equal(p2.runId, reg.runId);
+  assert.ok(Array.isArray(p2.firstAgentRun.steps));
+  p2.settle('ok');
+  append(bashSend('toolu_s2'));
+  append(toolOk('toolu_s2'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(states(sent, reg.runId).at(-1), 'done');
+  assert.equal(sent.filter((f) => f.payload.run_id === reg.runId).at(-1).payload.end_reason, undefined);
+  assert.match(activity.statsLine(), /reply_deferred_unregistered=1/);
+  activity.stop();
+});
+
+/** A started run plus a smart-mode message of the same group absorbed mid-turn. */
+async function guardedRun(h) {
+  const reg = await startedRun(h);
+  h.clock.advance(100);
+  h.activity.noteUnregisteredInput(CONV, '9000000000001');
+  h.append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000001') } });
+  h.activity.pollNow();
+  return reg;
+}
+
+test('1089-② review: a newer smart message arriving while the skipped send is in flight keeps the guard; the next reply does not claim the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await guardedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  const unregA = store.readActive().unregistered[CONV];
+  append(bashSend('toolu_s1'));
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  assert.equal(store.readSkip(reg.runId).unreg, unregA);
+  // Smart B arrives (bridge + log) before the send's result is collected.
+  clock.advance(300);
+  activity.noteUnregisteredInput(CONV, '9000000000002');
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000002') } });
+  clock.advance(200);
+  append(toolOk('toolu_s1'));
+  activity.pollNow();
+  const unregB = store.readActive().unregistered?.[CONV];
+  assert.ok(unregB > unregA, 'the guard for B stays');
+  const r = store.readRun(reg.runId);
+  assert.equal(r.state, 'active');
+  assert.equal(r.ambiguous_reply, true);
+  assert.equal(r.focus, false, 'B is pending: no focus');
+  // The answer to B is skipped again — it never claims the run.
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
+  assert.equal(store.claimExists(reg.runId), false);
+  activity.stop();
+});
+
+test('1089-② review: the send record collected late (log backlog) still honours the skip — the window is the records\' own timestamps', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir } = h;
+  const reg = await guardedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  append(bashSend('toolu_s1'));
+  clock.advance(50);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  clock.advance(400);
+  append(toolOk('toolu_s1'));
+  clock.advance(30_000);                                // read 30 s later
+  activity.pollNow();
+  const r = store.readRun(reg.runId);
+  assert.equal(r.state, 'active', 'deferred, not closed');
+  assert.equal(r.ambiguous_reply, true);
+  assert.equal(states(sent, reg.runId).includes('done'), false);
+  activity.stop();
+});
+
+test('1089-② review: a skip file older than the send call (an earlier skipped send) is not this send\'s — the run completes', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir } = h;
+  const reg = await guardedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  store.writeSkip(reg.runId, { at: clock.now() - 10_000, unreg: 1 });
+  append(bashSend('toolu_s1'));
+  append(toolOk('toolu_s1'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(states(sent, reg.runId).at(-1), 'done');
+  assert.equal(store.readRun(reg.runId).ambiguous_reply, undefined);
+  activity.stop();
+});
+
+test('1089-② review R2: B arrives after the send call started but BEFORE send.js plans (guard already B) → B stays pending, the guard stays, the next send does not claim the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await guardedRun(h);                      // smart A
+  const store = createRunStore({ dir: runsDir });
+  clock.advance(100);
+  append(bashSend('toolu_s1'));                         // the agent's answer to A starts
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV, '9000000000002');                 // smart B reaches the bridge …
+  activity.pollNow();
+  const unregB = store.readActive().unregistered[CONV];
+  // … while send.js is still preparing: it plans now and records B's guard.
+  clock.advance(100);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  assert.equal(store.readSkip(reg.runId).unreg, unregB);
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000002') } });
+  clock.advance(200);
+  append(toolOk('toolu_s1'));
+  activity.pollNow();
+  const r = store.readRun(reg.runId);
+  assert.equal(r.state, 'active');
+  assert.equal(r.ambiguous_reply, true);
+  assert.equal(r.focus, false, 'B is pending: no focus');
+  const q = activity.attribution.turn.queue.filter((it) => it.foreign);
+  assert.deepEqual(q.map((it) => it.answered).sort(), [false, true], 'A answered, B pending');
+  assert.equal(store.readActive().unregistered?.[CONV], unregB, 'the guard for B stays');
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
+  assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
+  activity.stop();
+});
+
+test('1089-② review R3: smart A reaches the runtime only after the skipped send settled → A keeps the guard; the next send does not claim the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await startedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  // A Lark message in front: the run has no focus.
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: larkMsg } });
+  activity.pollNow();
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV, '9000000000001');                 // smart A at the bridge, still on its way to C4
+  const unregA = store.readActive().unregistered[CONV];
+  clock.advance(100);
+  append(bashSend('toolu_s1'));
+  clock.advance(50);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  clock.advance(200);
+  append(toolOk('toolu_s1'));
+  activity.pollNow();
+  assert.equal(store.readActive().unregistered?.[CONV], unregA, 'nothing acknowledged: the guard stays');
+  // A is delivered to the runtime only now.
+  clock.advance(500);
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000001') } });
+  activity.pollNow();
+  const smart = activity.attribution.turn.queue.find((it) => it.foreign && it.reply?.channel === 'openmax');
+  assert.equal(smart.answered, false, 'A is pending');
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
+  assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
+  activity.stop();
+});
+
+test('1089-② review R4: smart A arrives before any run, the run is injected, B reaches the bridge but is delivered after the settlement → acking A never consumes B; B keeps the guard and the next send does not claim the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const store = createRunStore({ dir: runsDir });
+  await activity.collector.discover();
+  // Smart A with no run open: recorded by id, no guard yet; the runtime takes it.
+  activity.noteUnregisteredInput(CONV, '9000000000001');
+  clock.advance(100);
+  append({ type: 'user', message: { role: 'user', content: smartMsg('9000000000001') } });
+  // The @ message of the same group registers a run and is injected into the turn.
+  clock.advance(100);
+  const reg = activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: '7383920118271', endpoint: CONV });
+  activity.confirmRun(reg.runId, '{"ok":true,"id":43}\n');
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: omMsg(reg.marker) } });
+  activity.pollNow();
+  clock.advance(2100);
+  activity.emitter.tick();                              // gate open
+  assert.equal(store.readRun(reg.runId).focus, false, 'A is in front');
+  // Smart B reaches the bridge (guard = B) but not yet the runtime.
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV, '9000000000002');
+  const unregB = store.readActive().unregistered[CONV];
+  assert.ok(unregB);
+  // The agent answers A; send.js skips because of B's guard.
+  clock.advance(100);
+  append(bashSend('toolu_s1'));
+  clock.advance(50);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null);
+  clock.advance(200);
+  append(toolOk('toolu_s1'));
+  activity.pollNow();
+  assert.equal(store.readActive().unregistered?.[CONV], unregB, 'A acknowledged by id; B\'s record and guard stay');
+  // B is delivered only now.
+  clock.advance(500);
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000002') } });
+  activity.pollNow();
+  const items = activity.attribution.turn.queue.filter((it) => it.foreign);
+  assert.deepEqual(items.map((it) => [it.msgId, it.answered]), [['9000000000002', false], ['9000000000001', true]]);
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store }), null);
+  assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
+  activity.stop();
+});
+
+for (const [total, lifted] of [[50, true], [51, false]]) {
+  test(`1089-② review R5: a burst of ${total} smart messages (cap 50), the oldest delivered last → ${lifted ? 'all recorded: the guard lifts once all are answered' : 'one evicted: the guard stays and the next send does not claim the run'}`, async () => {
+    const h = setup();
+    const { activity, clock, append, runsDir } = h;
+    const reg = await startedRun(h);
+    const store = createRunStore({ dir: runsDir });
+    append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: larkMsg } });
+    activity.pollNow();                                 // no focus for the run
+    const ids = Array.from({ length: total }, (_, i) => String(9100000000000 + i));
+    for (const id of ids) {
+      clock.advance(10);
+      activity.noteUnregisteredInput(CONV, id);
+    }
+    // All but the oldest reach the runtime and are answered one by one (each skipped by the guard).
+    for (const id of ids.slice(1)) {
+      clock.advance(10);
+      append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg(id) } });
+    }
+    activity.pollNow();
+    for (let i = 1; i < total; i++) {
+      clock.advance(10);
+      append(bashSend(`toolu_b${i}`));
+      assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: `b${i}`, newKey: () => `c_b${i}`, now: clock.now(), store }), null);
+      clock.advance(10);
+      append(toolOk(`toolu_b${i}`));
+      activity.pollNow();
+    }
+    // The oldest is answered (acknowledged by id) only after it is delivered.
+    clock.advance(10);
+    append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg(ids[0]) } });
+    activity.pollNow();
+    const pendingOldest = activity.attribution.turn.queue.find((it) => it.msgId === ids[0]);
+    assert.equal(pendingOldest.answered, false);
+    if (!lifted) {
+      assert.ok(store.readActive().unregistered?.[CONV], 'the guard stays: a record was evicted unanswered');
+      assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'n', newKey: () => 'c_n', now: clock.now(), store }), null);
+      assert.equal(store.claimExists(reg.runId), false, 'the next send does not claim the run');
+    } else {
+      assert.ok(store.readActive().unregistered?.[CONV], 'the oldest is still outstanding');
+      append(bashSend('toolu_a'));
+      assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'a', newKey: () => 'c_a', now: clock.now(), store }), null);
+      clock.advance(10);
+      append(toolOk('toolu_a'));
+      activity.pollNow();
+      assert.equal(store.readActive().unregistered?.[CONV], undefined, 'every recorded message answered: guard lifted');
+      assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'n', newKey: () => 'c_n', now: clock.now(), store }).runId, reg.runId);
+    }
+    activity.stop();
+  });
+}

@@ -7,6 +7,9 @@
  *   runs/<run_id>.reply      reply claim (created with 'wx'; kind text / media / card)
  *   runs/<run_id>.form-card  marker: the run was answered with a card whose
  *                            metadata the server refused (422 → resent bare)
+ *   runs/<run_id>.skip       send.js's group guard skipped this run for a reply
+ *                            ({ at, unreg }); attribution then does not count
+ *                            that log reply as the run's answer (OPENM-1089 ②)
  *   runs/active.json         index of runs that are not closed, per-org summary gate,
  *                            unregistered group inputs (send.js guard)
  *   runs/send-stats.json     best-effort counters bumped by send.js
@@ -52,6 +55,7 @@ export function createRunStore({ dir = DEFAULT_RUNS_DIR } = {}) {
   const runPath = (id) => path.join(dir, `${id}.json`);
   const claimPath = (id) => path.join(dir, `${id}.reply`);
   const formCardPath = (id) => path.join(dir, `${id}.form-card`);
+  const skipPath = (id) => path.join(dir, `${id}.skip`);
   const activePath = path.join(dir, 'active.json');
   const sendStatsPath = path.join(dir, 'send-stats.json');
 
@@ -72,7 +76,7 @@ export function createRunStore({ dir = DEFAULT_RUNS_DIR } = {}) {
       return names.map((n) => RUN_FILE_RE.exec(n)?.[1]).filter(Boolean);
     },
     removeRun(id) {
-      for (const f of [runPath(id), claimPath(id), formCardPath(id)]) {
+      for (const f of [runPath(id), claimPath(id), formCardPath(id), skipPath(id)]) {
         try { fs.unlinkSync(f); } catch {}
       }
     },
@@ -117,6 +121,13 @@ export function createRunStore({ dir = DEFAULT_RUNS_DIR } = {}) {
     },
     formCardExists(id) {
       try { fs.accessSync(formCardPath(id)); return true; } catch { return false; }
+    },
+    /** The group guard skipped this run for a reply (last one wins). Throws on I/O errors. */
+    writeSkip(id, data) {
+      atomicWrite(skipPath(id), JSON.stringify(data));
+    },
+    readSkip(id) {
+      return readJson(skipPath(id));
     },
 
     /** Best-effort counter bump from send.js (racy by design; counters only). */

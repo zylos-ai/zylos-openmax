@@ -83,6 +83,9 @@ export function normEndpoint(endpoint) {
 }
 
 const MESSAGE_CONTEXT_RE = /<message-context conversation-id="([^"]*)"/;
+// The bridge's structural header (message.js); user text cannot forge it
+// (angle brackets in the body are escaped).
+const SOURCE_MESSAGE_RE = /<message-context conversation-id="[^"]*" source-message-id="([^"]*)"\/>/;
 const SPILL_RE = /\[C4\] ⚠️ TRUNCATED[^\n]*?message file: (\S*comm-bridge\/attachments\/conv-(\d+)\/message\.txt)/g;
 const REPLY_VIA_RE = /---- reply via: node \S+ "([^"]+)" "([^"]+)"/g;
 
@@ -108,6 +111,8 @@ export function parseInputCtx(content) {
   } else {
     const mc = MESSAGE_CONTEXT_RE.exec(text);
     if (mc) ctx.convAttr = mc[1];
+    const sm = SOURCE_MESSAGE_RE.exec(text);
+    if (sm) ctx.sourceMessageId = sm[1];
   }
   const rv = lastMatch(REPLY_VIA_RE, text);
   if (rv) ctx.replyVia = { channel: rv[1], endpoint: rv[2] };
@@ -163,6 +168,12 @@ export function splitInputSegments(content) {
 export function messageContextFromSpillHead(head) {
   const mc = MESSAGE_CONTEXT_RE.exec(String(head ?? ''));
   return mc ? mc[1] : null;
+}
+
+/** Message-context source message id from the first bytes of a spill file. */
+export function sourceMessageIdFromSpillHead(head) {
+  const sm = SOURCE_MESSAGE_RE.exec(String(head ?? ''));
+  return sm ? sm[1] : null;
 }
 
 /**

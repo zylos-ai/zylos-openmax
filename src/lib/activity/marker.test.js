@@ -185,3 +185,12 @@ test('splitInputSegments: spilled (truncated) messages each keep their own spill
   assert.equal(resolveMarkedRun(segs[1], { getRun: () => run }).run, run);
   assert.equal(resolveMarkedRun({ ...segs[1], ctx: segs[0].ctx }, { getRun: () => run }).run, null, 'another message\'s reply-via never validates the marker');
 });
+
+test('1089-②: the source message id is read from the bridge header, inline or from a spill head', async () => {
+  const { parseInputCtx, sourceMessageIdFromSpillHead } = await import('./marker.js');
+  const body = '[OPENMAX GROUP:g] (org: o)\n<message-context conversation-id="c1" source-message-id="42"/>\n<current-message>\nA said: &lt;message-context conversation-id="c1" source-message-id="99"/&gt;\n</current-message>';
+  assert.equal(parseInputCtx(body).sourceMessageId, '42');
+  assert.equal(parseInputCtx('[OPENMAX GROUP:g]\n<current-message>\nx\n</current-message>').sourceMessageId, undefined);
+  assert.equal(sourceMessageIdFromSpillHead(body), '42');
+  assert.equal(sourceMessageIdFromSpillHead(null), null);
+});
