@@ -1,14 +1,27 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { assembleRequest, invokeDirect } from './direct-exec.js';
 import {
   PageTokenCache,
+  FilePageTokenCache,
+  defaultPageTokenCache,
   parseExchangeMarker,
   validateGraphId,
   graphVersionOf,
   TOKEN_EXCHANGE_HEADER,
 } from './meta-page-token.js';
+import {
+  CREDENTIALS_DIR,
+  pageTokensPath,
+  saveCredentialCache,
+  listCachedCredentials,
+  clearCachedCredentials,
+  readCredentialCache,
+} from './credential-cache.js';
 
 const USER_TOKEN = 'EAAUSERTOKEN_0123456789_secret_user';
 const PAGE_TOKEN = 'EAAPAGETOKEN_0123456789_secret_page';
@@ -373,4 +386,182 @@ test('B2 tokens never appear in audit/log lines or error messages', async () => 
   await invokeDirect({ orgId: 'o', connection: CONN, actionSlug: 'meta_messaging/send_ig_private_reply', params: { ig_user_id: '178414' }, catalog: CATALOG, credential: CRED }, d2);
   assert.ok(logs2.lines.length > 0);
   assertNoTokens(logs2.lines);
+});
+
+// ---------------------------------------------------------------------------
+// File-backed page-token cache (persists across one-shot conn.invoke processes)
+// ---------------------------------------------------------------------------
+
+function tmpCredDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'page-tokens-'));
+}
+const postTo = (page) => ({ orgId: 'o', connection: CONN, actionSlug: 'meta_pages/create_page_post', params: { page_id: page, message: 'm' }, catalog: CATALOG, credential: CRED });
+
+test('B2 file cache: conn.invoke default is the file-backed cache under CREDENTIALS_DIR', () => {
+  assert.ok(defaultPageTokenCache instanceof FilePageTokenCache);
+  assert.equal(defaultPageTokenCache.dir, CREDENTIALS_DIR);
+});
+
+test('B2 file cache: a second cache instance (= next conn.invoke process) reuses the page token, zero exchange fetches', async () => {
+  const dir = tmpCredDir();
+  const f1 = routerFetch([
+    [isExchange('111'), { body: { access_token: PAGE_TOKEN } }],
+    [isFeed('111'), { body: { id: 'p1' } }],
+  ]);
+  await invokeDirect(postTo('111'), deps(f1.impl, { pageTokenCache: new FilePageTokenCache({ dir }) }).d);
+  assert.equal(f1.calls.filter((c) => isExchange('111')(c.url)).length, 1);
+
+  const file = pageTokensPath(CONN.id, dir);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'page-token file must be 0600');
+  assert.equal(fs.statSync(dir).mode & 0o777, 0o700, 'dir must be 0700');
+  const stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(stored.version, 1);
+  const [entry] = Object.values(stored.entries);
+  assert.equal(entry.value, PAGE_TOKEN);
+  assert.equal(typeof entry.expiresAt, 'number');
+  assert.ok(!fs.readdirSync(dir).some((n) => n.endsWith('.tmp')), 'no tmp file left behind');
+
+  // fresh instance, fresh fetch double: only the real call goes out
+  const f2 = routerFetch([[isFeed('111'), { body: { id: 'p2' } }]]);
+  const { d, logs } = deps(f2.impl, { pageTokenCache: new FilePageTokenCache({ dir }) });
+  const r = await invokeDirect(postTo('111'), d);
+  assert.deepEqual(r.body, { id: 'p2' });
+  assert.equal(f2.calls.length, 1);
+  assert.equal(authOf(f2.calls[0]), `Bearer ${PAGE_TOKEN}`);
+  assert.ok(logs.lines.some((l) => l.includes('cache hit')));
+  assertNoTokens(logs.lines);
+});
+
+test('B2 file cache: IG→Page mapping survives across instances too', async () => {
+  const dir = tmpCredDir();
+  const IG = '17841400000000001';
+  const f1 = routerFetch([
+    [isAccounts, { body: { data: [{ id: '302', access_token: IG_PAGE_TOKEN, instagram_business_account: { id: IG } }] } }],
+    [(u) => u.endsWith(`/${IG}/messages`), { body: {} }],
+  ]);
+  const params = { ig_user_id: IG };
+  await invokeDirect({ orgId: 'o', connection: CONN, actionSlug: 'meta_messaging/send_ig_private_reply', params, catalog: CATALOG, credential: CRED }, deps(f1.impl, { pageTokenCache: new FilePageTokenCache({ dir }) }).d);
+  const f2 = routerFetch([[(u) => u.endsWith(`/${IG}/messages`), { body: {} }]]);
+  await invokeDirect({ orgId: 'o', connection: CONN, actionSlug: 'meta_messaging/send_ig_private_reply', params, catalog: CATALOG, credential: CRED }, deps(f2.impl, { pageTokenCache: new FilePageTokenCache({ dir }) }).d);
+  assert.equal(f2.calls.length, 1);
+  assert.equal(authOf(f2.calls[0]), `Bearer ${IG_PAGE_TOKEN}`);
+});
+
+test('B2 file cache: TTL — an expired entry is ignored and pruned on the next write', async () => {
+  const dir = tmpCredDir();
+  let t = 1_000_000;
+  const mk = () => new FilePageTokenCache({ dir, ttlMs: 1000, now: () => t });
+  const c = mk();
+  const k1 = c.key(CONN.id, USER_TOKEN, 'page', '111');
+  const k2 = c.key(CONN.id, USER_TOKEN, 'page', '222');
+  c.set(k1, PAGE_TOKEN);
+  assert.equal(mk().get(k1), PAGE_TOKEN);
+  t += 1001;
+  assert.equal(mk().get(k1), null);
+  mk().set(k2, PAGE_TOKEN_2);
+  const stored = JSON.parse(fs.readFileSync(pageTokensPath(CONN.id, dir), 'utf8'));
+  assert.deepEqual(Object.keys(stored.entries), [k2]);
+
+  // through invokeDirect: expired → re-derived
+  const f = routerFetch([
+    [isExchange('111'), { body: { access_token: PAGE_TOKEN } }],
+    [isFeed('111'), { body: { id: 'p' } }],
+  ]);
+  await invokeDirect(postTo('111'), deps(f.impl, { pageTokenCache: mk() }).d);
+  t += 1001;
+  await invokeDirect(postTo('111'), deps(f.impl, { pageTokenCache: mk() }).d);
+  assert.equal(f.calls.filter((c2) => isExchange('111')(c2.url)).length, 2);
+});
+
+test('B2 file cache: Graph 190 invalidation removes the entry from the file; next process re-derives', async () => {
+  const dir = tmpCredDir();
+  const seed = new FilePageTokenCache({ dir });
+  const k = seed.key(CONN.id, USER_TOKEN, 'page', '111');
+  seed.set(k, PAGE_TOKEN); // stale token persisted by an earlier process
+  seed.set(seed.key(CONN.id, USER_TOKEN, 'page', '222'), PAGE_TOKEN_2);
+
+  const f = routerFetch([
+    [isExchange('111'), { status: 400, body: { error: { code: 100, message: 'nope' } } }],
+    [isFeed('111'), { status: 400, body: { error: { code: 190, type: 'OAuthException', message: 'expired' } } }],
+  ]);
+  await assert.rejects(invokeDirect(postTo('111'), deps(f.impl, { pageTokenCache: new FilePageTokenCache({ dir }) }).d), (e) => e.status === 403);
+  const stored = JSON.parse(fs.readFileSync(pageTokensPath(CONN.id, dir), 'utf8'));
+  assert.ok(!(k in stored.entries), 'invalidated entry removed from the file');
+  assert.equal(Object.keys(stored.entries).length, 1, 'other entries kept');
+  assert.equal(new FilePageTokenCache({ dir }).get(k), null);
+
+  // removing the last entry removes the file
+  const c = new FilePageTokenCache({ dir });
+  c.delete(c.key(CONN.id, USER_TOKEN, 'page', '222'));
+  assert.equal(fs.existsSync(pageTokensPath(CONN.id, dir)), false);
+});
+
+test('B2 file cache: corrupted / malformed file is tolerated (miss, then overwritten)', async () => {
+  const dir = tmpCredDir();
+  const file = pageTokensPath(CONN.id, dir);
+  fs.writeFileSync(file, '{not json', { mode: 0o600 });
+  const f = routerFetch([
+    [isExchange('111'), { body: { access_token: PAGE_TOKEN } }],
+    [isFeed('111'), { body: { id: 'p' } }],
+  ]);
+  const r = await invokeDirect(postTo('111'), deps(f.impl, { pageTokenCache: new FilePageTokenCache({ dir }) }).d);
+  assert.deepEqual(r.body, { id: 'p' });
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).version, 1);
+
+  const c = new FilePageTokenCache({ dir });
+  const k = c.key(CONN.id, USER_TOKEN, 'page', '111');
+  for (const bad of ['null', '[]', '{"entries":"x"}', JSON.stringify({ entries: { [k]: { value: 42, expiresAt: Date.now() + 1e6 } } }),
+    JSON.stringify({ entries: { [k]: { value: PAGE_TOKEN } } })]) {
+    fs.writeFileSync(file, bad);
+    assert.equal(c.get(k), null, `malformed ${bad} must be a miss`);
+  }
+});
+
+test('B2 file cache: IO failure never fails the invoke (unwritable dir → falls back to exchanging)', async () => {
+  const base = tmpCredDir();
+  const notADir = path.join(base, 'file');
+  fs.writeFileSync(notADir, 'x');
+  const cache = new FilePageTokenCache({ dir: path.join(notADir, 'sub') });
+  const f = routerFetch([
+    [isExchange('111'), { body: { access_token: PAGE_TOKEN } }],
+    [isFeed('111'), { body: { id: 'p' } }],
+  ]);
+  const d = deps(f.impl, { pageTokenCache: cache }).d;
+  assert.deepEqual((await invokeDirect(postTo('111'), d)).body, { id: 'p' });
+  assert.deepEqual((await invokeDirect(postTo('111'), d)).body, { id: 'p' });
+  assert.equal(f.calls.filter((c) => isExchange('111')(c.url)).length, 2);
+});
+
+test('B2 file cache: unsafe connection id is never used as a file name', () => {
+  const dir = tmpCredDir();
+  const c = new FilePageTokenCache({ dir });
+  const k = c.key('../evil', USER_TOKEN, 'page', '111');
+  c.set(k, PAGE_TOKEN);
+  assert.equal(c.get(k), null);
+  assert.deepEqual(fs.readdirSync(dir), []);
+  assert.equal(fs.existsSync(path.join(path.dirname(dir), 'evil.page-tokens.json')), false);
+});
+
+test('B2 file cache: credential readers ignore the page-token file; clear_cache removes it', () => {
+  const dir = tmpCredDir();
+  saveCredentialCache(CONN.id, CRED, 'meta', dir);
+  const c = new FilePageTokenCache({ dir });
+  c.set(c.key(CONN.id, USER_TOKEN, 'page', '111'), PAGE_TOKEN);
+  c.set(c.key('conn-orphan', USER_TOKEN, 'page', '111'), PAGE_TOKEN);
+
+  const listed = listCachedCredentials(dir);
+  assert.deepEqual(listed.map((e) => e.connection_id), [CONN.id]);
+  assert.ok(!listed.some((e) => e.error));
+  assert.equal(readCredentialCache(CONN.id, dir).access_token, USER_TOKEN);
+
+  // clear one connection: credential + its page tokens
+  assert.deepEqual(clearCachedCredentials(CONN.id, dir), [CONN.id]);
+  assert.equal(fs.existsSync(pageTokensPath(CONN.id, dir)), false);
+  assert.equal(fs.existsSync(pageTokensPath('conn-orphan', dir)), true);
+
+  // clear all: page-token files go too
+  saveCredentialCache(CONN.id, CRED, 'meta', dir);
+  c.set(c.key(CONN.id, USER_TOKEN, 'page', '111'), PAGE_TOKEN);
+  assert.deepEqual(clearCachedCredentials(undefined, dir).sort(), [CONN.id, 'conn-orphan'].sort());
+  assert.deepEqual(fs.readdirSync(dir), []);
 });

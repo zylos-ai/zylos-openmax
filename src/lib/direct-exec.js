@@ -19,7 +19,8 @@
  *   4. makes the HTTP request FROM THIS HOST directly to the provider, and
  *      (B2: an action whose headers_template carries the reserved
  *      X-Openmax-Token-Exchange header gets a Meta PAGE token derived from the
- *      connection's user token instead — see meta-page-token.js),
+ *      connection's user token instead, cached in
+ *      `<connectionId>.page-tokens.json` for 45 min — see meta-page-token.js),
  *   5. returns the SAME shape the server execute path returns —
  *      `{ status_code, headers, body }` — as a raw passthrough (the provider
  *      body is never transformed; the LLM reads it).
@@ -1041,8 +1042,10 @@ async function invokeDownload({
  *   - saveCache(connectionId, cred) → persist the refreshed credential
  *   - now()            (default Date.now) — for expiry math / tests
  *   - skewMs, audit, log, warn
- *   - pageTokenCache   (default module-level in-memory cache) — B2 Meta Page
- *                      token cache, see meta-page-token.js
+ *   - pageTokenCache   (default: file-backed FilePageTokenCache under
+ *                      CREDENTIALS_DIR, so derived tokens survive across the
+ *                      one-shot conn.invoke processes) — B2 Meta Page token
+ *                      cache, see meta-page-token.js
  */
 export async function invokeDirect(
   { orgId, connection, actionSlug, params = {}, catalog, credential },

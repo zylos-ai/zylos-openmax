@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Meta Page access-token exchange in direct mode (B2).** An action whose seeded `headers` (`headers_template`) carry the reserved `X-Openmax-Token-Exchange: meta_page:<param>` or `meta_ig_page:<param>` marker is sent with a Facebook PAGE access token that the executor derives from the connection's user token right before the call (`GET /{page_id}?fields=access_token`, or `/me/accounts` to find the Page linked to the Instagram account in `params[<param>]`), so the LLM never handles page tokens. The marker is stripped before the request leaves the host; the exchange only talks to `https://graph.facebook.com`, the action itself must target that origin, and the id must be numeric. On Graph code 190 for the page token it is invalidated, re-derived and the call retried once; a 190 on the exchange itself triggers one credential re-acquire. Derived tokens (and the IG→Page mapping) are cached per connection in `runtime/connect/credentials/<connectionId>.page-tokens.json` (0600, atomic writes, 45 min TTL, keyed on a hash of the user token so a reconnected user token never reuses them) so they survive between one-shot `conn.invoke` runs; the file is removed with the credential (revoke, needs_reauth, `conn.clear_cache`) and is ignored by `conn.cached`. Fails closed with 422 for an unknown marker, a non-Graph action, or a marker on a `request_spec`, prefetch, batch or `_download` call. Tokens are never logged. Code in `src/lib/meta-page-token.js`. Needs cws-connect migration 000111 (already on int) for the marked Meta actions.
+
 ## [2.29.0] - 2026-10-23
 
 Consolidates every change since 2.26.5 (the unreleased 2.27.0 – 2.28.1 entries are folded in here).

@@ -30,15 +30,26 @@
  *   - Tokens are never logged or put in error messages (errors carry Graph's
  *     error code/type/message, scrubbed of any token string, and the page/IG id).
  *
- * Cache: in-memory Map, keyed by (connection id, sha256 of the user token, kind,
- * id), TTL DEFAULT_PAGE_TOKEN_TTL_MS. Keying on the user-token hash means a
+ * Cache: keyed by (connection id, sha256 of the user token, kind, id), TTL
+ * DEFAULT_PAGE_TOKEN_TTL_MS. Keying on the user-token hash means a
  * refreshed/reconnected user token never reuses a page token derived from the
  * old one. Entries are invalidated when Graph rejects the page token (code 190).
- * Note: `conn.invoke` runs as a short-lived CLI process, so the cache mainly
- * helps within one process (retries, IG lookups); see b2-design.md.
+ * `conn.invoke` runs as a short-lived CLI process, so the default cache
+ * (FilePageTokenCache) persists to `<CREDENTIALS_DIR>/<connectionId>.page-tokens.json`
+ * next to the connection's credential file, with the same protection: dir 0700,
+ * file 0600, atomic tmp+rename writes, expired entries pruned on every write.
+ * The file is read on every lookup (no in-process layer), so an invalidation by
+ * one process is seen by the next. All file IO is best-effort: a cache failure
+ * never fails an invoke, it only costs an extra exchange. The file is removed
+ * with the credential (deleteCredentialCache: revoke / needs_reauth /
+ * conn.clear_cache). PageTokenCache (in-memory) remains for tests / injection.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { CREDENTIALS_DIR, PAGE_TOKENS_SUFFIX, pageTokensPath } from './credential-cache.js';
 
 export const TOKEN_EXCHANGE_HEADER = 'X-Openmax-Token-Exchange';
 export const META_GRAPH_ORIGIN = 'https://graph.facebook.com';
@@ -140,8 +151,8 @@ export function isGraphTokenError(result) {
 }
 
 /**
- * In-memory TTL cache for derived page tokens and IG→Page mappings. Exported as
- * a class so tests (and a future persistent store) can inject their own.
+ * In-memory TTL cache for derived page tokens and IG→Page mappings. Base of
+ * FilePageTokenCache (the persistent default) and injectable in tests.
  */
 export class PageTokenCache {
   constructor({ ttlMs = DEFAULT_PAGE_TOKEN_TTL_MS, now = Date.now } = {}) {
@@ -165,12 +176,116 @@ export class PageTokenCache {
     this.map.set(k, { value, expiresAt: this.now() + this.ttlMs });
   }
 
+  /** Set several `[key, value]` pairs at once (one write for file-backed caches). */
+  setMany(pairs) { for (const [k, v] of pairs) this.set(k, v); }
+
   delete(k) { this.map.delete(k); }
 
   clear() { this.map.clear(); }
 }
 
-export const defaultPageTokenCache = new PageTokenCache();
+// Connection ids become file names; anything that is not a plain id (path
+// separators, leading dot, …) is simply not persisted.
+const SAFE_CONN_ID_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
+const PAGE_TOKENS_FILE_VERSION = 1;
+
+/**
+ * File-backed page-token cache (the default for conn.invoke): one JSON file per
+ * connection, `<dir>/<connectionId>.page-tokens.json`, shape
+ * `{ version: 1, entries: { <key>: { value, expiresAt } } }`. Same key scheme
+ * and TTL as PageTokenCache. Every operation is best-effort and silent on IO
+ * errors: a miss just means the resolver exchanges again.
+ */
+export class FilePageTokenCache extends PageTokenCache {
+  constructor({ dir = CREDENTIALS_DIR, ttlMs = DEFAULT_PAGE_TOKEN_TTL_MS, now = Date.now } = {}) {
+    super({ ttlMs, now });
+    this.dir = dir;
+    this.map = null; // unused: the file is the store
+  }
+
+  fileFor(k) {
+    const connId = String(k).split('|', 1)[0];
+    return SAFE_CONN_ID_RE.test(connId) ? pageTokensPath(connId, this.dir) : null;
+  }
+
+  // Valid, unexpired entries of a file ({} when absent / unreadable / malformed).
+  readEntries(file) {
+    let data;
+    try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return {}; }
+    const raw = data && typeof data === 'object' && data.entries && typeof data.entries === 'object' ? data.entries : {};
+    const t = this.now();
+    const out = {};
+    for (const [k, e] of Object.entries(raw)) {
+      if (e && typeof e === 'object' && typeof e.value === 'string' && e.value
+        && typeof e.expiresAt === 'number' && e.expiresAt > t) out[k] = { value: e.value, expiresAt: e.expiresAt };
+    }
+    return out;
+  }
+
+  writeEntries(file, entries) {
+    try {
+      if (Object.keys(entries).length === 0) {
+        try { fs.unlinkSync(file); } catch {}
+        return;
+      }
+      fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+      try { fs.chmodSync(this.dir, 0o700); } catch {}
+      const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
+      try {
+        fs.writeFileSync(tmp, JSON.stringify({ version: PAGE_TOKENS_FILE_VERSION, entries }), { mode: 0o600 });
+        try { fs.chmodSync(tmp, 0o600); } catch {}
+        fs.renameSync(tmp, file);
+      } catch {
+        try { fs.unlinkSync(tmp); } catch {}
+      }
+    } catch {}
+  }
+
+  // Read-modify-write one file (readEntries already prunes expired entries).
+  update(file, fn) {
+    const entries = this.readEntries(file);
+    fn(entries);
+    this.writeEntries(file, entries);
+  }
+
+  get(k) {
+    const file = this.fileFor(k);
+    if (!file) return null;
+    const e = this.readEntries(file)[k];
+    return e ? e.value : null;
+  }
+
+  set(k, value) { this.setMany([[k, value]]); }
+
+  setMany(pairs) {
+    const byFile = new Map();
+    for (const [k, v] of pairs) {
+      const file = this.fileFor(k);
+      if (!file || typeof v !== 'string' || !v) continue;
+      if (!byFile.has(file)) byFile.set(file, []);
+      byFile.get(file).push([k, v]);
+    }
+    const expiresAt = this.now() + this.ttlMs;
+    for (const [file, list] of byFile) {
+      this.update(file, (entries) => { for (const [k, v] of list) entries[k] = { value: v, expiresAt }; });
+    }
+  }
+
+  delete(k) {
+    const file = this.fileFor(k);
+    if (file) this.update(file, (entries) => { delete entries[k]; });
+  }
+
+  clear() {
+    let names = [];
+    try { names = fs.readdirSync(this.dir); } catch {}
+    for (const n of names) {
+      if (n.endsWith(PAGE_TOKENS_SUFFIX)) { try { fs.unlinkSync(path.join(this.dir, n)); } catch {} }
+    }
+  }
+}
+
+export const defaultPageTokenCache = new FilePageTokenCache();
 
 /**
  * Derives Page tokens for one invoke. Holds the user credential's token and an
@@ -230,16 +345,20 @@ export function createPageTokenResolver({ connId, cache = defaultPageTokenCache,
         throw failure('meta_ig_page', igUserId, res, userToken, 'listing the Pages of the connected account failed');
       }
       let found = null;
+      const pairs = [];
       for (const p of res.body.data) {
         const pid = p && typeof p.id === 'string' && GRAPH_ID_RE.test(p.id) ? p.id : null;
         if (!pid || typeof p.access_token !== 'string' || !p.access_token) continue;
-        cache.set(cache.key(connId, userToken, 'page', pid), p.access_token);
+        pairs.push([cache.key(connId, userToken, 'page', pid), p.access_token]);
         const iga = p.instagram_business_account && p.instagram_business_account.id;
         if (typeof iga === 'string' && GRAPH_ID_RE.test(iga)) {
-          cache.set(cache.key(connId, userToken, 'ig', iga), pid);
+          pairs.push([cache.key(connId, userToken, 'ig', iga), pid]);
           if (iga === igUserId) found = { pid, tok: p.access_token };
         }
       }
+      // One write per /me/accounts page for a file-backed cache.
+      if (typeof cache.setMany === 'function') cache.setMany(pairs);
+      else for (const [k, v] of pairs) cache.set(k, v);
       if (found) {
         audit(`[conn.direct] page-token derived ig=${igUserId} page=${found.pid} conn=${connId} len=${found.tok.length}`);
         return found.tok;
