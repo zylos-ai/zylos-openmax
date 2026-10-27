@@ -448,7 +448,8 @@ console.log('[install] config.json written (0600)');
 
 console.log('[install] complete');
 
-// Auto-install the openmax-kb companion (idempotent, non-fatal, time-bounded).
+// Auto-install the openmax-product-faq companion and purge the legacy openmax-kb
+// once the new one is confirmed (idempotent, non-fatal, time-bounded).
 // Placed before the interactive "Next steps" so those lines don't print above kb output.
 ensureOpenmaxKb();
 

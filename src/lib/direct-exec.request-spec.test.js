@@ -471,3 +471,65 @@ test('resumable controls: init 401 (no refresh) and chunk 403 keep their bodies;
   assert.equal(c.f.calls[2].headers.Authorization, 'Bearer tok-2');
   assert.equal(c.f.calls[2].headers['Content-Range'], 'bytes 0-2/3');
 });
+
+// ---------------------------------------------------------------------------
+//  B2 Meta Page token exchange × request_spec: the exchange is only wired into
+//  the plain path, so a marked action reached through the request_spec engine
+//  fails closed (422) before ANY network call — the marker is never silently
+//  stripped and the user token sent instead.
+// ---------------------------------------------------------------------------
+
+const MARKER = { 'X-Openmax-Token-Exchange': 'meta_page:page_id' };
+const GRAPH = 'https://graph.facebook.com/v26.0';
+
+test('B2: request_spec action carrying the token-exchange marker → 422, no request sent', async () => {
+  const cat = [
+    ...CATALOG,
+    def('meta_pages/create_page_post_spec', 'POST', `${GRAPH}/{page_id}/feed`, {
+      headers_template: MARKER,
+      request_spec: { version: 1, requires: ['body_template'], body: { message: '{{message}}' } },
+    }),
+  ];
+  const f = fakeFetch([{ body: { id: 'P1' } }]);
+  await assert.rejects(
+    invokeDirect({ orgId: 'o', connection: { id: 'c1' }, actionSlug: 'meta_pages/create_page_post_spec', params: { page_id: '111', message: 'm' }, catalog: cat, credential: CRED }, { fetchImpl: f.impl, audit: () => {} }),
+    (e) => e.status === 422 && /X-Openmax-Token-Exchange/.test(e.message) && /request_spec/.test(e.message) && !e.message.includes('tok-1'),
+  );
+  // marker key in any case is still detected
+  const lower = cat.map((a) => (a.action === 'create_page_post_spec' ? { ...a, headers_template: { 'x-openmax-token-exchange': 'meta_page:page_id' } } : a));
+  await assert.rejects(
+    invokeDirect({ orgId: 'o', connection: { id: 'c1' }, actionSlug: 'meta_pages/create_page_post_spec', params: { page_id: '111', message: 'm' }, catalog: lower, credential: CRED }, { fetchImpl: f.impl, audit: () => {} }),
+    { status: 422 },
+  );
+  assert.equal(f.calls.length, 0, 'neither the exchange nor the real call is attempted');
+});
+
+test('B2: a marked prefetch step or batch item → 422, the user token is never sent for it', async () => {
+  const f = fakeFetch([{ body: ORIG }, { body: { id: 'M2' } }]);
+  const markedGet = CATALOG.map((a) => (a.action === 'messages-get' ? { ...a, headers_template: MARKER } : a));
+  await assert.rejects(run2(markedGet, 'gmail/threads-compose-reply', { message_id: 'M0', text: 'x' }, f.impl),
+    (e) => e.status === 422 && /prefetch steps/.test(e.message));
+  assert.equal(f.calls.length, 0, 'marked prefetch GET not sent');
+
+  const markedItem = CATALOG.map((a) => (a.action === 'events-delete' ? { ...a, headers_template: MARKER } : a));
+  await assert.rejects(run2(markedItem, 'calendar/events-batch', { requests: [{ action: 'calendar/events-delete', params: { calendar_id: 'p', event_id: 'e' } }] }, f.impl),
+    (e) => e.status === 422 && /batch items/.test(e.message));
+  assert.equal(f.calls.length, 0, 'batch with a marked item not sent');
+});
+
+function run2(catalog, action, params, fetchImpl) {
+  return invokeDirect({ orgId: 'o', connection: { id: 'c1' }, actionSlug: action, params, catalog, credential: CRED }, { fetchImpl, audit: () => {}, boundary: () => 'BOUNDARY' });
+}
+
+test('B2: a marked action called with _download → 422, the user token is never sent', async () => {
+  const cat = [
+    ...CATALOG,
+    def('meta_pages/get_page_post', 'GET', `${GRAPH}/{post_id}`, { headers_template: MARKER }),
+  ];
+  const f = fakeFetch([{ body: 'bytes' }]);
+  await assert.rejects(
+    run2(cat, 'meta_pages/get_page_post', { post_id: '111_222', page_id: '111', _download: { url: `${GRAPH}/file` } }, f.impl),
+    (e) => e.status === 422 && /_download/.test(e.message) && !e.message.includes('tok-1'),
+  );
+  assert.equal(f.calls.length, 0, 'download not attempted');
+});

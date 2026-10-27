@@ -56,15 +56,46 @@
  * is settled by the write_stdin poll that sees it exit (sendCalls).
  * Closing is idempotent and never regressed: turn end, timers and restart
  * handling skip closed runs.
+ *
+ * Continuation runs (OPENM-1089 ①): a reply closes its run (above), but the
+ * agent often answers first ("收到，我来查") and keeps working. In a turn
+ * that is not foreign and whose owners share one conversation, the answered
+ * run is continuable: the next VISIBLE tool step of the turn with no unreplied
+ * owner left (not commentary, not a reply / wait call) opens a continuation —
+ * a new run_id for the same source message (spawnContinuation, built by
+ * index.js like a registered run), which takes focus, streams live and is
+ * carried in full by the next reply. Each reply closes the current segment;
+ * no visible step between two replies → no continuation (the second reply
+ * carries the reference, as before). At most MAX_CONTINUATIONS_PER_TURN per
+ * turn; none while blocked (③) or degraded. A continuation still unanswered
+ * at turn end closes done without no_reply: its parent was answered.
+ *
+ * Guard-skipped replies (OPENM-1089 ②): send.js's group guard may decide a
+ * reply answers an unregistered smart-mode message, not the run (no claim, no
+ * agent_run; it leaves runs/<run_id>.skip). The sender's decision wins: when
+ * such a log reply settles ok (replySkipped: a skip file written while THIS
+ * call ran, by the log records' own timestamps), the run is NOT completed —
+ * it goes back to unanswered with ambiguous_reply, and the send answers the
+ * unmarked openmax message of the same endpoint that was pending when the
+ * call started (the earliest-arrived one, snapshotted then: a message that
+ * arrives while the send is in flight is never acknowledged by it). The
+ * guard is updated only when such a message was acknowledged, by its
+ * identity (onAmbiguousReply with its server message id): index.js removes
+ * that message's arrival record only — none for a message without an id —
+ * and keeps the guard while any other recorded smart-mode message is
+ * outstanding, so only when none is left does the next reply select the run;
+ * the queue moves on. No later reply → done after the no-reply
+ * grace, without no_reply (the merged reply may well have answered it).
  */
 
 import { classifyTool } from './classify.js';
 import { isVisibleTool, thinkingBody } from './present.js';
 import { startDetail, endDetail } from './tool-detail.js';
 import { normalizeDetail } from './detail.js';
-import { resolveMarkedRun, normEndpoint, parseMarker } from './marker.js';
+import { resolveMarkedRun, normEndpoint, parseMarker, sourceMessageIdFromSpillHead } from './marker.js';
 import {
   NO_REPLY_GRACE_MS, ACTIVE_IDLE_TIMEOUT_MS, QUEUED_NO_START_TIMEOUT_MS, REPLY_REF_WINDOW_MS,
+  MAX_CONTINUATIONS_PER_TURN,
 } from './constants.js';
 
 const MAX_RUN_EVENTS = 2000;
@@ -90,6 +121,13 @@ export function createAttribution({
   persist = () => {},
   onRunClosed = () => {},
   readSpillHead,
+  // OPENM-1089 ①: build + register a continuation run of `parent` (index.js);
+  // null when it cannot be created.
+  spawnContinuation = () => null,
+  // OPENM-1089 ②: send.js's guard skipped this run's latest reply (skip file).
+  replySkipped = () => false,
+  // OPENM-1089 ②: a guard-skipped reply was settled — clear the conversation's guard.
+  onAmbiguousReply = () => {},
 } = {}) {
   const runs = new Map();
   /**
@@ -117,6 +155,23 @@ export function createAttribution({
    */
   const sendCalls = new Map();
   let turn = null;
+  // Arrival order of merged-in foreign messages (the queue reorders them).
+  let itemSeq = 0;
+  const newForeignItem = (seg) => {
+    const it = { ...foreignItem(seg), seq: ++itemSeq };
+    // An unmarked openmax message: its server message id (the bridge's
+    // <message-context> header, inline or in the spill file) identifies it
+    // to the send guard's arrival records (OPENM-1089 ②).
+    if (it.reply?.channel === 'openmax') {
+      const ctx = seg?.ctx || {};
+      let id = ctx.sourceMessageId || null;
+      if (!id && ctx.spillPath && readSpillHead) {
+        try { id = sourceMessageIdFromSpillHead(readSpillHead(ctx.spillPath)); } catch { id = null; }
+      }
+      if (id) it.msgId = String(id);
+    }
+    return it;
+  };
   let degraded = false;
 
   const isOpen = (run) => run && run.state !== 'closed';
@@ -275,6 +330,9 @@ export function createAttribution({
       if (!isOpen(run)) continue;
       if (run.state === 'replied') closeRun(run, 'done');
       else if (interrupted) closeRun(run, 'failed', 'interrupted');
+      // A continuation nobody answered (e.g. memory work after the reply): its
+      // parent was answered — done, no no-reply grace.
+      else if (run.continues) closeRun(run, 'done');
       else {
         run.turn_ended_at = t;
         run._awaitNoReply = true;
@@ -301,7 +359,10 @@ export function createAttribution({
   }
 
   function newTurn(foreign, file) {
-    turn = { id: `${file || 'log'}:${now()}`, owners: [], queue: [], foreign, focus: null, sticky: null, blocked: false, file };
+    turn = {
+      id: `${file || 'log'}:${now()}`, owners: [], queue: [], foreign, focus: null, sticky: null, blocked: false, file,
+      lastAnswered: null, continuations: 0,
+    };
     return turn;
   }
 
@@ -324,8 +385,75 @@ export function createAttribution({
     stats.closed_on_reply = stats.closed_on_reply || {};
     stats.closed_on_reply[via] = (stats.closed_on_reply[via] || 0) + 1;
     closeRun(run, 'done');
-    if (turn && turn.owners.includes(run)) applyFocus(2, now());
+    if (turn && turn.owners.includes(run)) {
+      noteAnswered(run);
+      applyFocus(2, now());
+    }
     return true;
+  }
+
+  /**
+   * OPENM-1089 ①: remember the run the turn last answered; it may be
+   * continued when the turn is the run's own (not foreign, one conversation).
+   */
+  function noteAnswered(run) {
+    turn.lastAnswered = run;
+    const convs = new Set(turn.owners.map((r) => r.conversation_id));
+    run._continuable = !turn.foreign && convs.size === 1;
+  }
+
+  /**
+   * OPENM-1089 ①: a visible tool step starts with no run to take it — open a
+   * continuation of the run the turn last answered, when every condition
+   * holds. Returns the new run (focused) or null.
+   */
+  function maybeContinue(cls, t) {
+    if (!turn || turn.focus || turn.blocked || turn.foreign || degraded) return null;
+    if (turn.owners.some(unreplied)) return null;
+    const parent = turn.lastAnswered;
+    if (!parent || parent._continuable !== true) return null;
+    if (!isVisibleTool({ kind: 'tool', category: cls.category })) return null;
+    if (turn.continuations >= MAX_CONTINUATIONS_PER_TURN) return null;
+    let run = null;
+    try {
+      run = spawnContinuation(parent);
+    } catch {
+      run = null;
+    }
+    if (!run) return null;
+    turn.continuations += 1;
+    runs.set(run.run_id, run);
+    turn.owners.push(run);
+    turn.queue.push({ run });
+    enterTurn(run, t);
+    turn.focus = run;
+    setFocusFlags(run);
+    emitter.emitNow(run);
+    stats.continuations = (stats.continuations || 0) + 1;
+    return run;
+  }
+
+  /**
+   * OPENM-1089 ②: a log reply to `run` went out, but send.js's group guard
+   * decided it answers an unregistered (smart-mode) message: the sender's
+   * decision wins. The run is not answered (ambiguous_reply); the send
+   * answers that openmax message; the guard is lifted for the next reply.
+   */
+  function deferReply(run, item, skip, startAt) {
+    if (!isOpen(run) || run.state !== 'replied') return;
+    run.state = 'active';
+    run.replied_at = null;
+    run.ambiguous_reply = true;
+    stats.reply_deferred_unregistered = (stats.reply_deferred_unregistered || 0) + 1;
+    persist(run);
+    // Only the message this send could have answered (pending at its start).
+    // The guard is touched only when that message was really acknowledged: a
+    // smart-mode input still on its way to the runtime is not answered yet.
+    if (item && !item.answered && turn && turn.queue.includes(item)) {
+      item.answered = true;
+      try { onAmbiguousReply(run.reply_conversation_id || run.conversation_id, { skip, startAt, msgId: item.msgId || null }); } catch {}
+    }
+    if (turn && turn.owners.includes(run)) applyFocus(2, now());
   }
 
   /**
@@ -379,13 +507,28 @@ export function createAttribution({
   }
 
   /** A send call's final outcome (see sendCalls). Idempotent per run / item. */
-  function settleSend(entry, ok) {
+  function settleSend(entry, ok, endAt) {
     for (const id of entry.runIds) {
       const run = runs.get(id);
-      if (ok) completeOnReply(run, 'log');
-      else revertReply(run);
+      if (!ok) revertReply(run);
+      else {
+        const skip = isOpen(run) && run.state === 'replied'
+          ? skippedBySender(run, { startAt: entry.at, endAt }) : null;
+        if (skip) deferReply(run, entry.skipItems?.[id] || null, skip, entry.at);
+        else completeOnReply(run, 'log');
+      }
     }
     if (!ok) for (const it of entry.items) reopenItem(it);
+  }
+
+  /** The skip record send.js left for THIS send of `run`, or null. */
+  function skippedBySender(run, window) {
+    try {
+      const skip = replySkipped(run, window);
+      return skip && typeof skip === 'object' ? skip : null;
+    } catch {
+      return null;
+    }
   }
 
   /** The reply call that marked `run` replied failed: the run is not answered. */
@@ -519,7 +662,9 @@ export function createAttribution({
 
     // External sends pause attribution BEFORE this operation is attributed:
     // only an openmax run this operation itself answers gets the step.
-    const target = replied[0] || (external ? null : turn.focus);
+    let target = replied[0] || (external ? null : turn.focus);
+    // OPENM-1089 ①: work after the reply opens a continuation run.
+    if (!target && !external && !answered.length) target = maybeContinue(cls, t);
     if (target && unreplied(target)) startTool(target, input.callId, cls, t, input.name, input.input);
     else stats.attribution_unfocused_events += 1;
     for (const run of replied) markReplied(run, 'log', { pauseFocus: external });
@@ -538,7 +683,21 @@ export function createAttribution({
     }
     // The call's end tells whether the sends went out (settleSend).
     if (replied.length || marked.length) {
-      sendCalls.set(input.callId, { send: { runIds: replied.map((r) => r.run_id), items: [...marked] } });
+      // OPENM-1089 ②: per replied run, the unmarked openmax message of its
+      // endpoint pending right now (earliest arrived) — what this send answers
+      // if send.js's guard skipped it. The call's log time bounds the skip file.
+      const skipItems = {};
+      for (const r of replied) {
+        const ne = normEndpoint(r.endpoint);
+        const it = turn.queue
+          .filter((q) => q.foreign && !q.answered && q.reply && q.reply.channel === 'openmax'
+            && normEndpoint(q.reply.endpoint) === ne)
+          .sort((a, b) => (a.seq || 0) - (b.seq || 0))[0];
+        if (it) skipItems[r.run_id] = it;
+      }
+      sendCalls.set(input.callId, {
+        send: { runIds: replied.map((r) => r.run_id), items: [...marked], skipItems, at: t },
+      });
     }
 
     if (external && unknownExternal) {
@@ -570,7 +729,7 @@ export function createAttribution({
         if (ok !== null) {
           // Settled once: every key of this send goes (concurrent poll aliases too).
           for (const [k, v] of [...sendCalls]) if (v.send === send) sendCalls.delete(k);
-          settleSend(send, ok);
+          settleSend(send, ok, input.at);
         }
       }
     }
@@ -641,6 +800,33 @@ export function createAttribution({
     },
     closeRun,
 
+    /**
+     * A run left open by the previous openmax process (OPENM-1108). Only the
+     * plugin restarted — the agent session went on and its reply goes out as
+     * an ordinary message — so the run ends normally: `done`, no end reason
+     * (runtime_restarted stays reserved for noteRuntimeRestart). Its tool
+     * steps still running end `ok` at the close, so neither the frame nor the
+     * run file leaves a step the FE would mark interrupted.
+     *
+     * The stored events are ended in place rather than through deliver(): a
+     * run that went status-only after its steps were recorded (degradeAll /
+     * noteUnknownShape, persisted across the restart) would have deliver()
+     * skip the rewrite and leave the step running in the run file. The wire
+     * copy still goes through the emitter, which drops it under status-only.
+     */
+    closeLeftoverRun(run) {
+      if (!isOpen(run)) return;
+      const t = now();
+      for (const ev of run.events || []) {
+        if (ev.kind !== 'tool' || ev.ended_at != null) continue;
+        ev.ended_at = Math.max(t, Number(ev.at) || 0);
+        ev.error = false;
+        touch(run, t);
+        emitter.pushEvent(run, ev);
+      }
+      closeRun(run, 'done');
+    },
+
     /** Collector fell back to status-only: no process events for any run. */
     degradeAll() {
       degraded = true;
@@ -702,7 +888,7 @@ export function createAttribution({
                 setFocusFlags(run);
               } else {
                 newTurn(true, file);
-                turn.queue.push(foreignItem(seg));
+                turn.queue.push(newForeignItem(seg));
               }
               return;
             }
@@ -716,7 +902,7 @@ export function createAttribution({
                 enterTurn(it.run, t);
                 deliver(it.run, { id: nextEventId(it.run), kind: 'notice', code: 'merged_turn', at: t });
               } else {
-                turn.queue.push(foreignItem(it.seg));
+                turn.queue.push(newForeignItem(it.seg));
               }
             }
             applyFocus(4, t);
@@ -743,7 +929,7 @@ export function createAttribution({
                 deliver(run, { id: nextEventId(run), kind: 'notice', code: 'merged_turn', at: t });
               }
             } else if (!run) {
-              foreignNow.push(foreignItem(seg));
+              foreignNow.push(newForeignItem(seg));
             }
           }
           if (foreignNow.length) {
@@ -788,11 +974,12 @@ export function createAttribution({
           continue;
         }
         if (run._awaitNoReply && t - run.turn_ended_at >= NO_REPLY_GRACE_MS) {
-          closeRun(run, 'done', 'no_reply');
+          // A guard-skipped reply probably answered it as well (OPENM-1089 ②).
+          closeRun(run, 'done', run.ambiguous_reply === true ? null : 'no_reply');
           continue;
         }
         // A run recovered from a previous process waits for onWsOpen, which ends
-        // it failed / runtime_restarted once its org can hear the frame.
+        // it done, without an end reason, once its org can hear the frame (OPENM-1108).
         if ((run.state === 'queued' || run.state === 'created') && !run._restartPending
           && t - (run.created_at || 0) >= QUEUED_NO_START_TIMEOUT_MS) {
           closeRun(run, 'done', 'no_reply');

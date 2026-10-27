@@ -36,7 +36,9 @@ const WAITING_TOOLS = new Set(['write_stdin', 'wait', 'TaskOutput', 'BashOutput'
 // fully inspectable.
 const WRAPPER_EXEC_TOOLS = new Set(['exec']);
 
-const KB_RE = /skills\/openmax-kb\/|openmax\/src\/cli\/kb\.js/;
+const KB_RE = /skills\/openmax-(?:product-faq|kb)\/|openmax\/src\/cli\/kb\.js/;
+// Skill names that count as product-KB lookups (openmax-kb is the pre-rename legacy name).
+const KB_SKILLS = new Set(['openmax-product-faq', 'openmax-kb']);
 const SPILL_RE = /comm-bridge\/attachments\/conv-(\d+)\/message\.txt/g;
 
 /** Every string leaf of a tool input (strings, arrays, nested objects), depth-capped. */
@@ -224,7 +226,7 @@ export function classifyTool(name, input) {
     category = 'delegate';
     title = sanitizeDescription(input?.description);
   } else if (n === 'Skill') {
-    category = input?.skill === 'openmax-kb' ? 'kb' : 'skill';
+    category = KB_SKILLS.has(input?.skill) ? 'kb' : 'skill';
     if (category === 'skill') object = displayLine(input?.skill, OBJECT_LIMIT);
   } else if (WAITING_TOOLS.has(n)) {
     const out = { category: 'waiting', signals };

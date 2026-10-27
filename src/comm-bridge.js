@@ -1355,7 +1355,11 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         endpoint,
       })
       : null;
-    if (activity.enabled && !run && convType !== 'dm') activity.noteUnregisteredInput(endpoint);
+    // The id is the one <message-context> names: attribution reads it back
+    // from the runtime log to know which smart-mode message a reply answered.
+    if (activity.enabled && !run && convType !== 'dm') {
+      activity.noteUnregisteredInput(endpoint, String(replyTarget.cardMessageId || msg.id));
+    }
 
     try {
       registerConvOrg(msg.conversation_id, orgConfig.org_id);
