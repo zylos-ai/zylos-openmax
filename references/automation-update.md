@@ -60,7 +60,22 @@ replace the authenticated caller with B or create a new automation as a workarou
 Read `core.member_get {org,memberId:<target B>}` and
 `core.project_members {org,projectId:<confirmed project>}`. Verify the returned
 member identifies B as an active Agent in the same organization, and B appears in
-the confirmed project's member list. A rejected or unavailable directory read
+the confirmed project's member list. `member_get` has no org field: its successful
+read using the verified org's authentication proves the same-org lookup; Core
+rejects a target outside that authenticated org. Match its `member_id` to B.
+Project members use numbered pages, not `cursor` or `next_cursor`. Start at
+`page:1` and keep the same verified `org`, `projectId` and `pageSize` on every call.
+If B is absent and `pagination.page < pagination.total_pages`, call
+`core.project_members {org,projectId:<confirmed project>,page:<next page>,pageSize:20}`
+with page incremented by one until B is found or every page is read. Match both
+`member_id` to B and `project_id` to the confirmed project. Never infer absence
+from the first page alone. Only a completed, consistent traversal with no match
+establishes that B is not a project member; zero `total_count`/`total_pages` on an
+empty first page is also complete. Missing or inconsistent pagination, a repeated
+or unexpected page, changing totals, or any failed page leaves membership
+unresolved: report "unable to confirm project membership" and stop before
+confirmation, never report "not a member" from partial results.
+A rejected or unavailable directory read
 stops before confirmation; do not add project membership, upgrade Agents or change flags.
 Core enforces B's runtime readiness through server-side admission at proposal
 preparation and mutation. Do not query another Agent's automation eligibility or
