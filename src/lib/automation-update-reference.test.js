@@ -11,6 +11,23 @@ const recovery = read('../../references/automation-recovery.md');
 const webhook = read('../../references/automation-webhook.md');
 const update = [updateRoute, common, schedule, recovery, webhook].join(' ');
 
+function boundedSection(source, start, end) {
+  const from = source.indexOf(start);
+  const to = source.indexOf(end, from + start.length);
+  assert.ok(from >= 0 && to > from, `missing instruction section: ${start}`);
+  return source.slice(from, to);
+}
+
+const leadSection = source => boundedSection(source, '## Owner-confirmed Lead replacement', '## Propose and apply');
+const directChatSkillSection = source => boundedSection(source,
+  'For an explicit human DM request to change the responsible Agent of an existing automation,',
+  'For an existing automation run or a reply about its result,');
+const directChatSkillGuards = [
+  /read \[Automation Update\]\(references\/automation-update\.md\) before generic Issue intake/,
+  /do not create an Issue or fabricate a form handoff/,
+  /still requires the server's exact-change Owner confirmation before any mutation/,
+];
+
 function assertUpdateRouting(source) {
   assert.ok(source.includes('(automation-common.md)'), 'update must import shared authorization');
   assert.ok(source.includes('(automation-schedule.md)'), 'update must import schedule clarification');
@@ -41,7 +58,15 @@ test('update handoffs have their own workflow before generic task intake', () =>
   assert.ok(skill.includes('[Automation Update](references/automation-update.md) before generic Issue intake'));
   assert.ok(skill.includes('Editing an existing automation must never fall through to creation.'));
   assert.match(skill, /explicit human DM request to change the responsible Agent of an existing automation/);
-  assert.match(skill, /do not create an Issue or fabricate a form handoff/);
+  assertUpdateGuards(directChatSkillSection(skill), directChatSkillGuards);
+});
+
+test('direct chat routing retains its own Owner confirmation guard in SKILL', () => {
+  const section = directChatSkillSection(skill);
+  for (const guard of directChatSkillGuards) {
+    const changed = skill.replace(section, section.replace(guard, ''));
+    assert.throws(() => assertUpdateGuards(directChatSkillSection(changed), directChatSkillGuards), /missing update safeguard/);
+  }
 });
 
 const updateGuards = {
@@ -106,13 +131,24 @@ test('update and replacement guards reject missing actor, version, link and retr
 });
 
 const leadReplacementGuards = [
+  /A direct request does not require manufacturing a form envelope, and does not skip confirmation/,
   /The requesting Agent A must remain the persisted current Lead/,
   /the human must be the persisted Owner/,
   /administrator who is not that Owner cannot authorize the change/,
   /Keep envelope `lead_member_id` as A/,
   /only `configuration.lead_member_id` to the explicitly requested target B/,
-  /active Agent in the same organization with project access/,
-  /existing automation readiness eligibility/,
+  /`core\.member_get \{org,memberId:<target B>\}`/,
+  /`core\.project_members \{org,projectId:<confirmed project>\}`/,
+  /member identifies B as an active Agent in the same organization/,
+  /B appears in the confirmed project's member list/,
+  /A rejected or unavailable directory read stops before confirmation/,
+  /Core enforces B's runtime readiness through server-side admission at proposal preparation and mutation/,
+  /Do not query another Agent's automation eligibility or invent a readiness endpoint/,
+  /A server admission rejection stops the transfer/,
+  /never substitute the requesting Agent's readiness for B's/,
+  /`automation\.eligibility \{org,memberId:<requesting A>,operation:"lead_change",projectId:<confirmed project>\}`/,
+  /require `status:"supported"` before proposing the transfer/,
+  /never fall back to `operation:"update"` to bypass this compatibility check/,
   /Only the actual Owner's confirmation of this exact proposal permits mutation/,
   /Keep confirmation in A's original DM with Owner/,
   /server resolves B's future result DM/,
@@ -124,7 +160,7 @@ const leadReplacementGuards = [
 ];
 
 test('Lead replacement distinguishes requester, target, Owner and delivery while retaining fences', () => {
-  assertUpdateGuards(updateRoute, leadReplacementGuards);
+  assertUpdateGuards(leadSection(updateRoute), leadReplacementGuards);
   assert.match(common, /For creation, configuration lead must match envelope\/Agent/);
   assert.match(common, /For updates, the envelope lead and persisted current lead must match this Agent/);
   assert.match(common, /verify requesting Agent sender/);
@@ -133,8 +169,20 @@ test('Lead replacement distinguishes requester, target, Owner and delivery while
 });
 
 test('Lead replacement instruction guards reject removed authority and recovery boundaries', () => {
+  const section = leadSection(updateRoute);
   for (const guard of leadReplacementGuards) {
-    assert.throws(() => assertUpdateGuards(updateRoute.replace(guard, ''), leadReplacementGuards));
+    const changed = updateRoute.replace(section, section.replace(guard, ''));
+    assert.throws(() => assertUpdateGuards(leadSection(changed), leadReplacementGuards), /missing update safeguard/);
+  }
+});
+
+test('Lead compatibility rules cannot be supplied by another subsection', () => {
+  const section = leadSection(updateRoute);
+  for (const guard of leadReplacementGuards) {
+    const match = section.match(guard);
+    assert.ok(match, `missing Lead section guard: ${guard}`);
+    const movedOutside = `${updateRoute.replace(section, section.replace(guard, ''))} ${match[0]}`;
+    assert.throws(() => assertUpdateGuards(leadSection(movedOutside), leadReplacementGuards), /missing update safeguard/);
   }
 });
 

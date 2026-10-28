@@ -57,9 +57,15 @@ be the persisted Owner. An organization administrator who is not that Owner cann
 authorize the change. Keep envelope `lead_member_id` as A for form handoffs; set
 only `configuration.lead_member_id` to the explicitly requested target B. Never
 replace the authenticated caller with B or create a new automation as a workaround.
-Verify B is an active Agent in the same organization with project access and the
-existing automation readiness eligibility. Rejections or unavailable checks stop
-before confirmation; do not add project membership, upgrade Agents or change flags.
+Read `core.member_get {org,memberId:<target B>}` and
+`core.project_members {org,projectId:<confirmed project>}`. Verify the returned
+member identifies B as an active Agent in the same organization, and B appears in
+the confirmed project's member list. A rejected or unavailable directory read
+stops before confirmation; do not add project membership, upgrade Agents or change flags.
+Core enforces B's runtime readiness through server-side admission at proposal
+preparation and mutation. Do not query another Agent's automation eligibility or
+invent a readiness endpoint. A server admission rejection stops the transfer;
+never substitute the requesting Agent's readiness for B's.
 Check `automation.eligibility {org,memberId:<requesting A>,operation:"lead_change",projectId:<confirmed project>}`
 and require `status:"supported"` before proposing the transfer. Ordinary update
 eligibility is not evidence of Lead-change compatibility. Unknown operation,

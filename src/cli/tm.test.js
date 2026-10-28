@@ -99,6 +99,26 @@ test('eligibility rejects missing project before sending HTTP', async () => {
   }
 });
 
+test('eligibility rejects operation near-misses before any HTTP request', async () => {
+  let requests = 0;
+  const server = createServer((req, res) => { requests++; req.resume(); res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const operation of ['lead-change', 'LEAD_CHANGE', 'lead_change ', '', null, 7]) {
+      const result = await new Promise(resolve => execFile(process.execPath, [cliPath, 'automation.eligibility', JSON.stringify({
+        org: 'org-automation', memberId: 'agent', projectId: 'project', operation,
+      })], {
+        env: { ...process.env, COCO_ORG_ID: 'org-automation', COCO_API_URL: `http://127.0.0.1:${server.address().port}`, COCO_AUTH_TOKEN: 'test', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0' }, timeout: 5000,
+      }, (error, stdout, stderr) => resolve({ error, stderr })));
+      assert.ok(result.error, `operation ${JSON.stringify(operation)} must fail locally`);
+      assert.match(result.stderr, /operation create, update, replace or lead_change/);
+      assert.equal(requests, 0, `operation ${JSON.stringify(operation)} sent HTTP`);
+    }
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 test('trigger replacement uses desired route but original target and confirmed version', async () => {
   for (const source_kind of ['timer', 'webhook']) {
     const configuration = { ...readableProposal.configuration };
