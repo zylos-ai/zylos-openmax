@@ -69,6 +69,16 @@ test('replacement eligibility is an org-scoped read with a separate operation', 
   assert.equal(url.searchParams.get('project_id'), 'project');
 });
 
+test('Lead-change compatibility queries the current requesting Agent without mutating', async () => {
+  const request = await captureRequest('automation.eligibility', { org: 'org-automation', memberId: 'current-agent', projectId: 'project', operation: 'lead_change' });
+  assert.equal(request.method, 'GET');
+  const url = new URL(request.url, 'https://example.com');
+  assert.equal(url.pathname, '/api/v1/agents/current-agent/automation-creation-eligibility');
+  assert.equal(url.searchParams.get('operation'), 'lead_change');
+  assert.equal(url.searchParams.get('project_id'), 'project');
+  assert.equal(request.body, undefined);
+});
+
 test('eligibility rejects missing project before sending HTTP', async () => {
   let requests = 0;
   const server = createServer((req, res) => { requests++; req.resume(); res.end('{}'); });

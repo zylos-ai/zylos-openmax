@@ -40,6 +40,8 @@ test('update handoffs have their own workflow before generic task intake', () =>
   assert.ok(skill.includes('kind: "automation-update-request"'));
   assert.ok(skill.includes('[Automation Update](references/automation-update.md) before generic Issue intake'));
   assert.ok(skill.includes('Editing an existing automation must never fall through to creation.'));
+  assert.match(skill, /explicit human DM request to change the responsible Agent of an existing automation/);
+  assert.match(skill, /do not create an Issue or fabricate a form handoff/);
 });
 
 const updateGuards = {
@@ -101,6 +103,39 @@ test('update and replacement guards reject missing actor, version, link and retr
   }
   assert.throws(() => assertUpdateGuards(update.replace('`sender_type:"HUMAN"`', '`sender_type:"SYSTEM"`'), updateGuards.provenance), /missing update safeguard/);
   assert.throws(() => assertUpdateGuards(updateRoute.replace('`replaced_by_binding_id`', '`replaces_binding_id`'), replacementGuards), /missing update safeguard/);
+});
+
+const leadReplacementGuards = [
+  /The requesting Agent A must remain the persisted current Lead/,
+  /the human must be the persisted Owner/,
+  /administrator who is not that Owner cannot authorize the change/,
+  /Keep envelope `lead_member_id` as A/,
+  /only `configuration.lead_member_id` to the explicitly requested target B/,
+  /active Agent in the same organization with project access/,
+  /existing automation readiness eligibility/,
+  /Only the actual Owner's confirmation of this exact proposal permits mutation/,
+  /Keep confirmation in A's original DM with Owner/,
+  /server resolves B's future result DM/,
+  /Create and unverified Agent writes retain the self-Lead restriction/,
+  /do not repeat PUT, create, impersonate B or ask for new privileges/,
+  /Existing runs and queued webhook snapshots continue with their recorded Lead and result DM/,
+  /change record must identify Owner and conversation confirmation/,
+  /Do not combine Lead and trigger replacement/,
+];
+
+test('Lead replacement distinguishes requester, target, Owner and delivery while retaining fences', () => {
+  assertUpdateGuards(updateRoute, leadReplacementGuards);
+  assert.match(common, /For creation, configuration lead must match envelope\/Agent/);
+  assert.match(common, /For updates, the envelope lead and persisted current lead must match this Agent/);
+  assert.match(common, /verify requesting Agent sender/);
+  assert.match(common, /Do not invent envelope IDs to satisfy the form checks/);
+  assert.doesNotMatch(updateRoute, /Configuration owner\/lead must match too/);
+});
+
+test('Lead replacement instruction guards reject removed authority and recovery boundaries', () => {
+  for (const guard of leadReplacementGuards) {
+    assert.throws(() => assertUpdateGuards(updateRoute.replace(guard, ''), leadReplacementGuards));
+  }
 });
 
 test('automation delivery respects outcome, partial evidence and timeout fences', () => {

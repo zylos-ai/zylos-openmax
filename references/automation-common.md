@@ -17,9 +17,18 @@ Require the actual channel to be the human-Agent DM and envelope `org_id` to
 match trusted org. Fetch the exact source with
 `comm.get_message {org,conversationId,messageId}`; require `sender_type:"HUMAN"`
 and `sender_id` equal to `requester_member_id`. Display/directory names do not
-prove identity. Verify selected lead through `core.me {org}`; configuration lead
-must match envelope/Agent, and configuration owner must match that human.
+prove identity. Verify the requesting Agent through `core.me {org}`. For creation,
+configuration lead must match envelope/Agent. For updates, the envelope lead and
+persisted current lead must match this Agent; a different desired configuration
+lead is allowed only under Update's Owner-confirmed Lead replacement rules.
+Configuration owner must match that human; updates preserve the persisted Owner.
 Resolve project/membership through existing directory APIs when necessary.
+
+For a direct chat Lead-change request without a form envelope, verify the exact
+source is HUMAN in this Agent's DM using the same authoritative context and
+`core.me {org}`. Bind that source sender to the persisted binding Owner and this
+Agent to the persisted current Lead as described in Update. Do not invent envelope
+IDs to satisfy the form checks; preserve all org, actor and confirmation checks.
 
 Pass this verified `org` explicitly to every directory, conversation, history,
 automation read, proposal, status and mutation. Never use default org or choose
@@ -71,7 +80,7 @@ raw JSON/IDs/hashes/receipts/protocol explanations, construct authorization your
 or ask the human to quote/type confirmation.
 
 Require returned conversation to match the original verified DM. Fetch exact
-proposal via `comm.get_message`; verify selected Agent sender and card containing
+proposal via `comm.get_message`; verify requesting Agent sender and card containing
 returned readable plan. Missing/mismatched readback means stop and reconcile,
 without mutation or blind replacement. An unavailable API requires explaining
 temporary confirmation unavailability and stopping; never use

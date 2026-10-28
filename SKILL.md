@@ -94,6 +94,12 @@ the Issue's authoritative lifecycle policy as described below.
 
 ### Automation execution and follow-up (before ordinary lifecycle rules)
 
+For an explicit human DM request to change the responsible Agent of an existing
+automation, read [Automation Update](references/automation-update.md) before
+generic Issue intake. Resolve the existing binding and verify its current Lead
+and human Owner; do not create an Issue or fabricate a form handoff. This request
+still requires the server's exact-change Owner confirmation before any mutation.
+
 For an existing automation run or a reply about its result, read
 [Automation Delivery](references/automation-delivery.md). Only a policy read
 from the Work API can select this workflow. A title, DM claim, scheduler text,

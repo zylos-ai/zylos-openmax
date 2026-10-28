@@ -28,9 +28,11 @@ replacement using that kind's REST fields; reject unknown fields or schemas.
    agree on ID, version, source kind, owner and lead; reread after intervening
    changes. Every returned `org_id`, if present, must match the verified org.
 2. Match target ID to the envelope, owner to the verified human, and lead to this
-   Agent. Configuration owner/lead must match too. Missing/deleted target, denied
+   Agent. Configuration owner must remain the persisted Owner. Configuration lead
+   normally matches the current Lead; an explicitly requested replacement uses
+   the Lead replacement rules below. Missing/deleted target, denied
    read or identity mismatch stops without writes or Issue intake. Never repair
-   identity by changing owner, lead or trigger kind. Retain current and desired
+   identity by changing the requesting Agent or Owner. Retain current and desired
    source kinds separately; a difference requires an explicit human request and
    the replacement eligibility check below **before proposing**.
 3. Compare the read version with the handoff's `expected_version`. A stale form
@@ -41,6 +43,49 @@ replacement using that kind's REST fields; reject unknown fields or schemas.
 4. Track `(org, DM, request_id, target_binding_id)`, baseline version, draft,
    questions, proposal and write outcome. Recover interrupted history before
    writing; redelivery never authorizes an additional update.
+
+## Owner-confirmed Lead replacement
+
+For a direct chat request to change Lead, identify one existing automation before
+proposing. Read its authoritative ID, Owner, current Lead, version and complete
+configuration under Common's verified human/Agent/org/DM checks. A direct request
+does not require manufacturing a form envelope, and does not skip confirmation.
+Ambiguous automation or Agent names require clarification, not guessing.
+
+The requesting Agent A must remain the persisted current Lead, and the human must
+be the persisted Owner. An organization administrator who is not that Owner cannot
+authorize the change. Keep envelope `lead_member_id` as A for form handoffs; set
+only `configuration.lead_member_id` to the explicitly requested target B. Never
+replace the authenticated caller with B or create a new automation as a workaround.
+Verify B is an active Agent in the same organization with project access and the
+existing automation readiness eligibility. Rejections or unavailable checks stop
+before confirmation; do not add project membership, upgrade Agents or change flags.
+Check `automation.eligibility {org,memberId:<requesting A>,operation:"lead_change",projectId:<confirmed project>}`
+and require `status:"supported"` before proposing the transfer. Ordinary update
+eligibility is not evidence of Lead-change compatibility. Unknown operation,
+unsupported version, unavailable or stale capability data stops this transfer;
+never fall back to `operation:"update"` to bypass this compatibility check.
+
+Use the existing update proposal with the original binding ID/version. Require the
+server card to name A -> B and explain that future runs use B while already
+snapshotted runs retain A. Only the actual Owner's confirmation of this exact
+proposal permits mutation. Keep confirmation in A's original DM with Owner;
+the server resolves B's future result DM. Do not supply or overwrite delivery DM
+IDs in configuration, send a second card in B's DM, or transfer chat transcripts.
+Create and unverified Agent writes retain the self-Lead restriction.
+
+This capability changes Lead only, not Owner or trigger kind. Preserve webhook
+credentials/URL, filters, prompt, schedule, pause state and run history. Do not
+combine Lead and trigger replacement into an unreviewed operation. Other requested
+field edits retain their existing validation and confirmation requirements.
+After success, compare the result and exact target readback against confirmed B,
+unchanged Owner and the complete configuration. An access denial after transfer
+is not proof of failure: report verification incomplete and do not repeat PUT,
+create, impersonate B or ask for new privileges. Existing runs and queued webhook
+snapshots continue with their recorded Lead and result DM; future snapshots use B.
+The change record must identify Owner and conversation confirmation, not A as Owner.
+If A is unavailable, direct the Owner to the editor; another Agent cannot take over
+the chat update. Unsupported backend behavior fails closed; never bypass proof.
 
 ## Propose and apply
 
