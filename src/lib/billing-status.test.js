@@ -8,10 +8,6 @@ import {
   PLAN_STATE_TTL_MS,
   PLAN_STATE_TIMEOUT_MS,
   AGENT_ORIGIN_TIMEOUT_MS,
-  OVERDUE_NOTICE,
-  shouldSendOverdueNotice,
-  overdueNoticeCache,
-  OVERDUE_NOTICE_THROTTLE_MS,
 } from './billing-status.js';
 
 const org = (id = 'org-1') => ({ org_id: id, slug: id, self: { member_id: 'm-1' } });
@@ -40,7 +36,7 @@ function stubGet({ suspended, body, throws, origin = 'platform_created', originT
   return { getForOrg, calls, memberCalls };
 }
 
-beforeEach(() => { planStateCache.clear(); agentOriginCache.clear(); overdueNoticeCache.clear(); });
+beforeEach(() => { planStateCache.clear(); agentOriginCache.clear(); });
 
 test('enforcement_suspended=true → returns true', async () => {
   const { getForOrg } = stubGet({ suspended: true });
@@ -250,30 +246,6 @@ test('resolveAgentOrigin: missing self.member_id → null and not cached', async
   assert.equal(agentOriginCache.size, 0);
 });
 
-// --- notice throttle -------------------------------------------------------
-
-test('throttle: first send allowed, second within window blocked, allowed after window', () => {
-  const t = 10_000_000;
-  const key = ['org-1', 'conv-1'];
-  assert.equal(shouldSendOverdueNotice(...key, { now: () => t }), true, 'first send');
-  assert.equal(shouldSendOverdueNotice(...key, { now: () => t + OVERDUE_NOTICE_THROTTLE_MS - 1 }), false, 'within window blocked');
-  assert.equal(shouldSendOverdueNotice(...key, { now: () => t + OVERDUE_NOTICE_THROTTLE_MS + 1 }), true, 'after window allowed again');
-});
-
-test('throttle: DM and group (different targets) have separate buckets', () => {
-  const t = 11_000_000;
-  assert.equal(shouldSendOverdueNotice('org-1', 'dm-conv', { now: () => t }), true);
-  assert.equal(shouldSendOverdueNotice('org-1', 'group-conv', { now: () => t }), true);
-  // same target is throttled
-  assert.equal(shouldSendOverdueNotice('org-1', 'dm-conv', { now: () => t + 1 }), false);
-});
-
-test('throttle: different orgs on same conv id do not share a bucket', () => {
-  const t = 12_000_000;
-  assert.equal(shouldSendOverdueNotice('org-a', 'conv-x', { now: () => t }), true);
-  assert.equal(shouldSendOverdueNotice('org-b', 'conv-x', { now: () => t }), true);
-});
-
 test('missing org_id → false without querying', async () => {
   const { getForOrg, calls } = stubGet({ suspended: true });
   assert.equal(await isOrgLLMSuspended({ slug: 'no-id' }, { getForOrg }), false);
@@ -287,9 +259,3 @@ test('queries the plan-state path through the org-scoped client', async () => {
   assert.match(calls[0].path, /\/billing\/plan-state$/);
 });
 
-test('OVERDUE_NOTICE is bilingual (zh + en on separate lines)', () => {
-  const lines = OVERDUE_NOTICE.split('\n');
-  assert.equal(lines.length, 2);
-  assert.match(lines[0], /积分/);
-  assert.match(lines[1], /credits/i);
-});

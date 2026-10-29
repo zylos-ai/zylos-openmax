@@ -63,7 +63,7 @@ import { createMetricsReporter } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
 import { startLogRotation } from './lib/log-rotate.js';
-import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
+import { isOrgLLMSuspended } from './lib/billing-status.js';
 import {
   AGENT_DIAGNOSTICS_CONFIG_EVENT,
   AGENT_DIAGNOSTICS_EVENT,
@@ -978,22 +978,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     // the runtime and, because billing is metered post-hoc, dig the org deeper
     // into arrears. So — after shouldHandleMessage decided to HANDLE this real
     // user message, and BEFORE forwardToC4 — consult plan-state; if suspended,
-    // notify the sender via the same reply path a policy drop uses and skip the
-    // forward. Mirrors the drop path: no notice on sync-replay historic frames
-    // (stale spam) or to agent senders (avoids reject-notice ping-pong).
+    // drop the message: no forward, no reaction, no markRead. The plugin sends
+    // no reply of its own: cws-comm answers the sender once per person per
+    // stop (workspace-backlog#638, "only one sender").
     // isOrgLLMSuspended is fail-open (returns false on any billing-query error),
     // so a plan-state hiccup can never black-hole a user's messages.
     if (await isOrgLLMSuspended(orgConfig)) {
       log(`overdue [${orgConfig.slug}] msg=${msg.id}: org LLM suspended for arrears, not forwarding`);
-      const senderType = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
-      const isSyncReplay = notification._via === 'sync';
-      const isAgentSender = senderType === 'AGENT';
-      // Always skip forwarding. Send the notice at most once per throttle
-      // window per (org + conversation); within the window silently skip the
-      // send but still drop the message (no forward, no reaction, no markRead).
-      if (!isSyncReplay && !isAgentSender && shouldSendOverdueNotice(orgConfig.org_id, msg.conversation_id)) {
-        sendRejectNotice(orgConfig, msg, OVERDUE_NOTICE).catch(() => {});
-      }
       return;
     }
 

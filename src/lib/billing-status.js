@@ -18,8 +18,8 @@
  * FAIL-OPEN: any error (network, non-200, missing field, malformed body) is
  * treated as "not suspended" so a billing-query hiccup can never silently
  * black-hole a user's messages. The gateway remains the hard enforcement
- * boundary (it blocks the actual LLM call regardless) — this bridge check is a
- * UX affordance that turns a would-be silent no-op into an explicit notice.
+ * boundary (it blocks the actual LLM call regardless) — this bridge check only
+ * keeps the runtime asleep; the sender's explanation comes from cws-comm.
  * A true gateway-level fallback (agent-side blocking when this check is wrong)
  * is out of scope.
  *
@@ -69,67 +69,12 @@ export const planStateCache = new Map();
 // Exported for test reset, mirroring planStateCache.
 export const agentOriginCache = new Map();
 
-// User-facing notice sent when the org's LLM is suspended for arrears. Bilingual
-// (zh + en) on separate lines — sent verbatim every time, no per-user locale
-// detection. Interim copy pending final FE wording; kept as a single constant so
-// it is easy to change in one place.
-export const OVERDUE_NOTICE =
-  '当前工作区积分已用尽，请充值后继续。\n' +
-  'This workspace has run out of AI credits. Please top up to continue.';
-
-// Overdue-notice throttle window. A suspended org always has its message
-// dropped, but the notice is sent at most once per this window per reply target
-// so a chatty sender isn't spammed. Overridable via
-// config.billing.overdue_notice_throttle_ms.
-export const OVERDUE_NOTICE_THROTTLE_MS = 5 * 60 * 1000;   // 300_000
-
-// `${org_id}:${target}` → last-sent epoch ms. Exported for tests. Bounded by a
-// prune-on-cap guard (see shouldSendOverdueNotice) since the key space grows
-// with distinct conversations, unlike the per-org planStateCache.
-export const overdueNoticeCache = new Map();
-const OVERDUE_NOTICE_MAX_ENTRIES = 3000;
-
 function resolveTtlMs() {
   try {
     const v = loadConfig()?.billing?.plan_state_ttl_ms;
     if (Number.isInteger(v) && v > 0) return v;
   } catch { /* fall through to default */ }
   return PLAN_STATE_TTL_MS;
-}
-
-function resolveNoticeThrottleMs() {
-  try {
-    const v = loadConfig()?.billing?.overdue_notice_throttle_ms;
-    if (Number.isInteger(v) && v > 0) return v;
-  } catch { /* fall through to default */ }
-  return OVERDUE_NOTICE_THROTTLE_MS;
-}
-
-/**
- * Throttle gate for the overdue notice. Returns true — and records the send —
- * when a notice should be sent for this (org_id + reply target) now; returns
- * false while still inside the throttle window. The message is dropped either
- * way; this only gates the user-facing notice send.
- *
- * @param {string} orgId
- * @param {string} target  reply target (conversation id) — DM and group get
- *        separate buckets.
- * @param {object} [deps]  test seam — { now, windowMs }.
- * @returns {boolean}
- */
-export function shouldSendOverdueNotice(orgId, target, deps = {}) {
-  const now = deps.now ? deps.now() : Date.now();
-  const windowMs = Number.isInteger(deps.windowMs) ? deps.windowMs : resolveNoticeThrottleMs();
-  const key = `${orgId}:${target}`;
-  const last = overdueNoticeCache.get(key);
-  if (last != null && (now - last) < windowMs) return false;
-  overdueNoticeCache.set(key, now);
-  if (overdueNoticeCache.size > OVERDUE_NOTICE_MAX_ENTRIES) {
-    for (const [k, ts] of overdueNoticeCache) {
-      if ((now - ts) >= windowMs) overdueNoticeCache.delete(k);
-    }
-  }
-  return true;
 }
 
 /**
