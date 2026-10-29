@@ -129,10 +129,12 @@ test('O1 assembleRequest: {base_url} present in neither params nor url_placehold
   try { req(); } catch (e) { assert.ok(!String(e.url || '').includes('{base_url}')); }
 });
 
-test('O1 assembleRequest: params win over url_placeholders on a name clash', () => {
+test('O1 assembleRequest: url_placeholders win over params on a name clash (a differing caller value is refused 400)', () => {
   const def = { toolkit: 't', action: 'a', method: 'GET', url_template: 'https://host/{id}', input_schema: '' };
-  const req = assembleRequest(def, { id: 'from-param' }, 'T', { id: 'from-conn' });
-  assert.equal(req.url, 'https://host/from-param');
+  assert.throws(() => assembleRequest(def, { id: 'from-param' }, 'T', { id: 'from-conn' }),
+    (e) => e.status === 400 && /set by the connection/.test(e.message));
+  // An equal caller value is accepted; the connection value is what is sent.
+  assert.equal(assembleRequest(def, { id: 'FROM-CONN' }, 'T', { id: 'from-conn' }).url, 'https://host/from-conn');
 });
 
 test('O1 assembleRequest: url_placeholders can fill an optional QUERY placeholder too', () => {

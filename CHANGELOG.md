@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.1] - 2026-10-29
+
+### Security
+
+- **Direct mode: a caller can no longer move a request to another host by overriding a connection-owned URL placeholder.** Until now a caller param won over the credential's `url_placeholders` on a name clash, and a host-position value was only character-checked, so a prompt-injected agent passing `shop: "attacker.example"` (Shopify, `https://{shop}/…`) or `region_host: "attacker.example"` (Amazon SP-API, `https://{region_host}/…`) sent the request — with `X-Shopify-Access-Token` / `x-amz-access-token` — to that host. Now:
+  - **The connection value is authoritative.** When `url_placeholders` has a non-empty value for a placeholder the action uses (url_template path, host, query, or `headers_template`), a caller param of the same name with a different value is refused with 400 (`code: connection_placeholder_override`, message names the param only, never a value or token). An equal value (trimmed, case-insensitive) is accepted and ignored, so agents that echo `shop` / DocuSign `account_id` keep working. A key `url_placeholders` lacks still comes from the caller as before (Amazon `region_host` until cws-connect delivers it).
+  - **Final-origin check before the credential is attached.** When the action's host is defined by catalog / connection data, the assembled origin must be one of the catalog `url_template` origins (with `url_placeholders` substituted) or the `url_placeholders.base_url` origin (403 otherwise). An assembled URL that is not absolute (e.g. a caller-supplied `base_url` the connection does not provide) is refused with 400.
+  - **Static host rules per connector** (application slug from the connection index, else the credential's `provider`), mirroring cws-connect `InstanceHostSpec`: `shopify-oauth` / `shopify` hosts must match `<store>.myshopify.com`; `amazon_spapi` hosts must be `sellingpartnerapi-na|eu|fe.amazon.com`; https, no explicit port. Applied whenever the action's host is a placeholder, whether the value came from the caller or the connection (403 otherwise).
+  - Covers plain actions, `request_spec` actions, prefetch steps and batch sub-requests (all share `assembleBase`). Connectors whose host the caller legitimately fills without a static rule (e.g. `https://{tenant}.provider.example`) behave as before, still limited to host-label characters.
+  - Behaviour change: a caller that passes a value different from the connection's for any templated placeholder (not only host placeholders) now gets 400 instead of having its value used. Tests in `src/lib/direct-exec.host-guard.test.js`.
+
 ## [2.30.0] - 2026-10-27
 
 Combines PRs #222, #223, #224 and #225 into one release.
