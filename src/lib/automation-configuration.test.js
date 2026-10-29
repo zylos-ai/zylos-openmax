@@ -6,6 +6,25 @@ const base = { lead_member_id: 'agent', owner_member_id: 'human', spec: { projec
 const cardID = '01000000-0000-4000-8000-000000000002';
 
 for (const kind of ['timer', 'webhook']) {
+  test(`${kind} Lead replacement keeps target and exact proof without injecting a delivery DM`, () => {
+    const configuration = { ...base, lead_member_id: 'new-agent', ...(kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}) };
+    const proposal = automationAuthorizationProposal({ source_kind: kind, operation: 'update',
+      target_binding_id: 'binding', expected_version: 7, request_id: cardID, configuration });
+    assert.equal(proposal.configuration.lead_member_id, 'new-agent');
+    assert.equal(proposal.expected_version, 7);
+    const result = automationMutation({ id: 'binding', expected_version: 7, source_kind: kind,
+      configuration, authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID }, kind, 'update');
+    assert.equal(result.lead_member_id, 'new-agent');
+    assert.equal(result.owner_member_id, 'human');
+    assert.equal(result.expected_version, 7);
+    assert.equal(result.authorization_card_interaction_id, cardID);
+    assert.throws(() => automationMutation({ id: 'binding', expected_version: 7, source_kind: kind,
+      configuration: { ...configuration, spec: { ...base.spec, delivery_conversation_id: 'forged-dm' } },
+      authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID }, kind, 'update'), /unsupported/);
+  });
+}
+
+for (const kind of ['timer', 'webhook']) {
   test(`${kind} card consent is exclusive transport metadata for create and update`, () => {
     const proof = { authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID };
     const params = { id: 'binding', expected_version: 2, source_kind: kind, configuration: base, ...proof };

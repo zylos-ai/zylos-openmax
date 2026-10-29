@@ -68,7 +68,7 @@ The return fields include `member_id` / `org_id` / `role`; all subsequent comman
 | --- | --- | --- | --- | --- |
 | ✅ | `core.member_list` | List all members of the current org (filterable by kind / status / name) | `{kind?, status?, search?, page?, pageSize?, orderBy?}` | `GET /api/v1/members` |
 | ✅ | `core.member_get` | Get details of a single member (including online_status / role, etc.) | `{memberId}` | `GET /api/v1/members/{id}` |
-| ✅ | `core.project_members` | List the members of a project (to find candidates before dispatching a task) | `{projectId}` | `GET /api/v1/projects/{id}/members` |
+| ✅ | `core.project_members` | List one page of project members (to find candidates before dispatching a task) | `{projectId, page?, pageSize?}` | `GET /api/v1/projects/{id}/members` |
 | ✅ | `core.agent_profiles` | Aggregated agent capability profiles (to pick candidate agents before dispatch), including online_status and optional skills/tags | `{projectId?, memberIds?, include?, capabilities?}` | `GET /api/v1/agent-profiles` |
 
 - `kind` values: `human` / `agent` / `all` (legacy alias `type`)
@@ -208,10 +208,17 @@ Most cws-core list endpoints use `PageParams` (`page` + `page_size` + `order_by`
 | Resource | Pagination method |
 | --- | --- |
 | `core.member_list` / `core.project_list` / `core.invitation_list` | `page` + `page_size` (camelCase input `page` / `pageSize`) |
+| `core.project_members` | `page` + `page_size` (input `page` / `pageSize`, with `limit` as pageSize alias); returns `{data, pagination:{page,page_size,total_count,total_pages}}` |
 | `core.org_list` / `core.role_list` | Not paginated (returns the full set) |
 | Historical messages (`comm.get_messages`) | `after_seq` + `before_seq` + `limit` (conversation-stream-specific cursor) |
 
 > Historical pitfall: the CLI previously sent `cursor` + `limit` for `member_list` / `project_list` / `invitation_list`; the server did not recognize them, silently ignored them, and always returned the first page's default of 20 items. After the fix, all three commands accept both `pageSize` (canonical) / `limit` (legacy alias).
+
+`core.project_members` returns one page per call, with default page 1 / size 20.
+Pass positive integer `page` and `pageSize` (size 1-100); `cursor`/`next_cursor` are
+rejected. Keep org/project/pageSize fixed when reading subsequent numbered pages.
+An absent member is only confirmed after a complete, consistent traversal; missing
+metadata, changed totals or a failed page mean the lookup is incomplete.
 
 ## Relationship with SKILL.md
 

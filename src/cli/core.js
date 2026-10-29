@@ -64,6 +64,19 @@ const onboardingLangHeaders = () => {
 /** Normalize a scalar-or-array param into an array (drops null/undefined). */
 const toArray = (v) => (v == null ? [] : Array.isArray(v) ? v : [v]);
 
+function projectMemberPageQuery() {
+  const pageSize = params.pageSize !== undefined ? params.pageSize : params.limit;
+  if (params.cursor !== undefined || params.next_cursor !== undefined) {
+    throw Object.assign(new Error('core.project_members uses page/pageSize, not cursor pagination'), { status: 400 });
+  }
+  for (const [name, value, max] of [['page', params.page, 2147483647], ['pageSize', pageSize, 100]]) {
+    if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > max)) {
+      throw Object.assign(new Error(`core.project_members ${name} must be an integer from 1 to ${max}`), { status: 400 });
+    }
+  }
+  return { page: params.page, page_size: pageSize };
+}
+
 /**
  * Rename the agent itself (self-service display name change).
  *
@@ -167,7 +180,7 @@ const COMMANDS = {
   'core.member_get': () => oget(apiPath(`/members/${params.memberId}`)),
 
   // ✅ Project member list
-  'core.project_members': () => oget(apiPath(`/projects/${params.projectId}/members`)),
+  'core.project_members': () => oget(apiPath(`/projects/${params.projectId}/members`), projectMemberPageQuery()),
 
   // ✅ Agent capability profiles — the backend BFF aggregation a Lead reads to
   // pick a candidate agent for dispatch. A scope is REQUIRED: pass projectId
@@ -331,7 +344,7 @@ Members (humans + agents in one directory)
                            # kind: human|agent|all (legacy alias: type)
                            # search legacy alias: q;  pageSize legacy alias: limit
   core.member_get          {memberId}
-  core.project_members     {projectId}
+  core.project_members     {projectId, page?, pageSize?}  # pageSize legacy alias: limit
   core.agent_profiles      {projectId?, memberIds?, include?, capabilities?}
                            # agent 能力画像聚合（派发前选候选）。scope 必填：projectId 和/或 memberIds(可数组)
                            # capabilities:true 或 include:["capabilities"] → 含 skills(自报)+tags(人工标注)；不带则轻量视图

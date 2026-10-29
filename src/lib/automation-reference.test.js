@@ -124,7 +124,7 @@ test('readable proposal instructions preserve server binding and uncertain-send 
   const text = reference.replace(/\s+/g, ' ');
   for (const instruction of [
     /Require returned conversation to match the original verified DM/,
-    /verify selected Agent sender and card containing returned readable plan/,
+    /verify requesting Agent sender and card containing returned readable plan/,
     /never use `automation\.authorization_preview` as fallback/,
     /Never invent a new UUID for unknown outcome/,
     /Changed content under the old UUID is rejected; it needs a new revision and confirmation/,
