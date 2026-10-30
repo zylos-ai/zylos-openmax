@@ -274,6 +274,12 @@ body is no longer derived.
 `summary` is also the plain-text projection for clients that cannot render a
 card, which is the other reason it stays a single line.
 
+🔴 **A text answer and an unrelated card are two messages.** When a card that
+has nothing to do with your answer (a component-upgrade prompt, say) is due in
+the same turn, send the text answer first, then that card separately; the
+answer never goes into that card's `summary` or body. If the reply itself is a
+question with fixed options, it is a card as usual (see SKILL.md).
+
 `summary` is required on every card **except the three onboarding guide cards**
 (`onboarding.task` / `.channel` / `.partner`, below), which go without one
 (workspace-backlog#615): omit the field there — do not send an empty string.
