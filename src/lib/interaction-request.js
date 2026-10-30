@@ -20,6 +20,9 @@
  * stricter direction is the worse one: a local cap tighter than cws-comm's
  * makes a range the server accepts unreachable, with an error that blames the
  * caller. The cws-core edge made the same call for the same reason.
+ *
+ * The one exception is `summary` (see requireSummary): its cap guards against
+ * a misuse, not a server limit — an answer pushed into the card's context line.
  */
 import { newClientMsgId } from './message.js';
 
@@ -36,6 +39,29 @@ function requireText(value, field) {
     throw new InteractionRequestError(field, 'is required and must be a non-empty string');
   }
   return value;
+}
+
+const SUMMARY_MAX_CHARS = 80;
+const LINE_BREAK = /[\n\r\u0085\u2028\u2029]/;
+
+/**
+ * summary is one line of context — source and time — under the title. A long
+ * or multi-line one is an answer to the user that ended up inside a card,
+ * where it reads as card chrome rather than as the reply. Length is counted
+ * in code points, so a CJK or emoji character counts as one.
+ */
+function requireSummary(value) {
+  const summary = requireText(value, 'summary');
+  const reason = LINE_BREAK.test(summary)
+    ? 'contains a line break'
+    : [...summary].length > SUMMARY_MAX_CHARS ? `is longer than ${SUMMARY_MAX_CHARS} characters` : null;
+  if (reason) {
+    throw new InteractionRequestError(
+      'summary',
+      `${reason}: summary is one line of context (source and time), at most ${SUMMARY_MAX_CHARS} characters with no line breaks — the answer to the user belongs in a separate plain text message, not in a card`,
+    );
+  }
+  return summary;
 }
 
 /**
@@ -231,8 +257,8 @@ export function buildChoiceRequest(params = {}) {
   // blocks check below. Optional here: the three onboarding guide kinds go
   // without one (workspace-backlog#615), and whether a kind needs it is
   // cws-comm's call — it still refuses a missing summary on every other kind,
-  // naming the field. Only the type is checked: given means a real string.
-  const summary = params.summary === undefined ? undefined : requireText(params.summary, 'summary');
+  // naming the field. Given means a real string, on one line, within the cap.
+  const summary = params.summary === undefined ? undefined : requireSummary(params.summary);
 
   // 🔴 The body is not defaulted from `summary`. It used to be, and the card
   // then rendered the same sentence twice — once in the header beside the
@@ -440,7 +466,7 @@ export function buildFormRequest(params = {}) {
   }
 
   const title = requireText(params.title, 'title');
-  const summary = params.summary === undefined ? undefined : requireText(params.summary, 'summary');
+  const summary = params.summary === undefined ? undefined : requireSummary(params.summary);
 
   let blocks = [];
   if (params.blocks !== undefined) {

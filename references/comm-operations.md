@@ -274,6 +274,12 @@ body is no longer derived.
 `summary` is also the plain-text projection for clients that cannot render a
 card, which is the other reason it stays a single line.
 
+🔴 **`summary` is one line of at most 80 characters, with no line breaks**;
+anything longer or multi-line is rejected with the field named. The answer to
+the user's question never goes into a card — not `summary`, not the body. It is
+its own plain text message: when a card (a component-upgrade prompt, say) is
+due in the same turn, send the answer first as text, then the card separately.
+
 `summary` is required on every card **except the three onboarding guide cards**
 (`onboarding.task` / `.channel` / `.partner`, below), which go without one
 (workspace-backlog#615): omit the field there — do not send an empty string.

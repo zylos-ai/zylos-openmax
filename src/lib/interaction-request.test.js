@@ -111,6 +111,27 @@ test('title is required; summary is optional but must be a real string when give
   assert.throws(() => buildChoiceRequest({ title: 't', summary: 123, text: 'b', options: ['Y'] }), (e) => e.field === 'summary');
 });
 
+test('🔴 summary is one line of at most 80 characters; the answer does not go in a card', () => {
+  // cws-fe#1205: an answer to the user's question was sent as a card summary.
+  // Characters are code points, so a CJK summary gets the same 80.
+  const at80 = '美'.repeat(80);
+  assert.equal(buildChoiceRequest({ ...base, summary: at80, options: ['Y'] }).choice.summary, at80);
+  const emoji80 = '🚀'.repeat(80);
+  assert.equal(buildChoiceRequest({ ...base, summary: emoji80, options: ['Y'] }).choice.summary, emoji80);
+  const over = refusal(() => buildChoiceRequest({ ...base, summary: '美'.repeat(81), options: ['Y'] }));
+  assert.ok(over instanceof InteractionRequestError);
+  assert.equal(over.field, 'summary');
+  assert.match(over.message, /one line of context/);
+  assert.match(over.message, /separate/);
+  for (const br of ['\n', '\r', '\u2028', '\u2029', '\u0085']) {
+    const err = refusal(() => buildChoiceRequest({ ...base, summary: `openmax${br}05/19`, options: ['Y'] }));
+    assert.equal(err.field, 'summary', `line break U+${br.codePointAt(0).toString(16).padStart(4, '0')}`);
+  }
+  // Absent still means no key, and the onboarding kinds still go without one.
+  const none = buildChoiceRequest({ title: 't', text: 'b', options: ['Y'], cardKind: 'onboarding.channel' });
+  assert.equal(Object.hasOwn(none.choice, 'summary'), false);
+});
+
 test('confirm is passed through when given, and validated when malformed', () => {
   const body = buildChoiceRequest({ ...base, options: ['Yes'], confirm: { text: 'Sure?', label: 'Do it' } });
   assert.deepEqual(body.choice.confirm, { text: 'Sure?', label: 'Do it' });

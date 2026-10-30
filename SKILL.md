@@ -201,6 +201,8 @@ Why it is not cosmetic: the reader presses a button instead of retyping your own
 you, and the answer returns as a decodable receipt carrying `selected-action-ids` rather than a
 sentence you have to parse and can misread.
 
+🔴 **The answer to the user's question is always its own plain text message, never inside a card** — not in `summary`, not in the body. When a card is due in the same turn (a pending component-upgrade prompt, for one), send the answer first as text, then the card as a separate message. A card carries only its own question.
+
 **Then, and only then, the path:**
 
 - **Every reply to a message routed to you goes through the C4 reply path (`c4-send.js`) — card or text, one entry.** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail; reply using exactly that command. Text goes in the body as text. A card goes in as `[CARD]` followed by the card's JSON. Several questions for one person are one multi-question choice form (`fields`, one entry per question; in a group chat pass `answerers`):
@@ -273,7 +275,7 @@ question over Lark, Telegram or WeChat stays plain text exactly as before. See
 
 **Writing the card** (once you have decided it is one):
 
-  Title, summary and body are three regions and the client renders all three: the title is the subject, the summary is **one line of context** — where this came from and when (source, issue, timestamp), not the decision itself — and the body carries the detail. Never repeat one in another — it renders twice. (Exception: the three onboarding guide cards — `cardKind` `onboarding.*` — have **no summary**; leave the field out. Their wording is fixed in `references/onboarding-lead.md`.)
+  Title, summary and body are three regions and the client renders all three: the title is the subject, the summary is **one line of context** — where this came from and when (source, issue, timestamp), not the decision itself, and not the answer to anything — and the body carries the detail. `summary` is one line of at most 80 characters with no line breaks; anything else is rejected. Never repeat one in another — it renders twice. (Exception: the three onboarding guide cards — `cardKind` `onboarding.*` — have **no summary**; leave the field out. Their wording is fixed in `references/onboarding-lead.md`.)
 
   🔴 **A time in that summary line is written in the agent's configured timezone, with the offset, never raw UTC** (`自动检查 09-24 20:11 (+08)`, not `2026-09-24T12:11Z`). Every clock reachable from code here is UTC, so pasting one puts a time eight hours off under the title and the card says nothing about which zone it is. The zone is the agent's own configuration (`TZ` in `~/zylos/.env`), **not the host's** — the host is usually UTC while the agent is not.
 
