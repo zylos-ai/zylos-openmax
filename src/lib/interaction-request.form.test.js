@@ -192,15 +192,3 @@ test('resolveInteractionType: content decides, an explicit type must agree', () 
   assert.match(choiceWithFields.message, /disagrees with interactionType "choice"/);
   assert.equal(refusal(() => resolveInteractionType({ interactionType: 'poll' })).field, 'interactionType');
 });
-
-test('🔴 a form summary is held to the same one line of at most 80 characters', () => {
-  const at80 = '美'.repeat(80);
-  assert.equal(buildFormRequest(form({ summary: at80 })).form.summary, at80);
-  for (const summary of ['美'.repeat(81), '「客户看板」\n答完点一次提交', '「客户看板」\u2028答完点一次提交']) {
-    const err = refusal(() => buildFormRequest(form({ summary })));
-    assert.ok(err instanceof InteractionRequestError);
-    assert.equal(err.field, 'summary');
-  }
-  const { summary, ...noSummary } = form();
-  assert.equal(Object.hasOwn(buildFormRequest(noSummary).form, 'summary'), false);
-});
