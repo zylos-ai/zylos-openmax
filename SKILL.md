@@ -201,7 +201,7 @@ Why it is not cosmetic: the reader presses a button instead of retyping your own
 you, and the answer returns as a decodable receipt carrying `selected-action-ids` rather than a
 sentence you have to parse and can misread.
 
-🔴 **The answer to the user's question is always its own plain text message, never inside a card** — not in `summary`, not in the body. When a card is due in the same turn (a pending component-upgrade prompt, for one), send the answer first as text, then the card as a separate message. A card carries only its own question.
+🔴 **Never merge a text answer with an unrelated card.** When you answer the user in text and a card that has nothing to do with that answer is also due in the same turn (a pending component-upgrade prompt, for one), they are two messages: send the text answer first, then that card on its own. The answer never goes into that card's `summary` or body; the card carries only its own question. This is about unrelated content only: if your reply to the user is itself a question with fixed options, ask it with a card as above.
 
 **Then, and only then, the path:**
 

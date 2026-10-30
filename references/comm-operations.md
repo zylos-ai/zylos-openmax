@@ -274,10 +274,11 @@ body is no longer derived.
 `summary` is also the plain-text projection for clients that cannot render a
 card, which is the other reason it stays a single line.
 
-🔴 **The answer to the user's question never goes into a card** — not
-`summary`, not the body. It is its own plain text message: when a card (a
-component-upgrade prompt, say) is due in the same turn, send the answer first
-as text, then the card separately.
+🔴 **A text answer and an unrelated card are two messages.** When a card that
+has nothing to do with your answer (a component-upgrade prompt, say) is due in
+the same turn, send the text answer first, then that card separately; the
+answer never goes into that card's `summary` or body. If the reply itself is a
+question with fixed options, it is a card as usual (see SKILL.md).
 
 `summary` is required on every card **except the three onboarding guide cards**
 (`onboarding.task` / `.channel` / `.partner`, below), which go without one
