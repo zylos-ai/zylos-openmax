@@ -916,7 +916,7 @@ test('Bug1-SEC-R2 assembleRequest: a connection-owned {base_url} (verbatim) reve
   assert.equal(new URL(req.url).pathname, '/api/people/me');
 });
 
-test('Bug1-SEC-R2 WIRE: a malicious authority value emits NO request to a real server; a legit host:port authority value reaches it', async () => {
+test('Bug1-SEC-R2 WIRE: a malicious authority value emits NO request to a real server; a connection-provided host:port reaches it, a caller-only one is refused', async () => {
   const received = [];
   const server = http.createServer((req, res) => {
     received.push({ host: req.headers.host, url: req.url });
@@ -929,13 +929,25 @@ test('Bug1-SEC-R2 WIRE: a malicious authority value emits NO request to a real s
   // {hostport} is an AUTHORITY placeholder (before the first "/"); a legit host:port must pass verbatim.
   const DEF = { toolkit: 't', action: 'get', method: 'GET', url_template: 'http://{hostport}/v1/{resourceName}', input_schema: '' };
   try {
-    // legit host:port authority value + legit "/"-bearing pathname → reaches the real server intact
+    // connection-provided host:port + legit "/"-bearing pathname → reaches the real server intact
     await invokeDirect(
-      { orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 't/get', params: { hostport, resourceName: 'people/me' }, catalog: [DEF], credential: cred },
+      { orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 't/get', params: { resourceName: 'people/me' }, catalog: [DEF], credential: { ...cred, url_placeholders: { hostport } } },
       { audit: quietAudit },
     );
     assert.equal(received.at(-1).url, '/v1/people/me', `real server must receive the un-escaped path, got ${received.at(-1) && received.at(-1).url}`);
-    assert.equal(received.at(-1).host, hostport, 'the legit host:port authority value must survive verbatim');
+    assert.equal(received.at(-1).host, hostport, 'the host:port authority value must survive verbatim');
+
+    // the same host:port supplied only by the caller (no connection value, no
+    // static host rule) → refused before any request
+    const n0 = received.length;
+    await assert.rejects(
+      invokeDirect(
+        { orgId: 'o', connection: { id: 'c', applicationId: 'a' }, actionSlug: 't/get', params: { hostport, resourceName: 'people/me' }, catalog: [DEF], credential: cred },
+        { audit: quietAudit },
+      ),
+      (e) => e.status === 403,
+    );
+    assert.equal(received.length, n0, 'a caller-only host must produce NO request');
 
     // malicious authority value → rejected before any request; the server is NEVER hit
     const before = received.length;

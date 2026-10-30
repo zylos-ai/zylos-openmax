@@ -272,3 +272,170 @@ test('host-guard request_spec: the same override rule and static host rule apply
   assert.equal(calls[0].url, 'https://acme.myshopify.com/admin/api/2026-07/products.json');
   assert.deepEqual(JSON.parse(String(calls[0].opts.body)), { product: { title: 'x' } });
 });
+
+// ---------------------------------------------------------------------------
+//  Hosts a caller would define on its own are refused (fail closed)
+// ---------------------------------------------------------------------------
+
+test('host-guard: a host only the caller supplies (no connection value, no static rule) → 403, zero requests', async () => {
+  const cred = { credential_mode: 'direct', token_type: 'bearer', access_token: 'T_SECRET' };
+  const cases = [
+    [def('x/whole', 'GET', 'https://{host}/v1/items'), { host: 'api.example.com' }],
+    [def('x/port', 'GET', 'https://{host}:8443/v1/items'), { host: 'api.example.com' }],
+    [def('x/two', 'GET', 'https://{sub}.{domain}/v1/items'), { sub: 'a', domain: 'example' }],
+    [def('x/tld', 'GET', 'https://{name}.com/v1/items'), { name: 'example' }],
+  ];
+  for (const [d, params] of cases) {
+    const { impl, calls } = fakeFetch();
+    await assert.rejects(
+      () => invoke({ slug: 'some-saas', actionSlug: `${d.toolkit}/${d.action}`, params, catalog: [d], credential: cred }, impl),
+      (e) => e.status === 403 && e.code === 'direct_origin_refused' && assertNoSecret(e),
+      d.url_template,
+    );
+    assert.equal(calls.length, 0, d.url_template);
+  }
+});
+
+test('host-guard: Amazon / Shopify without a known slug or provider fail closed for a caller host, work with the connection host', async () => {
+  // no slug, no provider → no static rule; a caller-only host is refused even if it looks legitimate
+  for (const [actionSlug, params, catalog, credential] of [
+    ['amazon-orders/get-orders', { region_host: 'sellingpartnerapi-na.amazon.com', marketplace_ids: 'X' }, AMAZON_CATALOG, amazonCred()],
+    ['shopify-orders/list', { shop: 'acme.myshopify.com' }, SHOPIFY_CATALOG, shopifyCred()],
+  ]) {
+    const { impl, calls } = fakeFetch();
+    await assert.rejects(() => invoke({ slug: null, actionSlug, params, catalog, credential }, impl), (e) => e.status === 403 && assertNoSecret(e));
+    assert.equal(calls.length, 0);
+  }
+  // the connection-provided host still works without a slug
+  const a = fakeFetch();
+  await invoke({ slug: null, actionSlug: 'amazon-orders/get-orders', params: { marketplace_ids: 'X' }, catalog: AMAZON_CATALOG, credential: amazonCred({ region_host: 'sellingpartnerapi-eu.amazon.com' }) }, a.impl);
+  assert.equal(a.calls[0].url, 'https://sellingpartnerapi-eu.amazon.com/orders/v0/orders?MarketplaceIds=X');
+  const s = fakeFetch();
+  await invoke({ slug: null, actionSlug: 'shopify-orders/list', params: {}, catalog: SHOPIFY_CATALOG, credential: shopifyCred({ shop: 'acme.myshopify.com' }) }, s.impl);
+  assert.equal(s.calls[0].url, 'https://acme.myshopify.com/admin/api/2026-07/orders.json');
+});
+
+test('host-guard: a caller label under a domain the template fixes is still allowed (with or without a port)', async () => {
+  for (const [tpl, url] of [
+    ['https://{tenant}.provider.example/v1/items', 'https://acme.provider.example/v1/items'],
+    ['https://{tenant}.provider.example:8443/v1/items', 'https://acme.provider.example:8443/v1/items'],
+    ['https://{tenant}.{zone}/v1/items', 'https://acme.eu.provider.example/v1/items'],
+  ]) {
+    const d = def('saas/items', 'GET', tpl);
+    const { impl, calls } = fakeFetch();
+    await invoke({ slug: 'some-saas', actionSlug: 'saas/items', params: { tenant: 'acme' }, catalog: [d], credential: { credential_mode: 'direct', token_type: 'bearer', access_token: 'T', url_placeholders: { zone: 'eu.provider.example' } } }, impl);
+    assert.equal(calls[0].url, url, tpl);
+  }
+});
+
+// ---------------------------------------------------------------------------
+//  Redirects: followed by the executor, credentials dropped off-origin
+// ---------------------------------------------------------------------------
+
+/** fetch double: `routes` maps a URL to { status, location } (default 200 JSON). */
+function redirectFetch(routes) {
+  const calls = [];
+  const impl = async (url, opts = {}) => {
+    calls.push({ url, opts: { ...opts, headers: { ...(opts.headers || {}) } } });
+    const r = typeof routes === 'function' ? routes(url, calls.length) : routes[url];
+    const text = r && r.location ? '' : JSON.stringify({ ok: true });
+    const headers = new Map([['content-type', 'application/json']]);
+    if (r && r.location) headers.set('location', r.location);
+    return {
+      status: (r && r.status) || 200,
+      headers,
+      body: new ReadableStream({ start(c) { if (text) c.enqueue(new TextEncoder().encode(text)); c.close(); } }),
+      text: async () => text,
+    };
+  };
+  return { impl, calls };
+}
+
+const lowerKeys = (h) => Object.keys(h).map((k) => k.toLowerCase());
+
+test('redirect: a same-origin redirect is followed with the credential header kept', async () => {
+  const { impl, calls } = redirectFetch({
+    'https://acme.myshopify.com/admin/api/2026-07/orders.json': { status: 302, location: '/admin/api/2026-10/orders.json' },
+  });
+  const out = await invoke({ slug: 'shopify-oauth', actionSlug: 'shopify-orders/list', params: {}, catalog: SHOPIFY_CATALOG, credential: shopifyCred({ shop: 'acme.myshopify.com' }) }, impl);
+  assert.equal(out.status_code, 200);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].url, 'https://acme.myshopify.com/admin/api/2026-10/orders.json');
+  for (const c of calls) {
+    assert.equal(c.opts.redirect, 'manual', 'fetch never follows on its own');
+    assert.equal(c.opts.headers['X-Shopify-Access-Token'], 'shpat_SECRET');
+  }
+});
+
+test('redirect: a cross-origin redirect is followed without any credential-bearing header (custom auth header)', async () => {
+  const { impl, calls } = redirectFetch({
+    'https://sellingpartnerapi-na.amazon.com/orders/v0/orders?MarketplaceIds=X': { status: 307, location: 'https://other.example/landing' },
+  });
+  const out = await invoke({ slug: 'amazon_spapi', actionSlug: 'amazon-orders/get-orders', params: { marketplace_ids: 'X' }, catalog: AMAZON_CATALOG, credential: amazonCred({ region_host: 'sellingpartnerapi-na.amazon.com' }) }, impl);
+  assert.equal(out.status_code, 200);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].opts.headers['x-amz-access-token'], 'Atza|SECRET');
+  assert.equal(calls[1].url, 'https://other.example/landing');
+  assert.ok(!lowerKeys(calls[1].opts.headers).includes('x-amz-access-token'));
+  assert.ok(!JSON.stringify(calls[1]).includes('SECRET'), 'no token anywhere in the redirected request');
+});
+
+test('redirect: off-origin drops Authorization and any header carrying the token; others kept; never restored', async () => {
+  const { sendDirect } = await import('./direct-exec.js');
+  const { impl, calls } = redirectFetch({
+    'https://api.example.com/a': { status: 302, location: 'https://cdn.example.net/b' },
+    'https://cdn.example.net/b': { status: 302, location: 'https://api.example.com/c' },
+  });
+  await sendDirect({
+    method: 'GET', url: 'https://api.example.com/a',
+    headers: { Authorization: 'Bearer TOK_SECRET', 'X-Custom-Auth': 'k=TOK_SECRET', Cookie: 'sid=1', Accept: 'application/json' },
+  }, { fetchImpl: impl, credential: { token: 'TOK_SECRET' } });
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].opts.headers.Authorization, 'Bearer TOK_SECRET');
+  for (const c of calls.slice(1)) {
+    assert.deepEqual(c.opts.headers, { Accept: 'application/json' }, `${c.url}: only non-credential headers`);
+  }
+});
+
+test('redirect: method/body per status — 303 → GET, 302 POST → GET, 307/308 keep method and body', async () => {
+  const P = def('saas/create', 'POST', 'https://api.provider.example/v1/items');
+  for (const [status, method, hasBody] of [[303, 'GET', false], [302, 'GET', false], [301, 'GET', false], [307, 'POST', true], [308, 'POST', true]]) {
+    const { impl, calls } = redirectFetch({ 'https://api.provider.example/v1/items': { status, location: '/v2/items' } });
+    await invoke({ slug: 'saas', actionSlug: 'saas/create', params: { title: 'x' }, catalog: [P], credential: { credential_mode: 'direct', token_type: 'bearer', access_token: 'T' } }, impl);
+    assert.equal(calls[1].url, 'https://api.provider.example/v2/items');
+    assert.equal(calls[1].opts.method, method, `${status}`);
+    assert.equal(calls[1].opts.body !== undefined, hasBody, `${status} body`);
+    assert.equal(lowerKeys(calls[1].opts.headers).includes('content-type'), hasBody, `${status} content-type`);
+    assert.equal(calls[1].opts.headers.Authorization, 'Bearer T', 'same origin keeps auth');
+  }
+});
+
+test('redirect: the hop count is bounded (502 after the limit)', async () => {
+  const { MAX_DIRECT_REDIRECTS } = await import('./direct-exec.js');
+  const { impl, calls } = redirectFetch((url, n) => ({ status: 302, location: `/loop/${n}` }));
+  await assert.rejects(
+    () => invoke({ slug: 'shopify-oauth', actionSlug: 'shopify-orders/list', params: {}, catalog: SHOPIFY_CATALOG, credential: shopifyCred({ shop: 'acme.myshopify.com' }) }, impl),
+    (e) => e.status === 502 && e.code === 'too_many_redirects' && assertNoSecret(e),
+  );
+  assert.equal(calls.length, MAX_DIRECT_REDIRECTS + 1);
+});
+
+test('redirect: a 3xx without Location is returned as-is', async () => {
+  const { impl, calls } = redirectFetch({ 'https://acme.myshopify.com/admin/api/2026-07/orders.json': { status: 304 } });
+  const out = await invoke({ slug: 'shopify-oauth', actionSlug: 'shopify-orders/list', params: {}, catalog: SHOPIFY_CATALOG, credential: shopifyCred({ shop: 'acme.myshopify.com' }) }, impl);
+  assert.equal(out.status_code, 304);
+  assert.equal(calls.length, 1);
+});
+
+test('redirect: request_spec actions drop the credential header on a cross-origin redirect too', async () => {
+  const SPEC_CREATE = def('shopify-products/create-spec', 'POST', 'https://{shop}/admin/api/2026-07/products.json', {
+    request_spec: { version: 1, requires: ['body_template'], encoding: 'json', body: { product: { title: '{{title}}' } } },
+  });
+  const { impl, calls } = redirectFetch({ 'https://acme.myshopify.com/admin/api/2026-07/products.json': { status: 308, location: 'https://elsewhere.example/p' } });
+  await invoke({ slug: 'shopify-oauth', actionSlug: 'shopify-products/create-spec', params: { title: 'x' }, catalog: [SPEC_CREATE], credential: shopifyCred({ shop: 'acme.myshopify.com' }) }, impl);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].opts.headers['X-Shopify-Access-Token'], 'shpat_SECRET');
+  assert.equal(calls[1].opts.method, 'POST');
+  assert.ok(!JSON.stringify(calls[1].opts.headers).includes('SECRET'));
+  assert.deepEqual(JSON.parse(String(calls[1].opts.body)), { product: { title: 'x' } });
+});

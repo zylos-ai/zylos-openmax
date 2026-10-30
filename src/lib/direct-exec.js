@@ -35,7 +35,10 @@
  * overridden by a caller param (400 on a differing value), and every assembled
  * request's origin must be one the catalog / connection defines, or — when the
  * caller fills the host — one the connector's static host rule
- * (STATIC_HOST_RULES) admits (403), before the credential is attached.
+ * (STATIC_HOST_RULES) admits, or a label under a domain the template fixes
+ * (403 otherwise), before the credential is attached. Redirects are followed
+ * by this module, and credential headers are dropped once a redirect leaves
+ * the original origin.
  *
  * Token lifecycle (O4): two independent signals answer two questions.
  *   - `token_type` gates whether a token can be refreshed AT ALL: cws-connect
@@ -536,9 +539,13 @@ function refuseOrigin(message) {
  *      (templateOrigin with url_placeholders substituted verbatim is non-null),
  *      the final origin must be in deriveTrustedOrigins (catalog url_template
  *      origins + url_placeholders.base_url origin — never caller data; 403).
- *   3. Otherwise (a caller fills part of the host, e.g. "{tenant}.provider.
- *      example", and no static rule exists) nothing more is enforced here: the
- *      caller value already went through encodeAuthorityValue.
+ *   3. Otherwise a caller fills part of the host and no static rule exists.
+ *      That is only allowed when the template fixes the domain the caller
+ *      value sits under (e.g. "https://{tenant}.provider.example": the caller
+ *      adds a label, already restricted by encodeAuthorityValue). A host the
+ *      caller would define on its own ("https://{host}/…", "{base_url}…" the
+ *      connection does not provide, "{a}.{b}", "{x}.com") is refused (403),
+ *      before the credential is attached.
  * An assembled URL that does not parse as an absolute URL is refused (400).
  */
 function checkRequestOrigin(url, { actionDef, catalog, urlPlaceholders, slug }) {
@@ -562,7 +569,26 @@ function checkRequestOrigin(url, { actionDef, catalog, urlPlaceholders, slug }) 
     if (!trusted.includes(parsed.origin)) {
       throw refuseOrigin(`refused to send ${where} to origin "${parsed.origin}": not an origin of this connection's catalog`);
     }
+  } else if (!rule && !templateFixesHostDomain(actionDef.url_template, urlPlaceholders)) {
+    throw refuseOrigin(`refused to send ${where}: its host would come from a request param, and neither the connection nor a host rule for this connector defines it`);
   }
+}
+
+/**
+ * For a template whose host still has a caller placeholder after the
+ * connection's url_placeholders are substituted: does the template itself fix
+ * the domain under that placeholder? True only when the host text after the
+ * last placeholder (port removed) is a literal domain of at least two labels,
+ * e.g. ".provider.example". A template without a literal scheme ("{base_url}…"
+ * not provided by the connection) never does.
+ */
+function templateFixesHostDomain(template, uph) {
+  const resolved = String(template || '').replace(/\{([^}]+)\}/g, (m, key) => (hasVal(uph[key]) ? String(uph[key]) : m));
+  const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]*)/.exec(resolved);
+  if (!m) return false;
+  const authority = m[1].slice(m[1].lastIndexOf('@') + 1);
+  const suffix = authority.slice(authority.lastIndexOf('}') + 1).replace(/:\d*$/, '');
+  return /^\.[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(suffix);
 }
 
 /**
@@ -975,17 +1001,113 @@ async function normalizeResponse(res) {
   return { status_code: res.status, headers, body: buf.toString('base64'), body_encoding: 'base64' };
 }
 
-export async function sendDirect(assembled, { fetchImpl = fetch, redirect } = {}) {
-  const init = {
-    method: assembled.method,
-    headers: assembled.headers,
-    body: encodeAssembledBody(assembled),
-  };
-  // Only set when asked (B2 page-token calls use 'manual'); every other call
-  // keeps fetch's default options untouched.
-  if (redirect) init.redirect = redirect;
-  const res = await fetchImpl(assembled.url, init);
+/**
+ * Send an assembled request and normalize the response.
+ *
+ * `redirect: 'manual'` (B2 page-token calls) → a single request, a 3xx is
+ * returned as-is. Otherwise redirects are followed by fetchFollowingRedirects
+ * (bounded, credential headers dropped once the request leaves the original
+ * origin). `credential` ({ token, authInjection }) names what to strip.
+ */
+export async function sendDirect(assembled, { fetchImpl = fetch, redirect, credential } = {}) {
+  const body = encodeAssembledBody(assembled);
+  if (redirect === 'manual') {
+    const res = await fetchImpl(assembled.url, { method: assembled.method, headers: assembled.headers, body, redirect: 'manual' });
+    return normalizeResponse(res);
+  }
+  const res = await fetchFollowingRedirects(fetchImpl, {
+    method: assembled.method, url: assembled.url, headers: assembled.headers, body,
+  }, credential);
   return normalizeResponse(res);
+}
+
+// ---------------------------------------------------------------------------
+//  Redirect handling for credentialed requests
+// ---------------------------------------------------------------------------
+
+/** Max redirects followed for one direct request (fetch's own default is 20). */
+export const MAX_DIRECT_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+// Headers that describe a request body; dropped when a redirect turns the
+// request into a body-less GET (as fetch does).
+const BODY_HEADER_NAMES = new Set(['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']);
+
+/**
+ * Lower-cased names of the request headers that carry a credential: the
+ * standard ones (Authorization, Proxy-Authorization, Cookie), the connection's
+ * auth_injection header, and any header whose value contains the token (e.g. a
+ * headers_template value or a pre-baked custom scheme).
+ */
+function credentialHeaderNames(headers, { token, authInjection } = {}) {
+  const names = new Set(['authorization', 'proxy-authorization', 'cookie']);
+  if (authInjection && typeof authInjection === 'object' && authInjection.location === 'header' && authInjection.name) {
+    names.add(String(authInjection.name).toLowerCase());
+  }
+  const tok = token == null ? '' : String(token);
+  if (tok) {
+    for (const [k, v] of Object.entries(headers || {})) {
+      if (v != null && String(v).includes(tok)) names.add(k.toLowerCase());
+    }
+  }
+  return names;
+}
+
+function isReplayableBody(body) {
+  return body === undefined || body === null || typeof body === 'string'
+    || body instanceof Uint8Array || body instanceof ArrayBuffer;
+}
+
+async function discardBody(res) {
+  try { if (res && res.body && typeof res.body.cancel === 'function') await res.body.cancel(); } catch { /* best-effort */ }
+}
+
+/**
+ * fetch with redirects handled here instead of by fetch (`redirect: 'manual'`
+ * on every hop), so credentials never follow the request to another origin:
+ *   - same origin as the original request → follow with the headers as-is;
+ *   - any other origin → follow, but without every credential-bearing header
+ *     (credentialHeaderNames); once dropped they stay dropped for later hops;
+ *   - 303 → GET without body (HEAD stays HEAD); 301/302 turn a POST into a GET
+ *     without body (fetch semantics); 307/308 keep method and body;
+ *   - a 3xx without Location, or a 307/308 whose body cannot be replayed, is
+ *     returned as-is; a non-http(s) Location or more than `maxRedirects` hops
+ *     fails (502).
+ */
+async function fetchFollowingRedirects(fetchImpl, req, credential = {}, { maxRedirects = MAX_DIRECT_REDIRECTS } = {}) {
+  let { method, url, body } = req;
+  let headers = { ...(req.headers || {}) };
+  const strip = credentialHeaderNames(headers, credential);
+  const startOrigin = new URL(url).origin;
+  let stripped = false;
+  for (let hop = 0; ; hop++) {
+    const res = await fetchImpl(url, { method, headers, body, redirect: 'manual' });
+    if (!REDIRECT_STATUSES.has(res.status)) return res;
+    const location = getHeaderValue(res.headers, 'location');
+    if (!location) return res;
+    if ((res.status === 307 || res.status === 308) && !isReplayableBody(body)) return res;
+    if (hop >= maxRedirects) {
+      await discardBody(res);
+      throw Object.assign(new Error(`provider redirected more than ${maxRedirects} times`), { status: 502, code: 'too_many_redirects' });
+    }
+    let next;
+    try { next = new URL(location, url); } catch { next = null; }
+    if (!next || (next.protocol !== 'https:' && next.protocol !== 'http:')) {
+      await discardBody(res);
+      throw Object.assign(new Error('provider redirected to an unsupported location'), { status: 502, code: 'bad_redirect' });
+    }
+    await discardBody(res);
+    if (res.status === 303 ? (method !== 'GET' && method !== 'HEAD')
+      : ((res.status === 301 || res.status === 302) && method === 'POST')) {
+      method = 'GET';
+      body = undefined;
+      headers = Object.fromEntries(Object.entries(headers).filter(([k]) => !BODY_HEADER_NAMES.has(k.toLowerCase())));
+    }
+    if (!stripped && next.origin !== startOrigin) {
+      stripped = true;
+      headers = Object.fromEntries(Object.entries(headers).filter(([k]) => !strip.has(k.toLowerCase())));
+    }
+    url = next.toString();
+  }
 }
 
 // The wire body for an assembled request: request_spec encoders hand over
@@ -1318,7 +1440,10 @@ export async function invokeDirect(
     auditDirectCall(assembled.method, actionDef.url_template, params, audit);
     // A derived Page token must never ride a redirect off the Graph origin:
     // with an exchange the 3xx is returned as-is (same rule as _download).
-    return sendDirect(assembled, exchange ? { fetchImpl, redirect: 'manual' } : { fetchImpl });
+    // Otherwise redirects are followed without the credential off-origin.
+    return sendDirect(assembled, exchange
+      ? { fetchImpl, redirect: 'manual' }
+      : { fetchImpl, credential: { token, authInjection } });
   };
 
   // Re-acquire the connection credential once (reactive backstop). Returns true
@@ -1418,14 +1543,20 @@ async function invokeRequestSpec({ orgId, connId, actionDef, params, catalog, an
     setCred(fresh);
     return true;
   };
+  // Redirects are followed without the credential off-origin
+  // (fetchFollowingRedirects), same as the plain path.
+  const fetchReq = (req) => {
+    const c = getCred();
+    return fetchFollowingRedirects(fetchImpl, req, { token: c && c.access_token, authInjection: c && c.auth_injection });
+  };
   const sendBuilt = async (build, { refreshOn401 = true } = {}) => {
     let req = build(getCred());
-    let res = await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body });
+    let res = await fetchReq(req);
     if (res.status === 401 && refreshOn401 && await refresh()) {
       log(`[conn.direct] provider 401 conn=${connId}; reactive refresh + retry once`);
       try { if (res.body && typeof res.body.cancel === 'function') await res.body.cancel(); } catch { /* best effort */ }
       req = build(getCred());
-      res = await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body });
+      res = await fetchReq(req);
     }
     return normalizeResponse(res);
   };
