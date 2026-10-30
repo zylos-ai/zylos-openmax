@@ -733,10 +733,12 @@ test('B2 main request with a Page token is sent with redirect:"manual"; a 3xx is
   assert.equal(calls[1].opts.redirect, 'manual');
   assert.equal(calls[1].opts.headers.Authorization, `Bearer ${PAGE_TOKEN}`);
 
-  // an unmarked action keeps fetch's default options (no redirect key)
+  // an unmarked action also uses redirect:"manual" on the wire; the executor
+  // follows redirects itself (credential headers dropped off-origin)
   const f = routerFetch([[(u) => u.endsWith('/me?fields=id,name'), { body: { id: '1' } }]]);
   await invokeDirect({ orgId: 'o', connection: CONN, actionSlug: 'meta_account/me', params: {}, catalog: CATALOG, credential: CRED }, deps(f.impl).d);
-  assert.equal('redirect' in f.calls[0].opts, false);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].opts.redirect, 'manual');
 });
 
 // ---------------------------------------------------------------------------

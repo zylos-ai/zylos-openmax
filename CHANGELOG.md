@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.1] - 2026-10-29
+
+### Security
+
+Hardening of where direct-mode requests may send the connection credential.
+
+- **Connection-owned URL placeholders are authoritative.** When the credential's `url_placeholders` has a value for a placeholder the action uses (url_template path, host, query, or `headers_template`), a caller param of the same name with a different value is refused with 400 (`code: connection_placeholder_override`; the message names the param only). An equal value (trimmed, case-insensitive) is accepted and ignored, so agents that echo `shop` / DocuSign `account_id` keep working. A key `url_placeholders` lacks still comes from the caller.
+- **Request origin is checked before the credential is attached.** When the action's host is defined by catalog / connection data, the assembled origin must be one of the catalog `url_template` origins (with `url_placeholders` substituted) or the `url_placeholders.base_url` origin (403 otherwise). An assembled URL that is not absolute is refused with 400.
+- **Static host rules per connector** (application slug from the connection index, else the credential's `provider`), aligned with cws-connect `InstanceHostSpec`: `shopify-oauth` / `shopify` hosts must match `<store>.myshopify.com`; `amazon_spapi` hosts must be one of the `sellingpartnerapi-na|eu|fe.amazon.com` endpoints; https, no explicit port (403 otherwise).
+- **Hosts supplied only by the caller fail closed.** When the action's host comes from a param that neither the connection provides nor a static host rule covers, the request is refused with 403 (`code: direct_origin_refused`) before the credential is attached. A caller value that only adds a label under a domain the template fixes (e.g. `https://{tenant}.provider.example`) is still accepted, limited to host-label characters.
+- **Redirects keep the credential on its origin.** Direct requests (plain and `request_spec` actions, prefetch steps, batch calls) now handle redirects in the executor: same-origin redirects are followed unchanged; a redirect to another origin is followed without any credential-bearing header (`Authorization`, the connection's `auth_injection` header, any header carrying the token, `Cookie`, `Proxy-Authorization`), and those headers are not restored on later hops. 303 (and 301/302 for POST) continue as GET without a body; 307/308 keep method and body. At most 5 redirects are followed (502 `too_many_redirects` beyond that). Meta Page token calls keep returning a 3xx as-is.
+- Covers plain actions, `request_spec` actions, prefetch steps and batch sub-requests (all share `assembleBase`).
+- Behaviour changes: a caller value that differs from the connection's for any templated placeholder now gets 400 instead of being used; an action whose whole host is a caller param without a connection value or host rule now gets 403. Tests in `src/lib/direct-exec.host-guard.test.js`.
+
 ## [2.30.0] - 2026-10-27
 
 Combines PRs #222, #223, #224 and #225 into one release.

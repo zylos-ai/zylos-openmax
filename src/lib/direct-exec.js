@@ -30,6 +30,16 @@
  * URL. The action name must resolve in the catalog and the URL can only be the
  * registered `url_template` expanded with schema-checked params.
  *
+ * Host protection: a placeholder the connection provides in url_placeholders
+ * (e.g. Shopify `shop`, Amazon `region_host`, `base_url`) can never be
+ * overridden by a caller param (400 on a differing value), and every assembled
+ * request's origin must be one the catalog / connection defines, or — when the
+ * caller fills the host — one the connector's static host rule
+ * (STATIC_HOST_RULES) admits, or a label under a domain the template fixes
+ * (403 otherwise), before the credential is attached. Redirects are followed
+ * by this module, and credential headers are dropped once a redirect leaves
+ * the original origin.
+ *
  * Token lifecycle (O4): two independent signals answer two questions.
  *   - `token_type` gates whether a token can be refreshed AT ALL: cws-connect
  *     stores `"api_key"` for api_key connections (no refresh flow) and
@@ -340,7 +350,11 @@ function applyAuthToRequest(url, headers, token, tokenType, authInjection) {
  * Placeholders resolve from TWO sources: the action `params` AND the
  * credential's `url_placeholders` (connection-owned, NON-secret URL parts like a
  * self-hosted connector's `base_url`, e.g. Jenkins whose url_template starts
- * with "{base_url}"). `params` win on a name clash. A value from `params` is
+ * with "{base_url}"). The CONNECTION wins on a name clash: a caller value that
+ * differs from a provided url_placeholder the action templates is refused (400,
+ * see withoutConnectionOwnedParams); an equal one is ignored. The assembled URL
+ * then passes checkRequestOrigin (catalog / connection origins, static per-
+ * connector host rules) before auth is attached. A value from `params` is
  * URL-encoded (it is data — a path/query value); a value from `url_placeholders`
  * is substituted VERBATIM (it is structural — a scheme/host/base-URL prefix that
  * must not be percent-encoded, or "https://host/x" would corrupt into
@@ -365,7 +379,9 @@ function applyAuthToRequest(url, headers, token, tokenType, authInjection) {
  * @param {string} [tokenType]       credential token_type → Authorization scheme
  * @param {object} [authInjection]   optional generic injection descriptor
  *                                   { location:'header'|'query', name, value_template }
- * @param {object} [opts]            { noAuth } — forwarded to assembleBase
+ * @param {object} [opts]            { noAuth, catalog, slug } — forwarded to
+ *                                   assembleBase (catalog → trusted origins,
+ *                                   slug = application slug → static host rule)
  */
 export function assembleRequest(actionDef, params = {}, token, urlPlaceholders = {}, tokenType = '', authInjection = null, opts = {}) {
   const base = assembleBase(actionDef, params, token, urlPlaceholders, tokenType, authInjection, opts);
@@ -427,6 +443,154 @@ function templatedParamNames(actionDef) {
   return names;
 }
 
+// ---------------------------------------------------------------------------
+//  Host protection: connection-owned placeholders + final-origin check
+// ---------------------------------------------------------------------------
+
+/**
+ * Drop caller params that name a placeholder the CONNECTION already provides.
+ *
+ * url_placeholders are connection-owned (cws-connect Acquire): a self-hosted
+ * `base_url`, DocuSign `base_uri` / `account_id`, Shopify `shop`, Amazon
+ * `region_host`, ... Several of them ARE the request host, so a caller value
+ * must never replace them — otherwise a prompt-injected agent passing
+ * `shop: "attacker.example"` would send the connection token to that host.
+ *
+ * Rule (url_template path / authority / query AND headers_template, so one key
+ * means one value everywhere in the request): when url_placeholders has a
+ * non-empty value for a key the action templates, the connection value is
+ * authoritative —
+ *   - a caller value that differs from it is REFUSED (400);
+ *   - a caller value equal to it (trimmed, case-insensitive) is accepted and
+ *     dropped, so agents that echo the value they see (Shopify `shop`, DocuSign
+ *     `account_id` are still listed as action params) keep working;
+ *   - absent from url_placeholders → the caller value is used as before
+ *     (backward compatible, e.g. Amazon `region_host` before cws-connect
+ *     delivers it).
+ * Keys url_placeholders provides but the action does not template are left
+ * alone (they stay ordinary params / body fields). The error never echoes the
+ * connection value or any credential.
+ */
+function withoutConnectionOwnedParams(actionDef, params, uph) {
+  let out = params;
+  for (const key of templatedParamNames(actionDef)) {
+    if (!hasVal(uph[key]) || !hasVal(params[key])) continue;
+    const same = String(params[key]).trim().toLowerCase() === String(uph[key]).trim().toLowerCase();
+    if (!same) {
+      throw Object.assign(
+        new Error(`param "${key}" is set by the connection and cannot be overridden — omit "${key}" from params (action ${actionDef.toolkit}/${actionDef.action})`),
+        { status: 400, code: 'connection_placeholder_override' },
+      );
+    }
+    if (out === params) out = { ...params };
+    delete out[key];
+  }
+  return out;
+}
+
+const SHOPIFY_SHOP_HOST_RE = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i;
+const AMAZON_SPAPI_HOSTS = new Set([
+  'sellingpartnerapi-na.amazon.com',
+  'sellingpartnerapi-eu.amazon.com',
+  'sellingpartnerapi-fe.amazon.com',
+]);
+const SHOPIFY_HOST_RULE = { allows: (h) => SHOPIFY_SHOP_HOST_RE.test(h), expected: '<store>.myshopify.com' };
+
+/**
+ * Static per-connector host rules, keyed by APPLICATION slug (the connection's
+ * index `slug` / the credential's `provider`; NOT the action toolkit, which is
+ * e.g. "shopify-orders"). Mirrors cws-connect's InstanceHostSpec allowlists
+ * (internal/app/instance_host.go): Shopify `{shop}` must be a
+ * <store>.myshopify.com host, Amazon SP-API `{region_host}` one of the three
+ * regional endpoints. Applied to every action of the connector whose
+ * url_template host is a placeholder, whether the host came from the
+ * connection or (before cws-connect delivers it) from the caller.
+ */
+export const STATIC_HOST_RULES = Object.freeze({
+  'shopify-oauth': SHOPIFY_HOST_RULE,
+  shopify: SHOPIFY_HOST_RULE,
+  amazon_spapi: {
+    allows: (h) => AMAZON_SPAPI_HOSTS.has(String(h).toLowerCase()),
+    expected: [...AMAZON_SPAPI_HOSTS].join(' | '),
+  },
+});
+
+/** Does the template's host part (authority, or a leading "{base_url}"-style prefix) contain a placeholder? */
+function templateHostHasPlaceholder(template) {
+  const t = String(template || '');
+  const schemeM = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.exec(t);
+  if (!schemeM) return t.startsWith('{');
+  const rest = t.slice(schemeM[0].length);
+  const end = rest.search(/[/?#]/);
+  return (end === -1 ? rest : rest.slice(0, end)).includes('{');
+}
+
+function refuseOrigin(message) {
+  return Object.assign(new Error(message), { status: 403, code: 'direct_origin_refused' });
+}
+
+/**
+ * Final-origin check, run on every assembled direct request before the
+ * credential is attached:
+ *   1. Static host rule — when the connector (by `slug`) has one and the
+ *      action's host is a placeholder: https, no explicit port, no userinfo,
+ *      and the host must satisfy the rule (403 otherwise).
+ *   2. When the action's host is fully defined by operator/connection data
+ *      (templateOrigin with url_placeholders substituted verbatim is non-null),
+ *      the final origin must be in deriveTrustedOrigins (catalog url_template
+ *      origins + url_placeholders.base_url origin — never caller data; 403).
+ *   3. Otherwise a caller fills part of the host and no static rule exists.
+ *      That is only allowed when the template fixes the domain the caller
+ *      value sits under (e.g. "https://{tenant}.provider.example": the caller
+ *      adds a label, already restricted by encodeAuthorityValue). A host the
+ *      caller would define on its own ("https://{host}/…", "{base_url}…" the
+ *      connection does not provide, "{a}.{b}", "{x}.com") is refused (403),
+ *      before the credential is attached.
+ * An assembled URL that does not parse as an absolute URL is refused (400).
+ */
+function checkRequestOrigin(url, { actionDef, catalog, urlPlaceholders, slug }) {
+  let parsed;
+  try { parsed = new URL(url); } catch {
+    throw Object.assign(
+      new Error(`assembled URL for action ${actionDef.toolkit}/${actionDef.action} is not a valid absolute URL`),
+      { status: 400 },
+    );
+  }
+  const where = `action ${actionDef.toolkit}/${actionDef.action}`;
+  const rule = slug ? STATIC_HOST_RULES[String(slug).toLowerCase()] : undefined;
+  if (rule && templateHostHasPlaceholder(actionDef.url_template)) {
+    if (parsed.protocol !== 'https:' || parsed.port !== '' || parsed.username || parsed.password
+        || !rule.allows(parsed.hostname)) {
+      throw refuseOrigin(`refused to send ${where} to host "${parsed.host}": this connector only allows ${rule.expected}`);
+    }
+  }
+  if (templateOrigin(actionDef.url_template, urlPlaceholders)) {
+    const trusted = deriveTrustedOrigins(catalog, actionDef, urlPlaceholders);
+    if (!trusted.includes(parsed.origin)) {
+      throw refuseOrigin(`refused to send ${where} to origin "${parsed.origin}": not an origin of this connection's catalog`);
+    }
+  } else if (!rule && !templateFixesHostDomain(actionDef.url_template, urlPlaceholders)) {
+    throw refuseOrigin(`refused to send ${where}: its host would come from a request param, and neither the connection nor a host rule for this connector defines it`);
+  }
+}
+
+/**
+ * For a template whose host still has a caller placeholder after the
+ * connection's url_placeholders are substituted: does the template itself fix
+ * the domain under that placeholder? True only when the host text after the
+ * last placeholder (port removed) is a literal domain of at least two labels,
+ * e.g. ".provider.example". A template without a literal scheme ("{base_url}…"
+ * not provided by the connection) never does.
+ */
+function templateFixesHostDomain(template, uph) {
+  const resolved = String(template || '').replace(/\{([^}]+)\}/g, (m, key) => (hasVal(uph[key]) ? String(uph[key]) : m));
+  const m = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]*)/.exec(resolved);
+  if (!m) return false;
+  const authority = m[1].slice(m[1].lastIndexOf('@') + 1);
+  const suffix = authority.slice(authority.lastIndexOf('}') + 1).replace(/:\d*$/, '');
+  return /^\.[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(suffix);
+}
+
 /**
  * URL + query + headers + auth part of request assembly (unchanged logic,
  * shared by the classic path, request_spec actions, prefetch and batch
@@ -434,7 +598,7 @@ function templatedParamNames(actionDef) {
  * credential injection (batch sub-requests ride inside an authenticated outer
  * request).
  */
-export function assembleBase(actionDef, params = {}, token, urlPlaceholders = {}, tokenType = '', authInjection = null, { noAuth = false } = {}) {
+export function assembleBase(actionDef, callerParams = {}, token, urlPlaceholders = {}, tokenType = '', authInjection = null, { noAuth = false, catalog = null, slug = null } = {}) {
   if (!actionDef || typeof actionDef.url_template !== 'string' || !actionDef.url_template) {
     throw Object.assign(
       new Error('action has no url_template — local catalog is too old for direct execution (run conn.catalog {refresh:true})'),
@@ -445,6 +609,11 @@ export function assembleBase(actionDef, params = {}, token, urlPlaceholders = {}
   const template = actionDef.url_template;
   const uph = (urlPlaceholders && typeof urlPlaceholders === 'object') ? urlPlaceholders : {};
   const consumed = new Set();
+  // Connection-owned url_placeholders are AUTHORITATIVE: a caller value for a
+  // key the connection already provides is refused when it differs (400) and
+  // otherwise dropped, so every placeholder below resolves to the connection
+  // value. `params` is the caller params minus those keys.
+  const params = withoutConnectionOwnedParams(actionDef, callerParams || {}, uph);
 
   const qIdx = template.indexOf('?');
   const pathPart = qIdx >= 0 ? template.slice(0, qIdx) : template;
@@ -461,9 +630,10 @@ export function assembleBase(actionDef, params = {}, token, urlPlaceholders = {}
   //     (params) placeholder, choosing the encoder by WHERE it sits: an
   //     authority placeholder must not keep "/" (encodeAuthorityValue, rejects
   //     host-boundary chars); a pathname placeholder keeps "/" for real
-  //     resource names like "people/me" (encodePathValue). Params still win over
-  //     url_placeholders on a name clash (a params placeholder is deferred to
-  //     pass 2, never overwritten by pass 1).
+  //     resource names like "people/me" (encodePathValue). A key that
+  //     url_placeholders provides never reaches pass 2 from the caller: it was
+  //     removed from `params` above (withoutConnectionOwnedParams), so pass 1
+  //     always fills it with the connection value.
   const pass1 = pathPart.replace(/\{([^}]+)\}/g, (m, key) => {
     if (hasVal(params[key])) return m;              // caller value → defer to pass 2
     if (hasVal(uph[key])) { consumed.add(key); return String(uph[key]); } // trusted, verbatim
@@ -501,7 +671,8 @@ export function assembleBase(actionDef, params = {}, token, urlPlaceholders = {}
   });
 
   // Query placeholders — optional (drop the pair when the value is absent).
-  // Same two-source resolution; query values are always URL-encoded, after
+  // Same two-source resolution (a connection-provided key always takes the
+  // connection value, see above); query values are always URL-encoded, after
   // serializeQueryValue (per-property `x-query-style`, default String(v)).
   const querySchemaProps = schemaProperties(actionDef.input_schema);
   const outPairs = [];
@@ -558,6 +729,11 @@ export function assembleBase(actionDef, params = {}, token, urlPlaceholders = {}
     if (isExchangeHeaderName(hk)) continue;
     headers[hk] = fillTemplateValue(hv, params, uph, consumed);
   }
+
+  // Defense in depth: the final origin must be one the connection / catalog
+  // defines (or, for a caller-supplied host part, one the connector's static
+  // host rule admits) — checked BEFORE any credential is attached.
+  checkRequestOrigin(url, { actionDef, catalog, urlPlaceholders: uph, slug });
 
   // Generic auth injection (mirrors cws-connect). A descriptor, when present,
   // fully controls placement and wins over any templated header of the same
@@ -825,17 +1001,113 @@ async function normalizeResponse(res) {
   return { status_code: res.status, headers, body: buf.toString('base64'), body_encoding: 'base64' };
 }
 
-export async function sendDirect(assembled, { fetchImpl = fetch, redirect } = {}) {
-  const init = {
-    method: assembled.method,
-    headers: assembled.headers,
-    body: encodeAssembledBody(assembled),
-  };
-  // Only set when asked (B2 page-token calls use 'manual'); every other call
-  // keeps fetch's default options untouched.
-  if (redirect) init.redirect = redirect;
-  const res = await fetchImpl(assembled.url, init);
+/**
+ * Send an assembled request and normalize the response.
+ *
+ * `redirect: 'manual'` (B2 page-token calls) → a single request, a 3xx is
+ * returned as-is. Otherwise redirects are followed by fetchFollowingRedirects
+ * (bounded, credential headers dropped once the request leaves the original
+ * origin). `credential` ({ token, authInjection }) names what to strip.
+ */
+export async function sendDirect(assembled, { fetchImpl = fetch, redirect, credential } = {}) {
+  const body = encodeAssembledBody(assembled);
+  if (redirect === 'manual') {
+    const res = await fetchImpl(assembled.url, { method: assembled.method, headers: assembled.headers, body, redirect: 'manual' });
+    return normalizeResponse(res);
+  }
+  const res = await fetchFollowingRedirects(fetchImpl, {
+    method: assembled.method, url: assembled.url, headers: assembled.headers, body,
+  }, credential);
   return normalizeResponse(res);
+}
+
+// ---------------------------------------------------------------------------
+//  Redirect handling for credentialed requests
+// ---------------------------------------------------------------------------
+
+/** Max redirects followed for one direct request (fetch's own default is 20). */
+export const MAX_DIRECT_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+// Headers that describe a request body; dropped when a redirect turns the
+// request into a body-less GET (as fetch does).
+const BODY_HEADER_NAMES = new Set(['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']);
+
+/**
+ * Lower-cased names of the request headers that carry a credential: the
+ * standard ones (Authorization, Proxy-Authorization, Cookie), the connection's
+ * auth_injection header, and any header whose value contains the token (e.g. a
+ * headers_template value or a pre-baked custom scheme).
+ */
+function credentialHeaderNames(headers, { token, authInjection } = {}) {
+  const names = new Set(['authorization', 'proxy-authorization', 'cookie']);
+  if (authInjection && typeof authInjection === 'object' && authInjection.location === 'header' && authInjection.name) {
+    names.add(String(authInjection.name).toLowerCase());
+  }
+  const tok = token == null ? '' : String(token);
+  if (tok) {
+    for (const [k, v] of Object.entries(headers || {})) {
+      if (v != null && String(v).includes(tok)) names.add(k.toLowerCase());
+    }
+  }
+  return names;
+}
+
+function isReplayableBody(body) {
+  return body === undefined || body === null || typeof body === 'string'
+    || body instanceof Uint8Array || body instanceof ArrayBuffer;
+}
+
+async function discardBody(res) {
+  try { if (res && res.body && typeof res.body.cancel === 'function') await res.body.cancel(); } catch { /* best-effort */ }
+}
+
+/**
+ * fetch with redirects handled here instead of by fetch (`redirect: 'manual'`
+ * on every hop), so credentials never follow the request to another origin:
+ *   - same origin as the original request → follow with the headers as-is;
+ *   - any other origin → follow, but without every credential-bearing header
+ *     (credentialHeaderNames); once dropped they stay dropped for later hops;
+ *   - 303 → GET without body (HEAD stays HEAD); 301/302 turn a POST into a GET
+ *     without body (fetch semantics); 307/308 keep method and body;
+ *   - a 3xx without Location, or a 307/308 whose body cannot be replayed, is
+ *     returned as-is; a non-http(s) Location or more than `maxRedirects` hops
+ *     fails (502).
+ */
+async function fetchFollowingRedirects(fetchImpl, req, credential = {}, { maxRedirects = MAX_DIRECT_REDIRECTS } = {}) {
+  let { method, url, body } = req;
+  let headers = { ...(req.headers || {}) };
+  const strip = credentialHeaderNames(headers, credential);
+  const startOrigin = new URL(url).origin;
+  let stripped = false;
+  for (let hop = 0; ; hop++) {
+    const res = await fetchImpl(url, { method, headers, body, redirect: 'manual' });
+    if (!REDIRECT_STATUSES.has(res.status)) return res;
+    const location = getHeaderValue(res.headers, 'location');
+    if (!location) return res;
+    if ((res.status === 307 || res.status === 308) && !isReplayableBody(body)) return res;
+    if (hop >= maxRedirects) {
+      await discardBody(res);
+      throw Object.assign(new Error(`provider redirected more than ${maxRedirects} times`), { status: 502, code: 'too_many_redirects' });
+    }
+    let next;
+    try { next = new URL(location, url); } catch { next = null; }
+    if (!next || (next.protocol !== 'https:' && next.protocol !== 'http:')) {
+      await discardBody(res);
+      throw Object.assign(new Error('provider redirected to an unsupported location'), { status: 502, code: 'bad_redirect' });
+    }
+    await discardBody(res);
+    if (res.status === 303 ? (method !== 'GET' && method !== 'HEAD')
+      : ((res.status === 301 || res.status === 302) && method === 'POST')) {
+      method = 'GET';
+      body = undefined;
+      headers = Object.fromEntries(Object.entries(headers).filter(([k]) => !BODY_HEADER_NAMES.has(k.toLowerCase())));
+    }
+    if (!stripped && next.origin !== startOrigin) {
+      stripped = true;
+      headers = Object.fromEntries(Object.entries(headers).filter(([k]) => !strip.has(k.toLowerCase())));
+    }
+    url = next.toString();
+  }
 }
 
 // The wire body for an assembled request: request_spec encoders hand over
@@ -1117,6 +1389,10 @@ export async function invokeDirect(
   let cred = credential;
   const connId = connection.id;
   if (analysis) checkUnmappedParams(params, analysis);
+  // Host-protection context for every assembly of this invoke: the catalog
+  // (trusted origins) and the APPLICATION slug (static host rules) — the
+  // connection index slug, else the provider recorded with the credential.
+  const hostCtx = (c) => ({ catalog, slug: (connection && connection.slug) || (c && c.provider) || null });
 
   // Proactive refresh: refreshable (OAuth) tokens only, and only when they carry
   // an `expires_at` that is at/near expiry. api_key (token_type "api_key") is
@@ -1134,7 +1410,7 @@ export async function invokeDirect(
 
   if (analysis) {
     return invokeRequestSpec({
-      orgId, connId, actionDef, params, catalog, analysis,
+      orgId, connId, actionDef, params, catalog, analysis, hostCtx,
       getCred: () => cred, setCred: (c) => { cred = c; },
     }, { ...deps, fetchImpl, acquire, saveCache, audit, log, warn });
   }
@@ -1157,14 +1433,17 @@ export async function invokeDirect(
       tokenType = 'bearer';
       authInjection = null;
     }
-    const assembled = assembleRequest(actionDef, sendParams, token, c && c.url_placeholders, tokenType, authInjection);
+    const assembled = assembleRequest(actionDef, sendParams, token, c && c.url_placeholders, tokenType, authInjection, hostCtx(c));
     if (exchange && !isGraphOrigin(assembled.url)) {
       throw Object.assign(new Error(`refusing to send a derived Page access token outside ${META_GRAPH_ORIGIN}`), { status: 422 });
     }
     auditDirectCall(assembled.method, actionDef.url_template, params, audit);
     // A derived Page token must never ride a redirect off the Graph origin:
     // with an exchange the 3xx is returned as-is (same rule as _download).
-    return sendDirect(assembled, exchange ? { fetchImpl, redirect: 'manual' } : { fetchImpl });
+    // Otherwise redirects are followed without the credential off-origin.
+    return sendDirect(assembled, exchange
+      ? { fetchImpl, redirect: 'manual' }
+      : { fetchImpl, credential: { token, authInjection } });
   };
 
   // Re-acquire the connection credential once (reactive backstop). Returns true
@@ -1249,7 +1528,7 @@ function setContentType(headers, contentType) {
 
 function originOfUrl(u) { try { return new URL(u).origin; } catch { return null; } }
 
-async function invokeRequestSpec({ orgId, connId, actionDef, params, catalog, analysis, getCred, setCred }, deps) {
+async function invokeRequestSpec({ orgId, connId, actionDef, params, catalog, analysis, hostCtx, getCred, setCred }, deps) {
   const { fetchImpl, acquire, saveCache, audit, log } = deps;
   const { spec, encoding } = analysis;
 
@@ -1264,27 +1543,33 @@ async function invokeRequestSpec({ orgId, connId, actionDef, params, catalog, an
     setCred(fresh);
     return true;
   };
+  // Redirects are followed without the credential off-origin
+  // (fetchFollowingRedirects), same as the plain path.
+  const fetchReq = (req) => {
+    const c = getCred();
+    return fetchFollowingRedirects(fetchImpl, req, { token: c && c.access_token, authInjection: c && c.auth_injection });
+  };
   const sendBuilt = async (build, { refreshOn401 = true } = {}) => {
     let req = build(getCred());
-    let res = await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body });
+    let res = await fetchReq(req);
     if (res.status === 401 && refreshOn401 && await refresh()) {
       log(`[conn.direct] provider 401 conn=${connId}; reactive refresh + retry once`);
       try { if (res.body && typeof res.body.cancel === 'function') await res.body.cancel(); } catch { /* best effort */ }
       req = build(getCred());
-      res = await fetchImpl(req.url, { method: req.method, headers: req.headers, body: req.body });
+      res = await fetchReq(req);
     }
     return normalizeResponse(res);
   };
   const base = (def, p, opts) => {
     const c = getCred();
-    return assembleBase(def, p, c && c.access_token, c && c.url_placeholders, c && c.token_type, c && c.auth_injection, opts);
+    return assembleBase(def, p, c && c.access_token, c && c.url_placeholders, c && c.token_type, c && c.auth_injection, { ...hostCtx(c), ...opts });
   };
   // Full (URL + headers + body) assembly with the current credential's
   // url_placeholders but WITHOUT auth — used for batch sub-requests, which
   // ride inside the authenticated outer request.
   const assembleNoAuth = (def, p) => {
     const c = getCred();
-    return assembleRequest(def, p, '', c && c.url_placeholders, '', null, { noAuth: true });
+    return assembleRequest(def, p, '', c && c.url_placeholders, '', null, { ...hostCtx(c), noAuth: true });
   };
 
   // ③ prefetch (read-only GETs of same-catalog actions)
