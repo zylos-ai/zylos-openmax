@@ -219,7 +219,7 @@ function logRpcResponse(method, url, status, data, quietOnSuccess) {
   appendRpcLine(line);
 }
 
-async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId, timeoutMs, quietOnSuccess, retryOn401 = true } = {}) {
+async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId, timeoutMs, quietOnSuccess, retryOn401 = true, omitLogBodies = false } = {}) {
   const url = buildUrl(baseUrl, path, query);
 
   // Single attempt: resolve token, send, parse response. Returned shape lets
@@ -234,7 +234,10 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
     if (token) headers.Authorization = `Bearer ${token}`;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-    logRpcRequest(method, url, body, orgId, quietOnSuccess);
+    // omitLogBodies: the caller's request/response bodies must never reach a log
+    // sink (e.g. Computer Use: typed text + base64 screenshots). Method/URL/status
+    // are still logged.
+    logRpcRequest(method, url, omitLogBodies && body !== undefined ? '(omitted)' : body, orgId, quietOnSuccess);
 
     const res = await fetch(url, {
       method,
@@ -251,7 +254,7 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
     let data;
     try { data = JSON.parse(text); } catch { data = text; }
 
-    logRpcResponse(method, url, res.status, data, quietOnSuccess);
+    logRpcResponse(method, url, res.status, omitLogBodies ? '(omitted)' : data, quietOnSuccess);
     return { res, data, text };
   };
 
@@ -365,8 +368,8 @@ export const del   = (path)        => request('DELETE', path);
 // They resolve the JWT against that specific org's cache, so a multi-org
 // agent never accidentally calls cws-core with the wrong org's token.
 export const getForOrg   = (orgId, path, query, { timeoutMs, extraHeaders } = {}) => request('GET', path, { query, orgId, timeoutMs, extraHeaders });
-export const postForOrg  = (orgId, path, body, { timeoutMs, quietOnSuccess, retryOn401 } = {}) =>
-  request('POST', path, { body, orgId, timeoutMs, quietOnSuccess, retryOn401 });
+export const postForOrg  = (orgId, path, body, { timeoutMs, quietOnSuccess, retryOn401, omitLogBodies } = {}) =>
+  request('POST', path, { body, orgId, timeoutMs, quietOnSuccess, retryOn401, omitLogBodies });
 
 // Org-scoped GET that also attaches caller-supplied request headers — used when
 // a route needs a one-shot bearer that is NOT the org JWT (e.g. cws-connect's
