@@ -5,6 +5,17 @@ import { automationAuthorizationPreview, automationAuthorizationProposal, automa
 const base = { lead_member_id: 'agent', owner_member_id: 'human', spec: { project_id: 'project', title: 'Task' } };
 const cardID = '01000000-0000-4000-8000-000000000002';
 
+test('requester UUID case does not change self identity or erase a distinct confirmer', () => {
+  const requester = 'abcdefab-0000-4000-8000-000000000003';
+  for (const [human, owner] of [[requester.toUpperCase(), requester], [requester, requester.toUpperCase()]]) {
+    const params = { source_kind: 'timer', operation: 'create', request_id: cardID,
+      requester_member_id: human, configuration: { ...base, owner_member_id: owner, timezone: 'Asia/Singapore' } };
+    assert.equal(Object.hasOwn(automationAuthorizationProposal(params), 'requester_member_id'), false);
+    assert.equal(automationAuthorizationProposal({ ...params,
+      configuration: { ...params.configuration, owner_member_id: 'abcdefab-0000-4000-8000-000000000004' } }).requester_member_id, human);
+  }
+});
+
 test('self-owned proposals omit redundant requester for the legacy strict schema', () => {
   for (const source_kind of ['timer', 'webhook']) {
     for (const operation of ['create', 'update']) {

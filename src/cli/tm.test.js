@@ -154,13 +154,14 @@ test('Owner assignment sends requester separately and preserves target through m
   assert.equal(request.body.configuration.owner_member_id, target);
   assert.equal(Object.hasOwn(request.body.configuration, 'requester_member_id'), false);
   const mutation = await captureRequest('event-binding.create', {
-    org: params.org, source_kind: 'timer', configuration, ...cardProof,
+    org: params.org, source_kind: 'timer', requester_member_id: requester, configuration, ...cardProof,
   });
+  assert.equal(Object.hasOwn(mutation.body, 'requester_member_id'), false);
   assert.deepEqual(mutation.body, { ...configuration, ...cardProof });
 });
 
 test('self-owned create and update retain the legacy proposal HTTP body even with a redundant requester', async () => {
-  const requester = '01000000-0000-4000-8000-000000000003';
+  const requester = 'abcdefab-0000-4000-8000-000000000003';
   for (const source_kind of ['timer', 'webhook']) {
     for (const operation of ['create', 'update']) {
       const configuration = { ...readableProposal.configuration, owner_member_id: requester };
@@ -171,7 +172,7 @@ test('self-owned create and update retain the legacy proposal HTTP body even wit
       const proposal = { ...readableProposal, operation, source_kind, configuration,
         ...(operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {}) };
       const request = await captureRequest('automation.authorization_propose', {
-        org: 'org-automation', ...proposal, requester_member_id: requester,
+        org: 'org-automation', ...proposal, requester_member_id: requester.toUpperCase(),
       });
       assert.equal(request.url, '/api/v1/automation-authorizations/proposals');
       assert.deepEqual(request.body, proposal);

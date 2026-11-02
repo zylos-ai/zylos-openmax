@@ -11,6 +11,7 @@ const schedule = readReference('automation-schedule.md');
 const recovery = readReference('automation-recovery.md');
 const webhook = readReference('automation-webhook.md');
 const update = readReference('automation-update.md');
+const skill = readFileSync(new URL('../../SKILL.md', import.meta.url), 'utf8');
 // Evaluate the reachable workflow, including its conditional failure branch.
 const reference = [creation, common, schedule, recovery, webhook].join('\n');
 const delivery = readFileSync(new URL('../../references/automation-delivery.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
@@ -303,6 +304,11 @@ const cardConfirmationGuards = [
 ];
 
 const ownerAssignmentGuards = [
+  ['common positive requester', 'common', /Owner handover, set `requester_member_id` to the verified human source sender \(creator on create, persisted current Owner on update\), outside configuration/],
+  ['skill positive requester', 'skill', /Verify the current Owner separately from the desired new Owner; do not register a new Issue or change the authenticated requester to the recipient/],
+  ['creation positive requester', 'creation', /When `configuration.owner_member_id` names a colleague, pass the verified creator as `requester_member_id`/],
+  ['update positive requester', 'update', /an Owner handover must send the verified persisted current Owner, never the target colleague/],
+  ['operations positive requester', 'operations', /pass the verified creating human \(current Owner for update\); configuration's/],
   ['verified confirmer', 'common', /The verified human is the confirmer, not necessarily the desired Owner/],
   ['persisted current Owner', 'common', /Updates require the verified human to be the persisted current Owner/],
   ['no target impersonation', 'common', /Never set requester to the target colleague/],
@@ -326,15 +332,20 @@ function assertOwnerAssignment(sources) {
   }
 }
 test('Owner assignment instructions preserve authorization, responsibility and compatibility', () => {
-  assertOwnerAssignment({ common, creation, update });
+  assertOwnerAssignment({ common, creation, update, skill, operations });
 });
 test('Owner assignment guards reject every deleted rule and weakened authorization', () => {
-  const sources = Object.fromEntries(Object.entries({ common, creation, update }).map(([key, value]) => [key, value.replace(/\s+/g, ' ')]));
+  const sources = Object.fromEntries(Object.entries({ common, creation, update, skill, operations }).map(([key, value]) => [key, value.replace(/\s+/g, ' ')]));
   for (const [, scope, pattern] of ownerAssignmentGuards) {
     assert.match(sources[scope], pattern, 'mutation must change an existing rule');
     assert.throws(() => assertOwnerAssignment({ ...sources, [scope]: sources[scope].replace(pattern, '') }), /missing Owner safeguard/);
   }
   for (const [scope, from, to] of [
+    ['common', 'set `requester_member_id` to the verified human source sender', 'set `requester_member_id` to the target colleague'],
+    ['skill', 'Verify the current Owner separately from the desired new Owner', 'Use the desired new Owner as the current Owner'],
+    ['creation', 'pass the verified creator as `requester_member_id`', 'pass the target colleague as `requester_member_id`'],
+    ['update', 'send the verified persisted current Owner, never the target colleague', 'send the target colleague, never the persisted current Owner'],
+    ['operations', 'pass the verified creating human (current Owner for update)', 'pass the desired target Owner (recipient for update)'],
     ['common', 'Never set requester to the target colleague', 'Set requester to the target colleague'],
     ['update', 'An organization administrator who is not the current Owner cannot authorize it', 'Any organization administrator can authorize it'],
     ['update', 'Only the current Owner confirms', 'The recipient confirms'],

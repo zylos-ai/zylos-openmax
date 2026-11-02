@@ -95,7 +95,7 @@ export function automationAuthorizationProposal(params) {
     throw Object.assign(new Error('replaces_proposal_message_id must be a canonical decimal message ID string'), { status: 400 });
   }
   return { ...plan, request_id: params.request_id,
-    ...(requester === undefined || requester === plan.configuration.owner_member_id
+    ...(requester === undefined || requester.toLowerCase() === plan.configuration.owner_member_id?.toLowerCase()
       ? {} : { requester_member_id: requester }),
     ...(replacement === undefined ? {} : { replaces_proposal_message_id: replacement }) };
 }
