@@ -125,10 +125,8 @@ to resolve this uncertainty. Preserve the terminal-run safeguards below.
    If the Issue is already terminal, do not start another Attempt, alter Tasks,
    or submit a new result. A timeout or cancellation is a terminal fence: stop
    this run's execution and preserve outputs. A late success cannot overwrite it.
-2. Create and submit the Blueprint through the normal plan API. The server
-   applies the automation policy; read back the state and proceed only when the
-   server has advanced it. Do not request human plan acceptance or synthesize
-   `source=text_card_proxy` acceptance.
+2. Establish the accepted plan using the Issue plan-state gate below. Do not
+   request human plan acceptance or synthesize `source=text_card_proxy` acceptance.
 3. Execute and record Attempt/Task outcomes. Complete the inner state transitions
    and output comments before delivering the Issue. Report partial or failed
    execution truthfully; do not mark unsuccessful Tasks done to unblock delivery.
@@ -144,6 +142,96 @@ to resolve this uncertainty. Preserve the terminal-run safeguards below.
    responsible Agent in the bound DM. Do not separately `comm.send` the same
    result, send it through the Scheduler DM, or ask the user to accept it in Work.
    Automatic closure records that the run ended, not human endorsement.
+
+### Issue plan-state gate
+
+`blueprint.create` creates a plan object. `issue.submit_plan` submits that exact
+Blueprint to the Issue. For server-read `automation_policy: "silent"`, Work
+submits and automatically accepts the Issue plan in the same transaction:
+`in_progress` -> `pending_plan` -> `in_progress`, with `current_blueprint_id` set
+to the submitted Blueprint. The response is an Issue, not a Blueprint.
+`Blueprint.status` is a separate object lifecycle; it may remain `draft` after
+successful automatic Issue plan acceptance. Neither `draft` nor `approved` on a
+Blueprint alone proves whether this Issue's current plan was accepted.
+
+Before submission, read `blueprint.get {id,includeSteps:true}` and verify its
+`issue_id` matches the exact run. Retain the Blueprint ID, `version_number` and
+the actual step IDs/content/dependencies (and content hash when present) that you
+intend to execute. Submit it once with `issue.submit_plan {id,blueprintId,planText}`.
+Check the successful response and a fresh `issue.get`: both must name that Issue
+and org, its responsible Agent, `automation_policy: "silent"`, the submitted
+`current_blueprint_id`, and `status: "in_progress"`. Re-read the referenced
+Blueprint with steps and verify the same Issue, ID, version and step content.
+Only then continue Task/Attempt execution against those steps. Do not wait for
+Blueprint status to become `approved` or ask a human to accept this silent plan.
+
+When resuming after a lost response or earlier local blocker, read the existing
+Issue and its referenced Blueprint first. The authoritative Issue itself is the
+durable acceptance evidence: verify exact Issue/org, `lead_agent_id` is this
+Agent, `automation_policy: "silent"`, no `archived_at`, `status: "in_progress"`,
+and nonempty `current_blueprint_id` equal to this Blueprint's `id`; its
+`issue_id` must match. This is the executable subset of Work's
+`PlanAcceptanceReplayed()` definition. A generic `in_progress` Issue without
+that matching current-plan binding is not acceptance evidence. Work also regards
+`delivered` and `accepted` as already accepted for replay, but neither state
+permits further execution. All terminal and archived states still stop this run.
+Core omits empty optional fields: absent `archived_at` means not archived on
+this verified response contract; absent step `depends_on`/`required_resources`
+mean empty dependencies/resources. Do not wait for explicit null or empty fields.
+
+A lost submit response or Agent-attributed plan comment is not itself a blocker.
+Work writes automatic plan records using the caller Lead's member ID, so author
+identity does not distinguish a server-generated record from a manually written
+comment. Neither comment text nor notification text grants acceptance; the fresh
+Issue binding above does. Do not require a separate server-author identity.
+
+Verify the execution steps separately from Issue acceptance. If the pre-submit
+snapshot is retained, compare Blueprint ID/version and every step's ID,
+description, sort order, resources and dependencies with it. If that snapshot
+was lost, use `comment.list {workType:"issue",workId:<Issue>}` with pagination to
+locate the original acceptance transition for this current Blueprint: the
+`pending_plan` -> `in_progress` status record adjacent to the plan record naming
+this Blueprint. Use its `created_at` as the time baseline, not Issue.updated_at
+(later comments advance that) or the time of a replay response. Compare the
+Blueprint and each current step's `created_at` and `updated_at` to that baseline;
+none may be later. Verify each step belongs to this Blueprint and reconcile the
+step contents/dependencies with the recorded plan and any existing Tasks before
+resuming. Record the recovered snapshot for subsequent comparisons. Missing or
+ambiguous history, later step edits or an unexplained task/plan mismatch requires
+reconciliation, not treating a draft Blueprint as unaccepted. Timestamps are a
+conservative change check, not an immutable snapshot or proof that no step was
+deleted; do not ignore known missing steps or other contradictory evidence.
+
+After the fresh Issue binding and step checks pass, you may call
+`issue.submit_plan` once with the SAME Issue and current Blueprint to recover an
+authoritative response, retaining the original plan text. Work returns the
+persisted Issue without another transition/comment when `PlanAcceptanceReplayed()`
+and the same `current_blueprint_id` hold. This is optional: the verified Issue
+binding already proves acceptance. Re-read Issue/Blueprint before execution;
+do not repeat this call blindly after an error, use another Blueprint, or use
+replay to reset the step time baseline. A state/Lead/plan change stops recovery.
+
+Do not mutate an accepted Blueprint: no `blueprint.set_steps`, step add/update/
+delete, dependency/resource changes or other plan edits after acceptance, even
+when its status is still `draft`. The backend currently permits draft step edits
+without changing the Blueprint version, so version equality alone is insufficient.
+An intentional replan requires a new Blueprint and the normal submit/accept
+workflow while the Issue remains executable; never create a replacement merely
+to change the displayed status or silently discard existing Tasks.
+
+| Verified state for this exact run | Action |
+| --- | --- |
+| Silent Issue has matching accepted current Blueprint, in_progress, no archive; recovered step checks pass; Blueprint still draft | Continue or resume Tasks and Attempts for that accepted plan |
+| Issue in_progress but current Blueprint is missing or mismatched | Reconcile the plan; do not execute or infer acceptance |
+| Current Blueprint ID, Issue, version or step content differs from the submitted/accepted plan | Stop and reconcile the changed plan before execution |
+| Issue remains pending_plan, or ordinary human acceptance is required | Wait for the real acceptance workflow; never proxy acceptance |
+| External-action approval is pending | Keep that action blocked until its actual approval |
+| Issue is terminal or archived | Stop; do not create Tasks, Attempts or a new result |
+
+Do not call `issue.accept_plan`, edit Blueprint status, or bypass an endpoint
+error to force progress. A successful HTTP response without the matching Issue
+plan-state readback is insufficient. Report actual missing or conflicting
+evidence; an unchanged Blueprint `draft` alone is not such a conflict.
 
 Read the actual delivery outcome as well as Issue status. A successful or valid
 partial automation delivery closes as `accepted`; `failed` closes as
