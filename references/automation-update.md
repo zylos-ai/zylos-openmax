@@ -62,6 +62,9 @@ access unchanged. Only the current Owner confirms; do not seek a second card
 from the recipient. Changes to other fields use the same full configuration,
 version and single confirmation. Owner and trigger-kind changes cannot be
 combined; explain that they must be saved separately before proposing.
+If the returned card omits any of these responsibility changes or the complete
+resulting configuration, stop before confirmation or mutation and reconcile with
+the server; never infer missing card contents or supply a second authorization card.
 
 The server resolves the future target-Owner/Lead result DM. Never include a DM
 ID in configuration or forward private confirmation history. Read back the
@@ -146,10 +149,13 @@ Use Common's single server-card proposal/readback/status process, with a new UUI
 for the exact revision (not the handoff correlation ID):
 
 ```text
-automation.authorization_propose {org,request_id,requester_member_id,source_kind,operation:"update",target_binding_id,expected_version,configuration}
+automation.authorization_propose {org,request_id,requester_member_id?,source_kind,operation:"update",target_binding_id,expected_version,configuration}
 ```
 
 Record the agreed target/version and full replacement before proposing. Explain
+that unchanged-Owner updates omit `requester_member_id`; an Owner handover must
+send the verified persisted current Owner, never the target colleague. Follow
+Common's Core-first compatibility rule and stop if unsupported. Explain
 that this modifies an existing automation and show its resulting task, project,
 owner, Agent, trigger/timezone and output. For a trigger change, explain that a
 new automation replaces and pauses the original while retaining old run history

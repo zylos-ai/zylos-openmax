@@ -70,16 +70,26 @@ inputs must be complete before mutation; explain anything still missing.
 
 Record the exact configuration and a new UUID `request_id` dedicated to this
 final revision, separate from the form correlation ID. Call
-`tm.js automation.authorization_propose {org,request_id,requester_member_id,source_kind,operation,configuration}`:
+`tm.js automation.authorization_propose {org,request_id,requester_member_id?,source_kind,operation,configuration}`:
 use `operation:"create"` for creation, or `operation:"update"` with authoritative
 `target_binding_id` and `expected_version` for update. Never substitute create
 for update. The update plan must clearly describe modifying the existing binding.
-Set `requester_member_id` to the verified human source sender (creator on create,
-current Owner on update), outside configuration. The desired human Owner stays
+For self-owned creation or an update retaining the verified current Owner, omit
+`requester_member_id` from the proposal; the existing server contract remains unchanged.
+Only when the desired Owner differs from the verified confirmer, including an
+Owner handover, set `requester_member_id` to the verified human source sender
+(creator on create, persisted current Owner on update), outside configuration.
+The CLI omits a redundant requester equal to the configured Owner for legacy
+compatibility; this comparison does not verify identity or grant authorization.
+The desired human Owner stays
 in `configuration.owner_member_id`. Never set requester to the target colleague.
 Core verifies the actual confirmer's card interaction and target eligibility;
 this CLI parameter alone grants no authority. Confirmation stays in the original
 requester-Agent DM; the server resolves the target Owner's future delivery DM.
+Cross-Owner proposals require the matching Core contract to be deployed first.
+If the server rejects the requester field or does not support Owner assignment,
+stop without mutation; never strip that field, substitute the target as confirmer,
+or retry through an older endpoint to bypass the rejection.
 
 The server sends one readable Confirm/Modify/Cancel card in the same DM: task,
 project, human owner, Agent, trigger (local time/timezone, once or recurring with

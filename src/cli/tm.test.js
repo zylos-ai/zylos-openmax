@@ -156,9 +156,28 @@ test('Owner assignment sends requester separately and preserves target through m
   const mutation = await captureRequest('event-binding.create', {
     org: params.org, source_kind: 'timer', configuration, ...cardProof,
   });
-  assert.equal(mutation.body.owner_member_id, target);
-  assert.equal(Object.hasOwn(mutation.body, 'requester_member_id'), false);
-  assert.equal(mutation.body.authorization_card_interaction_id, cardProof.authorization_card_interaction_id);
+  assert.deepEqual(mutation.body, { ...configuration, ...cardProof });
+});
+
+test('self-owned create and update retain the legacy proposal HTTP body even with a redundant requester', async () => {
+  const requester = '01000000-0000-4000-8000-000000000003';
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      const configuration = { ...readableProposal.configuration, owner_member_id: requester };
+      if (source_kind === 'webhook') {
+        delete configuration.schedule_kind; delete configuration.cron_expr; delete configuration.timezone;
+        configuration.event_filter = '';
+      }
+      const proposal = { ...readableProposal, operation, source_kind, configuration,
+        ...(operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {}) };
+      const request = await captureRequest('automation.authorization_propose', {
+        org: 'org-automation', ...proposal, requester_member_id: requester,
+      });
+      assert.equal(request.url, '/api/v1/automation-authorizations/proposals');
+      assert.deepEqual(request.body, proposal);
+      assert.equal(Object.hasOwn(request.body, 'requester_member_id'), false);
+    }
+  }
 });
 
 test('replacement proposal preserves immutable replacement identity on explicit retry', async () => {
