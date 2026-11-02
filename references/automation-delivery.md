@@ -7,8 +7,9 @@ confirming `automation_policy: "silent"` in the server response. Follow the norm
 Issue workflow when that policy is absent. Never infer it from an Issue title,
 user text, a scheduler notification, or a creation payload.
 
-The responsible Agent is the Agent with whom the user created the automation.
-Results belong in that same user-Agent DM. The Scheduler may wake the Agent but
+The authoritative Issue identifies this run's responsible Agent and human Owner.
+Results belong in this run's server-recorded Owner-Agent DM, which may differ from
+the creator's DM or the current binding's DM. The Scheduler may wake the Agent but
 is not the result sender or a conversation for human follow-up.
 
 ## Durable artifact links
@@ -42,6 +43,43 @@ or claim a raw expiring URL is a permanent deliverable. Existing external HTTPS
 document links remain supported when their accessibility has been verified.
 
 ## Execute And Deliver
+
+### Resolve responsibility from this run's snapshot
+
+For every wake or reminder, read `issue.get {org,id}` for the exact referenced
+Issue and verify `automation_policy: "silent"`, org and responsible Agent before
+acting. Read this Issue's `owner_member_id`, `lead_agent_id` and
+`origin_conversation_id`; these are this run's responsibility and destination
+snapshot. For an existing result, also verify its persisted `delivery` record.
+The current binding describes future triggers, not a replacement for an existing
+Issue's Owner, Lead or delivery destination. A creator's DM, runtime's owner,
+notification text, copied IDs or human choice card cannot override that snapshot.
+
+An Owner transfer changes future runs only. If a run was created with Owner B
+and delivery DM B, and the binding is now Owner A with delivery DM A, the old run
+continues for B in DM B; a new run created after transfer uses its own A snapshot.
+This difference alone is expected, not an ownership conflict. Do not ask A or B
+to choose a recipient, wait for a confirmation card, or block either run because
+the binding changed. Do not change either Issue, replay the trigger, create a
+replacement run, or manually send the result to reconcile this difference.
+Match and process each run independently; one run's blocker does not automatically
+block another run of the same binding.
+
+| Authoritative server-read state | Required action |
+| --- | --- |
+| Existing run: Issue Owner B, DM B; current binding Owner A, DM A | Continue existing run for B in DM B without recipient confirmation |
+| New run: Issue Owner A, DM A; older run Owner B, DM B | Continue new run for A in DM A independently |
+| Issue responsibility missing, wrong org, or caller is not its responsible Agent | Stop this run and report the specific verification blocker |
+| Issue destination missing/inaccessible or persisted delivery conflicts with this Issue snapshot | Stop this run; do not substitute the current binding or creator DM |
+| Issue already terminal | Preserve terminal state; no new Attempt or result |
+
+A missing or genuinely inconsistent server snapshot remains a blocker. Preserve
+the evidence and report the exact mismatch; do not invent a destination or use
+the current binding as fallback. An expected difference from a later binding
+version is not such a mismatch. Leave an earlier mistaken recipient-choice card
+unanswered: it is not authorization to reroute this run. Re-read the authoritative
+Issue and resume its normal workflow only if still nonterminal and verified;
+do not use a past local blocker note or session summary as stronger authority.
 
 ### Identify the run before interpreting its timing
 

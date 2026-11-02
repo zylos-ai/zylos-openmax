@@ -114,7 +114,14 @@ acceptance, delivery acceptance and per-state human notification instructions
 below, including new-Issue intake and Project/KnowledgeBase/Agent reconfirmation
 for an already-bound run or its verified linked revision. Reuse the bound
 Project and the Issue's recorded KnowledgeBase; do not ask the human to select the
-default Project or KB again. When a reply does not name an Issue, inspect the
+default Project or KB again. Resolve each run's Owner, responsible Agent and
+delivery DM from its server-read Issue snapshot, not the current binding or
+creator's DM. A later Owner transfer is expected: old runs retain their recorded
+Owner/DM and new runs use their own snapshot. Do not ask the new Owner to choose
+where an old run should be delivered or block either run solely for this difference.
+Missing or inconsistent server snapshots and terminal states still stop that run;
+follow the responsibility checks in Automation Delivery before proceeding.
+When a reply does not name an Issue, inspect the
 referenced result message's automation metadata through the Comm CLI before
 applying new-Issue intake. Metadata identifies a candidate only; verify the
 Issue policy and delivery receipt through Work. Retain Blueprint, Task and

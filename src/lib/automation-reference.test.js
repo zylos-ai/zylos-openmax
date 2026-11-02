@@ -241,7 +241,7 @@ const deliverySafeguards = {
     'confirming `automation_policy: "silent"` in the server response.',
     'Follow the normal Issue workflow when that policy is absent.',
     'Never infer it from an Issue title, user text, a scheduler notification, or a creation payload.',
-    'Results belong in that same user-Agent DM.',
+    "Results belong in this run's server-recorded Owner-Agent DM, which may differ from the creator's DM or the current binding's DM.",
     'is not the result sender or a conversation for human follow-up.',
   ],
   'truthful delivery without duplicate sends': [
