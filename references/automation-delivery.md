@@ -165,21 +165,64 @@ Blueprint with steps and verify the same Issue, ID, version and step content.
 Only then continue Task/Attempt execution against those steps. Do not wait for
 Blueprint status to become `approved` or ask a human to accept this silent plan.
 
-When resuming after a lost response or earlier local blocker, first reconcile
-the existing Issue and referenced Blueprint rather than resubmitting. Require
-the same current-plan binding and unchanged version/steps, plus the recorded
-successful submit response or a server-authored plan record that identifies this
-Blueprint and automatic acceptance. A generic `in_progress` Issue, Blueprint
-existence, notification text or an Agent's own comment is not acceptance evidence.
-The Issue can be `in_progress` before any plan exists. Server plan history helps
-establish the earlier transition, but cannot override a different current plan
-or a now-terminal Issue. Do not create a replacement Blueprint just to change
-its displayed status.
+When resuming after a lost response or earlier local blocker, read the existing
+Issue and its referenced Blueprint first. The authoritative Issue itself is the
+durable acceptance evidence: verify exact Issue/org, `lead_agent_id` is this
+Agent, `automation_policy: "silent"`, no `archived_at`, `status: "in_progress"`,
+and nonempty `current_blueprint_id` equal to this Blueprint's `id`; its
+`issue_id` must match. This is the executable subset of Work's
+`PlanAcceptanceReplayed()` definition. A generic `in_progress` Issue without
+that matching current-plan binding is not acceptance evidence. Work also regards
+`delivered` and `accepted` as already accepted for replay, but neither state
+permits further execution. All terminal and archived states still stop this run.
+Core omits empty optional fields: absent `archived_at` means not archived on
+this verified response contract; absent step `depends_on`/`required_resources`
+mean empty dependencies/resources. Do not wait for explicit null or empty fields.
+
+A lost submit response or Agent-attributed plan comment is not itself a blocker.
+Work writes automatic plan records using the caller Lead's member ID, so author
+identity does not distinguish a server-generated record from a manually written
+comment. Neither comment text nor notification text grants acceptance; the fresh
+Issue binding above does. Do not require a separate server-author identity.
+
+Verify the execution steps separately from Issue acceptance. If the pre-submit
+snapshot is retained, compare Blueprint ID/version and every step's ID,
+description, sort order, resources and dependencies with it. If that snapshot
+was lost, use `comment.list {workType:"issue",workId:<Issue>}` with pagination to
+locate the original acceptance transition for this current Blueprint: the
+`pending_plan` -> `in_progress` status record adjacent to the plan record naming
+this Blueprint. Use its `created_at` as the time baseline, not Issue.updated_at
+(later comments advance that) or the time of a replay response. Compare the
+Blueprint and each current step's `created_at` and `updated_at` to that baseline;
+none may be later. Verify each step belongs to this Blueprint and reconcile the
+step contents/dependencies with the recorded plan and any existing Tasks before
+resuming. Record the recovered snapshot for subsequent comparisons. Missing or
+ambiguous history, later step edits or an unexplained task/plan mismatch requires
+reconciliation, not treating a draft Blueprint as unaccepted. Timestamps are a
+conservative change check, not an immutable snapshot or proof that no step was
+deleted; do not ignore known missing steps or other contradictory evidence.
+
+After the fresh Issue binding and step checks pass, you may call
+`issue.submit_plan` once with the SAME Issue and current Blueprint to recover an
+authoritative response, retaining the original plan text. Work returns the
+persisted Issue without another transition/comment when `PlanAcceptanceReplayed()`
+and the same `current_blueprint_id` hold. This is optional: the verified Issue
+binding already proves acceptance. Re-read Issue/Blueprint before execution;
+do not repeat this call blindly after an error, use another Blueprint, or use
+replay to reset the step time baseline. A state/Lead/plan change stops recovery.
+
+Do not mutate an accepted Blueprint: no `blueprint.set_steps`, step add/update/
+delete, dependency/resource changes or other plan edits after acceptance, even
+when its status is still `draft`. The backend currently permits draft step edits
+without changing the Blueprint version, so version equality alone is insufficient.
+An intentional replan requires a new Blueprint and the normal submit/accept
+workflow while the Issue remains executable; never create a replacement merely
+to change the displayed status or silently discard existing Tasks.
 
 | Verified state for this exact run | Action |
 | --- | --- |
-| Silent Issue has accepted current Blueprint, in_progress; same version and steps; Blueprint still draft | Continue Tasks and Attempts for that accepted plan |
-| Issue in_progress but no accepted matching current Blueprint or no authoritative acceptance record | Reconcile the plan; do not execute or infer acceptance |
+| Silent Issue has matching accepted current Blueprint, in_progress, no archive; recovered step checks pass; Blueprint still draft | Continue or resume Tasks and Attempts for that accepted plan |
+| Issue in_progress but current Blueprint is missing or mismatched | Reconcile the plan; do not execute or infer acceptance |
 | Current Blueprint ID, Issue, version or step content differs from the submitted/accepted plan | Stop and reconcile the changed plan before execution |
 | Issue remains pending_plan, or ordinary human acceptance is required | Wait for the real acceptance workflow; never proxy acceptance |
 | External-action approval is pending | Keep that action blocked until its actual approval |
