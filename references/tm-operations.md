@@ -368,6 +368,9 @@ When a human says in a DM "help me set up a scheduled task", you (the selected l
 #    - which project it belongs to
 #    - what to do when the time comes → title / description, ask for as much context as possible
 # 1) Have automation.authorization_propose send one confirmation card.
+#    Omit requester_member_id for self-owned proposals. For a different Owner,
+#    pass the verified creating human (current Owner for update); configuration's
+#    owner_member_id may be their explicitly selected eligible colleague.
 # 2) After its trusted receipt, use automation.authorization_status to verify confirmation.
 #    Create with the recorded proposal and returned interaction UUID; never use placeholders as proof.
 node src/cli/tm.js event-binding.create '{
@@ -386,7 +389,9 @@ node src/cli/tm.js event-binding.create '{
 
 Key points:
 
-- **owner=human, lead=yourself** is a hard constraint; filling it in wrong is rejected directly (see the guardrails above)
+- **owner=eligible human, lead=yourself** is a creation constraint. The confirming
+  requester is the creator and can explicitly assign a different eligible human
+  Owner; use the verified server-card workflow, never proofless impersonation.
 - For explicit form handoffs, required missing information must be resolved and the latest plan confirmed in the human's DM before creation; follow the Automation Creation workflow above.
 
 ## Relationship with SKILL.md

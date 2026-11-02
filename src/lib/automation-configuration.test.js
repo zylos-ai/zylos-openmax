@@ -5,6 +5,55 @@ import { automationAuthorizationPreview, automationAuthorizationProposal, automa
 const base = { lead_member_id: 'agent', owner_member_id: 'human', spec: { project_id: 'project', title: 'Task' } };
 const cardID = '01000000-0000-4000-8000-000000000002';
 
+test('requester UUID case does not change self identity or erase a distinct confirmer', () => {
+  const requester = 'abcdefab-0000-4000-8000-000000000003';
+  for (const [human, owner] of [[requester.toUpperCase(), requester], [requester, requester.toUpperCase()]]) {
+    const params = { source_kind: 'timer', operation: 'create', request_id: cardID,
+      requester_member_id: human, configuration: { ...base, owner_member_id: owner, timezone: 'Asia/Singapore' } };
+    assert.equal(Object.hasOwn(automationAuthorizationProposal(params), 'requester_member_id'), false);
+    assert.equal(automationAuthorizationProposal({ ...params,
+      configuration: { ...params.configuration, owner_member_id: 'abcdefab-0000-4000-8000-000000000004' } }).requester_member_id, human);
+  }
+});
+
+test('self-owned proposals omit redundant requester for the legacy strict schema', () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      const params = { source_kind, operation, request_id: cardID,
+        configuration: { ...base, owner_member_id: cardID, ...(source_kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}) },
+        ...(operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {}) };
+      const legacy = automationAuthorizationProposal(params);
+      assert.equal(Object.hasOwn(legacy, 'requester_member_id'), false);
+      assert.deepEqual(automationAuthorizationProposal({ ...params, requester_member_id: cardID }), legacy);
+    }
+  }
+});
+
+test('assignment proposal keeps confirming requester separate from target Owner', () => {
+  const requester = '01000000-0000-4000-8000-000000000003';
+  const configuration = { ...base, owner_member_id: 'target-human', timezone: 'Asia/Singapore' };
+  const params = { source_kind: 'timer', operation: 'create', request_id: cardID,
+    requester_member_id: requester, configuration };
+  const proposal = automationAuthorizationProposal(params);
+  assert.equal(proposal.requester_member_id, requester);
+  assert.equal(proposal.configuration.owner_member_id, 'target-human');
+  assert.equal(Object.hasOwn(proposal.configuration, 'requester_member_id'), false);
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      const plan = automationAuthorizationProposal({ ...params, source_kind, operation,
+        configuration: { ...base, owner_member_id: 'target-human', ...(source_kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}) },
+        ...(operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {}) });
+      assert.equal(plan.requester_member_id, requester);
+      assert.equal(plan.configuration.owner_member_id, 'target-human');
+    }
+  }
+  for (const value of ['', null, 42, 'not-a-member', '00000000-0000-0000-0000-000000000000']) {
+    assert.throws(() => automationAuthorizationProposal({ ...params, requester_member_id: value }), /requester_member_id/);
+  }
+  assert.throws(() => automationConfiguration({ source_kind: 'timer',
+    configuration: { ...configuration, requester_member_id: requester } }, 'timer'), /unsupported/);
+});
+
 for (const kind of ['timer', 'webhook']) {
   test(`${kind} Lead replacement keeps target and exact proof without injecting a delivery DM`, () => {
     const configuration = { ...base, lead_member_id: 'new-agent', ...(kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}) };

@@ -84,11 +84,19 @@ export function automationAuthorizationProposal(params) {
     delete plan.expected_version;
   }
   const replacement = params.replaces_proposal_message_id;
+  const requester = params.requester_member_id;
+  if (requester !== undefined && (typeof requester !== 'string'
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requester)
+    || requester === '00000000-0000-0000-0000-000000000000')) {
+    throw Object.assign(new Error('requester_member_id must be a nonzero human member UUID'), { status: 400 });
+  }
   if (replacement !== undefined && (typeof replacement !== 'string'
     || replacement.length > 128 || !/^[1-9][0-9]*$/.test(replacement))) {
     throw Object.assign(new Error('replaces_proposal_message_id must be a canonical decimal message ID string'), { status: 400 });
   }
   return { ...plan, request_id: params.request_id,
+    ...(requester === undefined || requester.toLowerCase() === plan.configuration.owner_member_id?.toLowerCase()
+      ? {} : { requester_member_id: requester }),
     ...(replacement === undefined ? {} : { replaces_proposal_message_id: replacement }) };
 }
 

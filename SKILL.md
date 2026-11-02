@@ -99,6 +99,10 @@ automation, read [Automation Update](references/automation-update.md) before
 generic Issue intake. Resolve the existing binding and verify its current Lead
 and human Owner; do not create an Issue or fabricate a form handoff. This request
 still requires the server's exact-change Owner confirmation before any mutation.
+The same Automation Update route applies when the current human Owner explicitly
+asks to hand over an existing automation to another human. Verify the current
+Owner separately from the desired new Owner; do not register a new Issue or
+change the authenticated requester to the recipient.
 
 For an existing automation run or a reply about its result, read
 [Automation Delivery](references/automation-delivery.md). Only a policy read

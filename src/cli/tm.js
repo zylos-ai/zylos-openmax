@@ -443,8 +443,8 @@ const COMMANDS = {
 
   // =========================================================================
   //  EVENT BINDING  (定时任务 / create-by-agent — cws-core /event-bindings)
-  //  create-by-agent: agent 必须 leadMemberId=自己、ownerMemberId=对话人类;
-  //  否则被 cws-work 护栏拒（lead≠自己 / owner 缺失或=自己）。见 SKILL.md。
+  // Creation keeps the caller as Lead; verified creator confirmation may assign
+  // another eligible human Owner. Requester and target Owner are distinct.
   // =========================================================================
 
   'automation.eligibility': () => {
@@ -561,7 +561,7 @@ ATTEMPT  (all ✅ on contract-v2)
 
 EVENT BINDING  (定时任务 / create-by-agent)
   automation.eligibility {org, memberId, operation:"create"|"update"|"replace"|"lead_change", projectId} # required project UUID; read compatible Agent capability
-  automation.authorization_propose {org, request_id, source_kind, operation, configuration, target_binding_id?, expected_version?, replaces_proposal_message_id?} # server sends one confirmation card
+  automation.authorization_propose {org, request_id, requester_member_id?, source_kind, operation, configuration, target_binding_id?, expected_version?, replaces_proposal_message_id?} # server sends one confirmation card to the verified requester
   automation.authorization_status {org, proposal_message_id} # authoritative card decision and interaction ID
   automation.authorization_preview {org, source_kind, operation, configuration, target_binding_id?, expected_version?} # retired; new server returns 410; never use as fallback
   event-binding.create   {org, source_kind:"timer", configuration, authorization_proposal_message_id, authorization_card_interaction_id}

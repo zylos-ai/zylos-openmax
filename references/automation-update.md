@@ -28,7 +28,8 @@ replacement using that kind's REST fields; reject unknown fields or schemas.
    agree on ID, version, source kind, owner and lead; reread after intervening
    changes. Every returned `org_id`, if present, must match the verified org.
 2. Match target ID to the envelope, owner to the verified human, and lead to this
-   Agent. Configuration owner must remain the persisted Owner. Configuration lead
+   Agent. Configuration owner normally remains the persisted Owner; an explicit
+   handover uses the Owner handover rules below. Configuration lead
    normally matches the current Lead; an explicitly requested replacement uses
    the Lead replacement rules below. Missing/deleted target, denied
    read or identity mismatch stops without writes or Issue intake. Never repair
@@ -43,6 +44,36 @@ replacement using that kind's REST fields; reject unknown fields or schemas.
 4. Track `(org, DM, request_id, target_binding_id)`, baseline version, draft,
    questions, proposal and write outcome. Recover interrupted history before
    writing; redelivery never authorizes an additional update.
+
+## Owner handover
+
+Only the verified current Owner may hand over an existing automation. An
+organization administrator who is not the current Owner cannot authorize it.
+Keep the requester and confirmation DM unchanged; put the explicitly selected
+colleague in `configuration.owner_member_id`. Core validates that the final
+target is an active human in the same organization, a member of the selected
+project, and permitted to chat with the final Lead. Failure blocks the operation;
+never grant membership, reset the target to the requester, or impersonate them.
+
+The server card must explain the old and new Owner, loss of Owner-level config
+editing rights, and that existing runs and pending approvals remain with the
+old Owner while newly started runs use the new Owner. Keep original project
+access unchanged. Only the current Owner confirms; do not seek a second card
+from the recipient. Changes to other fields use the same full configuration,
+version and single confirmation. Owner and trigger-kind changes cannot be
+combined; explain that they must be saved separately before proposing.
+If the returned card omits any of these responsibility changes or the complete
+resulting configuration, stop before confirmation or mutation and reconcile with
+the server; never infer missing card contents or supply a second authorization card.
+
+The server resolves the future target-Owner/Lead result DM. Never include a DM
+ID in configuration or forward private confirmation history. Read back the
+returned Owner and full configuration after success. Loss of read access after
+handover is not proof of failure and never authorizes another mutation.
+For an accepted Webhook event that has not yet created a run, the server applies
+the current Owner and matching delivery context when it starts the run. Existing
+created runs retain their recorded principals and delivery context. Do not
+rewrite event payloads, filters, old Issues or historical approvals during handover.
 
 ## Owner-confirmed Lead replacement
 
@@ -95,15 +126,19 @@ the server resolves B's future result DM. Do not supply or overwrite delivery DM
 IDs in configuration, send a second card in B's DM, or transfer chat transcripts.
 Create and unverified Agent writes retain the self-Lead restriction.
 
-This capability changes Lead only, not Owner or trigger kind. Preserve webhook
+Lead replacement alone preserves Owner. An explicit combined Owner handover
+must also satisfy the Owner handover rules; trigger-kind replacement cannot be
+combined with either principal change. Preserve webhook
 credentials/URL, filters, prompt, schedule, pause state and run history. Do not
 combine Lead and trigger replacement into an unreviewed operation. Other requested
 field edits retain their existing validation and confirmation requirements.
 After success, compare the result and exact target readback against confirmed B,
-unchanged Owner and the complete configuration. An access denial after transfer
+the confirmed Owner and the complete configuration. An access denial after transfer
 is not proof of failure: report verification incomplete and do not repeat PUT,
 create, impersonate B or ask for new privileges. Existing runs and queued webhook
-snapshots continue with their recorded Lead and result DM; future snapshots use B.
+snapshots continue with their recorded Lead and result DM for Lead-only edits;
+an explicit Owner handover follows the run-start boundary described above.
+Future snapshots use B.
 The change record must identify Owner and conversation confirmation, not A as Owner.
 If A is unavailable, direct the Owner to the editor; another Agent cannot take over
 the chat update. Unsupported backend behavior fails closed; never bypass proof.
@@ -114,10 +149,13 @@ Use Common's single server-card proposal/readback/status process, with a new UUI
 for the exact revision (not the handoff correlation ID):
 
 ```text
-automation.authorization_propose {org,request_id,source_kind,operation:"update",target_binding_id,expected_version,configuration}
+automation.authorization_propose {org,request_id,requester_member_id?,source_kind,operation:"update",target_binding_id,expected_version,configuration}
 ```
 
 Record the agreed target/version and full replacement before proposing. Explain
+that unchanged-Owner updates omit `requester_member_id`; an Owner handover must
+send the verified persisted current Owner, never the target colleague. Follow
+Common's Core-first compatibility rule and stop if unsupported. Explain
 that this modifies an existing automation and show its resulting task, project,
 owner, Agent, trigger/timezone and output. For a trigger change, explain that a
 new automation replaces and pauses the original while retaining old run history

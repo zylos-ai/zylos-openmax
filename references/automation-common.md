@@ -21,10 +21,15 @@ prove identity. Verify the requesting Agent through `core.me {org}`. For creatio
 configuration lead must match envelope/Agent. For updates, the envelope lead and
 persisted current lead must match this Agent; a different desired configuration
 lead is allowed only under Update's Owner-confirmed Lead replacement rules.
-Configuration owner must match that human; updates preserve the persisted Owner.
+The verified human is the confirmer, not necessarily the desired Owner. Creation
+may assign a different human Owner explicitly selected by the creator. Updates
+require the verified human to be the persisted current Owner; a different desired
+Owner is allowed only under Update's Owner handover rules. Never replace the
+requesting human with the target Owner to make an identity check pass.
 Resolve project/membership through existing directory APIs when necessary.
 
-For a direct chat Lead-change request without a form envelope, verify the exact
+For a direct chat Lead-change or human Owner handover request without a form
+envelope, verify the exact
 source is HUMAN in this Agent's DM using the same authoritative context and
 `core.me {org}`. Bind that source sender to the persisted binding Owner and this
 Agent to the persisted current Lead as described in Update. Do not invent envelope
@@ -65,10 +70,26 @@ inputs must be complete before mutation; explain anything still missing.
 
 Record the exact configuration and a new UUID `request_id` dedicated to this
 final revision, separate from the form correlation ID. Call
-`tm.js automation.authorization_propose {org,request_id,source_kind,operation,configuration}`:
+`tm.js automation.authorization_propose {org,request_id,requester_member_id?,source_kind,operation,configuration}`:
 use `operation:"create"` for creation, or `operation:"update"` with authoritative
 `target_binding_id` and `expected_version` for update. Never substitute create
 for update. The update plan must clearly describe modifying the existing binding.
+For self-owned creation or an update retaining the verified current Owner, omit
+`requester_member_id` from the proposal; the existing server contract remains unchanged.
+Only when the desired Owner differs from the verified confirmer, including an
+Owner handover, set `requester_member_id` to the verified human source sender
+(creator on create, persisted current Owner on update), outside configuration.
+The CLI omits a redundant requester equal to the configured Owner for legacy
+compatibility; this comparison does not verify identity or grant authorization.
+The desired human Owner stays
+in `configuration.owner_member_id`. Never set requester to the target colleague.
+Core verifies the actual confirmer's card interaction and target eligibility;
+this CLI parameter alone grants no authority. Confirmation stays in the original
+requester-Agent DM; the server resolves the target Owner's future delivery DM.
+Cross-Owner proposals require the matching Core contract to be deployed first.
+If the server rejects the requester field or does not support Owner assignment,
+stop without mutation; never strip that field, substitute the target as confirmer,
+or retry through an older endpoint to bypass the rejection.
 
 The server sends one readable Confirm/Modify/Cancel card in the same DM: task,
 project, human owner, Agent, trigger (local time/timezone, once or recurring with
@@ -101,7 +122,8 @@ poll unrelated cards.
 Call `automation.authorization_status {org,proposal_message_id}` for that exact
 proposal. Require `authorization_kind:"card"`, matching `proposal_message_id`,
 `status:"confirmed"` and returned nonzero UUID `card_interaction_id`. Core checks
-actual actor against owner, org, Agent, DM, immutable plan/operation, update target
+actual actor against the registered confirming human, org, Agent, DM, immutable
+plan/operation, update target
 and version, expiry and audit record. Failed lookup or missing/mismatched context
 leaves the plan unconfirmed and forbids writing. Confirmed means consent, not a
 successful create/update.

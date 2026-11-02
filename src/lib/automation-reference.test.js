@@ -10,6 +10,8 @@ const common = readReference('automation-common.md');
 const schedule = readReference('automation-schedule.md');
 const recovery = readReference('automation-recovery.md');
 const webhook = readReference('automation-webhook.md');
+const update = readReference('automation-update.md');
+const skill = readFileSync(new URL('../../SKILL.md', import.meta.url), 'utf8');
 // Evaluate the reachable workflow, including its conditional failure branch.
 const reference = [creation, common, schedule, recovery, webhook].join('\n');
 const delivery = readFileSync(new URL('../../references/automation-delivery.md', import.meta.url), 'utf8').replace(/\s+/g, ' ');
@@ -288,7 +290,7 @@ const cardConfirmationGuards = [
   ['no fabrication or UI inference', /never fabricate a human message, infer consent from UI text or poll unrelated cards/],
   ['exact status lookup', /Call `automation\.authorization_status \{org,proposal_message_id\}` for that exact proposal/],
   ['verified card status and UUID', /Require `authorization_kind:"card"`, matching `proposal_message_id`, `status:"confirmed"` and returned nonzero UUID `card_interaction_id`/],
-  ['actor scope', /actual actor against owner, org, Agent, DM, immutable plan\/operation, update target and version, expiry and audit record/],
+  ['actor scope', /actual actor against the registered confirming human, org, Agent, DM, immutable plan\/operation, update target and version, expiry and audit record/],
   ['lookup fail closed', /Failed lookup or missing\/mismatched context leaves the plan unconfirmed and forbids writing/],
   ['wait state', /`pending_confirmation` \| Wait; no write/],
   ['modify state', /`modifying` \| Ask what to change; no write/],
@@ -300,6 +302,59 @@ const cardConfirmationGuards = [
   ['unknown write fence', /or replace proof while an earlier mutation remains unresolved/],
   ['consent is not success', /Confirmed means consent, not a successful create\/update/],
 ];
+
+const ownerAssignmentGuards = [
+  ['common positive requester', 'common', /Owner handover, set `requester_member_id` to the verified human source sender \(creator on create, persisted current Owner on update\), outside configuration/],
+  ['skill positive requester', 'skill', /Verify the current Owner separately from the desired new Owner; do not register a new Issue or change the authenticated requester to the recipient/],
+  ['creation positive requester', 'creation', /When `configuration.owner_member_id` names a colleague, pass the verified creator as `requester_member_id`/],
+  ['update positive requester', 'update', /an Owner handover must send the verified persisted current Owner, never the target colleague/],
+  ['operations positive requester', 'operations', /pass the verified creating human \(current Owner for update\); configuration's/],
+  ['verified confirmer', 'common', /The verified human is the confirmer, not necessarily the desired Owner/],
+  ['persisted current Owner', 'common', /Updates require the verified human to be the persisted current Owner/],
+  ['no target impersonation', 'common', /Never set requester to the target colleague/],
+  ['creator confirms', 'creation', /The creator confirms in this DM; the colleague does not confirm on their behalf/],
+  ['creator project access', 'creation', /The creator must be an active human in the same organization and a member of the selected project/],
+  ['administrator cannot hand over', 'update', /An organization administrator who is not the current Owner cannot authorize it/],
+  ['target policy', 'update', /target is an active human in the same organization, a member of the selected project, and permitted to chat with the final Lead/],
+  ['no membership repair', 'update', /never grant membership, reset the target to the requester, or impersonate them/],
+  ['current Owner only confirmation', 'update', /Only the current Owner confirms; do not seek a second card from the recipient/],
+  ['responsibility boundary', 'update', /existing runs and pending approvals remain with the old Owner while newly started runs use the new Owner/],
+  ['separate trigger kind', 'update', /Owner and trigger-kind changes cannot be combined/],
+  ['server delivery resolution', 'update', /The server resolves the future target-Owner\/Lead result DM/],
+  ['missing card contents stop', 'update', /If the returned card omits any of these responsibility changes or the complete resulting configuration, stop before confirmation or mutation/],
+  ['self path compatibility', 'common', /For self-owned creation or an update retaining the verified current Owner, omit `requester_member_id` from the proposal/],
+  ['Core first', 'common', /Cross-Owner proposals require the matching Core contract to be deployed first/],
+  ['unsupported fails closed', 'common', /If the server rejects the requester field or does not support Owner assignment, stop without mutation; never strip that field, substitute the target as confirmer, or retry through an older endpoint to bypass the rejection/],
+];
+function assertOwnerAssignment(sources) {
+  for (const [name, scope, pattern] of ownerAssignmentGuards) {
+    assert.match(sources[scope].replace(/\s+/g, ' '), pattern, `missing Owner safeguard: ${name}`);
+  }
+}
+test('Owner assignment instructions preserve authorization, responsibility and compatibility', () => {
+  assertOwnerAssignment({ common, creation, update, skill, operations });
+});
+test('Owner assignment guards reject every deleted rule and weakened authorization', () => {
+  const sources = Object.fromEntries(Object.entries({ common, creation, update, skill, operations }).map(([key, value]) => [key, value.replace(/\s+/g, ' ')]));
+  for (const [, scope, pattern] of ownerAssignmentGuards) {
+    assert.match(sources[scope], pattern, 'mutation must change an existing rule');
+    assert.throws(() => assertOwnerAssignment({ ...sources, [scope]: sources[scope].replace(pattern, '') }), /missing Owner safeguard/);
+  }
+  for (const [scope, from, to] of [
+    ['common', 'set `requester_member_id` to the verified human source sender', 'set `requester_member_id` to the target colleague'],
+    ['skill', 'Verify the current Owner separately from the desired new Owner', 'Use the desired new Owner as the current Owner'],
+    ['creation', 'pass the verified creator as `requester_member_id`', 'pass the target colleague as `requester_member_id`'],
+    ['update', 'send the verified persisted current Owner, never the target colleague', 'send the target colleague, never the persisted current Owner'],
+    ['operations', 'pass the verified creating human (current Owner for update)', 'pass the desired target Owner (recipient for update)'],
+    ['common', 'Never set requester to the target colleague', 'Set requester to the target colleague'],
+    ['update', 'An organization administrator who is not the current Owner cannot authorize it', 'Any organization administrator can authorize it'],
+    ['update', 'Only the current Owner confirms', 'The recipient confirms'],
+    ['update', 'existing runs and pending approvals remain with the old Owner', 'existing runs and pending approvals move to the new Owner'],
+  ]) {
+    assert.ok(sources[scope].includes(from));
+    assert.throws(() => assertOwnerAssignment({ ...sources, [scope]: sources[scope].replace(from, to) }), /missing Owner safeguard/);
+  }
+});
 test('card instructions match the trusted receipt header and redirected bridge context', () => {
   const receipt = { id: '9002', conversation_id: 'interaction-center', sender_type: 'SYSTEM', type: 'INTERACTION_RECEIPT',
     content: { body: { origin: { conversation_id: 'owner-dm', message_id: '9001' },
@@ -334,7 +389,7 @@ test('card confirmation guards reject missing scope, nonconfirmation choices, an
     assert.throws(() => assertCardConfirmation(text.replace(pattern, '')), /missing card safeguard/);
   }
   assert.throws(() => assertCardConfirmation(text.replace('`status:"confirmed"`', '`status:"pending_confirmation"`')), /verified card status/);
-  assert.throws(() => assertCardConfirmation(text.replace('actual actor against owner, org, Agent, DM', 'any actor')), /actor scope/);
+  assert.throws(() => assertCardConfirmation(text.replace('actual actor against the registered confirming human, org, Agent, DM', 'any actor')), /actor scope/);
 });
 
 const recoveryGuards = [
