@@ -125,10 +125,8 @@ to resolve this uncertainty. Preserve the terminal-run safeguards below.
    If the Issue is already terminal, do not start another Attempt, alter Tasks,
    or submit a new result. A timeout or cancellation is a terminal fence: stop
    this run's execution and preserve outputs. A late success cannot overwrite it.
-2. Create and submit the Blueprint through the normal plan API. The server
-   applies the automation policy; read back the state and proceed only when the
-   server has advanced it. Do not request human plan acceptance or synthesize
-   `source=text_card_proxy` acceptance.
+2. Establish the accepted plan using the Issue plan-state gate below. Do not
+   request human plan acceptance or synthesize `source=text_card_proxy` acceptance.
 3. Execute and record Attempt/Task outcomes. Complete the inner state transitions
    and output comments before delivering the Issue. Report partial or failed
    execution truthfully; do not mark unsuccessful Tasks done to unblock delivery.
@@ -144,6 +142,53 @@ to resolve this uncertainty. Preserve the terminal-run safeguards below.
    responsible Agent in the bound DM. Do not separately `comm.send` the same
    result, send it through the Scheduler DM, or ask the user to accept it in Work.
    Automatic closure records that the run ended, not human endorsement.
+
+### Issue plan-state gate
+
+`blueprint.create` creates a plan object. `issue.submit_plan` submits that exact
+Blueprint to the Issue. For server-read `automation_policy: "silent"`, Work
+submits and automatically accepts the Issue plan in the same transaction:
+`in_progress` -> `pending_plan` -> `in_progress`, with `current_blueprint_id` set
+to the submitted Blueprint. The response is an Issue, not a Blueprint.
+`Blueprint.status` is a separate object lifecycle; it may remain `draft` after
+successful automatic Issue plan acceptance. Neither `draft` nor `approved` on a
+Blueprint alone proves whether this Issue's current plan was accepted.
+
+Before submission, read `blueprint.get {id,includeSteps:true}` and verify its
+`issue_id` matches the exact run. Retain the Blueprint ID, `version_number` and
+the actual step IDs/content/dependencies (and content hash when present) that you
+intend to execute. Submit it once with `issue.submit_plan {id,blueprintId,planText}`.
+Check the successful response and a fresh `issue.get`: both must name that Issue
+and org, its responsible Agent, `automation_policy: "silent"`, the submitted
+`current_blueprint_id`, and `status: "in_progress"`. Re-read the referenced
+Blueprint with steps and verify the same Issue, ID, version and step content.
+Only then continue Task/Attempt execution against those steps. Do not wait for
+Blueprint status to become `approved` or ask a human to accept this silent plan.
+
+When resuming after a lost response or earlier local blocker, first reconcile
+the existing Issue and referenced Blueprint rather than resubmitting. Require
+the same current-plan binding and unchanged version/steps, plus the recorded
+successful submit response or a server-authored plan record that identifies this
+Blueprint and automatic acceptance. A generic `in_progress` Issue, Blueprint
+existence, notification text or an Agent's own comment is not acceptance evidence.
+The Issue can be `in_progress` before any plan exists. Server plan history helps
+establish the earlier transition, but cannot override a different current plan
+or a now-terminal Issue. Do not create a replacement Blueprint just to change
+its displayed status.
+
+| Verified state for this exact run | Action |
+| --- | --- |
+| Silent Issue has accepted current Blueprint, in_progress; same version and steps; Blueprint still draft | Continue Tasks and Attempts for that accepted plan |
+| Issue in_progress but no accepted matching current Blueprint or no authoritative acceptance record | Reconcile the plan; do not execute or infer acceptance |
+| Current Blueprint ID, Issue, version or step content differs from the submitted/accepted plan | Stop and reconcile the changed plan before execution |
+| Issue remains pending_plan, or ordinary human acceptance is required | Wait for the real acceptance workflow; never proxy acceptance |
+| External-action approval is pending | Keep that action blocked until its actual approval |
+| Issue is terminal or archived | Stop; do not create Tasks, Attempts or a new result |
+
+Do not call `issue.accept_plan`, edit Blueprint status, or bypass an endpoint
+error to force progress. A successful HTTP response without the matching Issue
+plan-state readback is insufficient. Report actual missing or conflicting
+evidence; an unchanged Blueprint `draft` alone is not such a conflict.
 
 Read the actual delivery outcome as well as Issue status. A successful or valid
 partial automation delivery closes as `accepted`; `failed` closes as

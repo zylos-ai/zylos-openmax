@@ -245,7 +245,7 @@ const deliverySafeguards = {
     'is not the result sender or a conversation for human follow-up.',
   ],
   'truthful delivery without duplicate sends': [
-    'read back the state and proceed only when the server has advanced it.',
+    'Check the successful response and a fresh `issue.get`: both must name that Issue and org, its responsible Agent, `automation_policy: "silent"`, the submitted `current_blueprint_id`, and `status: "in_progress"`.',
     'do not mark unsuccessful Tasks done to unblock delivery.',
     'actual success/partial/failure outcome (`success`, `partial`, or `failed`) and a stable `idempotencyKey`.',
     'Do not separately `comm.send` the same result, send it through the Scheduler DM, or ask the user to accept it in Work.',
