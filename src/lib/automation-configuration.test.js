@@ -5,6 +5,22 @@ import { automationAuthorizationPreview, automationAuthorizationProposal, automa
 const base = { lead_member_id: 'agent', owner_member_id: 'human', spec: { project_id: 'project', title: 'Task' } };
 const cardID = '01000000-0000-4000-8000-000000000002';
 
+test('assignment proposal keeps confirming requester separate from target Owner', () => {
+  const requester = '01000000-0000-4000-8000-000000000003';
+  const configuration = { ...base, owner_member_id: 'target-human', timezone: 'Asia/Singapore' };
+  const params = { source_kind: 'timer', operation: 'create', request_id: cardID,
+    requester_member_id: requester, configuration };
+  const proposal = automationAuthorizationProposal(params);
+  assert.equal(proposal.requester_member_id, requester);
+  assert.equal(proposal.configuration.owner_member_id, 'target-human');
+  assert.equal(Object.hasOwn(proposal.configuration, 'requester_member_id'), false);
+  for (const value of ['', null, 42, 'not-a-member', '00000000-0000-0000-0000-000000000000']) {
+    assert.throws(() => automationAuthorizationProposal({ ...params, requester_member_id: value }), /requester_member_id/);
+  }
+  assert.throws(() => automationConfiguration({ source_kind: 'timer',
+    configuration: { ...configuration, requester_member_id: requester } }, 'timer'), /unsupported/);
+});
+
 for (const kind of ['timer', 'webhook']) {
   test(`${kind} Lead replacement keeps target and exact proof without injecting a delivery DM`, () => {
     const configuration = { ...base, lead_member_id: 'new-agent', ...(kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}) };

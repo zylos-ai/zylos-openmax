@@ -53,6 +53,10 @@ rollout, read [Recovery](automation-recovery.md).
    do not merely leave information required at execution time in the DM. For a
    draft timer, apply the [schedule-resolution rules](automation-schedule.md) before proposing.
 3. Follow Automation Common's server plan/card process with `operation:"create"`.
+   Pass the verified creator as `requester_member_id` on the proposal, even when
+   `configuration.owner_member_id` names a colleague. The creator confirms in
+   this DM; the colleague does not confirm on their behalf. The server validates
+   the target's active human membership, project membership and Lead chat access.
    Confirmed status is not mutation success; apply its exact proof and uncertainty rules.
 4. After the server verifies the latest plan's confirmation, call `src/cli/tm.js` with
    `event-binding.create` for timer or `webhook.create` for webhook. Pass

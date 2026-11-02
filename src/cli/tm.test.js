@@ -142,6 +142,25 @@ test('trigger replacement uses desired route but original target and confirmed v
   }
 });
 
+test('Owner assignment sends requester separately and preserves target through mutation', async () => {
+  const requester = '01000000-0000-4000-8000-000000000003';
+  const target = '01000000-0000-4000-8000-000000000004';
+  const configuration = { ...readableProposal.configuration, owner_member_id: target };
+  const params = { org: 'org-automation', ...readableProposal,
+    requester_member_id: requester, configuration };
+  const request = await captureRequest('automation.authorization_propose', params);
+  assert.equal(request.url, '/api/v1/automation-authorizations/proposals');
+  assert.equal(request.body.requester_member_id, requester);
+  assert.equal(request.body.configuration.owner_member_id, target);
+  assert.equal(Object.hasOwn(request.body.configuration, 'requester_member_id'), false);
+  const mutation = await captureRequest('event-binding.create', {
+    org: params.org, source_kind: 'timer', configuration, ...cardProof,
+  });
+  assert.equal(mutation.body.owner_member_id, target);
+  assert.equal(Object.hasOwn(mutation.body, 'requester_member_id'), false);
+  assert.equal(mutation.body.authorization_card_interaction_id, cardProof.authorization_card_interaction_id);
+});
+
 test('replacement proposal preserves immutable replacement identity on explicit retry', async () => {
   const proposal = { ...readableProposal, replaces_proposal_message_id: cardProof.authorization_proposal_message_id };
   for (let retry = 0; retry < 2; retry++) {

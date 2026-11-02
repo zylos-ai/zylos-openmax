@@ -288,7 +288,7 @@ const cardConfirmationGuards = [
   ['no fabrication or UI inference', /never fabricate a human message, infer consent from UI text or poll unrelated cards/],
   ['exact status lookup', /Call `automation\.authorization_status \{org,proposal_message_id\}` for that exact proposal/],
   ['verified card status and UUID', /Require `authorization_kind:"card"`, matching `proposal_message_id`, `status:"confirmed"` and returned nonzero UUID `card_interaction_id`/],
-  ['actor scope', /actual actor against owner, org, Agent, DM, immutable plan\/operation, update target and version, expiry and audit record/],
+  ['actor scope', /actual actor against the registered confirming human, org, Agent, DM, immutable plan\/operation, update target and version, expiry and audit record/],
   ['lookup fail closed', /Failed lookup or missing\/mismatched context leaves the plan unconfirmed and forbids writing/],
   ['wait state', /`pending_confirmation` \| Wait; no write/],
   ['modify state', /`modifying` \| Ask what to change; no write/],
@@ -334,7 +334,7 @@ test('card confirmation guards reject missing scope, nonconfirmation choices, an
     assert.throws(() => assertCardConfirmation(text.replace(pattern, '')), /missing card safeguard/);
   }
   assert.throws(() => assertCardConfirmation(text.replace('`status:"confirmed"`', '`status:"pending_confirmation"`')), /verified card status/);
-  assert.throws(() => assertCardConfirmation(text.replace('actual actor against owner, org, Agent, DM', 'any actor')), /actor scope/);
+  assert.throws(() => assertCardConfirmation(text.replace('actual actor against the registered confirming human, org, Agent, DM', 'any actor')), /actor scope/);
 });
 
 const recoveryGuards = [
