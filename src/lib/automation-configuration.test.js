@@ -5,6 +5,44 @@ import { automationAuthorizationPreview, automationAuthorizationProposal, automa
 const base = { lead_member_id: 'agent', owner_member_id: 'human', spec: { project_id: 'project', title: 'Task' } };
 const cardID = '01000000-0000-4000-8000-000000000002';
 
+test('result notification policy preserves presence through proposal and mutation', () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      for (const policy of [undefined, 'every', 'failure_only', 'none']) {
+        const configuration = { ...base, ...(source_kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}),
+          ...(policy === undefined ? {} : { result_notification_policy: policy }) };
+        const params = { source_kind, operation, request_id: cardID, configuration,
+          ...(operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {}) };
+        const proposal = automationAuthorizationProposal(params);
+        const body = automationMutation({ source_kind, configuration,
+          id: 'binding', expected_version: 7,
+          authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID }, source_kind, operation);
+        for (const result of [proposal.configuration, body,
+          automationConfiguration({ ...configuration, source_kind }, source_kind)]) {
+          assert.equal(Object.hasOwn(result, 'result_notification_policy'), policy !== undefined);
+          assert.equal(result.result_notification_policy, policy);
+        }
+      }
+    }
+  }
+});
+
+test('invalid notification policy and readonly migration marker cannot reach a write', () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const fields of [
+      ...['', null, undefined, 'all', 'EVERY', false, 0, {}, []].map(result_notification_policy => ({ result_notification_policy })),
+      { result_notification_policy_migrated: false },
+    ]) {
+      const configuration = { ...base, timezone: 'Asia/Singapore', ...fields };
+      if (source_kind === 'webhook') delete configuration.timezone;
+      const params = { source_kind, operation: 'create', request_id: cardID, configuration };
+      assert.throws(() => automationAuthorizationProposal(params), /result_notification_policy/);
+      assert.throws(() => automationMutation({ source_kind, configuration }, source_kind), /result_notification_policy/);
+      assert.throws(() => automationConfiguration({ source_kind, ...configuration }, source_kind), /result_notification_policy/);
+    }
+  }
+});
+
 test('requester UUID case does not change self identity or erase a distinct confirmer', () => {
   const requester = 'abcdefab-0000-4000-8000-000000000003';
   for (const [human, owner] of [[requester.toUpperCase(), requester], [requester, requester.toUpperCase()]]) {

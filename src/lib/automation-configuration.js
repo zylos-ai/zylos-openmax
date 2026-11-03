@@ -26,7 +26,7 @@ export function automationConfiguration(params, sourceKind) {
     : [['schedule_kind', 'scheduleKind'], ['cron_expr', 'cronExpr'],
       ['timezone', 'timezone'], ['run_at', 'runAt'],
       ['interval_seconds', 'intervalSeconds'], ['anchor_at', 'anchorAt']];
-  const allowed = new Set(['lead_member_id', 'owner_member_id', 'spec', ...fields.map(([wire]) => wire)]);
+  const allowed = new Set(['lead_member_id', 'owner_member_id', 'spec', 'result_notification_policy', ...fields.map(([wire]) => wire)]);
   if (!nested) {
     for (const key of ['org', 'orgId', 'org_id', 'source_kind', 'leadMemberId', 'ownerMemberId',
       'projectId', 'title', 'description', ...fields.map(([, alias]) => alias)]) allowed.add(key);
@@ -36,6 +36,12 @@ export function automationConfiguration(params, sourceKind) {
   }
   for (const key of Object.keys(spec)) {
     if (!['project_id', 'title', 'description'].includes(key)) fail(`unsupported spec field: ${key}`);
+  }
+  if (Object.hasOwn(input, 'result_notification_policy')) {
+    if (!['every', 'failure_only', 'none'].includes(input.result_notification_policy)) {
+      fail('result_notification_policy must be every, failure_only or none');
+    }
+    body.result_notification_policy = input.result_notification_policy;
   }
   if (nested) return input;
   for (const [wire, alias] of fields) {

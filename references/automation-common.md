@@ -49,7 +49,7 @@ silently discard them. Preserve only these source-specific REST fields:
 
 | Scope | Fields |
 | --- | --- |
-| Both | `lead_member_id`, `owner_member_id`, `spec` with `project_id`, `title`, `description` |
+| Both | `lead_member_id`, `owner_member_id`, optional `result_notification_policy`, `spec` with `project_id`, `title`, `description` |
 | Timer | `schedule_kind` (`cron`, `once`, `interval`), `timezone`, applicable `cron_expr`, `run_at`, `interval_seconds`, `anchor_at` |
 | Webhook | Optional CEL `event_filter`; empty means all events |
 
@@ -60,6 +60,38 @@ are instants: never reinterpret in machine timezone or convert intervals to cron
 `form_context` supplies display context and explicit active-mode inputs, including
 partial selections; it is neither API parameters nor identity proof. Never restore
 hidden-mode values or treat absent frequency/time as a choice.
+
+### Result notification policy
+
+`result_notification_policy` accepts exactly `every`, `failure_only` or `none`.
+Preserve explicit presence through proposal and mutation, including an explicit
+choice equal to the stored value. Reject empty, null or unknown values. The
+readonly binding field `result_notification_policy_migrated` is display context;
+never send it as configuration or infer consent from it.
+
+For creation, omitted policy defaults on the server to `every` for timers and
+`failure_only` for webhooks. For update, omission preserves the current policy
+and migration banner, including a source-kind conversion. Do not fill an omitted
+update policy from the baseline merely because configuration is otherwise full.
+Only an explicit human policy selection belongs in the proposal and mutation;
+an explicit selection of the current value also clears the migration banner.
+Preserve that exact presence when verifying the confirmed plan. An unrelated
+rename, Owner/Lead change or trigger edit must not clear the banner.
+
+Verify the server's readable confirmation includes any explicit policy choice
+and its change from the current setting before accepting the card as the plan.
+On creation it must show the effective default when the field is omitted.
+After mutation, read back the effective policy and migration marker; explicit
+selection requires the marker to be false. Unsupported server fields or missing
+confirmation details require reconciliation, never dropping the policy and
+retrying with a weaker confirmation.
+
+This setting controls only the final result DM. All results remain in history;
+`failure_only` includes partial and failed outcomes. Approval requests and system
+alerts are unaffected. Work snapshots the policy when a run is created; changing
+the binding affects future runs, not an existing run's policy or recipient.
+Migration notices for existing webhook Owners are server-managed; do not send
+another notice or dismiss the banner on the human's behalf.
 
 ## Propose
 

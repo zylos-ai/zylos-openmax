@@ -138,8 +138,9 @@ to resolve this uncertainty. Preserve the terminal-run safeguards below.
    failed or cancelled, and at least one durable artifact. Do not use `partial`
    for all-failed work, missing output, or still-running Tasks. Report `failed`
    truthfully when no partial result satisfies those conditions.
-5. The server persists completion and reliably delivers the result as the
-   responsible Agent in the bound DM. Do not separately `comm.send` the same
+5. The server persists completion and applies the run's result notification
+   policy. When permitted, it reliably delivers the result as the responsible
+   Agent in the bound DM. Do not separately `comm.send` the same
    result, send it through the Scheduler DM, or ask the user to accept it in Work.
    Automatic closure records that the run ended, not human endorsement.
 
@@ -262,8 +263,21 @@ node src/cli/tm.js issue.deliver '{"org":"org-id","id":"issue-id","summary":"Rep
 ```
 
 `issue.get` returns `delivery` with its `id`, persisted result and
-`notification_status` (`pending` or `sent`), plus destination/message IDs when
+`notification_status` (`pending`, `sent` or `suppressed`), plus destination/message IDs when
 available. A completed Issue with pending notification is not a failed run.
+`suppressed` means the server intentionally omitted the final result DM under
+the run's immutable `result_notification_policy`; the result and artifacts are
+still retained. `every` permits all results, `failure_only` permits partial and
+failed outcomes, and `none` suppresses all final result DMs. Read this policy from
+the Issue, not the binding's current setting. Never retry a suppressed notification,
+manually send the result to compensate, or alter the run policy. Suppression is
+not execution failure and does not suppress approval requests or system alerts.
+Run history (`event-binding.runs`) exposes `result_notification_policy` and
+`result_notification_status` separately. Its original `notification_status`
+describes initial Lead dispatch, not result delivery. An absent result status
+means no result status is available yet; it is not proof of a sent result.
+Linked revisions inherit the original run's policy snapshot. Do not infer a
+different revision policy from the binding's current setting.
 Retain the same payload/key on retries: changing the content under the same key
 is a conflict. Use a linked revision for a changed result, not a replacement
 delivery for an already completed run.

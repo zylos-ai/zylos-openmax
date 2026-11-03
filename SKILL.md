@@ -129,6 +129,13 @@ Attempt bookkeeping and all safety/permission
 boundaries. Never call `accept_plan` or `accept_delivered` on the human's behalf
 to emulate automation. Ordinary Issues retain explicit human acceptance.
 
+For these verified automation runs, Work applies the immutable Issue
+`result_notification_policy` to the final result DM. A persisted delivery with
+`notification_status: "suppressed"` is intentional: retain the result without
+manually sending it or retrying notification. This takes precedence over the
+ordinary completion-notification guardrail below. Approval requests and system
+alerts remain unaffected; follow Automation Delivery for outcome interpretation.
+
 
 Roles are determined by the runtime assignment relationship, not by an inherent Agent attribute:
 
