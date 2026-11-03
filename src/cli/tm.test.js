@@ -15,6 +15,65 @@ const cardProof = {
   authorization_card_interaction_id: '01000000-0000-4000-8000-000000000002',
 };
 
+test('notification policy consent and omission survive CLI proposal and write bodies', async () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      for (const policy of [undefined, 'every', 'failure_only', 'none']) {
+        const configuration = { lead_member_id: 'agent', owner_member_id: 'human',
+          spec: { project_id: 'project', title: 'Task' },
+          ...(source_kind === 'timer' ? { timezone: 'Asia/Singapore', schedule_kind: 'cron', cron_expr: '0 9 * * *' } : {}),
+          ...(policy === undefined ? {} : { result_notification_policy: policy }) };
+        const proposed = await captureRequest('automation.authorization_propose', {
+          org: 'org-automation', request_id: readableProposal.request_id, source_kind, operation,
+          configuration, ...(operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {}),
+        });
+        const route = source_kind === 'timer' ? 'event-binding' : 'webhook';
+        const mutated = await captureRequest(`${route}.${operation}`, {
+          org: 'org-automation', source_kind, configuration, id: 'binding', expected_version: 7, ...cardProof,
+        });
+        for (const body of [proposed.body.configuration, mutated.body]) {
+          assert.equal(Object.hasOwn(body, 'result_notification_policy'), policy !== undefined);
+          assert.equal(body.result_notification_policy, policy);
+        }
+        assert.equal(mutated.body.authorization_card_interaction_id, cardProof.authorization_card_interaction_id);
+      }
+    }
+  }
+});
+
+test('notification policy validation rejects before CLI sends HTTP', async () => {
+  let requests = 0;
+  const server = createServer((req, res) => { requests++; req.resume(); res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const source_kind of ['timer', 'webhook']) {
+      for (const fields of [{ result_notification_policy: '' }, { result_notification_policy: null },
+        { result_notification_policy: 'invalid' }, { result_notification_policy_migrated: false }]) {
+        const params = { org: 'org-automation', source_kind, operation: 'update',
+          request_id: readableProposal.request_id, target_binding_id: 'binding', expected_version: 7,
+          configuration: { lead_member_id: 'agent', owner_member_id: 'human', spec: { title: 'Task' }, ...fields } };
+        const route = source_kind === 'timer' ? 'event-binding' : 'webhook';
+        for (const [command, input] of [
+          ['automation.authorization_propose', params],
+          ...['create', 'update'].map(operation => [`${route}.${operation}`, {
+            org: params.org, source_kind, configuration: params.configuration,
+            id: 'binding', expected_version: 7, ...cardProof,
+          }]),
+        ]) {
+          const result = await new Promise(resolve => execFile(process.execPath,
+            [cliPath, command, JSON.stringify(input)], {
+              env: { ...process.env, COCO_API_URL: `http://127.0.0.1:${server.address().port}`, COCO_AUTH_TOKEN: 'test', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0' }, timeout: 5000,
+            }, (error, stdout, stderr) => resolve({ error, stderr })));
+          assert.ok(result.error, command);
+          assert.match(result.stderr, /result_notification_policy/);
+          assert.equal(requests, 0, `${command} sent an invalid policy`);
+        }
+      }
+    }
+    assert.equal(requests, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test('run history uses an authenticated GET with only bounded history query fields', async () => {
   const request = await captureRequest('event-binding.runs', { org: 'org-automation', id: 'binding', limit: 7, offset: 14, page: 9 });
   assert.equal(request.method, 'GET');
