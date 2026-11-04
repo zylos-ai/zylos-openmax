@@ -34,7 +34,8 @@ import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import {
-  extractImOwnerNotice, handleImOwnerNotice, createDedup, refreshOwnerEndpoint, reportPath,
+  handleImOwnerNotice, createDedup, refreshOwnerEndpoint, reportPath,
+  IM_OWNER_NOTICE_EVENT, IM_OWNER_NOTICE_TYPE, noticeFromSystemFrame,
 } from './lib/im-owner-notice.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { preferredConnectorsFrom } from './lib/connector-preference.js';
@@ -991,19 +992,6 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       return;
     }
 
-    // OPENM-936: platform IM-owner notice (Agent cap 90%/100%, org credits
-    // exhausted). Handled entirely in code — never forwarded to the model (it
-    // must not burn credits, and must work while the org is LLM-suspended, so
-    // it runs BEFORE the arrears gate). See lib/im-owner-notice.js.
-    if (isSystemSender(msg)) {
-      const imNotice = extractImOwnerNotice(msg);
-      if (imNotice) {
-        await processImOwnerNotice(orgConfig, imNotice);
-        markRead(orgConfig, msg.conversation_id, msg.seq);
-        return;
-      }
-    }
-
     // Credit-arrears gate. An org whose LLM is suspended for non-payment (欠费)
     // stays online and keeps receiving frames — arrears does NOT drop the WS;
     // only the LLM call is blocked at the gateway. Forwarding anyway would wake
@@ -1614,6 +1602,8 @@ function syncLiveAccessAndReport(orgConfig) {
 // only guards against a future rename (e.g. a "message.edited" alias).
 function classifySystemEvent(eventName) {
   const e = String(eventName || '').toLowerCase();
+  // OPENM-936 v2: matched first so no prefix/substring rule can claim it.
+  if (e === IM_OWNER_NOTICE_EVENT) return IM_OWNER_NOTICE_TYPE;
   if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
   if (e === 'message.updated') return 'edit';
   if (e.startsWith('agent.config.')) return 'config_update';
@@ -1643,6 +1633,19 @@ async function handleSystemEvent(orgConfig, frame) {
 
   // Consumed by the dispatcher (receipt watcher); never surfaced to the agent.
   if (kind === 'card_settled') return;
+
+  // OPENM-936 v2: IM-owner notice — handled in code, never reaches the model.
+  // System frames bypass the credit-arrears gate (that gate lives only in the
+  // message path), so this still runs while the org is LLM-suspended.
+  if (kind === IM_OWNER_NOTICE_TYPE) {
+    const notice = noticeFromSystemFrame(frame);
+    if (!notice) {
+      warn(`[${orgConfig.slug}] ${IM_OWNER_NOTICE_EVENT}: missing data, skip`);
+      return;
+    }
+    await processImOwnerNotice(orgConfig, notice);
+    return;
+  }
 
   if (kind === 'config_update') {
     handleConfigUpdate(orgConfig, frame);

@@ -1,17 +1,17 @@
 /**
- * IM owner notice (OPENM-936) — deliver a platform-rendered notice to the
- * owner's most recent IM private chat, in code, without waking the model.
+ * IM owner notice (OPENM-936, contract v2) — deliver a platform-rendered notice
+ * to the owner's most recent IM private chat, in code, without waking the model.
  *
- * Contract (cws-core → cws-comm → this plugin):
- *   A SYSTEM-sender TEXT message in the agent's system DM carries
- *     content.body.systemEvent = {
- *       type: "im_owner_notice", event_id, kind, text, report_token }
- *   (sibling of content.body.text — comm message content has no metadata
- *   field; cws-core!977). The get-message detail envelope may nest it under
- *   `message.content`; legacy `metadata.systemEvent` paths are kept as fallback.
+ * Contract v2 (cws-core → cws-comm PushAgentNotice → this plugin):
+ *   cws-comm pushes a WS `system` frame
+ *     { event: "agent.im_owner_notice",
+ *       data: { org_id, agent_member_id, event_id, kind, text, report_token, occurred_at } }
+ *   (no conversation / message — the v1 system-DM carrier was dropped). The
+ *   frame path never runs the credit-arrears gate, so notices still go out
+ *   while the org is LLM-suspended (that is exactly the org_credits_exhausted case).
  *
  * Plugin behavior:
- *   1. Never forward the message to C4 / the model.
+ *   1. Never forward the notice to C4 / the model.
  *   2. Dedup by event_id (small bounded persisted set).
  *   3. Resolve the "latest owner DM endpoint" and send `text` through
  *      `c4-send.js <channel> <endpoint>` (body on stdin).
@@ -22,15 +22,19 @@
  * component to C4 sqlite (`conversations`, direction='in'). We read that table
  * on demand at notice time (freshest answer, no extra service), AND persist the
  * winner to `im-owner-endpoint.json` — refreshed periodically and on every
- * notice — so C4 pruning/rotation cannot lose the last known address. The
- * on-demand read wins when it finds a DM; otherwise the persisted file is used.
+ * notice — so C4 pruning/rotation cannot lose the last known address.
  *
- * DM detection per channel (only channels whose endpoint format is known from
- * locally available component code; anything else is NOT cached):
- *   - lark / feishu: endpoint `chatId|type:p2p` (zylos-lark buildEndpoint);
- *     dmPolicy defaults to `owner`, so a p2p inbound is the channel owner.
- *   - telegram / dingtalk / whatsapp / wechat: endpoint DM marker not
- *     determinable from code available here → never cached (documented gap).
+ * DM detection per channel (contract v2 §B, verified against each channel
+ * component's endpoint builder). `type:dm-pairing` (admin pairing
+ * notifications) is always excluded; anything unknown is NOT cached.
+ *   - lark / feishu / dingtalk / wecom / whatsapp: endpoint token `type:p2p`
+ *   - slack / line / ms-teams / whatsapp-business: exact endpoint token `type:dm`
+ *   - telegram: first endpoint segment is a positive integer (private chat id;
+ *     groups are negative)
+ *   - wechat: endpoint contains `|to:` (`<account>|to:<user>`). Sending may fail
+ *     with ERR_CONTEXT_TOKEN_MISSING (no live context token) → reported `failed`.
+ *   - discord: C4 row content starts with `[DISCORD DM]`
+ *   - zalo: C4 row content starts with `[Zalo DM]`
  */
 
 import fs from 'node:fs';
@@ -56,38 +60,34 @@ const SCAN_LIMIT = 500;
 // Detection
 // ---------------------------------------------------------------------------
 
-/** Return the im_owner_notice systemEvent from any known message shape, or null. */
-export function extractImOwnerNotice(msg) {
-  if (!msg) return null;
-  const candidates = [
-    msg.content?.body?.systemEvent,
-    msg.message?.content?.body?.systemEvent,
-    msg.content?.metadata?.systemEvent,
-    msg.message?.content?.metadata?.systemEvent,
-    msg.metadata?.systemEvent,
-    msg.message?.metadata?.systemEvent,
-  ];
-  for (const se of candidates) {
-    if (se && typeof se === 'object' && se.type === IM_OWNER_NOTICE_TYPE) return se;
-  }
-  return null;
+export const IM_OWNER_NOTICE_EVENT = 'agent.im_owner_notice';
+
+/** Return the notice payload (`payload.data`) of an agent.im_owner_notice system frame. */
+export function noticeFromSystemFrame(frame) {
+  const data = frame?.payload?.data;
+  return data && typeof data === 'object' ? data : null;
 }
 
+const P2P_CHANNELS = new Set(['lark', 'feishu', 'dingtalk', 'wecom', 'whatsapp']);
+const DM_TOKEN_CHANNELS = new Set(['slack', 'line', 'ms-teams', 'whatsapp-business']);
+const CONTENT_PREFIX = { discord: '[DISCORD DM]', zalo: '[Zalo DM]' };
+
 /**
- * Whether a C4 inbound (channel, endpoint) is a private chat with the owner.
- * Conservative: unknown channels / formats return false (never cached).
+ * Whether a C4 inbound row (channel, endpoint, content) is a private chat with
+ * the owner. Conservative: unknown channels / formats return false.
  */
-export function isOwnerDmEndpoint(channel, endpoint) {
+export function isOwnerDmEndpoint(channel, endpoint, content) {
   const ch = String(channel || '').toLowerCase();
   if (!ch || EXCLUDED_CHANNELS.has(ch) || !endpoint) return false;
-  const parts = String(endpoint).split('|');
-  switch (ch) {
-    case 'lark':
-    case 'feishu':
-      return Boolean(parts[0]) && parts.slice(1).includes('type:p2p');
-    default:
-      return false;
-  }
+  const ep = String(endpoint);
+  const parts = ep.split('|');
+  if (!parts[0] || parts.slice(1).includes('type:dm-pairing')) return false;
+  if (P2P_CHANNELS.has(ch)) return parts.slice(1).includes('type:p2p');
+  if (DM_TOKEN_CHANNELS.has(ch)) return parts.slice(1).includes('type:dm');
+  if (ch === 'telegram') return /^[1-9]\d*$/.test(parts[0]);
+  if (ch === 'wechat') return ep.includes('|to:') && parts.some(p => p.startsWith('to:') && p.length > 3);
+  if (CONTENT_PREFIX[ch]) return typeof content === 'string' && content.startsWith(CONTENT_PREFIX[ch]);
+  return false;
 }
 
 /** Pick the newest owner-DM row from rows ordered newest-first. */
@@ -95,8 +95,11 @@ export function selectOwnerDm(rows) {
   for (const r of rows || []) {
     const channel = r.channel;
     const endpoint = r.endpoint_id ?? r.endpoint;
-    if (isOwnerDmEndpoint(channel, endpoint)) {
-      return { channel, endpoint, at: r.timestamp || r.at || null, id: r.id ?? null };
+    if (isOwnerDmEndpoint(channel, endpoint, r.content)) {
+      const hit = { channel, endpoint, at: r.timestamp || r.at || null, id: r.id ?? null };
+      const prefix = CONTENT_PREFIX[String(channel).toLowerCase()];
+      if (prefix) hit.content = prefix;
+      return hit;
     }
   }
   return null;
@@ -120,7 +123,7 @@ export async function readC4InboundRows(dbPath = DEFAULT_C4_DB, limit = SCAN_LIM
   try {
     db = new DatabaseSync(dbPath, { readOnly: true });
     const excluded = [...EXCLUDED_CHANNELS];
-    const sql = `SELECT id, channel, endpoint_id, timestamp FROM conversations
+    const sql = `SELECT id, channel, endpoint_id, timestamp, substr(content, 1, 32) AS content FROM conversations
       WHERE direction = 'in' AND endpoint_id IS NOT NULL
         AND channel NOT IN (${excluded.map(() => '?').join(',')})
       ORDER BY id DESC LIMIT ?`;
@@ -145,7 +148,7 @@ function writeJsonAtomic(file, data) {
 
 export function readCachedEndpoint(cacheFile = DEFAULT_CACHE_FILE) {
   const c = readJson(cacheFile);
-  if (c && isOwnerDmEndpoint(c.channel, c.endpoint)) return c;
+  if (c && isOwnerDmEndpoint(c.channel, c.endpoint, c.content)) return c;
   return null;
 }
 
@@ -162,6 +165,9 @@ export async function refreshOwnerEndpoint({
   const cached = readCachedEndpoint(cacheFile);
   if (fresh) {
     const entry = { channel: fresh.channel, endpoint: fresh.endpoint, at: fresh.at };
+    // Content-detected channels (discord/zalo) keep the prefix so the cached
+    // entry still validates without the C4 row.
+    if (fresh.content) entry.content = fresh.content;
     if (!cached || cached.channel !== entry.channel || cached.endpoint !== entry.endpoint || cached.at !== entry.at) {
       try { writeJsonAtomic(cacheFile, entry); } catch {}
     }
