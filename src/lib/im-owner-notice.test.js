@@ -201,7 +201,7 @@ test('isOwnerAttributed: slack/discord need the owner as sender of the msg in th
   assert.equal(isOwnerAttributed('discord', 'c1|msg:11', {}, opts), false);
 });
 
-test('selectOwnerDm (review repro): legacy whitelist config + newer stranger DM picks the owner DM', () => {
+test('selectOwnerDm: legacy whitelist config + newer stranger DM picks the owner DM', () => {
   const componentsDir = componentsWithLogs({ feishu: [
     { message_id: 'om1', user_id: 'uo', open_id: 'ou_o' }, { message_id: 'om2', user_id: 'stranger', open_id: 'ou_s' },
   ] });
@@ -489,4 +489,74 @@ test('end to end: system frame -> route -> handle -> c4-send stub gets the owner
     }),
   });
   assert.deepEqual(sends, [['lark', 'oc_o|type:p2p', 'credits out']]);
+});
+
+test('handleImOwnerNotice: after a successful send the event is released; redelivery is a duplicate and does not send', async () => {
+  const sends = [];
+  const file = path.join(tmp(), 's.json');
+  const dedup = createDedup({ file });
+  const deps = { dedup, resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '7' }), send: async (...a) => { sends.push(a); return true; } };
+  assert.equal(await handleImOwnerNotice(SE, deps), 'sent');
+  assert.equal(await handleImOwnerNotice(SE, deps), 'duplicate');
+  // persisted: a fresh process (new dedup over the same file) also sees it as done
+  assert.equal(await handleImOwnerNotice(SE, { ...deps, dedup: createDedup({ file }) }), 'duplicate');
+  assert.equal(sends.length, 1);
+  // in-flight marker released: the same event_id is not stuck as in_flight
+  // (an independent, empty dedup store can deliver it again)
+  assert.equal(await handleImOwnerNotice(SE, { ...deps, dedup: createDedup({ file: path.join(tmp(), 'other.json') }) }), 'sent');
+  assert.equal(sends.length, 2);
+});
+
+test('handleImOwnerNotice: persisted attempts >= max gives up immediately without sending', async () => {
+  const file = path.join(tmp(), 's.json');
+  const seed = createDedup({ file });
+  for (let i = 0; i < 3; i++) seed.attempt('e1');
+  const dedup = createDedup({ file });
+  assert.equal(dedup.attempts('e1'), 3);
+  let sends = 0; let resolves = 0; const warns = [];
+  const st = await handleImOwnerNotice(SE, {
+    dedup, resolveEndpoint: async () => { resolves++; return { channel: 'telegram', endpoint: '7' }; },
+    send: async () => { sends++; return true; }, warn: (m) => warns.push(m), setTimer: () => assert.fail('no retry'),
+  });
+  assert.equal(st, 'gave_up');
+  assert.equal(sends, 0);
+  assert.equal(resolves, 0);
+  assert.equal(dedup.has('e1'), true);
+  assert.match(warns[0], /gave_up/);
+});
+
+test('handleImOwnerNotice: default retry timer is unref\'d (does not keep the process alive)', async (t) => {
+  const timers = [];
+  const orig = globalThis.setTimeout;
+  t.after(() => { globalThis.setTimeout = orig; for (const x of timers) clearTimeout(x); });
+  globalThis.setTimeout = (fn, ms, ...rest) => { const x = orig(fn, ms, ...rest); timers.push(x); return x; };
+  const st = await handleImOwnerNotice(SE, {
+    dedup: createDedup({ file: path.join(tmp(), 's.json') }),
+    resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '7' }), send: async () => false,
+    retryDelaysMs: [60_000],
+  });
+  globalThis.setTimeout = orig;
+  assert.equal(st, 'failed');
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].hasRef(), false);
+});
+
+test('readViaCommBridgeBetterSqlite: opens read-only and requires the db file to exist', async (t) => {
+  const dir = DEFAULT_COMM_BRIDGE_DIR;
+  if (!fs.existsSync(path.join(dir, 'node_modules', 'better-sqlite3'))) { t.skip(`comm-bridge better-sqlite3 not installed at ${dir}`); return; }
+  const db = path.join(tmp(), 'c4.db');
+  try {
+    const { createRequire } = await import('node:module');
+    const D = createRequire(path.join(dir, 'scripts', 'c4-db.js'))('better-sqlite3');
+    const w = new D(db);
+    w.exec('CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (7);');
+    w.close();
+  } catch (e) { t.skip(`better-sqlite3 unusable here: ${e.message}`); return; }
+  // fileMustExist: a missing db is refused and not created.
+  const missing = path.join(tmp(), 'missing.db');
+  await assert.rejects(readViaCommBridgeBetterSqlite(missing, 'SELECT 1'));
+  assert.equal(fs.existsSync(missing), false);
+  // readonly: a write (that returns rows, so .all() is valid) throws and changes nothing.
+  await assert.rejects(readViaCommBridgeBetterSqlite(db, 'INSERT INTO t VALUES (8) RETURNING a'), /readonly/i);
+  assert.deepEqual(await readViaCommBridgeBetterSqlite(db, 'SELECT a FROM t'), [{ a: 7 }]);
 });
