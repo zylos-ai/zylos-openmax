@@ -178,7 +178,10 @@ accepts only the listed create REST fields; unknown fields are rejected.
 Timers preserve `schedule_kind`, `timezone`, `cron_expr`,
 `run_at`, `interval_seconds`, `anchor_at`, `lead_member_id`, `owner_member_id`
 and `spec`. Webhooks preserve `lead_member_id`, `owner_member_id`, `spec` and
-`event_filter`. Use `webhook.get {org,id}` to read a webhook configuration.
+`event_filter`. Both forward an optional confirmed `project_member_additions`
+(only the configuration's Lead and/or Owner, each once) as the top-level body
+field; see [Automation Common](automation-common.md#project-member-additions).
+Use `webhook.get {org,id}` to read a webhook configuration.
 `event_filter` is a CEL boolean expression over the sole variable `payload`
 (the received JSON object). Given a confirmed payload field `type`, an example
 is `has(payload.type) && payload.type == "order.created"`; an empty filter

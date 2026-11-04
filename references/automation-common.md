@@ -49,7 +49,7 @@ silently discard them. Preserve only these source-specific REST fields:
 
 | Scope | Fields |
 | --- | --- |
-| Both | `lead_member_id`, `owner_member_id`, optional `result_notification_policy`, `spec` with `project_id`, `title`, `description` |
+| Both | `lead_member_id`, `owner_member_id`, optional `result_notification_policy`, optional `project_member_additions`, `spec` with `project_id`, `title`, `description` |
 | Timer | `schedule_kind` (`cron`, `once`, `interval`), `timezone`, applicable `cron_expr`, `run_at`, `interval_seconds`, `anchor_at` |
 | Webhook | Optional CEL `event_filter`; empty means all events |
 
@@ -92,6 +92,38 @@ alerts are unaffected. Work snapshots the policy when a run is created; changing
 the binding affects future runs, not an existing run's policy or recipient.
 Migration notices for existing webhook Owners are server-managed; do not send
 another notice or dismiss the banner on the human's behalf.
+
+### Project member additions
+
+Optional `project_member_additions` is an array naming who joins
+`spec.project_id` together with the confirmed write: only this configuration's
+`lead_member_id` and/or `owner_member_id`, each at most once, at most two
+entries. The human selects them in the form. Pass the handoff's list verbatim
+in the proposal configuration and the mutation configuration; never add, drop
+or reorder entries, build a list yourself, or copy one from a baseline, directory
+read or rejection. Omitted or empty means nobody joins and the existing
+membership rules apply unchanged. The CLI rejects any other entry, a duplicate,
+more than two entries or a non-array before HTTP; the server re-validates.
+
+A Lead or Owner listed there joins the project when the confirmed create or
+update succeeds, in the same server transaction; a failed write adds nobody and
+writes nothing. Their current non-membership is therefore not missing access and
+not a blocker for actionability, proposal or confirmation. Your own project
+reads may be denied until the write succeeds; rely on the server card for the
+project name. Never add members yourself (for example with
+`project.member_add`) and never treat the list as permission to change
+membership outside this write. The confirming human needs project write access
+(an effective project member or org owner/admin); the server checks it.
+
+When the list is non-empty, the server's readable card must name who joins the
+project. A card without that line, or a server that rejects or does not support
+the field, requires a stop without mutation; never strip the list, retry without
+it or add members to make a rejection pass. Explain an invalid list, missing
+project write access, a departed member or an archived project in plain words
+and stop. The field is write-time only: binding reads do not return it, so
+compare the other confirmed fields on readback. For an update that resumes an
+automation paused because its Lead or Owner left the project, report the actual
+returned state; never assume it resumed.
 
 ## Propose
 

@@ -26,7 +26,8 @@ export function automationConfiguration(params, sourceKind) {
     : [['schedule_kind', 'scheduleKind'], ['cron_expr', 'cronExpr'],
       ['timezone', 'timezone'], ['run_at', 'runAt'],
       ['interval_seconds', 'intervalSeconds'], ['anchor_at', 'anchorAt']];
-  const allowed = new Set(['lead_member_id', 'owner_member_id', 'spec', 'result_notification_policy', ...fields.map(([wire]) => wire)]);
+  const allowed = new Set(['lead_member_id', 'owner_member_id', 'spec', 'result_notification_policy',
+    'project_member_additions', ...fields.map(([wire]) => wire)]);
   if (!nested) {
     for (const key of ['org', 'orgId', 'org_id', 'source_kind', 'leadMemberId', 'ownerMemberId',
       'projectId', 'title', 'description', ...fields.map(([, alias]) => alias)]) allowed.add(key);
@@ -43,12 +44,33 @@ export function automationConfiguration(params, sourceKind) {
     }
     body.result_notification_policy = input.result_notification_policy;
   }
+  if (Object.hasOwn(input, 'project_member_additions')) {
+    body.project_member_additions = projectMemberAdditions(input.project_member_additions, body, fail);
+  }
   if (nested) return input;
   for (const [wire, alias] of fields) {
     const value = input[wire] ?? input[alias];
     if (value !== undefined) body[wire] = value;
   }
   return body;
+}
+
+// The human-confirmed members who join spec.project_id with the write. Only the
+// configuration's own Lead and/or Owner, each once; the server re-validates and
+// normalizes order, so the list is forwarded exactly as given.
+function projectMemberAdditions(additions, body, fail) {
+  if (!Array.isArray(additions) || additions.length > 2) {
+    fail('project_member_additions must be an array of at most 2 member IDs');
+  }
+  const members = [body.lead_member_id, body.owner_member_id].filter(id => typeof id === 'string' && id !== '');
+  for (let i = 0; i < additions.length; i++) {
+    const id = additions[i];
+    if (typeof id !== 'string' || !id.trim()) fail('project_member_additions entries must be non-empty member ID strings');
+    if (!members.includes(id) || additions.indexOf(id) !== i) {
+      fail('project_member_additions may list only this configuration\'s lead_member_id and/or owner_member_id, each once');
+    }
+  }
+  return additions;
 }
 
 export function automationAuthorizationPreview(params) {
