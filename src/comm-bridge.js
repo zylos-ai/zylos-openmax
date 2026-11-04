@@ -34,7 +34,7 @@ import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import {
-  handleImOwnerNotice, createDedup, refreshOwnerEndpoint, reportPath,
+  handleImOwnerNotice, createDedup, refreshOwnerEndpoint,
   IM_OWNER_NOTICE_EVENT, IM_OWNER_NOTICE_TYPE, noticeFromSystemFrame,
 } from './lib/im-owner-notice.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
@@ -347,17 +347,12 @@ async function sendRejectNotice(orgConfig, msg, text) {
   }
 }
 
-// OPENM-936 IM-owner notice plumbing (dedup set + core report).
+// OPENM-936 IM-owner notice plumbing (dedup set; no report-back to core).
 let imOwnerNoticeDedup = null;
 async function processImOwnerNotice(orgConfig, imNotice) {
   if (!imOwnerNoticeDedup) imOwnerNoticeDedup = createDedup();
   await handleImOwnerNotice(imNotice, {
     dedup: imOwnerNoticeDedup,
-    report: async (body) => {
-      const selfId = orgConfig.self?.member_id;
-      if (!selfId) throw new Error('self member_id unknown');
-      await postForOrg(orgConfig.org_id, apiPath(reportPath(selfId)), body, { quietOnSuccess: true });
-    },
     log: (m) => log(`[${orgConfig.slug}] ${m}`),
     warn: (m) => warn(`[${orgConfig.slug}] ${m}`),
   });

@@ -6,11 +6,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   isOwnerDmEndpoint, noticeFromSystemFrame, IM_OWNER_NOTICE_EVENT, IM_OWNER_NOTICE_TYPE, selectOwnerDm, refreshOwnerEndpoint,
-  createDedup, handleImOwnerNotice, readCachedEndpoint, reportPath,
+  createDedup, handleImOwnerNotice, readCachedEndpoint, isOwnerAttributed,
 } from './im-owner-notice.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'im-owner-'));
-const SE = { type: 'im_owner_notice', event_id: 'e1', kind: 'agent_cap_90', text: 'hello', report_token: 'tok' };
+// Owner-bound configs for every channel (dmPolicy defaults to owner).
+const CFG = {
+  lark: { owner: { bound: true, open_id: 'ou_o' } }, feishu: { owner: { bound: true, open_id: 'ou_o' } },
+  discord: { owner: 'd1' }, zalo: { owner: { user_id: 'u1' } },
+};
+const cfgs = (ch) => CFG[ch] || null;
+const SE = { type: 'im_owner_notice', event_id: 'e1', kind: 'agent_cap_90', text: 'hello', report_token: 'ignored' };
 
 test('noticeFromSystemFrame: reads payload.data of the v2 system frame', () => {
   const data = { org_id: 'o', agent_member_id: 'a', event_id: 'e1', kind: 'agent_cap_90', text: 'hi', report_token: 't', occurred_at: '2026-11-04T00:00:00Z' };
@@ -78,11 +84,11 @@ test('isOwnerDmEndpoint: unknown / internal channels never cached', () => {
 });
 
 test('selectOwnerDm + cache: discord hit keeps content prefix so cached entry validates', async () => {
-  const hit = selectOwnerDm([{ id: 1, channel: 'discord', endpoint_id: 'c1|msg:1', content: '[DISCORD DM] bob', timestamp: 't' }]);
+  const hit = selectOwnerDm([{ id: 1, channel: 'discord', endpoint_id: 'c1|msg:1', content: '[DISCORD DM] bob', timestamp: 't' }], cfgs);
   assert.equal(hit.content, '[DISCORD DM]');
   const cacheFile = path.join(tmp(), 'c.json');
-  await refreshOwnerEndpoint({ cacheFile, readRows: async () => [{ channel: 'zalo', endpoint_id: 'u1', content: '[Zalo DM] a', timestamp: 't' }] });
-  assert.equal(readCachedEndpoint(cacheFile).endpoint, 'u1');
+  await refreshOwnerEndpoint({ cacheFile, readRows: async () => [{ channel: 'zalo', endpoint_id: 'u1', content: '[Zalo DM] a', timestamp: 't' }], loadConfig: cfgs });
+  assert.equal(readCachedEndpoint(cacheFile, cfgs).endpoint, 'u1');
 });
 
 test('selectOwnerDm: skips internal channels and groups, newest DM wins', () => {
@@ -96,19 +102,78 @@ test('selectOwnerDm: skips internal channels and groups, newest DM wins', () => 
     { id: 3, channel: 'lark', endpoint_id: 'oc_new|type:p2p', timestamp: 't3' },
     { id: 2, channel: 'feishu', endpoint_id: 'oc_old|type:p2p', timestamp: 't2' },
   ];
-  assert.deepEqual(selectOwnerDm(rows), { channel: 'lark', endpoint: 'oc_new|type:p2p', at: 't3', id: 3 });
-  assert.equal(selectOwnerDm(rows.slice(0, 6)), null);
+  assert.deepEqual(selectOwnerDm(rows, cfgs), { channel: 'lark', endpoint: 'oc_new|type:p2p', at: 't3', id: 3 });
+  assert.equal(selectOwnerDm(rows.slice(0, 6), cfgs), null);
 });
 
 test('refreshOwnerEndpoint: persists hit; falls back to cache when C4 pruned', async () => {
   const dir = tmp();
   const cacheFile = path.join(dir, 'c.json');
-  const hit = await refreshOwnerEndpoint({ cacheFile, readRows: async () => [{ channel: 'lark', endpoint_id: 'oc_a|type:p2p', timestamp: 't' }] });
+  const hit = await refreshOwnerEndpoint({ cacheFile, readRows: async () => [{ channel: 'lark', endpoint_id: 'oc_a|type:p2p', timestamp: 't' }], loadConfig: cfgs });
   assert.equal(hit.endpoint, 'oc_a|type:p2p');
-  assert.equal(readCachedEndpoint(cacheFile).endpoint, 'oc_a|type:p2p');
-  const later = await refreshOwnerEndpoint({ cacheFile, readRows: async () => [] });
+  assert.equal(readCachedEndpoint(cacheFile, cfgs).endpoint, 'oc_a|type:p2p');
+  const later = await refreshOwnerEndpoint({ cacheFile, readRows: async () => [], loadConfig: cfgs });
   assert.equal(later.endpoint, 'oc_a|type:p2p');
-  assert.equal(await refreshOwnerEndpoint({ cacheFile: path.join(dir, 'none.json'), readRows: async () => [] }), null);
+  assert.equal(await refreshOwnerEndpoint({ cacheFile: path.join(dir, 'none.json'), readRows: async () => [], loadConfig: cfgs }), null);
+});
+
+test('isOwnerAttributed: peer id in endpoint must equal bound owner', () => {
+  const cases = [
+    ['telegram', { owner: { chat_id: '777' } }, '777|msg:1', '888|msg:1'],
+    ['dingtalk', { owner: { staff_id: 's1' } }, 's1|type:p2p|msg:m', 's2|type:p2p|msg:m'],
+    ['wecom', { owner: { user_id: 'w1' } }, 'w1|type:p2p|msg:m', 'w2|type:p2p|msg:m'],
+    ['zalo', { owner: { user_id: 'z1' } }, 'z1|msg:1|req:x', 'z2|msg:1|req:x'],
+    ['whatsapp-business', { owner: { bound: true, wa_id: '8613' } }, '8613|type:dm|msg:w', '8614|type:dm|msg:w'],
+    ['whatsapp', { owner: { bound: true, jid: '8613:5@s.whatsapp.net' } }, '8613@s.whatsapp.net|type:p2p|msg:1', '8614@s.whatsapp.net|type:p2p|msg:1'],
+    ['line', { owner: { bound: true, userId: 'U1' } }, 'U1|type:dm|account:default|user:U1', 'U2|type:dm|account:default|user:U2'],
+    ['ms-teams', { owner: { bound: true, aadObjectId: 'a1' } }, 'conv|type:dm|user:a1|msg:x', 'conv|type:dm|user:a2|msg:x'],
+  ];
+  for (const [ch, cfg, owner, other] of cases) {
+    assert.equal(isOwnerAttributed(ch, owner, cfg), true, `${ch} owner`);
+    assert.equal(isOwnerAttributed(ch, other, cfg), false, `${ch} non-owner`);
+    assert.equal(isOwnerAttributed(ch, owner, { owner: {} }), false, `${ch} unbound`);
+    assert.equal(isOwnerAttributed(ch, owner, null), false, `${ch} no config`);
+  }
+});
+
+test('isOwnerAttributed: chat-id-only channels (lark/feishu/slack/discord) need dmPolicy=owner', () => {
+  for (const ch of ['lark', 'feishu', 'slack']) {
+    const owner = { bound: true, open_id: 'ou_o', user_id: 'u' };
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner }), true, `${ch} default policy`);
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner, dmPolicy: 'owner' }), true, ch);
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner, dmPolicy: 'open' }), false, ch);
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner, dmPolicy: 'allowlist', dmAllowFrom: ['x'] }), false, ch);
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner: { bound: false } }), false, `${ch} unbound`);
+  }
+  assert.equal(isOwnerAttributed('discord', 'c1|msg:1', { owner: 'd1' }), true);
+  assert.equal(isOwnerAttributed('discord', 'c1|msg:1', { owner: 'd1', dmPolicy: 'open' }), false);
+  assert.equal(isOwnerAttributed('discord', 'c1|msg:1', {}), false);
+});
+
+test('isOwnerAttributed: wechat (no owner) only with a single-user allowlist', () => {
+  assert.equal(isOwnerAttributed('wechat', 'acct|to:wx1', { dmPolicy: 'allowlist', dmAllowFrom: ['wx1'] }), true);
+  assert.equal(isOwnerAttributed('wechat', 'acct|to:wx2', { dmPolicy: 'allowlist', dmAllowFrom: ['wx1'] }), false);
+  assert.equal(isOwnerAttributed('wechat', 'acct|to:wx1', { dmPolicy: 'allowlist', dmAllowFrom: ['wx1', 'wx2'] }), false);
+  assert.equal(isOwnerAttributed('wechat', 'acct|to:wx1', { dmPolicy: 'open' }), false);
+  assert.equal(isOwnerAttributed('signal', 'x', { owner: {} }), false);
+});
+
+test('selectOwnerDm: a newer non-owner DM is skipped in favour of the owner DM', () => {
+  const load = (ch) => ({ telegram: { owner: { chat_id: '1' }, dmPolicy: 'open' }, lark: { owner: { bound: true }, dmPolicy: 'open' } })[ch];
+  const rows = [
+    { id: 3, channel: 'lark', endpoint_id: 'oc_x|type:p2p', timestamp: 't3' },
+    { id: 2, channel: 'telegram', endpoint_id: '2|msg:1', timestamp: 't2' },
+    { id: 1, channel: 'telegram', endpoint_id: '1|msg:1', timestamp: 't1' },
+  ];
+  assert.deepEqual(selectOwnerDm(rows, load), { channel: 'telegram', endpoint: '1|msg:1', at: 't1', id: 1 });
+  assert.equal(selectOwnerDm(rows.slice(0, 2), load), null);
+});
+
+test('readCachedEndpoint: re-attributes against current owner config', async () => {
+  const cacheFile = path.join(tmp(), 'c.json');
+  await refreshOwnerEndpoint({ cacheFile, readRows: async () => [{ channel: 'telegram', endpoint_id: '1|msg:1', timestamp: 't' }], loadConfig: () => ({ owner: { chat_id: '1' } }) });
+  assert.equal(readCachedEndpoint(cacheFile, () => ({ owner: { chat_id: '1' } })).endpoint, '1|msg:1');
+  assert.equal(readCachedEndpoint(cacheFile, () => ({ owner: { chat_id: '9' } })), null);
 });
 
 test('createDedup: persisted and bounded', () => {
@@ -121,49 +186,40 @@ test('createDedup: persisted and bounded', () => {
   assert.equal(d2.has('b'), true);
 });
 
-test('handleImOwnerNotice: sends and reports sent; duplicate is a no-op', async () => {
-  const sends = []; const reports = [];
+test('handleImOwnerNotice: sends; duplicate is a no-op; report_token ignored', async () => {
+  const sends = [];
   const deps = {
     dedup: createDedup({ file: path.join(tmp(), 's.json') }),
     resolveEndpoint: async () => ({ channel: 'lark', endpoint: 'oc_a|type:p2p' }),
     send: async (...a) => { sends.push(a); return true; },
-    report: async (b) => { reports.push(b); },
   };
   assert.equal(await handleImOwnerNotice(SE, deps), 'sent');
   assert.equal(await handleImOwnerNotice(SE, deps), 'duplicate');
   assert.deepEqual(sends, [['lark', 'oc_a|type:p2p', 'hello']]);
-  assert.deepEqual(reports, [{ report_token: 'tok', event_id: 'e1', status: 'sent' }]);
 });
 
-test('handleImOwnerNotice: no cached address reports no_address without sending', async () => {
-  const reports = []; let sent = false;
+test('handleImOwnerNotice: no owner address logs no_address without sending', async () => {
+  const logs = []; let sent = false;
   const status = await handleImOwnerNotice(SE, {
     dedup: createDedup({ file: path.join(tmp(), 's.json') }),
     resolveEndpoint: async () => null,
     send: async () => { sent = true; return true; },
-    report: async (b) => { reports.push(b); },
+    log: (m) => logs.push(m),
   });
   assert.equal(status, 'no_address');
   assert.equal(sent, false);
-  assert.deepEqual(reports, [{ report_token: 'tok', event_id: 'e1', status: 'no_address' }]);
+  assert.ok(logs.some(l => l.includes('status=no_address')));
 });
 
-test('handleImOwnerNotice: send failure reports failed; report error only warns', async () => {
-  const warns = [];
+test('handleImOwnerNotice: send failure is logged as failed', async () => {
   const status = await handleImOwnerNotice(SE, {
     dedup: createDedup({ file: path.join(tmp(), 's.json') }),
     resolveEndpoint: async () => ({ channel: 'lark', endpoint: 'oc_a|type:p2p' }),
     send: async () => false,
-    report: async () => { throw new Error('404'); },
-    warn: (m) => warns.push(m),
   });
   assert.equal(status, 'failed');
-  assert.ok(warns.some(w => w.includes('ReportImOwnerNotice failed')));
 });
 
-test('reportPath is self-scoped', () => {
-  assert.equal(reportPath('m-1'), '/agents/m-1/im-owner-notice-reports');
-});
 
 const BRIDGE_SRC = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'comm-bridge.js'), 'utf8');
 
