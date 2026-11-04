@@ -33,6 +33,9 @@ import { WsClient, createDeduper } from './lib/ws.js';
 import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
+import {
+  extractImOwnerNotice, handleImOwnerNotice, createDedup, refreshOwnerEndpoint, reportPath,
+} from './lib/im-owner-notice.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { preferredConnectorsFrom } from './lib/connector-preference.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
@@ -341,6 +344,22 @@ async function sendRejectNotice(orgConfig, msg, text) {
   } catch (e) {
     warn(`[${orgConfig.slug}] reject notice for msg=${msg.id} failed: ${e.message}`);
   }
+}
+
+// OPENM-936 IM-owner notice plumbing (dedup set + core report).
+let imOwnerNoticeDedup = null;
+async function processImOwnerNotice(orgConfig, imNotice) {
+  if (!imOwnerNoticeDedup) imOwnerNoticeDedup = createDedup();
+  await handleImOwnerNotice(imNotice, {
+    dedup: imOwnerNoticeDedup,
+    report: async (body) => {
+      const selfId = orgConfig.self?.member_id;
+      if (!selfId) throw new Error('self member_id unknown');
+      await postForOrg(orgConfig.org_id, apiPath(reportPath(selfId)), body, { quietOnSuccess: true });
+    },
+    log: (m) => log(`[${orgConfig.slug}] ${m}`),
+    warn: (m) => warn(`[${orgConfig.slug}] ${m}`),
+  });
 }
 
 function forwardToC4(endpoint, body, priority) {
@@ -970,6 +989,19 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         sendRejectNotice(orgConfig, msg, decision.userNotice).catch(() => {});
       }
       return;
+    }
+
+    // OPENM-936: platform IM-owner notice (Agent cap 90%/100%, org credits
+    // exhausted). Handled entirely in code — never forwarded to the model (it
+    // must not burn credits, and must work while the org is LLM-suspended, so
+    // it runs BEFORE the arrears gate). See lib/im-owner-notice.js.
+    if (isSystemSender(msg)) {
+      const imNotice = extractImOwnerNotice(msg);
+      if (imNotice) {
+        await processImOwnerNotice(orgConfig, imNotice);
+        markRead(orgConfig, msg.conversation_id, msg.seq);
+        return;
+      }
     }
 
     // Credit-arrears gate. An org whose LLM is suspended for non-payment (欠费)
@@ -2677,6 +2709,11 @@ if (orgs.length === 0) {
 } else {
   log(`booting WS pool: ${orgs.length} org(s) enabled`);
   activity.start();
+  // OPENM-936: keep the persisted owner-DM endpoint fresh so C4 pruning
+  // cannot lose it (also refreshed on demand when a notice arrives).
+  const refreshImOwner = () => refreshOwnerEndpoint().catch(() => {});
+  refreshImOwner();
+  setInterval(refreshImOwner, 5 * 60 * 1000).unref?.();
   // Pre-mint each org's JWT and hydrate the authoritative self display_name
   // in parallel, so member_id write-back AND @-mention name readiness land
   // before the WS handler hits the first message. Each WS still has its own
