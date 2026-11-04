@@ -3,19 +3,38 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import {
   isOwnerDmEndpoint, noticeFromSystemFrame, IM_OWNER_NOTICE_EVENT, IM_OWNER_NOTICE_TYPE, selectOwnerDm, refreshOwnerEndpoint,
-  createDedup, handleImOwnerNotice, readCachedEndpoint, isOwnerAttributed,
+  createDedup, handleImOwnerNotice, readCachedEndpoint, isOwnerAttributed, stripMessageParams,
+  readC4InboundRows, _resetC4ReadWarning,
 } from './im-owner-notice.js';
+import { classifySystemEvent, routeImOwnerNotice } from './system-event-routing.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'im-owner-'));
-// Owner-bound configs for every channel (dmPolicy defaults to owner).
 const CFG = {
-  lark: { owner: { bound: true, open_id: 'ou_o' } }, feishu: { owner: { bound: true, open_id: 'ou_o' } },
+  lark: { owner: { bound: true, user_id: 'uo', open_id: 'ou_o' } }, feishu: { owner: { bound: true, user_id: 'uo', open_id: 'ou_o' } },
+  slack: { owner: { bound: true, user_id: 'UO' } },
   discord: { owner: 'd1' }, zalo: { owner: { user_id: 'u1' } },
 };
 const cfgs = (ch) => CFG[ch] || null;
+const jsonl = (...rows) => rows.map(r => JSON.stringify(r)).join('\n') + '\n';
+/** Component dir with message logs as each channel component writes them. */
+function componentsWithLogs({ lark = [], feishu = [], slack = {}, discord = {} } = {}) {
+  const dir = tmp();
+  const put = (rel, text) => { const f = path.join(dir, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, text); };
+  for (const [ch, entries] of [['lark', lark], ['feishu', feishu]]) {
+    for (const e of entries) put(`${ch}/logs/${e.user_id}.log`, jsonl(e));
+  }
+  for (const [chat, entries] of Object.entries(slack)) put(`slack/logs/${chat}.log`, jsonl(...entries));
+  for (const [chat, entries] of Object.entries(discord)) put(`discord/logs/dm/${chat}.jsonl`, jsonl(...entries));
+  return dir;
+}
+const OWNER_LOGS = () => componentsWithLogs({
+  lark: [{ message_id: 'om_new', user_id: 'uo', open_id: 'ou_o' }, { message_id: 'om_a', user_id: 'uo', open_id: 'ou_o' }],
+  feishu: [{ message_id: 'om_old', user_id: 'uo', open_id: 'ou_o' }],
+  discord: { c1: [{ direction: 'in', userId: 'd1', messageId: '1' }] },
+});
 const SE = { type: 'im_owner_notice', event_id: 'e1', kind: 'agent_cap_90', text: 'hello', report_token: 'ignored' };
 
 test('noticeFromSystemFrame: reads payload.data of the v2 system frame', () => {
@@ -84,8 +103,11 @@ test('isOwnerDmEndpoint: unknown / internal channels never cached', () => {
 });
 
 test('selectOwnerDm + cache: discord hit keeps content prefix so cached entry validates', async () => {
-  const hit = selectOwnerDm([{ id: 1, channel: 'discord', endpoint_id: 'c1|msg:1', content: '[DISCORD DM] bob', timestamp: 't' }], cfgs);
+  const componentsDir = OWNER_LOGS();
+  const hit = selectOwnerDm([{ id: 1, channel: 'discord', endpoint_id: 'c1|msg:1|req:c1:1', content: '[DISCORD DM] bob', timestamp: 't' }], cfgs, { componentsDir });
   assert.equal(hit.content, '[DISCORD DM]');
+  assert.equal(hit.endpoint, 'c1');
+  assert.equal(hit.source, 'c1|msg:1|req:c1:1');
   const cacheFile = path.join(tmp(), 'c.json');
   await refreshOwnerEndpoint({ cacheFile, readRows: async () => [{ channel: 'zalo', endpoint_id: 'u1', content: '[Zalo DM] a', timestamp: 't' }], loadConfig: cfgs });
   assert.equal(readCachedEndpoint(cacheFile, cfgs).endpoint, 'u1');
@@ -99,22 +121,25 @@ test('selectOwnerDm: skips internal channels and groups, newest DM wins', () => 
     { id: 6, channel: 'web-console', endpoint_id: 'x|type:p2p' },
     { id: 5, channel: 'shell', endpoint_id: 'x|type:p2p' },
     { id: 4, channel: 'lark', endpoint_id: 'oc_g|type:group' },
-    { id: 3, channel: 'lark', endpoint_id: 'oc_new|type:p2p', timestamp: 't3' },
-    { id: 2, channel: 'feishu', endpoint_id: 'oc_old|type:p2p', timestamp: 't2' },
+    { id: 3, channel: 'lark', endpoint_id: 'oc_new|type:p2p|msg:om_new', timestamp: 't3' },
+    { id: 2, channel: 'feishu', endpoint_id: 'oc_old|type:p2p|msg:om_old', timestamp: 't2' },
   ];
-  assert.deepEqual(selectOwnerDm(rows, cfgs), { channel: 'lark', endpoint: 'oc_new|type:p2p', at: 't3', id: 3 });
-  assert.equal(selectOwnerDm(rows.slice(0, 6), cfgs), null);
+  const componentsDir = OWNER_LOGS();
+  assert.deepEqual(selectOwnerDm(rows, cfgs, { componentsDir }),
+    { channel: 'lark', source: 'oc_new|type:p2p|msg:om_new', endpoint: 'oc_new|type:p2p', at: 't3', id: 3 });
+  assert.equal(selectOwnerDm(rows.slice(0, 6), cfgs, { componentsDir }), null);
 });
 
 test('refreshOwnerEndpoint: persists hit; falls back to cache when C4 pruned', async () => {
   const dir = tmp();
   const cacheFile = path.join(dir, 'c.json');
-  const hit = await refreshOwnerEndpoint({ cacheFile, readRows: async () => [{ channel: 'lark', endpoint_id: 'oc_a|type:p2p', timestamp: 't' }], loadConfig: cfgs });
+  const componentsDir = OWNER_LOGS();
+  const hit = await refreshOwnerEndpoint({ cacheFile, componentsDir, readRows: async () => [{ channel: 'lark', endpoint_id: 'oc_a|type:p2p|msg:om_a', timestamp: 't' }], loadConfig: cfgs });
   assert.equal(hit.endpoint, 'oc_a|type:p2p');
-  assert.equal(readCachedEndpoint(cacheFile, cfgs).endpoint, 'oc_a|type:p2p');
-  const later = await refreshOwnerEndpoint({ cacheFile, readRows: async () => [], loadConfig: cfgs });
+  assert.equal(readCachedEndpoint(cacheFile, cfgs, { componentsDir }).endpoint, 'oc_a|type:p2p');
+  const later = await refreshOwnerEndpoint({ cacheFile, componentsDir, readRows: async () => [], loadConfig: cfgs });
   assert.equal(later.endpoint, 'oc_a|type:p2p');
-  assert.equal(await refreshOwnerEndpoint({ cacheFile: path.join(dir, 'none.json'), readRows: async () => [], loadConfig: cfgs }), null);
+  assert.equal(await refreshOwnerEndpoint({ cacheFile: path.join(dir, 'none.json'), componentsDir, readRows: async () => [], loadConfig: cfgs }), null);
 });
 
 test('isOwnerAttributed: peer id in endpoint must equal bound owner', () => {
@@ -136,18 +161,55 @@ test('isOwnerAttributed: peer id in endpoint must equal bound owner', () => {
   }
 });
 
-test('isOwnerAttributed: chat-id-only channels (lark/feishu/slack/discord) need dmPolicy=owner', () => {
-  for (const ch of ['lark', 'feishu', 'slack']) {
-    const owner = { bound: true, open_id: 'ou_o', user_id: 'u' };
-    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner }), true, `${ch} default policy`);
-    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner, dmPolicy: 'owner' }), true, ch);
-    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner, dmPolicy: 'open' }), false, ch);
-    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner, dmPolicy: 'allowlist', dmAllowFrom: ['x'] }), false, ch);
-    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', { owner: { bound: false } }), false, `${ch} unbound`);
+test('isOwnerAttributed: lark/feishu need the owner as sender of the msg in the component log', () => {
+  for (const ch of ['lark', 'feishu']) {
+    const componentsDir = componentsWithLogs({ [ch]: [
+      { message_id: 'om_o', user_id: 'uo', open_id: 'ou_o' },
+      { message_id: 'om_s', user_id: 'stranger', open_id: 'ou_s' },
+    ] });
+    const cfg = { owner: { bound: true, user_id: 'uo', open_id: 'ou_o' } };
+    const opts = { componentsDir };
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p|msg:om_o', cfg, opts), true, `${ch} owner`);
+    assert.equal(isOwnerAttributed(ch, 'oc_2|type:p2p|msg:om_s', cfg, opts), false, `${ch} stranger`);
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p', cfg, opts), false, `${ch} no msg id (legacy row)`);
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p|msg:om_x', cfg, opts), false, `${ch} not in log`);
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p|msg:om_o', { owner: { bound: false, user_id: 'uo' } }, opts), false, `${ch} unbound`);
+    // dmPolicy / legacy whitelist are irrelevant: evidence decides.
+    assert.equal(isOwnerAttributed(ch, 'oc_2|type:p2p|msg:om_s', { ...cfg, whitelist: { enabled: false } }, opts), false);
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p|msg:om_o', { ...cfg, dmPolicy: 'open' }, opts), true);
+    // Previous owner's DM after rebinding is not attributed to the new owner.
+    assert.equal(isOwnerAttributed(ch, 'oc_1|type:p2p|msg:om_o', { owner: { bound: true, user_id: 'stranger', open_id: 'ou_s' } }, opts), false);
   }
-  assert.equal(isOwnerAttributed('discord', 'c1|msg:1', { owner: 'd1' }), true);
-  assert.equal(isOwnerAttributed('discord', 'c1|msg:1', { owner: 'd1', dmPolicy: 'open' }), false);
-  assert.equal(isOwnerAttributed('discord', 'c1|msg:1', {}), false);
+});
+
+test('isOwnerAttributed: slack/discord need the owner as sender of the msg in the component log', () => {
+  const componentsDir = componentsWithLogs({
+    slack: { D1: [{ from: 'o', userId: 'UO', ts: '1.1' }], D2: [{ from: 's', userId: 'US', ts: '2.2' }] },
+    discord: { c1: [{ direction: 'in', userId: 'd1', messageId: '11' }], c2: [{ direction: 'in', userId: 'd2', messageId: '22' }, { direction: 'out', userId: 'd1', messageId: '23' }] },
+  });
+  const opts = { componentsDir };
+  const slack = { owner: { bound: true, user_id: 'UO' } };
+  assert.equal(isOwnerAttributed('slack', 'D1|type:dm|msg:1.1', slack, opts), true);
+  assert.equal(isOwnerAttributed('slack', 'D2|type:dm|msg:2.2', slack, opts), false);
+  assert.equal(isOwnerAttributed('slack', 'D1|type:dm', slack, opts), false);
+  assert.equal(isOwnerAttributed('slack', 'D1|type:dm|msg:1.1', { owner: { bound: false } }, opts), false);
+  assert.equal(isOwnerAttributed('discord', 'c1|msg:11|req:c1:11', { owner: 'd1' }, opts), true);
+  assert.equal(isOwnerAttributed('discord', 'c2|msg:22', { owner: 'd1' }, opts), false);
+  assert.equal(isOwnerAttributed('discord', 'c2|msg:23', { owner: 'd1' }, opts), false, 'outgoing entry is not evidence');
+  assert.equal(isOwnerAttributed('discord', 'c1|msg:11', {}, opts), false);
+});
+
+test('selectOwnerDm (review repro): legacy whitelist config + newer stranger DM picks the owner DM', () => {
+  const componentsDir = componentsWithLogs({ feishu: [
+    { message_id: 'om1', user_id: 'uo', open_id: 'ou_o' }, { message_id: 'om2', user_id: 'stranger', open_id: 'ou_s' },
+  ] });
+  const load = () => ({ owner: { bound: true, user_id: 'uo', open_id: 'ou_o' }, whitelist: { enabled: false } });
+  const rows = [
+    { id: 2, channel: 'feishu', endpoint_id: 'oc_stranger_chat|type:p2p|msg:om2', timestamp: 't2' },
+    { id: 1, channel: 'feishu', endpoint_id: 'oc_owner_chat|type:p2p|msg:om1', timestamp: 't1' },
+  ];
+  assert.equal(selectOwnerDm(rows, load, { componentsDir }).endpoint, 'oc_owner_chat|type:p2p');
+  assert.equal(selectOwnerDm(rows.slice(0, 1), load, { componentsDir }), null);
 });
 
 test('isOwnerAttributed: wechat (no owner) only with a single-user allowlist', () => {
@@ -159,20 +221,21 @@ test('isOwnerAttributed: wechat (no owner) only with a single-user allowlist', (
 });
 
 test('selectOwnerDm: a newer non-owner DM is skipped in favour of the owner DM', () => {
-  const load = (ch) => ({ telegram: { owner: { chat_id: '1' }, dmPolicy: 'open' }, lark: { owner: { bound: true }, dmPolicy: 'open' } })[ch];
+  const load = (ch) => ({ telegram: { owner: { chat_id: '1' }, dmPolicy: 'open' }, lark: { owner: { bound: true, user_id: 'uo' }, dmPolicy: 'open' } })[ch];
+  const componentsDir = tmp();
   const rows = [
-    { id: 3, channel: 'lark', endpoint_id: 'oc_x|type:p2p', timestamp: 't3' },
+    { id: 3, channel: 'lark', endpoint_id: 'oc_x|type:p2p|msg:om', timestamp: 't3' },
     { id: 2, channel: 'telegram', endpoint_id: '2|msg:1', timestamp: 't2' },
     { id: 1, channel: 'telegram', endpoint_id: '1|msg:1', timestamp: 't1' },
   ];
-  assert.deepEqual(selectOwnerDm(rows, load), { channel: 'telegram', endpoint: '1|msg:1', at: 't1', id: 1 });
-  assert.equal(selectOwnerDm(rows.slice(0, 2), load), null);
+  assert.deepEqual(selectOwnerDm(rows, load, { componentsDir }), { channel: 'telegram', source: '1|msg:1', endpoint: '1', at: 't1', id: 1 });
+  assert.equal(selectOwnerDm(rows.slice(0, 2), load, { componentsDir }), null);
 });
 
 test('readCachedEndpoint: re-attributes against current owner config', async () => {
   const cacheFile = path.join(tmp(), 'c.json');
   await refreshOwnerEndpoint({ cacheFile, readRows: async () => [{ channel: 'telegram', endpoint_id: '1|msg:1', timestamp: 't' }], loadConfig: () => ({ owner: { chat_id: '1' } }) });
-  assert.equal(readCachedEndpoint(cacheFile, () => ({ owner: { chat_id: '1' } })).endpoint, '1|msg:1');
+  assert.equal(readCachedEndpoint(cacheFile, () => ({ owner: { chat_id: '1' } })).endpoint, '1');
   assert.equal(readCachedEndpoint(cacheFile, () => ({ owner: { chat_id: '9' } })), null);
 });
 
@@ -184,6 +247,11 @@ test('createDedup: persisted and bounded', () => {
   assert.equal(d.has('d'), true);
   const d2 = createDedup({ file, max: 3 });
   assert.equal(d2.has('b'), true);
+  d2.attempt('z'); d2.attempt('z');
+  assert.equal(createDedup({ file, max: 3 }).attempts('z'), 2);
+  const legacy = path.join(tmp(), 'legacy.json');
+  fs.writeFileSync(legacy, JSON.stringify(['old']));
+  assert.equal(createDedup({ file: legacy }).has('old'), true);
 });
 
 test('handleImOwnerNotice: sends; duplicate is a no-op; report_token ignored', async () => {
@@ -221,44 +289,106 @@ test('handleImOwnerNotice: send failure is logged as failed', async () => {
 });
 
 
-const BRIDGE_SRC = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'comm-bridge.js'), 'utf8');
+test('handleImOwnerNotice: failed send stays retryable on redelivery, capped at 3 attempts', async () => {
+  const dedup = createDedup({ file: path.join(tmp(), 's.json') });
+  let calls = 0;
+  const deps = { dedup, resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }), send: async () => { calls++; return false; } };
+  assert.equal(await handleImOwnerNotice(SE, deps), 'failed');
+  assert.equal(await handleImOwnerNotice(SE, deps), 'failed');
+  assert.equal(await handleImOwnerNotice(SE, deps), 'failed');
+  assert.equal(await handleImOwnerNotice(SE, deps), 'gave_up');
+  assert.equal(await handleImOwnerNotice(SE, deps), 'duplicate');
+  assert.equal(calls, 3);
+  const d2 = createDedup({ file: path.join(tmp(), 's.json') });
+  let n = 0;
+  const flaky = { dedup: d2, resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }), send: async () => ++n > 1 };
+  assert.equal(await handleImOwnerNotice(SE, flaky), 'failed');
+  assert.equal(await handleImOwnerNotice(SE, flaky), 'sent');
+  assert.equal(await handleImOwnerNotice(SE, flaky), 'duplicate');
+});
 
-// comm-bridge self-executes on import, so evaluate classifySystemEvent's real
-// source with its dependencies stubbed.
-function loadClassify() {
-  const start = BRIDGE_SRC.indexOf('function classifySystemEvent(eventName)');
-  const end = BRIDGE_SRC.indexOf('\n}\n', start) + 2;
-  const fnSrc = BRIDGE_SRC.slice(start, end);
-  // eslint-disable-next-line no-new-func
-  return new Function('IM_OWNER_NOTICE_EVENT', 'IM_OWNER_NOTICE_TYPE', 'AGENT_DIAGNOSTICS_EVENT', 'CARD_RECORDED_EVENT', 'isChannelEvent',
-    `${fnSrc}; return classifySystemEvent;`)(IM_OWNER_NOTICE_EVENT, IM_OWNER_NOTICE_TYPE, 'agent.diagnostics.command', 'card.interaction.recorded', (e) => e.startsWith('channel.'));
-}
+test('handleImOwnerNotice: sends a stripped endpoint even if the resolver returns a raw one', async () => {
+  const sends = [];
+  await handleImOwnerNotice(SE, {
+    dedup: createDedup({ file: path.join(tmp(), 's.json') }),
+    resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '7|msg:9|req:7:9' }),
+    send: async (...a) => { sends.push(a); return true; },
+  });
+  assert.deepEqual(sends, [['telegram', '7', 'hello']]);
+});
 
-test('classifySystemEvent: agent.im_owner_notice -> im_owner_notice, matched before fallbacks', () => {
-  const classify = loadClassify();
+test('stripMessageParams: drops message-level params, keeps per-channel routing params', () => {
+  const cases = [
+    ['telegram', '123|msg:9|req:123:9|thread:4', '123'],
+    ['lark', 'oc_1|type:p2p|root:om_r|parent:om_p|msg:om_m|thread:omt', 'oc_1|type:p2p'],
+    ['slack', 'D1|type:dm|msg:1.2|thread:1.0', 'D1|type:dm'],
+    ['discord', 'c1|msg:5|req:c1:5', 'c1'],
+    ['line', 'U1|type:dm|account:default|user:U1|replyKey:rk', 'U1|type:dm|account:default|user:U1'],
+    ['ms-teams', 'conv|type:dm|user:a1|msg:x', 'conv|type:dm|user:a1'],
+    ['wechat', 'acct|to:wx1', 'acct|to:wx1'],
+    ['dingtalk', 's1|type:p2p|msg:m', 's1|type:p2p'],
+    ['zalo', 'z1|msg:1|req:x', 'z1'],
+  ];
+  for (const [ch, raw, want] of cases) assert.equal(stripMessageParams(raw), want, ch);
+});
+
+test('readC4InboundRows: falls back to sqlite3 CLI when node:sqlite is unavailable; warns once when neither works', async (t) => {
+  const db = path.join(tmp(), 'c4.db');
+  try {
+    execFileSync('sqlite3', [db, `CREATE TABLE conversations (id INTEGER PRIMARY KEY, direction TEXT, channel TEXT, endpoint_id TEXT, content TEXT, timestamp TEXT);
+      INSERT INTO conversations VALUES (1,'in','telegram','1|msg:1','hi','t1'),(2,'in','openmax','x','y','t2'),(3,'out','telegram','1','z','t3'),(4,'in','lark','oc|type:p2p|msg:o''x','[Lark DM] a','t4');`]);
+  } catch { t.skip('sqlite3 CLI not installed'); return; }
+  const noNode = async () => { throw Object.assign(new Error('nope'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' }); };
+  const rows = await readC4InboundRows(db, 10, { nodeSqlite: noNode, warn: () => assert.fail('no warn') });
+  assert.deepEqual(rows.map(r => [r.id, r.channel, r.endpoint_id]), [[4, 'lark', "oc|type:p2p|msg:o'x"], [1, 'telegram', '1|msg:1']]);
+  _resetC4ReadWarning();
+  const warns = [];
+  const opts = { nodeSqlite: noNode, sqliteBin: '/nonexistent/sqlite3', warn: (m) => warns.push(m) };
+  assert.deepEqual(await readC4InboundRows(db, 10, opts), []);
+  assert.deepEqual(await readC4InboundRows(db, 10, opts), []);
+  assert.equal(warns.length, 1);
+  assert.match(warns[0], /cannot read C4.*ERR_UNKNOWN_BUILTIN_MODULE.*ENOENT/);
+});
+
+test('classifySystemEvent: im owner notice wins over substring fallbacks', () => {
   assert.equal(IM_OWNER_NOTICE_EVENT, 'agent.im_owner_notice');
-  assert.equal(classify('agent.im_owner_notice'), 'im_owner_notice');
-  assert.equal(classify('AGENT.IM_OWNER_NOTICE'), 'im_owner_notice');
-  assert.equal(classify('agent.config.updated'), 'config_update');
-  assert.equal(classify('message.updated'), 'edit');
-  const body = BRIDGE_SRC.slice(BRIDGE_SRC.indexOf('function classifySystemEvent('));
-  assert.ok(body.indexOf('IM_OWNER_NOTICE_EVENT) return IM_OWNER_NOTICE_TYPE') < body.indexOf("e.includes('recall')"));
+  assert.equal(classifySystemEvent('agent.im_owner_notice'), IM_OWNER_NOTICE_TYPE);
+  assert.equal(classifySystemEvent('AGENT.IM_OWNER_NOTICE'), IM_OWNER_NOTICE_TYPE);
+  assert.equal(classifySystemEvent('agent.config.updated'), 'config_update');
+  assert.equal(classifySystemEvent('message.updated'), 'edit');
+  assert.equal(classifySystemEvent('message.read'), null);
 });
 
-test('handleSystemEvent routes im_owner_notice to processImOwnerNotice before conversation/forward logic', () => {
-  const fnStart = BRIDGE_SRC.indexOf('async function handleSystemEvent(orgConfig, frame)');
-  const branch = BRIDGE_SRC.indexOf('if (kind === IM_OWNER_NOTICE_TYPE)', fnStart);
-  assert.ok(branch > fnStart);
-  const seg = BRIDGE_SRC.slice(branch, BRIDGE_SRC.indexOf('\n  }\n', branch));
-  assert.match(seg, /noticeFromSystemFrame\(frame\)/);
-  assert.match(seg, /await processImOwnerNotice\(orgConfig, notice\);\s*return;/);
-  assert.ok(branch < BRIDGE_SRC.indexOf('missing conversation_id', fnStart));
-  assert.ok(!seg.includes('isOrgLLMSuspended'), 'system frame path must not be arrears-gated');
-  const sysHandler = BRIDGE_SRC.slice(fnStart, BRIDGE_SRC.indexOf('\n}\n', fnStart));
-  assert.ok(!sysHandler.includes('isOrgLLMSuspended'));
+test('routeImOwnerNotice: dispatches the frame data to the handler; ignores other events', async () => {
+  const got = []; const warns = [];
+  const data = { event_id: 'e9', kind: 'agent_cap_90', text: 'hi' };
+  const deps = { onNotice: async (n) => got.push(n), warn: (m) => warns.push(m) };
+  assert.equal(await routeImOwnerNotice({ type: 'system', payload: { event: 'agent.im_owner_notice', data } }, deps), true);
+  assert.deepEqual(got, [data]);
+  assert.equal(await routeImOwnerNotice({ type: 'system', payload: { event: 'agent.im_owner_notice' } }, deps), true);
+  assert.equal(got.length, 1);
+  assert.match(warns[0], /missing data/);
+  assert.equal(await routeImOwnerNotice({ type: 'system', payload: { event: 'message.updated', data } }, deps), false);
+  assert.equal(got.length, 1);
 });
 
-test('v1 system-DM interception removed from the message path', () => {
-  assert.ok(!BRIDGE_SRC.includes('extractImOwnerNotice'));
-  assert.ok(!BRIDGE_SRC.includes('const imNotice ='));
+test('end to end: system frame -> route -> handle -> c4-send stub gets the owner DM (not the stranger)', async () => {
+  const componentsDir = componentsWithLogs({ lark: [
+    { message_id: 'om1', user_id: 'uo', open_id: 'ou_o' }, { message_id: 'om2', user_id: 'stranger', open_id: 'ou_s' },
+  ] });
+  const rows = [
+    { id: 2, channel: 'lark', endpoint_id: 'oc_s|type:p2p|msg:om2', timestamp: 't2' },
+    { id: 1, channel: 'lark', endpoint_id: 'oc_o|type:p2p|msg:om1', timestamp: 't1' },
+  ];
+  const sends = [];
+  const dedup = createDedup({ file: path.join(tmp(), 's.json') });
+  const frame = { type: 'system', payload: { event: 'agent.im_owner_notice', data: { event_id: 'x1', kind: 'org_credits_exhausted', text: 'credits out' } } };
+  await routeImOwnerNotice(frame, {
+    onNotice: (n) => handleImOwnerNotice(n, {
+      dedup,
+      resolveEndpoint: () => refreshOwnerEndpoint({ cacheFile: path.join(tmp(), 'c.json'), componentsDir, readRows: async () => rows, loadConfig: () => ({ owner: { bound: true, user_id: 'uo', open_id: 'ou_o' }, whitelist: { enabled: false } }) }),
+      send: async (...a) => { sends.push(a); return true; },
+    }),
+  });
+  assert.deepEqual(sends, [['lark', 'oc_o|type:p2p', 'credits out']]);
 });

@@ -34,9 +34,9 @@ import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
 import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import {
-  handleImOwnerNotice, createDedup, refreshOwnerEndpoint,
-  IM_OWNER_NOTICE_EVENT, IM_OWNER_NOTICE_TYPE, noticeFromSystemFrame,
+  handleImOwnerNotice, createDedup, refreshOwnerEndpoint, IM_OWNER_NOTICE_TYPE,
 } from './lib/im-owner-notice.js';
+import { classifySystemEvent, routeImOwnerNotice } from './lib/system-event-routing.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { preferredConnectorsFrom } from './lib/connector-preference.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
@@ -44,7 +44,7 @@ import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
 import { getMediaUrl, downloadMedia } from './cli/as.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
-import { createChannelInstaller, isChannelEvent } from './lib/channel-connector.js';
+import { createChannelInstaller } from './lib/channel-connector.js';
 import { logSystemFrame } from './lib/system-events.js';
 import { createReceiptWatcher, CARD_RECORDED_EVENT } from './lib/receipt-watch.js';
 import { createDmSeenWatcher, resolveDmSeenConfig, drainSentMarkers, buildUnseenPrompt, SENT_DIR } from './lib/dm-seen-watch.js';
@@ -70,7 +70,6 @@ import { startLogRotation } from './lib/log-rotate.js';
 import { isOrgLLMSuspended, OVERDUE_NOTICE, shouldSendOverdueNotice } from './lib/billing-status.js';
 import {
   AGENT_DIAGNOSTICS_CONFIG_EVENT,
-  AGENT_DIAGNOSTICS_EVENT,
   applyDiagnosticsConfig,
   createDiagnosticsHandler,
 } from './lib/diagnostics.js';
@@ -1595,24 +1594,7 @@ function syncLiveAccessAndReport(orgConfig) {
 //   .reaction.added / .reaction.removed / .mention.created.
 // Exact match keeps us in lock-step with the contract; the substring fallback
 // only guards against a future rename (e.g. a "message.edited" alias).
-function classifySystemEvent(eventName) {
-  const e = String(eventName || '').toLowerCase();
-  // OPENM-936 v2: matched first so no prefix/substring rule can claim it.
-  if (e === IM_OWNER_NOTICE_EVENT) return IM_OWNER_NOTICE_TYPE;
-  if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
-  if (e === 'message.updated') return 'edit';
-  if (e.startsWith('agent.config.')) return 'config_update';
-  if (e === AGENT_DIAGNOSTICS_EVENT) return 'diagnostics';
-  // Thin "card flipped" lifecycle event — not the answer (that is the
-  // interaction receipt). Handled by the dispatcher's lost-receipt watcher.
-  if (e === CARD_RECORDED_EVENT) return 'card_settled';
-  if (e.startsWith('connection.')) return 'connection';
-  if (isChannelEvent(e)) return 'channel';
-  // Defensive fallback for naming drift — does not match reaction/read/etc.
-  if (e.includes('recall') || e.includes('delete')) return 'recall';
-  if (e.includes('edit') || e.includes('updat')) return 'edit';
-  return null;
-}
+// classifySystemEvent lives in lib/system-event-routing.js (unit-tested there).
 
 async function handleSystemEvent(orgConfig, frame) {
   const payload = frame.payload || {};
@@ -1633,12 +1615,10 @@ async function handleSystemEvent(orgConfig, frame) {
   // System frames bypass the credit-arrears gate (that gate lives only in the
   // message path), so this still runs while the org is LLM-suspended.
   if (kind === IM_OWNER_NOTICE_TYPE) {
-    const notice = noticeFromSystemFrame(frame);
-    if (!notice) {
-      warn(`[${orgConfig.slug}] ${IM_OWNER_NOTICE_EVENT}: missing data, skip`);
-      return;
-    }
-    await processImOwnerNotice(orgConfig, notice);
+    await routeImOwnerNotice(frame, {
+      onNotice: (notice) => processImOwnerNotice(orgConfig, notice),
+      warn: (m) => warn(`[${orgConfig.slug}] ${m}`),
+    });
     return;
   }
 
