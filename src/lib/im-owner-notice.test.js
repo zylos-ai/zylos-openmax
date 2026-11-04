@@ -12,7 +12,13 @@ import {
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'im-owner-'));
 const SE = { type: 'im_owner_notice', event_id: 'e1', kind: 'agent_cap_90', text: 'hello', report_token: 'tok' };
 
-test('extractImOwnerNotice: content.metadata (WS frame) and nested detail shapes', () => {
+test('extractImOwnerNotice: content.body.systemEvent (core shape), WS frame and get-message envelope', () => {
+  assert.deepEqual(extractImOwnerNotice({ content: { body: { text: 'hello', systemEvent: SE } } }), SE);
+  assert.deepEqual(extractImOwnerNotice({ message: { content: { body: { text: 'hello', systemEvent: SE } } } }), SE);
+  assert.equal(extractImOwnerNotice({ content: { body: { text: 'x', systemEvent: { type: 'other' } } } }), null);
+});
+
+test('extractImOwnerNotice: fallback content.metadata (WS frame) and nested detail shapes', () => {
   assert.deepEqual(extractImOwnerNotice({ content: { metadata: { systemEvent: SE } } }), SE);
   assert.deepEqual(extractImOwnerNotice({ message: { content: { metadata: { systemEvent: SE } } } }), SE);
   assert.equal(extractImOwnerNotice({ content: { metadata: { systemEvent: { type: 'other' } } } }), null);

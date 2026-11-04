@@ -4,11 +4,11 @@
  *
  * Contract (cws-core → cws-comm → this plugin):
  *   A SYSTEM-sender TEXT message in the agent's system DM carries
- *     content.metadata.systemEvent = {
+ *     content.body.systemEvent = {
  *       type: "im_owner_notice", event_id, kind, text, report_token }
- *   The marker lives in `content` (real-time WS frames carry `content` but not
- *   the top-level `metadata`); the get-message detail envelope may nest it
- *   under `message.content`, so every known shape is read.
+ *   (sibling of content.body.text — comm message content has no metadata
+ *   field; cws-core!977). The get-message detail envelope may nest it under
+ *   `message.content`; legacy `metadata.systemEvent` paths are kept as fallback.
  *
  * Plugin behavior:
  *   1. Never forward the message to C4 / the model.
@@ -60,6 +60,8 @@ const SCAN_LIMIT = 500;
 export function extractImOwnerNotice(msg) {
   if (!msg) return null;
   const candidates = [
+    msg.content?.body?.systemEvent,
+    msg.message?.content?.body?.systemEvent,
     msg.content?.metadata?.systemEvent,
     msg.message?.content?.metadata?.systemEvent,
     msg.metadata?.systemEvent,

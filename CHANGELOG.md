@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **IM owner notice, delivered in code (OPENM-936).** A SYSTEM-sender message whose `content.metadata.systemEvent.type` is `im_owner_notice` (Agent cap 90% / 100%, org credits exhausted) is intercepted before the arrears gate and never forwarded to the model. It is deduplicated by `event_id` (bounded persisted set), its pre-rendered `text` is sent via `c4-send.js` to the owner's latest IM private chat, and `{report_token, event_id, status: sent|no_address|failed}` is reported back to cws-core.
+- **IM owner notice, delivered in code (OPENM-936).** A SYSTEM-sender message whose `content.body.systemEvent.type` is `im_owner_notice` (legacy `metadata.systemEvent` paths kept as fallback) (Agent cap 90% / 100%, org credits exhausted) is intercepted before the arrears gate and never forwarded to the model. It is deduplicated by `event_id` (bounded persisted set), its pre-rendered `text` is sent via `c4-send.js` to the owner's latest IM private chat, and `{report_token, event_id, status: sent|no_address|failed}` is reported back to cws-core.
 - **Owner DM endpoint cache.** Resolved on demand from C4 `conversations` (inbound, excluding openmax / scheduler / system / web-console / shell) and persisted to `components/openmax/im-owner-endpoint.json` (refreshed every 5 min and on each notice) so C4 pruning cannot lose it. Only Lark / Feishu `type:p2p` endpoints are recognised; other channels are not cached until their DM marker is known.
 
 ## [2.31.0] - 2026-11-04
