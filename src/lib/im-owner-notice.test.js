@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import {
   isOwnerDmEndpoint, noticeFromSystemFrame, IM_OWNER_NOTICE_EVENT, IM_OWNER_NOTICE_TYPE, selectOwnerDm, refreshOwnerEndpoint,
   createDedup, handleImOwnerNotice, readCachedEndpoint, isOwnerAttributed, stripMessageParams,
-  readC4InboundRows, _resetC4ReadWarning,
+  readC4InboundRows, _resetC4ReadWarning, _resetInFlight, readViaCommBridgeBetterSqlite, DEFAULT_COMM_BRIDGE_DIR,
 } from './im-owner-notice.js';
 import { classifySystemEvent, routeImOwnerNotice } from './system-event-routing.js';
 
@@ -35,6 +35,8 @@ const OWNER_LOGS = () => componentsWithLogs({
   feishu: [{ message_id: 'om_old', user_id: 'uo', open_id: 'ou_o' }],
   discord: { c1: [{ direction: 'in', userId: 'd1', messageId: '1' }] },
 });
+beforeEach(() => _resetInFlight());
+
 const SE = { type: 'im_owner_notice', event_id: 'e1', kind: 'agent_cap_90', text: 'hello', report_token: 'ignored' };
 
 test('noticeFromSystemFrame: reads payload.data of the v2 system frame', () => {
@@ -284,27 +286,94 @@ test('handleImOwnerNotice: send failure is logged as failed', async () => {
     dedup: createDedup({ file: path.join(tmp(), 's.json') }),
     resolveEndpoint: async () => ({ channel: 'lark', endpoint: 'oc_a|type:p2p' }),
     send: async () => false,
+    setTimer: () => {},
   });
   assert.equal(status, 'failed');
 });
 
 
-test('handleImOwnerNotice: failed send stays retryable on redelivery, capped at 3 attempts', async () => {
+function fakeTimers() {
+  const q = [];
+  return { q, setTimer: (fn, ms) => q.push({ fn, ms }), fire: async () => q.shift().fn() };
+}
+
+test('handleImOwnerNotice: local delayed retry (30s, 2min), capped at 3 attempts, then gave up', async () => {
+  _resetInFlight();
   const dedup = createDedup({ file: path.join(tmp(), 's.json') });
+  const t = fakeTimers();
   let calls = 0;
-  const deps = { dedup, resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }), send: async () => { calls++; return false; } };
+  const warns = [];
+  const deps = { dedup, setTimer: t.setTimer, warn: (m) => warns.push(m), resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }), send: async () => { calls++; return false; } };
   assert.equal(await handleImOwnerNotice(SE, deps), 'failed');
-  assert.equal(await handleImOwnerNotice(SE, deps), 'failed');
-  assert.equal(await handleImOwnerNotice(SE, deps), 'failed');
-  assert.equal(await handleImOwnerNotice(SE, deps), 'gave_up');
+  assert.deepEqual(t.q.map(x => x.ms), [30000]);
+  // redelivery during the pending retry window: blocked, no extra send
+  assert.equal(await handleImOwnerNotice(SE, deps), 'in_flight');
+  assert.equal(await t.fire(), 'failed');
+  assert.deepEqual(t.q.map(x => x.ms), [120000]);
+  assert.equal(await t.fire(), 'failed');
+  assert.equal(t.q.length, 0);
+  assert.equal(calls, 3);
+  assert.match(warns.at(-1), /gave_up after 3 attempts/);
   assert.equal(await handleImOwnerNotice(SE, deps), 'duplicate');
   assert.equal(calls, 3);
-  const d2 = createDedup({ file: path.join(tmp(), 's.json') });
+});
+
+test('handleImOwnerNotice: no_address is retried and succeeds later', async () => {
+  _resetInFlight();
+  const dedup = createDedup({ file: path.join(tmp(), 's.json') });
+  const t = fakeTimers();
   let n = 0;
-  const flaky = { dedup: d2, resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }), send: async () => ++n > 1 };
-  assert.equal(await handleImOwnerNotice(SE, flaky), 'failed');
-  assert.equal(await handleImOwnerNotice(SE, flaky), 'sent');
-  assert.equal(await handleImOwnerNotice(SE, flaky), 'duplicate');
+  const sends = [];
+  const deps = { dedup, setTimer: t.setTimer, resolveEndpoint: async () => (++n > 1 ? { channel: 'telegram', endpoint: '1' } : null), send: async (...a) => { sends.push(a); return true; } };
+  assert.equal(await handleImOwnerNotice(SE, deps), 'no_address');
+  assert.equal(await t.fire(), 'sent');
+  assert.equal(t.q.length, 0);
+  assert.equal(sends.length, 1);
+  assert.equal(await handleImOwnerNotice(SE, deps), 'duplicate');
+});
+
+test('handleImOwnerNotice: concurrent duplicate deliveries send once', async () => {
+  _resetInFlight();
+  const dedup = createDedup({ file: path.join(tmp(), 's.json') });
+  let calls = 0;
+  const deps = { dedup, setTimer: () => assert.fail('no retry'), resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }),
+    send: async () => { calls++; await new Promise(r => setTimeout(r, 20)); return true; } };
+  const res = await Promise.all([handleImOwnerNotice(SE, deps), handleImOwnerNotice(SE, deps)]);
+  assert.deepEqual(res.sort(), ['in_flight', 'sent']);
+  assert.equal(calls, 1);
+});
+
+test('handleImOwnerNotice: retry timer firing concurrently with a new delivery sends once', async () => {
+  _resetInFlight();
+  const dedup = createDedup({ file: path.join(tmp(), 's.json') });
+  const t = fakeTimers();
+  let n = 0;
+  const deps = { dedup, setTimer: t.setTimer, resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }),
+    send: async () => { n++; await new Promise(r => setTimeout(r, 10)); return n > 1; } };
+  assert.equal(await handleImOwnerNotice(SE, deps), 'failed');
+  const [a, b] = await Promise.all([t.fire(), handleImOwnerNotice(SE, deps)]);
+  assert.equal(a, 'sent');
+  assert.equal(b, 'in_flight');
+  assert.equal(n, 2);
+});
+
+test('handleImOwnerNotice: restart during a pending retry never sends twice', async () => {
+  _resetInFlight();
+  const file = path.join(tmp(), 's.json');
+  const t = fakeTimers();
+  let calls = 0;
+  const ok = async () => { calls++; return true; };
+  // process A: first attempt fails, retry pending
+  assert.equal(await handleImOwnerNotice(SE, { dedup: createDedup({ file }), setTimer: t.setTimer, resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }), send: async () => false }), 'failed');
+  // "restart": in-memory state lost, timers dropped; a redelivery sends with persisted attempt count
+  _resetInFlight();
+  const d2 = createDedup({ file });
+  assert.equal(d2.attempts(SE.event_id), 1);
+  assert.equal(await handleImOwnerNotice(SE, { dedup: d2, setTimer: t.setTimer, resolveEndpoint: async () => ({ channel: 'telegram', endpoint: '1' }), send: ok }), 'sent');
+  // the old timer (if it somehow still fired in a surviving process) sees the persisted done set
+  _resetInFlight();
+  assert.equal(await handleImOwnerNotice(SE, { dedup: createDedup({ file }), send: ok }), 'duplicate');
+  assert.equal(calls, 1);
 });
 
 test('handleImOwnerNotice: sends a stripped endpoint even if the resolver returns a raw one', async () => {
@@ -339,15 +408,44 @@ test('readC4InboundRows: falls back to sqlite3 CLI when node:sqlite is unavailab
       INSERT INTO conversations VALUES (1,'in','telegram','1|msg:1','hi','t1'),(2,'in','openmax','x','y','t2'),(3,'out','telegram','1','z','t3'),(4,'in','lark','oc|type:p2p|msg:o''x','[Lark DM] a','t4');`]);
   } catch { t.skip('sqlite3 CLI not installed'); return; }
   const noNode = async () => { throw Object.assign(new Error('nope'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' }); };
-  const rows = await readC4InboundRows(db, 10, { nodeSqlite: noNode, warn: () => assert.fail('no warn') });
+  const noBetter = async () => { throw Object.assign(new Error('missing'), { code: 'MODULE_NOT_FOUND' }); };
+  const rows = await readC4InboundRows(db, 10, { nodeSqlite: noNode, betterSqlite: noBetter, warn: () => assert.fail('no warn') });
   assert.deepEqual(rows.map(r => [r.id, r.channel, r.endpoint_id]), [[4, 'lark', "oc|type:p2p|msg:o'x"], [1, 'telegram', '1|msg:1']]);
   _resetC4ReadWarning();
   const warns = [];
-  const opts = { nodeSqlite: noNode, sqliteBin: '/nonexistent/sqlite3', warn: (m) => warns.push(m) };
+  const opts = { nodeSqlite: noNode, betterSqlite: noBetter, sqliteBin: '/nonexistent/sqlite3', warn: (m) => warns.push(m) };
   assert.deepEqual(await readC4InboundRows(db, 10, opts), []);
   assert.deepEqual(await readC4InboundRows(db, 10, opts), []);
   assert.equal(warns.length, 1);
-  assert.match(warns[0], /cannot read C4.*ERR_UNKNOWN_BUILTIN_MODULE.*ENOENT/);
+  assert.match(warns[0], /cannot read C4.*ERR_UNKNOWN_BUILTIN_MODULE.*MODULE_NOT_FOUND.*ENOENT/);
+});
+
+test('readC4InboundRows: uses comm-bridge better-sqlite3 before sqlite3 CLI; ABI/load errors fall through', async () => {
+  _resetC4ReadWarning();
+  const db = path.join(tmp(), 'c4.db');
+  fs.writeFileSync(db, '');
+  const noNode = async () => { throw new Error('nope'); };
+  const rows = [{ id: 1, channel: 'telegram', endpoint_id: '1' }];
+  assert.deepEqual(await readC4InboundRows(db, 10, { nodeSqlite: noNode, betterSqlite: async () => rows, sqliteBin: '/nonexistent/sqlite3', warn: () => assert.fail('no warn') }), rows);
+  const abi = async () => { throw Object.assign(new Error('was compiled against a different Node.js version using NODE_MODULE_VERSION 115'), { code: 'ERR_DLOPEN_FAILED' }); };
+  const warns = [];
+  assert.deepEqual(await readC4InboundRows(db, 10, { nodeSqlite: noNode, betterSqlite: abi, sqliteBin: '/nonexistent/sqlite3', warn: (m) => warns.push(m) }), []);
+  assert.match(warns[0], /better-sqlite3: ERR_DLOPEN_FAILED.*sqlite3 CLI/);
+});
+
+test('readViaCommBridgeBetterSqlite: loads from comm-bridge install when present', async (t) => {
+  const dir = DEFAULT_COMM_BRIDGE_DIR;
+  if (!fs.existsSync(path.join(dir, 'node_modules', 'better-sqlite3'))) { t.skip('comm-bridge not installed'); return; }
+  const db = path.join(tmp(), 'c4.db');
+  try {
+    const { createRequire } = await import('node:module');
+    const D = createRequire(path.join(dir, 'scripts', 'c4-db.js'))('better-sqlite3');
+    const w = new D(db);
+    w.exec("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (7);");
+    w.close();
+  } catch (e) { t.skip(`better-sqlite3 unusable here: ${e.message}`); return; }
+  assert.deepEqual(await readViaCommBridgeBetterSqlite(db, 'SELECT a FROM t'), [{ a: 7 }]);
+  await assert.rejects(readViaCommBridgeBetterSqlite(path.join(tmp(), 'missing.db'), 'SELECT 1'));
 });
 
 test('classifySystemEvent: im owner notice wins over substring fallbacks', () => {

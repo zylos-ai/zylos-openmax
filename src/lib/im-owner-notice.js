@@ -51,6 +51,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 
 export const IM_OWNER_NOTICE_TYPE = 'im_owner_notice';
@@ -65,8 +66,12 @@ export const DEFAULT_DEDUP_FILE = path.join(ZYLOS_DIR, 'components', 'openmax', 
 export const DEFAULT_C4_DB = path.join(ZYLOS_DIR, 'comm-bridge', 'c4.db');
 export const DEFAULT_C4_SEND = path.join(ZYLOS_DIR, '.claude', 'skills', 'comm-bridge', 'scripts', 'c4-send.js');
 export const DEDUP_MAX = 200;
-/** Send attempts per event_id across redeliveries before giving up. */
+/** Send attempts per event_id (local delayed retries + redeliveries) before giving up. */
 export const MAX_ATTEMPTS = 3;
+/** Delay before local retry #2 and #3 after a failed / no_address attempt. */
+export const RETRY_DELAYS_MS = [30_000, 120_000];
+/** C4 comm-bridge skill dir; its node_modules ships better-sqlite3 (c4-db.js uses it). */
+export const DEFAULT_COMM_BRIDGE_DIR = path.join(ZYLOS_DIR, '.claude', 'skills', 'comm-bridge');
 /** Rows scanned per on-demand C4 read (newest first). */
 const SCAN_LIMIT = 500;
 
@@ -299,6 +304,17 @@ async function readViaNodeSqlite(dbPath, sql) {
   try { return db.prepare(sql).all(); } finally { try { db.close(); } catch {} }
 }
 
+/**
+ * better-sqlite3 resolved from the comm-bridge's own install (never a plugin
+ * dependency). Read-only, fileMustExist.
+ */
+export async function readViaCommBridgeBetterSqlite(dbPath, sql, { commBridgeDir = DEFAULT_COMM_BRIDGE_DIR } = {}) {
+  const req = createRequire(path.join(commBridgeDir, 'scripts', 'c4-db.js'));
+  const Database = req('better-sqlite3');
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try { return db.prepare(sql).all(); } finally { try { db.close(); } catch {} }
+}
+
 async function readViaSqliteCli(dbPath, sql, bin = 'sqlite3') {
   const { stdout } = await execFileP(bin, ['-readonly', '-json', dbPath, sql], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
   const out = String(stdout || '').trim();
@@ -307,16 +323,19 @@ async function readViaSqliteCli(dbPath, sql, bin = 'sqlite3') {
 
 /**
  * Newest-first inbound rows from C4 sqlite. Tries built-in node:sqlite, then
- * the sqlite3 CLI (read-only, 5s timeout). If neither works, warns once and
+ * better-sqlite3 from the comm-bridge install, then the sqlite3 CLI (read-only,
+ * 5s timeout). If neither works, warns once and
  * returns [] (the persisted cache is then the only source).
  */
 export async function readC4InboundRows(dbPath = DEFAULT_C4_DB, limit = SCAN_LIMIT, {
   warn = (m) => console.warn(m), sqliteBin = 'sqlite3', nodeSqlite = readViaNodeSqlite,
+  betterSqlite = readViaCommBridgeBetterSqlite,
 } = {}) {
   if (!fs.existsSync(dbPath)) return [];
   const sql = c4Sql(limit);
   const errors = [];
   try { return await nodeSqlite(dbPath, sql); } catch (e) { errors.push(`node:sqlite: ${e.code || e.message}`); }
+  try { return await betterSqlite(dbPath, sql); } catch (e) { errors.push(`better-sqlite3: ${e.code || e.message}`); }
   try { return await readViaSqliteCli(dbPath, sql, sqliteBin); } catch (e) { errors.push(`sqlite3 CLI: ${e.code || e.message}`); }
   if (!c4ReadWarned) {
     c4ReadWarned = true;
@@ -434,12 +453,25 @@ export function c4Send(channel, endpoint, text, { script = DEFAULT_C4_SEND, time
   });
 }
 
+/** event_ids currently being handled in this process (incl. pending retries). */
+const inFlight = new Set();
+/** Test hook. */
+export function _resetInFlight() { inFlight.clear(); }
+
 /**
- * Handle one im_owner_notice systemEvent end to end. Never throws.
- * Returns the logged outcome: 'sent' | 'no_address' | 'failed' |
- * 'duplicate' | 'invalid' | 'gave_up'. Only 'sent' (and unrecoverable
- * 'invalid'/'gave_up') mark the event_id done; 'failed' / 'no_address' leave
- * it retryable on a later delivery, capped at maxAttempts.
+ * Handle one im_owner_notice systemEvent. Never throws.
+ * Returns the outcome of the first attempt: 'sent' | 'no_address' | 'failed' |
+ * 'duplicate' | 'in_flight' | 'invalid' | 'gave_up'.
+ *
+ * The upstream push is fire-and-forget (no redelivery on a local failure), so
+ * a 'failed' / 'no_address' attempt is retried locally with in-process timers
+ * (RETRY_DELAYS_MS: 30s, then 2min) up to maxAttempts in total, then given up
+ * with a log. Attempts are persisted, so a redelivery after a restart
+ * continues the count; a restart drops pending retry timers (accepted — the
+ * persisted done set is checked before every attempt, so nothing is sent
+ * twice). The event stays owned by the retry (in-flight) until final
+ * success / give-up. The comm-bridge is a single process, so an in-memory
+ * in-flight set prevents concurrent duplicate deliveries from sending twice.
  */
 export async function handleImOwnerNotice(se, {
   dedup,
@@ -448,6 +480,8 @@ export async function handleImOwnerNotice(se, {
   log = () => {},
   warn = () => {},
   maxAttempts = MAX_ATTEMPTS,
+  retryDelaysMs = RETRY_DELAYS_MS,
+  setTimer = (fn, ms) => { const t = setTimeout(fn, ms); t.unref?.(); return t; },
 } = {}) {
   const eventId = se?.event_id ? String(se.event_id) : '';
   const text = typeof se?.text === 'string' ? se.text.trim() : '';
@@ -459,31 +493,59 @@ export async function handleImOwnerNotice(se, {
     log(`[im-owner-notice] duplicate event_id=${eventId}, skipped`);
     return 'duplicate';
   }
+  if (inFlight.has(eventId)) {
+    log(`[im-owner-notice] event_id=${eventId} already in flight, skipped`);
+    return 'in_flight';
+  }
   if (!text) {
     dedup?.add(eventId);
     warn(`[im-owner-notice] event_id=${eventId} empty text, ignored`);
     return 'invalid';
   }
-  if (dedup && dedup.attempts(eventId) >= maxAttempts) {
-    dedup.add(eventId);
-    warn(`[im-owner-notice] event_id=${eventId} status=gave_up after ${maxAttempts} attempts`);
-    return 'gave_up';
-  }
-  const attempt = dedup ? dedup.attempt(eventId) : 1;
+  inFlight.add(eventId); // synchronous claim before the first await
 
-  let status;
-  let target = null;
-  try { target = await resolveEndpoint(); } catch (e) { warn(`[im-owner-notice] resolve endpoint: ${e.message}`); }
-  if (!target) {
-    status = 'no_address';
-  } else {
-    let ok = false;
-    try { ok = await send(target.channel, stripMessageParams(target.endpoint), text); } catch { ok = false; }
-    status = ok ? 'sent' : 'failed';
-  }
-  if (status === 'sent') dedup?.add(eventId);
-  log(`[im-owner-notice] event_id=${eventId} kind=${se.kind || '?'} status=${status} attempt=${attempt}/${maxAttempts}` +
-    (target ? ` channel=${target.channel}` : ''));
-
-  return status;
+  const run = async () => {
+    try {
+      if (dedup?.has(eventId)) { // sent meanwhile (checked before every attempt)
+        inFlight.delete(eventId);
+        return 'duplicate';
+      }
+      if (dedup && dedup.attempts(eventId) >= maxAttempts) {
+        dedup.add(eventId);
+        inFlight.delete(eventId);
+        warn(`[im-owner-notice] event_id=${eventId} status=gave_up after ${maxAttempts} attempts`);
+        return 'gave_up';
+      }
+      const attempt = dedup ? dedup.attempt(eventId) : 1;
+      let status;
+      let target = null;
+      try { target = await resolveEndpoint(); } catch (e) { warn(`[im-owner-notice] resolve endpoint: ${e.message}`); }
+      if (!target) {
+        status = 'no_address';
+      } else {
+        let ok = false;
+        try { ok = await send(target.channel, stripMessageParams(target.endpoint), text); } catch { ok = false; }
+        status = ok ? 'sent' : 'failed';
+      }
+      log(`[im-owner-notice] event_id=${eventId} kind=${se.kind || '?'} status=${status} attempt=${attempt}/${maxAttempts}` +
+        (target ? ` channel=${target.channel}` : ''));
+      if (status === 'sent') {
+        dedup?.add(eventId);
+        inFlight.delete(eventId);
+      } else if (attempt < maxAttempts) {
+        const delay = retryDelaysMs[Math.min(attempt - 1, retryDelaysMs.length - 1)] ?? 0;
+        setTimer(run, delay);
+      } else {
+        dedup?.add(eventId);
+        inFlight.delete(eventId);
+        warn(`[im-owner-notice] event_id=${eventId} status=gave_up after ${attempt} attempts (last=${status})`);
+      }
+      return status;
+    } catch (e) {
+      inFlight.delete(eventId);
+      warn(`[im-owner-notice] event_id=${eventId} error: ${e.message}`);
+      return 'failed';
+    }
+  };
+  return run();
 }
