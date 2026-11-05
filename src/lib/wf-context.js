@@ -2,7 +2,7 @@
  * Workflow context (wf_ref).
  *
  * A message sent from the right-hand panel of the OpenMax workflows page
- * carries message metadata written by the server
+ * carries message metadata that the server is expected to write
  *
  *   wf_ref: { workflow_id: string|null, run_id: string|null, page: string,
  *             step_n: number|null }
@@ -11,6 +11,10 @@
  * (`run_id` is null when there is no run; on the create page `workflow_id` is
  * null too; `step_n` — which step is being edited — is set only on the `step`
  * page). The key is absent on every other message.
+ *
+ * The plugin does not verify where wf_ref came from: a sender can also put it
+ * in the message metadata itself, so it has the same trust level as
+ * preferred_connectors and is treated as a hint only.
  *
  * The bridge renders it as a structural self-closing <wf-context .../> element
  * in the inbound header (next to <message-context> / <connector-preference>),

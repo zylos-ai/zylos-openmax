@@ -150,6 +150,14 @@ test('quotes, angle brackets and ampersands are escaped; line breaks collapsed',
   assert.equal(out.match(/"/g).length, 6, out);
 });
 
+test('NUL and other C0 control characters (incl. tab, DEL) are collapsed to one space', () => {
+  assert.equal(
+    render({ workflow_id: 'a\u0000b\u0001c', run_id: 'r\u001f1', page: 'de\ttail\u007f' }),
+    '<wf-context workflow-id="a b c" run-id="r 1" page="de tail"/>',
+  );
+  assert.equal(render({ workflow_id: '\u0000\u001f', run_id: null, page: null }), '', 'control-only value is empty');
+});
+
 // --- formatInboundForC4 integration ------------------------------------------
 
 const conv = { type: 'dm', id: 'cv-1' };
@@ -165,6 +173,7 @@ test('formatInboundForC4: <wf-context> in the header, after <message-context>, b
   const wf = out.indexOf('<wf-context workflow-id="wf-1" run-id="run-9" page="run"/>\n');
   const cur = out.indexOf('<current-message>');
   assert.ok(ctx >= 0 && wf > ctx && cur > wf, out);
+  assert.equal(out.match(/<wf-context /g).length, 1, 'element emitted exactly once');
   assert.doesNotMatch(out.slice(cur), /wf-context/);
 });
 
