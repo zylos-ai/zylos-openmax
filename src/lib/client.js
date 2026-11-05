@@ -364,7 +364,8 @@ export const del   = (path)        => request('DELETE', path);
 // running on (e.g. per-org WS message handlers, multi-org CLI commands).
 // They resolve the JWT against that specific org's cache, so a multi-org
 // agent never accidentally calls cws-core with the wrong org's token.
-export const getForOrg   = (orgId, path, query, { timeoutMs, extraHeaders } = {}) => request('GET', path, { query, orgId, timeoutMs, extraHeaders });
+export const getForOrg   = (orgId, path, query, { timeoutMs, extraHeaders, quietOnSuccess } = {}) =>
+  request('GET', path, { query, orgId, timeoutMs, extraHeaders, quietOnSuccess });
 export const postForOrg  = (orgId, path, body, { timeoutMs, quietOnSuccess, retryOn401 } = {}) =>
   request('POST', path, { body, orgId, timeoutMs, quietOnSuccess, retryOn401 });
 

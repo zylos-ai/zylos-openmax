@@ -51,6 +51,7 @@ import { createDmSeenWatcher, resolveDmSeenConfig, drainSentMarkers, buildUnseen
 import { findPendingQuestion } from './lib/pending-question.js';
 import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
+import { createMarketClientEnsurer } from './lib/market-client-ensure.js';
 import { createDefaultReadinessGate, createGatedOnlineReporter, readinessReport } from './lib/agent-readiness.js';
 import { createReadinessTrigger } from './lib/readiness-trigger.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
@@ -2314,8 +2315,12 @@ function periodicSync() {
     // not smuggled out early by the periodic tick.
     reportAgentOnlineWhenReady(orgConfig).catch(e =>
       warn(`[${slug}] periodic online-report failed: ${e.message}`));
+    ensureMarketClient(orgConfig).catch(e =>
+      warn(`[${slug}] periodic market-client check failed: ${e.message}`));
   }
 }
+
+const ensureMarketClient = createMarketClientEnsurer({ loadConfig, getForOrg, postForOrg, apiPath, log, warn });
 
 // Metrics reporting — read from zylos-dashboard, push to cws-core, every 60s.
 const METRICS_REPORT_INTERVAL_MS = (config.metricsReport?.intervalSeconds || 60) * 1000;
