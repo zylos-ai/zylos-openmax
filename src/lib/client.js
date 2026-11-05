@@ -205,21 +205,23 @@ function logRpcRequest(method, url, body, orgId, quietOnSuccess) {
   appendRpcLine(line);
 }
 
-function logRpcResponse(method, url, status, data, quietOnSuccess) {
+function logRpcResponse(method, url, status, data, quietOnSuccess, quietStatuses) {
   let bodyStr;
   try { bodyStr = typeof data === 'string' ? data : JSON.stringify(redactSecrets(data)); }
   catch { bodyStr = String(data); }
   const line = `[rpc] ← ${method} ${url} resp ${status}: ${bodyStr}`;
   // quietOnSuccess suppresses stdout only for 2xx/3xx; errors (>=400) still log
   // via console.warn so failures are never hidden. The file sink is unaffected.
-  if (rpcLogStdoutEnabled() && !(quietOnSuccess && status < 400)) {
+  // quietStatuses: expected error statuses the caller handles itself (stdout only).
+  const quiet = (quietOnSuccess && status < 400) || (Array.isArray(quietStatuses) && quietStatuses.includes(status));
+  if (rpcLogStdoutEnabled() && !quiet) {
     const level = status >= 400 ? 'warn' : 'log';
     console[level](line);
   }
   appendRpcLine(line);
 }
 
-async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId, timeoutMs, quietOnSuccess, retryOn401 = true } = {}) {
+async function doRequest(baseUrl, method, path, { body, query, extraHeaders, orgId, timeoutMs, quietOnSuccess, quietStatuses, retryOn401 = true } = {}) {
   const url = buildUrl(baseUrl, path, query);
 
   // Single attempt: resolve token, send, parse response. Returned shape lets
@@ -251,7 +253,7 @@ async function doRequest(baseUrl, method, path, { body, query, extraHeaders, org
     let data;
     try { data = JSON.parse(text); } catch { data = text; }
 
-    logRpcResponse(method, url, res.status, data, quietOnSuccess);
+    logRpcResponse(method, url, res.status, data, quietOnSuccess, quietStatuses);
     return { res, data, text };
   };
 
@@ -364,8 +366,8 @@ export const del   = (path)        => request('DELETE', path);
 // running on (e.g. per-org WS message handlers, multi-org CLI commands).
 // They resolve the JWT against that specific org's cache, so a multi-org
 // agent never accidentally calls cws-core with the wrong org's token.
-export const getForOrg   = (orgId, path, query, { timeoutMs, extraHeaders, quietOnSuccess } = {}) =>
-  request('GET', path, { query, orgId, timeoutMs, extraHeaders, quietOnSuccess });
+export const getForOrg   = (orgId, path, query, { timeoutMs, extraHeaders, quietOnSuccess, quietStatuses } = {}) =>
+  request('GET', path, { query, orgId, timeoutMs, extraHeaders, quietOnSuccess, quietStatuses });
 export const postForOrg  = (orgId, path, body, { timeoutMs, quietOnSuccess, retryOn401 } = {}) =>
   request('POST', path, { body, orgId, timeoutMs, quietOnSuccess, retryOn401 });
 

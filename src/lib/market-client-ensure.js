@@ -9,12 +9,14 @@
  * - The component name is a constant; nothing the server sends is used as a
  *   name, ref or command. Only `version` is read, and it must be X.Y.Z.
  * - zylos is run with an argv array (no shell).
- * - Each request id is acted on at most once (persisted across restarts); a
- *   failed install is not retried until the server issues a new request. Only
- *   pending requests are acted on, so an owner uninstall is respected.
+ * - Each request id is acted on at most once (persisted before installing, so
+ *   it holds across restarts); a failed install is not retried until the
+ *   server issues a new request. Only pending requests are acted on, so an
+ *   owner uninstall is respected.
  */
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
@@ -23,15 +25,23 @@ export const MARKET_CLIENT_COMPONENT = 'om-marketplace-client';
 
 const INSTALL_TIMEOUT_MS = 180_000;
 const QUERY_TIMEOUT_MS = 20_000;
+const REQUEST_TIMEOUT_MS = 15_000;
+const REPORT_RETRY_DELAY_MS = 30_000;
+const UNAVAILABLE_BACKOFF_MS = 60 * 60 * 1000;
 const MAX_REMEMBERED_REQUESTS = 50;
 
 const SEMVER_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const NOT_INSTALLED_RE = /is not installed/;
 
 const promisifiedExecFile = promisify(execFileCb);
 const realExecFile = (file, args, opts) => promisifiedExecFile(file, args, opts);
+const realSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-const DEFAULT_STATE_PATH = path.join(process.env.HOME || '/tmp', 'zylos/components/openmax/runtime/market-client.json');
+function defaultStatePath() {
+  const zylosDir = process.env.ZYLOS_DIR || path.join(process.env.HOME || os.homedir(), 'zylos');
+  return path.join(zylosDir, 'components/openmax/runtime/market-client.json');
+}
 
 export function parseStrictSemver(value) {
   if (typeof value !== 'string') return null;
@@ -46,14 +56,17 @@ export function normaliseVersion(value) {
   return parseStrictSemver(stripped) ? stripped : null;
 }
 
-function compareSemver(a, b) {
+function atLeast(version, target) {
+  const a = parseStrictSemver(version);
+  const b = parseStrictSemver(target);
+  if (!a || !b) return false;
   for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+    if (a[i] !== b[i]) return a[i] > b[i];
   }
-  return 0;
+  return true;
 }
 
-function fileStore(statePath) {
+export function fileStore(statePath = defaultStatePath()) {
   return {
     load() {
       try {
@@ -92,39 +105,51 @@ export function createMarketClientEnsurer({
   log = () => {},
   warn = () => {},
   execFile = realExecFile,
-  store = fileStore(DEFAULT_STATE_PATH),
+  store = fileStore(),
   now = () => Date.now(),
+  sleep = realSleep,
   installTimeoutMs = INSTALL_TIMEOUT_MS,
   queryTimeoutMs = QUERY_TIMEOUT_MS,
+  requestTimeoutMs = REQUEST_TIMEOUT_MS,
+  reportRetryDelayMs = REPORT_RETRY_DELAY_MS,
+  unavailableBackoffMs = UNAVAILABLE_BACKOFF_MS,
 } = {}) {
-  const unavailable = new Set();
+  const unavailableUntil = new Map();
   let chain = Promise.resolve();
 
-  async function installedVersion() {
+  // { state: 'installed', version } | { state: 'absent' } | { state: 'error' }.
+  // version is null when the installed version is not strict X.Y.Z.
+  async function probe() {
     let stdout;
     try {
       ({ stdout } = await execFile('zylos', ['info', MARKET_CLIENT_COMPONENT, '--json'], { timeout: queryTimeoutMs }));
-    } catch {
-      return { installed: false, version: null };
+    } catch (err) {
+      const notInstalled = err?.code === 1 && !err.killed && NOT_INSTALLED_RE.test(String(err.stderr || ''));
+      return notInstalled ? { state: 'absent' } : { state: 'error', detail: describeExecError(err) };
     }
     try {
       const info = JSON.parse(String(stdout));
-      if (!info || info.name !== MARKET_CLIENT_COMPONENT) return { installed: false, version: null };
-      return { installed: true, version: normaliseVersion(info.version) };
+      if (!info || info.name !== MARKET_CLIENT_COMPONENT) return { state: 'error', detail: 'unexpected info' };
+      return { state: 'installed', version: normaliseVersion(info.version) };
     } catch {
-      return { installed: true, version: null };
+      return { state: 'error', detail: 'unparseable info' };
     }
   }
 
-  async function install(slug, version) {
-    const before = await installedVersion();
-    const current = parseStrictSemver(before.version);
-    if (before.installed && current && compareSemver(current, parseStrictSemver(version)) >= 0) {
+  async function install(slug, target) {
+    const before = await probe();
+    if (before.state === 'error') {
+      warn(`[${slug}] market client: zylos info failed (${before.detail})`);
+      return { outcome: 'failed', reason: 'probe_failed' };
+    }
+    if (before.state === 'installed' && atLeast(before.version, target)) {
       return { outcome: 'succeeded', client_version: before.version };
     }
-    const args = before.installed
+    const upgrading = before.state === 'installed';
+    // zylos upgrade cannot pin a version; the result is verified below.
+    const args = upgrading
       ? ['upgrade', MARKET_CLIENT_COMPONENT, '--yes']
-      : ['add', `${MARKET_CLIENT_COMPONENT}@${version}`, '--yes'];
+      : ['add', `${MARKET_CLIENT_COMPONENT}@${target}`, '--yes'];
     log(`[${slug}] market client: zylos ${args[0]} ${args[1]}`);
     try {
       await execFile('zylos', args, { timeout: installTimeoutMs });
@@ -133,21 +158,24 @@ export function createMarketClientEnsurer({
       warn(`[${slug}] market client: zylos ${args[0]} failed (${describeExecError(err)})`);
       return {
         outcome: 'failed',
-        reason: timedOut ? 'install_timeout' : (before.installed ? 'upgrade_failed' : 'install_failed'),
+        reason: timedOut ? 'install_timeout' : (upgrading ? 'upgrade_failed' : 'install_failed'),
       };
     }
-    const after = await installedVersion();
-    if (!after.installed || !after.version) {
+    const after = await probe();
+    if (after.state !== 'installed' || !atLeast(after.version, target)) {
       return { outcome: 'failed', reason: 'version_unverified' };
     }
     return { outcome: 'succeeded', client_version: after.version };
   }
 
-  async function report(orgConfig, memberId, requestId, result) {
-    const body = { request_id: requestId, outcome: result.outcome };
-    if (result.client_version) body.client_version = result.client_version;
-    if (result.reason) body.reason = result.reason;
-    await postForOrg(orgConfig.org_id, apiPath(`/agents/${memberId}/market-client:result`), body);
+  // After a crash mid-install: read-only check, never reinstall.
+  async function recover(target) {
+    if (!parseStrictSemver(target)) return { outcome: 'failed', reason: 'interrupted' };
+    const current = await probe();
+    if (current.state === 'installed' && atLeast(current.version, target)) {
+      return { outcome: 'succeeded', client_version: current.version };
+    }
+    return { outcome: 'failed', reason: 'interrupted' };
   }
 
   function remember(state, requestId, entry) {
@@ -160,13 +188,23 @@ export function createMarketClientEnsurer({
     store.save(state);
   }
 
-  async function reportAndRecord(orgConfig, memberId, requestId, state, result) {
-    try {
-      await report(orgConfig, memberId, requestId, result);
-      remember(state, requestId, { reported: true });
-      log(`[${orgConfig.slug}] market client: reported ${result.outcome} request=${requestId}`);
-    } catch (err) {
-      warn(`[${orgConfig.slug}] market client: result report failed request=${requestId}: ${err.message}`);
+  async function report(orgConfig, memberId, requestId, state, result) {
+    const body = { request_id: requestId, outcome: result.outcome };
+    if (result.client_version) body.client_version = result.client_version;
+    if (result.reason) body.reason = result.reason;
+    const send = () => postForOrg(orgConfig.org_id, apiPath(`/agents/${memberId}/market-client:result`), body,
+      { timeoutMs: requestTimeoutMs });
+    // One quick retry, well inside the server's request deadline; later syncs re-report.
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await send();
+        remember(state, requestId, { reported: true });
+        log(`[${orgConfig.slug}] market client: reported ${result.outcome} request=${requestId}`);
+        return;
+      } catch (err) {
+        warn(`[${orgConfig.slug}] market client: result report failed request=${requestId} (attempt ${attempt}/2): ${err.message}`);
+        if (attempt === 1) await sleep(reportRetryDelayMs);
+      }
     }
   }
 
@@ -175,21 +213,23 @@ export function createMarketClientEnsurer({
     let memberId = orgConfig.self?.member_id;
     if (!memberId) memberId = loadConfig?.().orgs?.[slug]?.self?.member_id || '';
     if (!memberId) return;
+    if ((unavailableUntil.get(slug) || 0) > now()) return;
 
     let pending;
     try {
-      pending = await getForOrg(orgConfig.org_id, apiPath(`/agents/${memberId}/market-client`), undefined, { quietOnSuccess: true });
+      pending = await getForOrg(orgConfig.org_id, apiPath(`/agents/${memberId}/market-client`), undefined,
+        { quietOnSuccess: true, quietStatuses: [404], timeoutMs: requestTimeoutMs });
     } catch (err) {
       if (err?.status === 404) {
-        if (!unavailable.has(slug)) {
-          unavailable.add(slug);
-          log(`[${slug}] market client request endpoint not available (404), skipping`);
+        if (!unavailableUntil.has(slug)) {
+          log(`[${slug}] market client request endpoint not available (404), re-checking hourly`);
         }
+        unavailableUntil.set(slug, now() + unavailableBackoffMs);
         return;
       }
       throw err;
     }
-    unavailable.delete(slug);
+    unavailableUntil.delete(slug);
     if (!pending || pending.required !== true) return;
 
     const requestId = typeof pending.request_id === 'string' ? pending.request_id : '';
@@ -202,13 +242,16 @@ export function createMarketClientEnsurer({
     const seen = state.requests[requestId];
     if (seen) {
       if (seen.reported) return;
-      // Crash mid-install leaves no result: report it, never reinstall.
-      const result = seen.result || { outcome: 'failed', reason: 'interrupted' };
-      if (!seen.result) remember(state, requestId, { result });
-      await reportAndRecord(orgConfig, memberId, requestId, state, result);
+      let result = seen.result;
+      if (!result) {
+        result = await recover(pending.version);
+        remember(state, requestId, { result });
+      }
+      await report(orgConfig, memberId, requestId, state, result);
       return;
     }
 
+    // Persisted before any side effect so a crash cannot cause a second install.
     remember(state, requestId, { org: slug, reported: false });
 
     let result;
@@ -220,7 +263,7 @@ export function createMarketClientEnsurer({
       result = await install(slug, version);
     }
     remember(state, requestId, { result });
-    await reportAndRecord(orgConfig, memberId, requestId, state, result);
+    await report(orgConfig, memberId, requestId, state, result);
   }
 
   // Serialized: one install at a time across orgs.

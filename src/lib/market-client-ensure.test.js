@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMarketClientEnsurer, parseStrictSemver, normaliseVersion, MARKET_CLIENT_COMPONENT } from './market-client-ensure.js';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import {
+  createMarketClientEnsurer, fileStore, parseStrictSemver, normaliseVersion, MARKET_CLIENT_COMPONENT,
+} from './market-client-ensure.js';
 
 const apiPath = (p) => `/api/v1${p}`;
 const REQ = '3f2c1a9e-8b7d-4c6e-9f10-112233445566';
@@ -19,37 +24,46 @@ function org(memberId = 'm-1') {
   return { slug: 'org-a', org_id: 'org-id-a', self: { member_id: memberId } };
 }
 
-// zylos fake: `installed` is the version reported by `zylos info` (null = not installed).
-function fakeZylos({ installed = null, after, failOn, failErr } = {}) {
+const notInstalledErr = () => Object.assign(new Error('Command failed'), {
+  code: 1, stderr: `Error: Component "${MARKET_CLIENT_COMPONENT}" is not installed.\n`,
+});
+
+// zylos fake: `installed` is the version `zylos info` reports (null = not installed).
+function fakeZylos({ installed = null, after, failOn, failErr, infoErr, onRun } = {}) {
   const calls = [];
+  const opts = [];
   let current = installed;
-  const execFile = async (file, args) => {
+  const execFile = async (file, args, o) => {
     calls.push([file, ...args]);
+    opts.push(o);
     assert.equal(file, 'zylos');
     if (args[0] === 'info') {
-      if (current === null) throw Object.assign(new Error('not installed'), { code: 1 });
+      if (infoErr) throw infoErr;
+      if (current === null) throw notInstalledErr();
       return { stdout: JSON.stringify({ name: MARKET_CLIENT_COMPONENT, version: current }) };
     }
-    if (failOn === args[0]) throw failErr || Object.assign(new Error('boom secret-ish stderr'), { code: 1 });
+    onRun?.(args);
+    if (failOn === args[0]) throw failErr || Object.assign(new Error('boom secret-ish stderr'), { code: 1, stderr: 'secret-ish' });
     current = after;
     return { stdout: '' };
   };
-  return { execFile, calls };
+  return { execFile, calls, opts, runs: () => calls.filter((c) => c[1] === 'add' || c[1] === 'upgrade') };
 }
 
-function setup({ pull, zylos = fakeZylos(), store = memStore(), postImpl } = {}) {
+function setup({ pull, zylos = fakeZylos(), store = memStore(), postImpl, clock } = {}) {
   const gets = [];
   const posts = [];
   const logs = [];
+  const sleeps = [];
   const ensure = createMarketClientEnsurer({
     loadConfig: () => ({ orgs: {} }),
-    getForOrg: async (orgId, path, query, opts) => {
-      gets.push({ orgId, path, opts });
+    getForOrg: async (orgId, p, query, opts) => {
+      gets.push({ orgId, path: p, opts });
       return typeof pull === 'function' ? pull() : pull;
     },
-    postForOrg: async (orgId, path, body) => {
-      posts.push({ orgId, path, body });
-      if (postImpl) return postImpl();
+    postForOrg: async (orgId, p, body, opts) => {
+      posts.push({ orgId, path: p, body, opts });
+      if (postImpl) return postImpl(posts.length);
       return undefined;
     },
     apiPath,
@@ -57,8 +71,10 @@ function setup({ pull, zylos = fakeZylos(), store = memStore(), postImpl } = {})
     warn: (m) => logs.push(m),
     execFile: zylos.execFile,
     store,
+    sleep: async (ms) => { sleeps.push(ms); },
+    ...(clock ? { now: () => clock.t } : {}),
   });
-  return { ensure, gets, posts, logs, zylos, store };
+  return { ensure, gets, posts, logs, sleeps, zylos, store };
 }
 
 const pending = (extra = {}) => ({ required: true, request_id: REQ, action: 'install', version: '0.3.0', ...extra });
@@ -70,14 +86,37 @@ test('parseStrictSemver accepts only X.Y.Z', () => {
   }
 });
 
+test('normaliseVersion strips a leading v and requires strict X.Y.Z', () => {
+  assert.equal(normaliseVersion('v0.3.0'), '0.3.0');
+  assert.equal(normaliseVersion('0.3.0'), '0.3.0');
+  for (const bad of ['vv0.3.0', 'v0.3', 'V0.3.0', 'v0.3.0-rc.1', ' v0.3.0', 'v', null]) {
+    assert.equal(normaliseVersion(bad), null, String(bad));
+  }
+});
+
 test('no pending request: nothing is run or reported', async () => {
   const t = setup({ pull: { required: false } });
   await t.ensure(org());
   assert.equal(t.gets.length, 1);
   assert.equal(t.gets[0].path, '/api/v1/agents/m-1/market-client');
-  assert.equal(t.gets[0].opts.quietOnSuccess, true);
   assert.equal(t.zylos.calls.length, 0);
   assert.equal(t.posts.length, 0);
+});
+
+test('only required === true is acted on, even with a full request body', async () => {
+  for (const required of [false, 'true', 1, undefined]) {
+    const t = setup({ pull: pending({ required }) });
+    await t.ensure(org());
+    assert.equal(t.zylos.calls.length, 0, String(required));
+    assert.equal(t.posts.length, 0, String(required));
+  }
+});
+
+test('cws-core requests carry a timeout and quiet 404 logging', async () => {
+  const t = setup({ pull: pending(), zylos: fakeZylos({ after: '0.3.0' }) });
+  await t.ensure(org());
+  assert.deepEqual(t.gets[0].opts, { quietOnSuccess: true, quietStatuses: [404], timeoutMs: 15_000 });
+  assert.equal(t.posts[0].opts.timeoutMs, 15_000);
 });
 
 test('missing member_id: no request is made', async () => {
@@ -90,7 +129,7 @@ test('valid request, not installed: zylos add pinned to version, reports succeed
   const zylos = fakeZylos({ installed: null, after: '0.3.0' });
   const t = setup({ pull: pending(), zylos });
   await t.ensure(org());
-  assert.deepEqual(zylos.calls[1], ['zylos', 'add', 'om-marketplace-client@0.3.0', '--yes']);
+  assert.deepEqual(zylos.runs(), [['zylos', 'add', 'om-marketplace-client@0.3.0', '--yes']]);
   assert.equal(t.posts.length, 1);
   assert.equal(t.posts[0].path, '/api/v1/agents/m-1/market-client:result');
   assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.3.0' });
@@ -100,16 +139,51 @@ test('valid request, older version installed: zylos upgrade, reports new version
   const zylos = fakeZylos({ installed: '0.2.0', after: '0.3.1' });
   const t = setup({ pull: pending({ action: 'upgrade' }), zylos });
   await t.ensure(org());
-  assert.deepEqual(zylos.calls[1], ['zylos', 'upgrade', 'om-marketplace-client', '--yes']);
+  assert.deepEqual(zylos.runs(), [['zylos', 'upgrade', 'om-marketplace-client', '--yes']]);
   assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.3.1' });
+});
+
+test('upgrade ending below the target version is reported version_unverified', async () => {
+  const t = setup({ pull: pending(), zylos: fakeZylos({ installed: '0.2.0', after: '0.2.5' }) });
+  await t.ensure(org());
+  assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'version_unverified' });
+});
+
+test('add and upgrade run with the install timeout', async () => {
+  for (const installed of [null, '0.2.0']) {
+    const zylos = fakeZylos({ installed, after: '0.3.0' });
+    const t = setup({ pull: pending(), zylos });
+    await t.ensure(org());
+    const i = zylos.calls.findIndex((c) => c[1] === 'add' || c[1] === 'upgrade');
+    assert.equal(zylos.opts[i]?.timeout, 180_000, String(installed));
+    assert.equal(zylos.opts[0]?.timeout, 20_000);
+  }
 });
 
 test('already at or above target: no install, reports installed version', async () => {
   const zylos = fakeZylos({ installed: '0.4.0' });
   const t = setup({ pull: pending(), zylos });
   await t.ensure(org());
-  assert.equal(zylos.calls.length, 1);
+  assert.equal(zylos.runs().length, 0);
   assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.4.0' });
+});
+
+test('reported version is normalised: v-prefixed installed version is sent as X.Y.Z', async () => {
+  const added = setup({ pull: pending(), zylos: fakeZylos({ installed: null, after: 'v0.3.0' }) });
+  await added.ensure(org());
+  assert.deepEqual(added.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.3.0' });
+
+  const upToDate = setup({ pull: pending(), zylos: fakeZylos({ installed: 'v0.4.0' }) });
+  await upToDate.ensure(org());
+  assert.deepEqual(upToDate.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.4.0' });
+});
+
+test('installed version not strict X.Y.Z after stripping v is reported version_unverified', async () => {
+  for (const after of ['v0.3', 'v0.3.0-rc.1', 'vv0.3.0']) {
+    const t = setup({ pull: pending(), zylos: fakeZylos({ installed: null, after }) });
+    await t.ensure(org());
+    assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'version_unverified' }, after);
+  }
 });
 
 test('invalid version string is rejected: no zylos call, reported failed', async () => {
@@ -135,7 +209,22 @@ test('component name, ref and command from the server are never used', async () 
   await t.ensure(org());
   const flat = zylos.calls.flat().join(' ');
   assert.ok(!flat.includes('evil'), flat);
-  assert.deepEqual(zylos.calls[1], ['zylos', 'add', 'om-marketplace-client@0.3.0', '--yes']);
+  assert.deepEqual(zylos.runs(), [['zylos', 'add', 'om-marketplace-client@0.3.0', '--yes']]);
+});
+
+test('zylos info error other than "not installed": no install, reported probe_failed', async () => {
+  const errs = [
+    Object.assign(new Error('x'), { killed: true, signal: 'SIGTERM' }),
+    Object.assign(new Error('x'), { code: 'ENOENT' }),
+    Object.assign(new Error('x'), { code: 1, stderr: 'Error: registry corrupt' }),
+  ];
+  for (const infoErr of errs) {
+    const zylos = fakeZylos({ infoErr });
+    const t = setup({ pull: pending(), zylos });
+    await t.ensure(org());
+    assert.equal(zylos.runs().length, 0);
+    assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'probe_failed' });
+  }
 });
 
 test('install failure is reported with a reason code and no zylos output', async () => {
@@ -159,20 +248,55 @@ test('install timeout and upgrade failure map to their reason codes', async () =
   assert.equal(upgrade.posts[0].body.reason, 'upgrade_failed');
 });
 
-test('installed version not verifiable after install is reported failed', async () => {
-  const t = setup({ pull: pending(), zylos: fakeZylos({ installed: null, after: 'garbage' }) });
+test('request id is persisted before zylos add runs', async () => {
+  const store = memStore();
+  let persistedDuringRun = false;
+  const zylos = fakeZylos({ after: '0.3.0', onRun: () => { persistedDuringRun = !!store.state.requests[REQ]; } });
+  const t = setup({ pull: pending(), zylos, store });
   await t.ensure(org());
-  assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'version_unverified' });
+  assert.equal(persistedDuringRun, true);
+});
+
+test('crash during install (process dies inside zylos add) is not reinstalled after restart', async () => {
+  const store = memStore();
+  let onDisk = null;
+  // Snapshot of the persisted state at the moment the process would die.
+  const zylos1 = fakeZylos({ onRun: () => { onDisk = JSON.parse(JSON.stringify(store.state)); } });
+  await setup({ pull: pending(), zylos: zylos1, store }).ensure(org());
+  const zylos = fakeZylos();
+  const second = setup({ pull: pending(), zylos, store: memStore(onDisk) });
+  await second.ensure(org());
+  assert.equal(zylos.runs().length, 0);
+  assert.deepEqual(second.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'interrupted' });
+});
+
+test('crash recovery: installed at or above target reports succeeded (read-only)', async () => {
+  const store = memStore({ requests: { [REQ]: { org: 'org-a', reported: false } } });
+  const zylos = fakeZylos({ installed: 'v0.3.0' });
+  const t = setup({ pull: pending(), zylos, store });
+  await t.ensure(org());
+  assert.deepEqual(zylos.calls, [['zylos', 'info', MARKET_CLIENT_COMPONENT, '--json']]);
+  assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.3.0' });
+});
+
+test('crash recovery: not installed or below target reports interrupted', async () => {
+  for (const installed of [null, '0.2.0']) {
+    const store = memStore({ requests: { [REQ]: { org: 'org-a', reported: false } } });
+    const zylos = fakeZylos({ installed });
+    const t = setup({ pull: pending(), zylos, store });
+    await t.ensure(org());
+    assert.equal(zylos.runs().length, 0);
+    assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'interrupted' });
+  }
 });
 
 test('idempotent per request id: a failed install is not retried on the next sync', async () => {
   const zylos = fakeZylos({ installed: null, failOn: 'add' });
-  const store = memStore();
-  const t = setup({ pull: pending(), zylos, store });
+  const t = setup({ pull: pending(), zylos });
   await t.ensure(org());
   await t.ensure(org());
   await t.ensure(org());
-  assert.equal(zylos.calls.filter((c) => c[1] === 'add').length, 1);
+  assert.equal(zylos.runs().length, 1);
   assert.equal(t.posts.length, 1);
 });
 
@@ -194,11 +318,23 @@ test('a new request id after a failure is acted on', async () => {
   await t.ensure(org());
   id = REQ2;
   await t.ensure(org());
-  assert.equal(zylos.calls.filter((c) => c[1] === 'add').length, 2);
+  assert.equal(zylos.runs().length, 2);
   assert.deepEqual(t.posts.map((p) => p.body.request_id), [REQ, REQ2]);
 });
 
-test('report network failure: next sync re-reports the stored result without reinstalling', async () => {
+test('report failure: one retry after about 30 s', async () => {
+  const t = setup({
+    pull: pending(),
+    zylos: fakeZylos({ after: '0.3.0' }),
+    postImpl: (n) => { if (n === 1) throw new Error('fetch failed'); },
+  });
+  await t.ensure(org());
+  assert.deepEqual(t.sleeps, [30_000]);
+  assert.equal(t.posts.length, 2);
+  assert.equal(t.store.state.requests[REQ].reported, true);
+});
+
+test('report failing twice: next sync re-reports the stored result without reinstalling', async () => {
   let failPost = true;
   const zylos = fakeZylos({ installed: null, after: '0.3.0' });
   const t = setup({
@@ -207,24 +343,16 @@ test('report network failure: next sync re-reports the stored result without rei
     postImpl: () => { if (failPost) throw new Error('fetch failed'); },
   });
   await t.ensure(org());
+  assert.equal(t.posts.length, 2);
   failPost = false;
   await t.ensure(org());
   await t.ensure(org());
-  assert.equal(zylos.calls.filter((c) => c[1] === 'add').length, 1);
-  assert.equal(t.posts.length, 2);
-  assert.deepEqual(t.posts[1].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.3.0' });
+  assert.equal(zylos.runs().length, 1);
+  assert.equal(t.posts.length, 3);
+  assert.deepEqual(t.posts[2].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.3.0' });
 });
 
-test('interrupted install (no stored result) is reported failed, not reinstalled', async () => {
-  const store = memStore({ requests: { [REQ]: { org: 'org-a', reported: false } } });
-  const zylos = fakeZylos();
-  const t = setup({ pull: pending(), zylos, store });
-  await t.ensure(org());
-  assert.equal(zylos.calls.length, 0);
-  assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'interrupted' });
-});
-
-test('pull network error propagates to the caller; nothing is run', async () => {
+test('pull network error propagates; the next sync recovers', async () => {
   let down = true;
   const zylos = fakeZylos({ installed: null, after: '0.3.0' });
   const t = setup({ pull: () => { if (down) throw new Error('fetch failed'); return pending(); }, zylos });
@@ -235,13 +363,30 @@ test('pull network error propagates to the caller; nothing is run', async () => 
   assert.equal(t.posts[0].body.outcome, 'succeeded');
 });
 
-test('404 (hosted Agent or older server) is skipped quietly and logged once', async () => {
-  const zylos = fakeZylos();
-  const t = setup({ pull: () => { throw Object.assign(new Error('not found'), { status: 404 }); }, zylos });
+test('404 (hosted Agent or older server): logged once, polled at most hourly', async () => {
+  const clock = { t: 1_000_000 };
+  let status = 404;
+  const pull = () => {
+    if (status === 404) throw Object.assign(new Error('not found'), { status: 404 });
+    return { required: false };
+  };
+  const t = setup({ pull, clock });
   await t.ensure(org());
+  clock.t += 5 * 60 * 1000;
   await t.ensure(org());
-  assert.equal(zylos.calls.length, 0);
+  clock.t += 50 * 60 * 1000;
+  await t.ensure(org());
+  assert.equal(t.gets.length, 1);
+  clock.t += 6 * 60 * 1000;
+  await t.ensure(org());
+  assert.equal(t.gets.length, 2);
   assert.equal(t.logs.filter((l) => l.includes('404')).length, 1);
+  status = 200;
+  clock.t += 61 * 60 * 1000;
+  await t.ensure(org());
+  clock.t += 5 * 60 * 1000;
+  await t.ensure(org());
+  assert.equal(t.gets.length, 4);
 });
 
 test('invalid request_id is ignored', async () => {
@@ -257,33 +402,52 @@ test('concurrent calls are serialized: one install for two orgs', async () => {
   let n = 0;
   const t = setup({ pull: () => pending({ request_id: n++ === 0 ? REQ : REQ2 }), zylos });
   await Promise.all([t.ensure(org('m-1')), t.ensure({ slug: 'org-b', org_id: 'org-id-b', self: { member_id: 'm-2' } })]);
-  assert.equal(zylos.calls.filter((c) => c[1] === 'add').length, 1);
+  assert.equal(zylos.runs().length, 1);
   assert.equal(t.posts.length, 2);
   assert.ok(t.posts.every((p) => p.body.outcome === 'succeeded'));
 });
 
-test('normaliseVersion strips a leading v and requires strict X.Y.Z', () => {
-  assert.equal(normaliseVersion('v0.3.0'), '0.3.0');
-  assert.equal(normaliseVersion('0.3.0'), '0.3.0');
-  for (const bad of ['vv0.3.0', 'v0.3', 'V0.3.0', 'v0.3.0-rc.1', ' v0.3.0', 'v', null]) {
-    assert.equal(normaliseVersion(bad), null, String(bad));
+test('fileStore: real files round-trip, missing or corrupt files load empty, no temp files left', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-store-'));
+  try {
+    const file = path.join(dir, 'nested', 'market-client.json');
+    const s = fileStore(file);
+    assert.deepEqual(s.load(), { requests: {} });
+    s.save({ requests: { [REQ]: { reported: true } } });
+    assert.deepEqual(fileStore(file).load(), { requests: { [REQ]: { reported: true } } });
+    assert.deepEqual(fs.readdirSync(path.dirname(file)), ['market-client.json']);
+    fs.writeFileSync(file, '{not json');
+    assert.deepEqual(s.load(), { requests: {} });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('reported version is normalised: v-prefixed installed version is sent as X.Y.Z', async () => {
-  const added = setup({ pull: pending(), zylos: fakeZylos({ installed: null, after: 'v0.3.0' }) });
-  await added.ensure(org());
-  assert.deepEqual(added.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.3.0' });
-
-  const upToDate = setup({ pull: pending(), zylos: fakeZylos({ installed: 'v0.4.0' }) });
-  await upToDate.ensure(org());
-  assert.deepEqual(upToDate.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.4.0' });
+test('fileStore: a failed request survives a restart with real files', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-store-'));
+  try {
+    const file = path.join(dir, 'market-client.json');
+    const first = setup({ pull: pending(), zylos: fakeZylos({ failOn: 'add' }), store: fileStore(file) });
+    await first.ensure(org());
+    const zylos = fakeZylos();
+    const second = setup({ pull: pending(), zylos, store: fileStore(file) });
+    await second.ensure(org());
+    assert.equal(zylos.calls.length, 0);
+    assert.equal(second.posts.length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test('installed version not strict X.Y.Z after stripping v is reported version_unverified', async () => {
-  for (const after of ['v0.3', 'v0.3.0-rc.1', 'vv0.3.0']) {
-    const t = setup({ pull: pending(), zylos: fakeZylos({ installed: null, after }) });
-    await t.ensure(org());
-    assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'version_unverified' }, after);
+test('default state path prefers ZYLOS_DIR', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-zylos-'));
+  const saved = process.env.ZYLOS_DIR;
+  process.env.ZYLOS_DIR = dir;
+  try {
+    fileStore().save({ requests: {} });
+    assert.ok(fs.existsSync(path.join(dir, 'components/openmax/runtime/market-client.json')));
+  } finally {
+    if (saved === undefined) delete process.env.ZYLOS_DIR; else process.env.ZYLOS_DIR = saved;
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
