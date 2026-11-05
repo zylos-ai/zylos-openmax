@@ -331,6 +331,7 @@ test('report failure: one retry after about 30 s', async () => {
   await t.ensure(org());
   assert.deepEqual(t.sleeps, [30_000]);
   assert.equal(t.posts.length, 2);
+  assert.deepEqual(t.posts.map((p) => p.opts?.timeoutMs), [15_000, 15_000]);
   assert.equal(t.store.state.requests[REQ].reported, true);
 });
 
@@ -363,30 +364,43 @@ test('pull network error propagates; the next sync recovers', async () => {
   assert.equal(t.posts[0].body.outcome, 'succeeded');
 });
 
-test('404 (hosted Agent or older server): logged once, polled at most hourly', async () => {
+test('404 (hosted Agent or older server): logged once, polled at most every 10 min, cleared on success', async () => {
   const clock = { t: 1_000_000 };
+  const min = 60 * 1000;
   let status = 404;
   const pull = () => {
     if (status === 404) throw Object.assign(new Error('not found'), { status: 404 });
     return { required: false };
   };
   const t = setup({ pull, clock });
+  const notices = () => t.logs.filter((l) => l.includes('404')).length;
   await t.ensure(org());
-  clock.t += 5 * 60 * 1000;
+  clock.t += 5 * min;
   await t.ensure(org());
-  clock.t += 50 * 60 * 1000;
+  clock.t += 4 * min;
   await t.ensure(org());
   assert.equal(t.gets.length, 1);
-  clock.t += 6 * 60 * 1000;
+  clock.t += 2 * min;
   await t.ensure(org());
   assert.equal(t.gets.length, 2);
-  assert.equal(t.logs.filter((l) => l.includes('404')).length, 1);
+  assert.equal(notices(), 1);
+
   status = 200;
-  clock.t += 61 * 60 * 1000;
+  clock.t += 11 * min;
   await t.ensure(org());
-  clock.t += 5 * 60 * 1000;
+  clock.t += 1 * min;
   await t.ensure(org());
   assert.equal(t.gets.length, 4);
+
+  // A success clears the backoff state: a later 404 is logged again and backs off again.
+  status = 404;
+  clock.t += 1 * min;
+  await t.ensure(org());
+  assert.equal(t.gets.length, 5);
+  assert.equal(notices(), 2);
+  clock.t += 5 * min;
+  await t.ensure(org());
+  assert.equal(t.gets.length, 5);
 });
 
 test('invalid request_id is ignored', async () => {

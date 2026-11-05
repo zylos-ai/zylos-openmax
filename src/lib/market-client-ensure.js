@@ -27,11 +27,14 @@ const INSTALL_TIMEOUT_MS = 180_000;
 const QUERY_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REPORT_RETRY_DELAY_MS = 30_000;
-const UNAVAILABLE_BACKOFF_MS = 60 * 60 * 1000;
+// Must stay within the server's 10-minute self-hosted request deadline.
+const UNAVAILABLE_BACKOFF_MS = 10 * 60 * 1000;
 const MAX_REMEMBERED_REQUESTS = 50;
 
 const SEMVER_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Matches zylos' "is not installed" wording; if that wording changes, an absent
+// client is reported probe_failed (never a wrong install).
 const NOT_INSTALLED_RE = /is not installed/;
 
 const promisifiedExecFile = promisify(execFileCb);
@@ -222,7 +225,7 @@ export function createMarketClientEnsurer({
     } catch (err) {
       if (err?.status === 404) {
         if (!unavailableUntil.has(slug)) {
-          log(`[${slug}] market client request endpoint not available (404), re-checking hourly`);
+          log(`[${slug}] market client request endpoint not available (404), re-checking every 10 min`);
         }
         unavailableUntil.set(slug, now() + unavailableBackoffMs);
         return;
