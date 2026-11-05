@@ -50,7 +50,7 @@ function fakeZylos({ installed = null, after, failOn, failErr, infoErr, onRun } 
   return { execFile, calls, opts, runs: () => calls.filter((c) => c[1] === 'add' || c[1] === 'upgrade') };
 }
 
-function setup({ pull, zylos = fakeZylos(), store = memStore(), postImpl, clock } = {}) {
+function setup({ pull, zylos = fakeZylos(), store = memStore(), postImpl } = {}) {
   const gets = [];
   const posts = [];
   const logs = [];
@@ -72,7 +72,6 @@ function setup({ pull, zylos = fakeZylos(), store = memStore(), postImpl, clock 
     execFile: zylos.execFile,
     store,
     sleep: async (ms) => { sleeps.push(ms); },
-    ...(clock ? { now: () => clock.t } : {}),
   });
   return { ensure, gets, posts, logs, sleeps, zylos, store };
 }
@@ -364,43 +363,27 @@ test('pull network error propagates; the next sync recovers', async () => {
   assert.equal(t.posts[0].body.outcome, 'succeeded');
 });
 
-test('404 (hosted Agent or older server): logged once, polled at most every 10 min, cleared on success', async () => {
-  const clock = { t: 1_000_000 };
-  const min = 60 * 1000;
+test('404 (hosted Agent or older server): polled every sync, logged once per org until a success', async () => {
   let status = 404;
   const pull = () => {
     if (status === 404) throw Object.assign(new Error('not found'), { status: 404 });
     return { required: false };
   };
-  const t = setup({ pull, clock });
+  const t = setup({ pull });
   const notices = () => t.logs.filter((l) => l.includes('404')).length;
   await t.ensure(org());
-  clock.t += 5 * min;
   await t.ensure(org());
-  clock.t += 4 * min;
   await t.ensure(org());
-  assert.equal(t.gets.length, 1);
-  clock.t += 2 * min;
-  await t.ensure(org());
-  assert.equal(t.gets.length, 2);
+  assert.equal(t.gets.length, 3);
   assert.equal(notices(), 1);
 
   status = 200;
-  clock.t += 11 * min;
   await t.ensure(org());
-  clock.t += 1 * min;
-  await t.ensure(org());
-  assert.equal(t.gets.length, 4);
-
-  // A success clears the backoff state: a later 404 is logged again and backs off again.
   status = 404;
-  clock.t += 1 * min;
   await t.ensure(org());
-  assert.equal(t.gets.length, 5);
+  await t.ensure(org());
+  assert.equal(t.gets.length, 6);
   assert.equal(notices(), 2);
-  clock.t += 5 * min;
-  await t.ensure(org());
-  assert.equal(t.gets.length, 5);
 });
 
 test('invalid request_id is ignored', async () => {
@@ -434,6 +417,26 @@ test('fileStore: real files round-trip, missing or corrupt files load empty, no 
     assert.deepEqual(s.load(), { requests: {} });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fileStore: a non-object requests field is reset; the same request never installs twice', async () => {
+  for (const bad of ['[]', '"x"', 'null', '42']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-store-'));
+    try {
+      const file = path.join(dir, 'market-client.json');
+      fs.writeFileSync(file, `{"requests": ${bad}}`);
+      assert.deepEqual(fileStore(file).load(), { requests: {} }, bad);
+      const zylos = fakeZylos({ failOn: 'add' });
+      const first = setup({ pull: pending(), zylos, store: fileStore(file) });
+      await first.ensure(org());
+      const second = setup({ pull: pending(), zylos, store: fileStore(file) });
+      await second.ensure(org());
+      assert.equal(zylos.runs().length, 1, bad);
+      assert.equal(first.posts.length + second.posts.length, 1, bad);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
