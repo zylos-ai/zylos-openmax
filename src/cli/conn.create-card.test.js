@@ -11,7 +11,7 @@ import {
   CONNECTOR_CREATE_CARD_SCHEMA, CREATE_CARD_MAX_ACTIONS, CREATE_CARD_LIMITS,
   isSecretLikeKey, assertNoSecretKeys, parseCreateCardInput,
   buildConnectorCreateCardMessage, buildCreateCardFallbackText,
-  sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage, looksLikeToken,
+  sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage, looksLikeToken, actionNameKey,
 } from './conn.js';
 
 // conn.create_card (OPENM-836): the "create this custom connector?" card.
@@ -157,19 +157,51 @@ test('parseCreateCardInput: control / invisible formatting characters (Cc, Cf) r
   assert.throws(() => parseCreateCardInput(withConnector({ name: 'Acme\u202Emrc' })), /invisible formatting/);
 });
 
-test('parseCreateCardInput: emoji joiners (ZWNJ, ZWJ, tag chars) allowed in text, not in URLs / slug', () => {
-  const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}'; // 👨‍👩‍👧
+test('parseCreateCardInput: emoji ZWJ / tag sequences allowed only where valid; ZWNJ only in description', () => {
+  const family = '\u{1F468}‍\u{1F469}‍\u{1F467}'; // 👨‍👩‍👧
+  const rainbow = '\u{1F3F3}️‍\u{1F308}'; // 🏳️‍🌈 (VS16 before ZWJ)
+  const skin = '\u{1F469}\u{1F3FD}‍\u{1F4BB}'; // 👩🏽‍💻 (skin tone before ZWJ)
   const scotland = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}'; // 🏴󠁧󠁢󠁳󠁣󠁴󠁿
-  const zwnj = 'می\u200Cخواهم';
-  for (const v of [family, scotland, zwnj]) {
+  for (const v of [family, rainbow, skin, scotland]) {
     assert.equal(parseCreateCardInput(withConnector({ name: `CRM ${v}` })).connector.name, `CRM ${v}`);
-    assert.equal(parseCreateCardInput(withConnector({ description: v })).connector.description, v);
-    assert.equal(parseCreateCardInput(withAction({ summary: v })).actions[0].summary, v);
+    assert.equal(parseCreateCardInput(withConnector({ description: `说明 ${v}` })).connector.description, `说明 ${v}`);
+    assert.equal(parseCreateCardInput(withAction({ summary: `${v} 列出` })).actions[0].summary, `${v} 列出`);
   }
-  rejects400(withConnector({ name: `${family}\u202E` }), /invisible formatting/);
-  rejects400(withConnector({ base_url: 'https://a.example.com/x\u200Dy' }), /invisible formatting/);
+  // ZWNJ between letters: description only
+  const zwnj = 'می‌خواهم';
+  assert.equal(parseCreateCardInput(withConnector({ description: zwnj })).connector.description, zwnj);
+  rejects400(withConnector({ name: zwnj }), /invisible formatting/);
+  rejects400(withAction({ summary: zwnj }), /invisible formatting/);
+  rejects400(withConnector({ description: 'ab‌' }), /invisible formatting/);
+  rejects400(withConnector({ description: '1‌2' }), /invisible formatting/);
+  // tag characters outside a complete 🏴 … U+E007F sequence
+  for (const v of ['\u{E0020}', 'list\u{E0020}', 'a\u{E0067}\u{E007F}', '\u{1F3F4}\u{E0067}\u{E0062}', '\u{1F3F4}\u{E007F}', `${scotland}\u{E0020}`]) {
+    rejects400(withConnector({ name: v }), /invisible formatting/);
+    rejects400(withAction({ summary: v }), /invisible formatting/);
+    rejects400(withConnector({ description: v }), /invisible formatting/);
+  }
+  // ZWJ not between two emoji
+  for (const v of ['a‍b', '\u{1F468}‍', '‍\u{1F468}', '\u{1F468}‍a', 'list‍']) {
+    rejects400(withConnector({ name: v }), /invisible formatting/);
+    rejects400(withConnector({ description: v }), /invisible formatting/);
+  }
+  rejects400(withConnector({ name: `${family}‮` }), /invisible formatting/);
+  // no joiners / tags at all in action names, slug, URLs
+  for (const v of [family, scotland]) rejects400(withAction({ name: `list${v}` }), /invisible formatting/);
+  rejects400(withAction({ name: 'list\u{E0020}' }), /invisible formatting/);
+  rejects400(withConnector({ base_url: 'https://a.example.com/x‍y' }), /invisible formatting/);
   rejects400(withConnector({ icon_url: `https://a.example.com/${scotland}` }), /invisible formatting/);
-  rejects400(withConnector({ slug: 'a\u200Db' }), /connector\.slug/);
+  rejects400(withConnector({ slug: 'a‍b' }), /connector\.slug/);
+});
+
+test('parseCreateCardInput: action-name duplicates detected after NFKC + default-ignorable stripping', () => {
+  const two = (n0, n1) => valid({ actions: [{ name: n0, effect: 'read', summary: 's' }, { name: n1, effect: 'write', summary: 's' }] });
+  rejects400(two('list', 'list\u{E0020}'), /invisible formatting/); // the invisible variant never gets in
+  rejects400(two('list', 'ＬＩＳＴ'), /duplicated/); // full-width folds under NFKC
+  rejects400(two('list', 'LIST'), /duplicated/);
+  assert.equal(actionNameKey('li­st'), 'list'); // soft hyphen is default-ignorable
+  assert.equal(actionNameKey('ｌｉｓｔ'), 'list');
+  assert.doesNotThrow(() => parseCreateCardInput(two('list', 'list_all')));
 });
 
 test('parseCreateCardInput: URLs — credentials in any form rejected; normalized href echoed', () => {
@@ -236,23 +268,61 @@ test('URLs: ";" is a query separator too; signed-URL / JWT parameter names refus
   }
 });
 
-test('URLs: token-shaped path segments / query values refused (best-effort), ordinary ids pass', () => {
-  const tokens = [
-    'sk_live_abc123', 'sk-proj-abc', 'rk_test_x', 'ghp_abcdefghijklmnop', 'github_pat_11ABC', 'glpat-xyz', 'xoxb-123-456',
-    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig', 'AKIAIOSFODNN7EXAMPLE', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv',
-  ];
-  for (const t of tokens) {
+// Real-looking tokens are assembled at runtime so no secret-shaped literal sits
+// in the repository (and push protection has nothing to flag).
+const R = (n, alphabet = 'aB3dE5gH7jK9mN2pQ4sT6vW8xY0') => Array.from({ length: n }, (_, i) => alphabet[i % alphabet.length]).join('');
+const TOKENS = [
+  ['sk', '-', 'proj-', R(40)].join(''),
+  ['sk', '-', R(20)].join(''),
+  ['sk', '_live_', R(24)].join(''),
+  ['rk', '_test_', R(24)].join(''),
+  ['gh', 'p_', R(36)].join(''),
+  ['gh', 's_', R(36)].join(''),
+  ['github', '_pat_', R(40)].join(''),
+  ['gl', 'pat-', R(20)].join(''),
+  ['xo', 'xb-', '1234567890-', R(24)].join(''),
+  ['ey', 'J', R(20), '.', 'eyJ', R(20), '.', R(20)].join(''),
+  ['AK', 'IA', R(16, 'ABCDEFGHIJ0123456789')].join(''),
+];
+
+test('URLs: well-known token formats refused in path segments and query values (best-effort)', () => {
+  for (const t of TOKENS) {
     assert.equal(looksLikeToken(t), true, t);
     assert.throws(() => parseCreateCardInput(withConnector({ base_url: `https://a.example.com/hooks/${t}` })),
       (e) => e.code === 'secret_field_rejected' && /token-like URL path segment #2/.test(e.message) && !e.message.includes(t), t);
     assert.throws(() => parseCreateCardInput(withConnector({ icon_url: `https://a.example.com/i.png?v=${t}` })),
       (e) => e.code === 'secret_field_rejected' && /token-like value of URL query parameter "v"/.test(e.message), t);
   }
-  const ok = ['3f401897-545e-4633-a486-5b3c464137a5', 'd41d8cd98f00b204e9800998ecf8427e', 'list-all-repositories-for-the-current-user',
-    'v1', 'API', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0U', 'skills', 'eyJ'];
+});
+
+test('URLs: a percent-encoded token in a path segment is decoded before the check', () => {
+  const t = ['sk', '_live_', R(24)].join('');
+  const encoded = `%73${t.slice(1)}`; // "%73" = "s"
+  assert.equal(looksLikeToken(encoded), false, 'raw form alone would slip through');
+  assert.throws(() => parseCreateCardInput(withConnector({ base_url: `https://a.example.com/hooks/${encoded}` })),
+    (e) => e.code === 'secret_field_rejected' && /path segment #2/.test(e.message));
+  const gh = ['gh', 'p_', R(36)].join('');
+  assert.throws(() => parseCreateCardInput(withConnector({ icon_url: `https://a.example.com/%67${gh.slice(1)}/i.png` })),
+    (e) => e.code === 'secret_field_rejected');
+});
+
+test('URLs: no false positives on locale codes, words, short prefixes or Drive / Notion / S3-style ids', () => {
+  const ok = [
+    'sk-SK', 'sk_SK', 'sk-proj', 'sk_live_short', 'rk_test_x', 'xoxo-gossip', 'xoxb-short', 'ghp_short', 'github_pat_x',
+    'glpat-xyz', 'eyJ', 'eyJabc.def', 'AKIA1234', 'skills', 'sketch',
+    '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms', // Google Sheets / Drive id
+    'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv', // 32 mixed-class chars, no known prefix
+    '1429989fe8ac4effbc8f57f56486db54', // Notion page id
+    'My-Page-Title-1429989fe8ac4effbc8f57f56486db54',
+    '3f401897-545e-4633-a486-5b3c464137a5', 'd41d8cd98f00b204e9800998ecf8427e', 'list-all-repositories-for-the-current-user',
+  ];
   for (const t of ok) {
     assert.equal(looksLikeToken(t), false, t);
     assert.doesNotThrow(() => parseCreateCardInput(withConnector({ base_url: `https://a.example.com/${t}/x` })), t);
+  }
+  for (const u of ['https://a.example.com/docs?hl=sk-SK', 'https://a.example.com/sk_SK/docs', 'https://a.example.com/blog/xoxo-gossip',
+    'https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit']) {
+    assert.doesNotThrow(() => parseCreateCardInput(withConnector({ base_url: u })), u);
   }
 });
 

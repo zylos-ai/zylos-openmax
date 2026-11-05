@@ -840,14 +840,25 @@ export function isSecretLikeKey(key) {
 }
 
 // Best-effort: a URL path segment or query value that LOOKS like a credential
-// even though nothing names it as one. Conservative on purpose (ids, hashes and
-// slugs pass): a well-known token prefix, or a long run (>=32) of
-// [A-Za-z0-9_-] that mixes upper case, lower case and digits.
-const TOKEN_PREFIX_RE = /^(?:sk|rk)[_-]|^(?:ghp|gho|ghu|ghs|ghr)_|^github_pat_|^glpat-|^xox[abposr]-|^eyJ[A-Za-z0-9_-]{4,}\.|^AKIA[0-9A-Z]{16}$/;
+// even though nothing names it as one. Only well-known token formats, each
+// with a minimum body length so locale codes and words (`sk-SK`, `sk_SK`,
+// `xoxo-gossip`) pass. There is deliberately NO generic "long random string"
+// rule: Google Drive / Notion / S3 ids look exactly like that, and a false
+// positive would block legitimate URLs. Catching everything is impossible —
+// secret-named parameters are checked separately (isSecretLikeKey).
+const TOKEN_PATTERNS = [
+  /^sk-[A-Za-z0-9_-]{16,}$/, //                         OpenAI / Anthropic style
+  /^(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}$/, //      Stripe secret / restricted
+  /^gh[pousr]_[A-Za-z0-9]{20,}$/, //                    GitHub tokens
+  /^github_pat_[A-Za-z0-9_]{20,}$/, //                  GitHub fine-grained PAT
+  /^glpat-[A-Za-z0-9_-]{20,}$/, //                      GitLab PAT
+  /^xox[abprs]-[A-Za-z0-9-]{10,}$/, //                  Slack tokens
+  /^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]*)?$/, // JWT
+  /^(?:AKIA|ASIA)[0-9A-Z]{16}$/, //                     AWS access key id
+];
 export function looksLikeToken(value) {
   const v = String(value);
-  if (TOKEN_PREFIX_RE.test(v)) return true;
-  return v.length >= 32 && /^[A-Za-z0-9_-]+$/.test(v) && /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v);
+  return TOKEN_PATTERNS.some((re) => re.test(v));
 }
 
 // The one refusal for a secret on the card. `location` names WHERE (a field
@@ -877,7 +888,7 @@ export function assertNoSecretKeys(value, path = '') {
   walk(value, path);
 }
 
-function cardString(v, field, max, { required = false, emojiJoiners = true } = {}) {
+function cardString(v, field, max, { required = false, joiners = 'none' } = {}) {
   if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '' && !required)) {
     if (required) throw bad(`${field} is required`);
     return undefined;
@@ -886,27 +897,66 @@ function cardString(v, field, max, { required = false, emojiJoiners = true } = {
   const s = v.trim();
   if (!s) throw bad(`${field} is required`);
   if ([...s].length > max) throw bad(`${field} is too long (max ${max} characters)`);
-  if (hasForbiddenChar(s, { emojiJoiners })) {
+  if (hasForbiddenChar(s, joiners)) {
     throw bad(`${field} must not contain control, invisible formatting or line-separator characters (e.g. U+202E, U+200B, U+2028)`);
   }
   return s;
 }
 
 // Control (Cc), invisible formatting (Cf: bidi controls U+200E/F, U+202A–202E,
-// U+2066–2069, U+200B, U+2060–2064, BOM, …) and the line / paragraph
-// separators U+2028 / U+2029 can make the card display something other than
-// what will be created. Text fields still allow the emoji-sequence joiners:
-// ZWNJ U+200C, ZWJ U+200D (👨‍👩‍👧) and the tag characters U+E0020–U+E007F
-// (subdivision flags like 🏴󠁧󠁢󠁳󠁣󠁴󠁿). URLs and slugs allow none of them.
-function hasForbiddenChar(s, { emojiJoiners = true } = {}) {
-  for (const ch of s) {
-    const cp = ch.codePointAt(0);
+// U+2066–2069, U+200B, U+2060–2064, BOM, tag characters, …) and the line /
+// paragraph separators U+2028 / U+2029 can make the card display something
+// other than what will be created, so they are refused. The only exceptions,
+// by field (`joiners`):
+//   'none'  — slug, action names, URLs: no exception at all.
+//   'emoji' — connector name, action summary: ZWJ U+200D only BETWEEN two
+//             emoji (Extended_Pictographic, optionally followed by VS16 /
+//             a skin-tone modifier, e.g. 👨‍👩‍👧, 🏳️‍🌈), and tag characters
+//             U+E0020–U+E007E only inside a complete emoji tag sequence:
+//             U+1F3F4 + tags + U+E007F (subdivision flags like 🏴󠁧󠁢󠁳󠁣󠁴󠁿).
+//   'text'  — description: 'emoji' plus ZWNJ U+200C between two letters
+//             (Persian, Indic scripts need it). ZWNJ is refused elsewhere.
+const PICTO_RE = /\p{Extended_Pictographic}/u;
+const LETTER_RE = /\p{L}/u;
+const isTag = (cp) => cp >= 0xE0020 && cp <= 0xE007F;
+const isEmojiTail = (cp) => cp === 0xFE0F || (cp >= 0x1F3FB && cp <= 0x1F3FF);
+function hasForbiddenChar(s, joiners = 'none') {
+  const cps = [...s].map((ch) => ch.codePointAt(0));
+  const ch = (cp) => (cp === undefined ? '' : String.fromCodePoint(cp));
+  const allowed = new Set();
+  if (joiners !== 'none') {
+    for (let i = 0; i < cps.length; i += 1) {
+      // complete tag sequence: 🏴 + ≥1 tag (E0020–E007E) + cancel tag E007F
+      if (cps[i] === 0x1F3F4) {
+        let j = i + 1;
+        while (j < cps.length && cps[j] >= 0xE0020 && cps[j] <= 0xE007E) j += 1;
+        if (j > i + 1 && cps[j] === 0xE007F) { for (let k = i + 1; k <= j; k += 1) allowed.add(k); i = j; }
+        continue;
+      }
+      if (cps[i] === 0x200D) {
+        let b = i - 1;
+        while (b >= 0 && isEmojiTail(cps[b])) b -= 1;
+        if (b >= 0 && PICTO_RE.test(ch(cps[b])) && PICTO_RE.test(ch(cps[i + 1]))) allowed.add(i);
+        continue;
+      }
+      if (cps[i] === 0x200C && joiners === 'text'
+        && LETTER_RE.test(ch(cps[i - 1])) && LETTER_RE.test(ch(cps[i + 1]))) allowed.add(i);
+    }
+  }
+  for (let i = 0; i < cps.length; i += 1) {
+    const cp = cps[i];
     if (cp === 0x2028 || cp === 0x2029) return true;
-    if (!/[\p{Cc}\p{Cf}]/u.test(ch)) continue;
-    if (emojiJoiners && (cp === 0x200C || cp === 0x200D || (cp >= 0xE0020 && cp <= 0xE007F))) continue;
-    return true;
+    if (!/[\p{Cc}\p{Cf}]/u.test(ch(cp)) && !isTag(cp)) continue;
+    if (!allowed.has(i)) return true;
   }
   return false;
+}
+
+// Identity of an action name for duplicate detection: NFKC (full-width and
+// compatibility forms fold), default-ignorable code points removed, lower-cased
+// — so visually identical variants collide.
+export function actionNameKey(name) {
+  return name.normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
 }
 
 // [name, value] pairs of a query string or fragment ("a=1&b=2;c"), split on
@@ -923,7 +973,7 @@ function urlParamPairs(raw) {
 }
 
 function cardUrl(v, field) {
-  const s = cardString(v, field, CREATE_CARD_LIMITS.url, { emojiJoiners: false });
+  const s = cardString(v, field, CREATE_CARD_LIMITS.url);
   if (s === undefined) return undefined;
   let u;
   try { u = new URL(s); } catch { throw bad(`${field} must be an absolute http(s) URL`); }
@@ -971,8 +1021,8 @@ export function parseCreateCardInput(p) {
   const c = p.connector;
   if (!c || typeof c !== 'object' || Array.isArray(c)) throw bad('connector object is required');
   rejectUnknownKeys(c, CREATE_CARD_CONNECTOR_KEYS, 'connector.');
-  const connector = { name: cardString(c.name, 'connector.name', CREATE_CARD_LIMITS.name, { required: true }) };
-  const slug = cardString(c.slug, 'connector.slug', CREATE_CARD_LIMITS.slug, { required: true, emojiJoiners: false });
+  const connector = { name: cardString(c.name, 'connector.name', CREATE_CARD_LIMITS.name, { required: true, joiners: 'emoji' }) };
+  const slug = cardString(c.slug, 'connector.slug', CREATE_CARD_LIMITS.slug, { required: true });
   if (!CONNECTOR_SLUG_RE.test(slug)) {
     throw bad('connector.slug must be lowercase letters/digits joined by "-" or "_" (no leading/trailing separator, max 64), e.g. "acme-crm" — and must be the exact slug you will pass to conn.app_import');
   }
@@ -983,7 +1033,7 @@ export function parseCreateCardInput(p) {
   connector.auth_type = c.auth_type;
   const iconUrl = cardUrl(c.icon_url, 'connector.icon_url');
   if (iconUrl !== undefined) connector.icon_url = iconUrl;
-  const description = cardString(c.description, 'connector.description', CREATE_CARD_LIMITS.description);
+  const description = cardString(c.description, 'connector.description', CREATE_CARD_LIMITS.description, { joiners: 'text' });
   if (description !== undefined) connector.description = description;
   const baseUrl = cardUrl(c.base_url, 'connector.base_url');
   if (baseUrl !== undefined) connector.base_url = baseUrl;
@@ -999,11 +1049,11 @@ export function parseCreateCardInput(p) {
     // Bare action segment, exactly what conn.app_import submits (the server
     // prepends "{slug}/").
     if (name.includes('/')) throw bad(`${where}.name must be the bare action name (no "/"; the server prepends the connector slug)`);
-    const key = name.toLowerCase();
+    const key = actionNameKey(name);
     if (seenNames.has(key)) throw bad(`${where}.name "${name}" is duplicated`);
     seenNames.add(key);
     if (!CREATE_CARD_EFFECTS.includes(a.effect)) throw bad(`${where}.effect must be one of ${CREATE_CARD_EFFECTS.join(' | ')}`);
-    const summary = cardString(a.summary, `${where}.summary`, CREATE_CARD_LIMITS.action_summary, { required: true });
+    const summary = cardString(a.summary, `${where}.summary`, CREATE_CARD_LIMITS.action_summary, { required: true, joiners: 'emoji' });
     return { name, effect: a.effect, summary };
   });
 

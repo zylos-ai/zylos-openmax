@@ -421,15 +421,23 @@ validation, all before anything is sent (`400`): required `name` (≤100) / `slu
 no secret-named query / fragment parameter (`?api_key=…`, `?x=1;sig=…` — `;`
 counts as a separator too — `?X-Amz-Signature=…`, `?id_token=…`, `#token=…` →
 `400 secret_field_rejected`, naming the parameter, never its value); a path
-segment or query value that looks like a token (a known prefix such as `sk_`,
-`ghp_`, `xoxb-`, `eyJ…` (JWT), `AKIA…`, or ≥32 characters of `[A-Za-z0-9_-]`
-mixing upper case, lower case and digits) is refused the same way — a
-best-effort heuristic, not a guarantee; they are echoed in normalized form (the
-parsed `href`, so the card shows the real host); no control, invisible
+segment (percent-decoded) or query value in a well-known token format is
+refused the same way — `sk-…` / `sk_live_…` / `rk_test_…`, `ghp_…` and the other
+GitHub prefixes, `github_pat_…`, `glpat-…`, `xoxb-…` (Slack), a JWT (`eyJ….…`),
+an AWS key id (`AKIA…` / `ASIA…`), each only with a realistic body length, so
+`?hl=sk-SK`, `/sk_SK/` or `xoxo-gossip` pass. There is deliberately no generic
+"long random string" rule (it would block Google Drive / Notion ids), so this is
+a best-effort check, not a guarantee. URLs are echoed in normalized form (the
+parsed `href`, so the card shows the real host). No control, invisible
 formatting or line-separator characters (Unicode Cc / Cf such as U+202E, U+200B,
-U+FEFF, and U+2028 / U+2029) in any field — text fields (name, description,
-summary) still allow the emoji joiners ZWNJ / ZWJ and the tag characters
-U+E0020–U+E007F (family emoji, subdivision flags); URLs and the slug allow none;
+U+FEFF, tag characters, U+2028 / U+2029) in any field, with narrow exceptions
+for emoji: in `connector.name`, `connector.description` and `actions[].summary`
+a ZWJ is allowed only between two emoji (👨‍👩‍👧, 🏳️‍🌈) and tag characters only
+inside a complete flag tag sequence (🏴 … U+E007F, e.g. 🏴󠁧󠁢󠁳󠁣󠁴󠁿); ZWNJ is
+allowed only in `connector.description`, between two letters (Persian, Indic
+scripts). `slug`, `actions[].name` and URLs allow none of them. Action names are
+compared for duplicates after NFKC and removing default-ignorable characters
+(`ＬＩＳＴ` = `list`);
 `description` ≤500; 1–50 actions, each `name` ≤100 without `/` and unique,
 `effect` `read` | `write`, `summary` ≤200; unknown fields refused. **Any
 secret-like key anywhere in the input** (`api_key`, `secret`, `client_secret`,
