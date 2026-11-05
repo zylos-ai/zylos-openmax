@@ -32,6 +32,7 @@
 import { randomUUID } from 'crypto';
 import { extractWorkReferences, formatWorkReferenceContext } from './work-reference.js';
 import { formatConnectorPreference } from './connector-preference.js';
+import { formatWfContext } from './wf-context.js';
 
 const TYPE_TAG = { dm: '[OPENMAX DM]', group: '[OPENMAX GROUP]', thread: '[OPENMAX THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
@@ -178,7 +179,7 @@ function formatContextLine(m) {
  * @param {Array}  [recent] - recent group messages used for `<group-context>`
  * @param {object} [opts]   - { groupName, quotedContent, threadContext,
  *                              threadRootId, smartHint, receipt,
- *                              preferredConnectors,
+ *                              preferredConnectors, wfRef,
  *                              systemSender: { memberId? } | undefined }
  *                            `systemSender` is set by the bridge only for a
  *                            platform System Member (sender_type=SYSTEM).
@@ -189,7 +190,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
   const {
     groupName, quotedContent, threadContext, threadRootId, smartHint, orgId, orgName, receipt, systemSender,
-    preferredConnectors,
+    preferredConnectors, wfRef,
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
@@ -279,6 +280,12 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // above: typed text cannot produce it.
   const preference = formatConnectorPreference(preferredConnectors);
   if (preference) header += `${preference}\n`;
+  // Workflow context: which workflow / run / page of the workflows page the
+  // user sent this from, from message metadata `wf_ref`. A hint only — the
+  // workflows records stay authoritative (see wf-context.js). Structural for
+  // the same reason as the elements above.
+  const wfContext = formatWfContext(wfRef);
+  if (wfContext) header += `${wfContext}\n`;
   const parts = [header];
 
   // Skill discovery is advisory in the runtime: a model can occasionally
