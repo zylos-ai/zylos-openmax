@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMarketClientEnsurer, parseStrictSemver, MARKET_CLIENT_COMPONENT } from './market-client-ensure.js';
+import { createMarketClientEnsurer, parseStrictSemver, normaliseVersion, MARKET_CLIENT_COMPONENT } from './market-client-ensure.js';
 
 const apiPath = (p) => `/api/v1${p}`;
 const REQ = '3f2c1a9e-8b7d-4c6e-9f10-112233445566';
@@ -260,4 +260,30 @@ test('concurrent calls are serialized: one install for two orgs', async () => {
   assert.equal(zylos.calls.filter((c) => c[1] === 'add').length, 1);
   assert.equal(t.posts.length, 2);
   assert.ok(t.posts.every((p) => p.body.outcome === 'succeeded'));
+});
+
+test('normaliseVersion strips a leading v and requires strict X.Y.Z', () => {
+  assert.equal(normaliseVersion('v0.3.0'), '0.3.0');
+  assert.equal(normaliseVersion('0.3.0'), '0.3.0');
+  for (const bad of ['vv0.3.0', 'v0.3', 'V0.3.0', 'v0.3.0-rc.1', ' v0.3.0', 'v', null]) {
+    assert.equal(normaliseVersion(bad), null, String(bad));
+  }
+});
+
+test('reported version is normalised: v-prefixed installed version is sent as X.Y.Z', async () => {
+  const added = setup({ pull: pending(), zylos: fakeZylos({ installed: null, after: 'v0.3.0' }) });
+  await added.ensure(org());
+  assert.deepEqual(added.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.3.0' });
+
+  const upToDate = setup({ pull: pending(), zylos: fakeZylos({ installed: 'v0.4.0' }) });
+  await upToDate.ensure(org());
+  assert.deepEqual(upToDate.posts[0].body, { request_id: REQ, outcome: 'succeeded', client_version: '0.4.0' });
+});
+
+test('installed version not strict X.Y.Z after stripping v is reported version_unverified', async () => {
+  for (const after of ['v0.3', 'v0.3.0-rc.1', 'vv0.3.0']) {
+    const t = setup({ pull: pending(), zylos: fakeZylos({ installed: null, after }) });
+    await t.ensure(org());
+    assert.deepEqual(t.posts[0].body, { request_id: REQ, outcome: 'failed', reason: 'version_unverified' }, after);
+  }
 });

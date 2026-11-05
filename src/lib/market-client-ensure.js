@@ -39,6 +39,13 @@ export function parseStrictSemver(value) {
   return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
 }
 
+// Reported versions: a leading "v" is stripped, then strict X.Y.Z is required.
+export function normaliseVersion(value) {
+  if (typeof value !== 'string') return null;
+  const stripped = value.startsWith('v') ? value.slice(1) : value;
+  return parseStrictSemver(stripped) ? stripped : null;
+}
+
 function compareSemver(a, b) {
   for (let i = 0; i < 3; i++) {
     if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
@@ -103,7 +110,7 @@ export function createMarketClientEnsurer({
     try {
       const info = JSON.parse(String(stdout));
       if (!info || info.name !== MARKET_CLIENT_COMPONENT) return { installed: false, version: null };
-      return { installed: true, version: typeof info.version === 'string' ? info.version.replace(/^v/, '') : null };
+      return { installed: true, version: normaliseVersion(info.version) };
     } catch {
       return { installed: true, version: null };
     }
@@ -130,7 +137,7 @@ export function createMarketClientEnsurer({
       };
     }
     const after = await installedVersion();
-    if (!after.installed || !parseStrictSemver(after.version)) {
+    if (!after.installed || !after.version) {
       return { outcome: 'failed', reason: 'version_unverified' };
     }
     return { outcome: 'succeeded', client_version: after.version };
