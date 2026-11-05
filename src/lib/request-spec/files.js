@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { specError } from './errors.js';
+import { fetchFollowingRedirects } from '../follow-redirects.js';
 
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
 export const MAX_STREAM_FILE_BYTES = 1024 * 1024 * 1024;
@@ -148,6 +149,9 @@ async function readCappedStream(body, cap, what) {
   return Buffer.concat(chunks);
 }
 
+// Resolve + fetch attempts for an artifact source (each with a fresh link).
+const ARTIFACT_FETCH_ATTEMPTS = 2;
+
 // Default artifact resolver: cws-core /artifacts/resolve (as.js getMediaUrl);
 // the returned presigned URL is fetched with the CF Access service headers the
 // storage gateway needs (same as client.js getBytes) and nothing else.
@@ -213,15 +217,28 @@ export async function resolveOneFile(paramName, rawValue, fileSpec = {}, deps = 
         throw specError(400, `file "${paramName}": artifact must be an artifact://<id> URI`);
       }
       const resolve = deps.resolveArtifact || defaultResolveArtifact;
-      const meta = await resolve(v.artifact, deps.orgId);
-      if (!meta || typeof meta.url !== 'string' || !/^https:\/\//i.test(meta.url)) {
-        throw specError(502, `file "${paramName}": artifact did not resolve to a download URL`);
-      }
-      if (Number.isFinite(meta.contentLength) && meta.contentLength > cap) throw tooBig(meta.contentLength);
       const fetchImpl = deps.fetchImpl || fetch;
-      // Only the URL the resolve endpoint returned is fetched; redirects are not followed.
-      const res = await fetchImpl(meta.url, { method: 'GET', headers: meta.headers || {}, redirect: 'manual' });
-      if (res.status < 200 || res.status >= 300) throw specError(502, `file "${paramName}": artifact download failed (HTTP ${res.status})`);
+      let meta;
+      let res;
+      // Each attempt resolves its own link: the link may be short-lived or
+      // single-use, so a failed one is never requested again.
+      for (let attempt = 1; ; attempt++) {
+        meta = await resolve(v.artifact, deps.orgId);
+        if (!meta || typeof meta.url !== 'string' || !/^https:\/\//i.test(meta.url)) {
+          throw specError(502, `file "${paramName}": artifact did not resolve to a download URL`);
+        }
+        if (Number.isFinite(meta.contentLength) && meta.contentLength > cap) throw tooBig(meta.contentLength);
+        // The resolved URL is fetched; its redirect to the storage object is
+        // followed by hand (https only, bounded, each URL once).
+        try {
+          res = await fetchFollowingRedirects(meta.url, { headers: meta.headers || {}, fetchImpl });
+        } catch (err) {
+          if (attempt < ARTIFACT_FETCH_ATTEMPTS) continue;
+          throw specError(502, `file "${paramName}": artifact download failed (${err.message})`);
+        }
+        if (res.status >= 200 && res.status < 300) break;
+        if (attempt >= ARTIFACT_FETCH_ATTEMPTS) throw specError(502, `file "${paramName}": artifact download failed (HTTP ${res.status})`);
+      }
       bytes = await readCappedStream(res.body, cap, `file "${paramName}"`);
       if (!filename && meta.name) filename = safeMeta(String(meta.name), 'filename');
       if (!v.mime_type && meta.contentType && !/octet-stream/i.test(meta.contentType)) v.mime_type = String(meta.contentType).split(';')[0];
