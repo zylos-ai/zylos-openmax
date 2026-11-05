@@ -141,3 +141,39 @@ test('cross-origin stripping also works for a Headers instance', async () => {
   });
   assert.deepEqual(calls[1].opts.headers, { 'cf-access-client-id': 'id' });
 });
+
+test('cross-origin stripping also works for array-of-pairs headers', async () => {
+  const { calls, fetchImpl } = scripted({
+    'https://core.example/t1': { status: 302, location: 'https://store.example/obj' },
+    'https://store.example/obj': { status: 200 },
+  });
+  const headers = [
+    ['Authorization', 'Bearer x'],
+    ['Proxy-Authorization', 'Basic y'],
+    ['Cookie', 'c=1'],
+    ['CF-Access-Client-Id', 'id'],
+    ['CF-Access-Client-Secret', 's'],
+    ['Accept', '*/*'],
+  ];
+  await fetchFollowingRedirects('https://core.example/t1', { headers, fetchImpl });
+  assert.deepEqual(calls[0].opts.headers, headers);
+  assert.deepEqual(calls[1].opts.headers, {
+    'cf-access-client-id': 'id',
+    'cf-access-client-secret': 's',
+    accept: '*/*',
+  });
+});
+
+test('same-origin redirect keeps every array-of-pairs header', async () => {
+  const { calls, fetchImpl } = scripted({
+    'https://core.example/t1': { status: 302, location: '/obj' },
+    'https://core.example/obj': { status: 200 },
+  });
+  const headers = [['Authorization', 'Bearer x'], ['Cookie', 'c=1'], ['CF-Access-Client-Id', 'id']];
+  await fetchFollowingRedirects('https://core.example/t1', { headers, fetchImpl });
+  for (const c of calls) {
+    assert.deepEqual(Object.fromEntries(new Headers(c.opts.headers)), {
+      authorization: 'Bearer x', cookie: 'c=1', 'cf-access-client-id': 'id',
+    });
+  }
+});

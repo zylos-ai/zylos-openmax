@@ -27,8 +27,15 @@ export const DEFAULT_MAX_REDIRECTS = 3;
 // Headers fetch removes when a redirect goes to another origin.
 const CROSS_ORIGIN_DROPPED = new Set(['authorization', 'proxy-authorization', 'cookie']);
 
+// Accepts every HeadersInit form fetch does. A plain object keeps its entries
+// (and the caller's name casing) as-is; anything else (a Headers instance, an
+// array of [name, value] pairs, ...) is normalized through `new Headers()` so
+// it is read the way fetch reads it — never via Object.entries, which would
+// turn an array's pairs into headers named "0", "1", ...
 function withoutCredentialHeaders(headers) {
-  const entries = headers instanceof Headers ? [...headers.entries()] : Object.entries(headers || {});
+  const isPlainObject = headers != null && typeof headers === 'object'
+    && (Object.getPrototypeOf(headers) === Object.prototype || Object.getPrototypeOf(headers) === null);
+  const entries = isPlainObject ? Object.entries(headers) : [...new Headers(headers ?? undefined).entries()];
   return Object.fromEntries(entries.filter(([k]) => !CROSS_ORIGIN_DROPPED.has(String(k).toLowerCase())));
 }
 
