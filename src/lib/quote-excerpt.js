@@ -67,7 +67,7 @@ function renderedText(markdown) {
   return stripMarkers(String(markdown)
     .replace(/^[ \t]*(?:```|~~~).*$/gm, '')            // code fences
     .replace(/^[ \t]*(?:[-*_=][ \t]*){3,}$/gm, '')      // rules, setext underlines
-    .replace(/^[ \t]*\d+[.)][ \t]+/gm, '')              // ordered markers: digits are content in an excerpt
+    .replace(/^([ \t]*(?:>[ \t]?)*)\d+[.)][ \t]+/gm, '$1') // ordered markers (also inside blockquotes): digits are content in an excerpt
     // No `[` / `(` inside the classes: keeps it linear on input with many `[`.
     .replace(/!?\[([^[\]]*)\]\([^()]*\)/g, '$1'));      // links / images → text
 }
