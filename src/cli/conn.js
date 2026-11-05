@@ -782,6 +782,414 @@ function requireTargetConversationId(p) {
   return raw;
 }
 
+// --- conn.create_card: "create this custom connector?" confirmation card ------
+//
+// Before the Agent creates a custom connector (conn.app_import /
+// conn.actiondef_create) it posts ONE structured card describing exactly what
+// will be created, and waits for the owner's confirmation (OPENM-836). The card
+// creates nothing: the frontend posts an ordinary user message on click
+// ("确认创建 {name}" / "我要改 {name}" with metadata {connector_create_card_id,
+// action, ref_message_id}), and the Agent then runs conn.app_import with the
+// SAME slug and actions.
+//
+// Shape mirrors conn.auth_notice / channel.js: AGENT_STRUCTURED + content
+// {content_type, body{schema,...}} + a compact metadata copy (cws-comm trims
+// structured bodies from the list hot path) + a plain-text fallback_text.
+//
+// The schema string MUST stay byte-identical to the cws-fe renderer's constant.
+// No secret ever travels on this card: any secret-like key anywhere in the
+// input is refused before anything is sent (the OAuth Client Secret is entered
+// by the user on the connections page via the card's「填写 Client Secret」button).
+export const CONNECTOR_CREATE_CARD_SCHEMA = 'openmax.connector-create.v1';
+export const CREATE_CARD_MAX_ACTIONS = 50;
+export const CREATE_CARD_LIMITS = Object.freeze({
+  name: 100,
+  slug: 64,
+  description: 500,
+  url: 2048,
+  action_name: 100,
+  action_summary: 200,
+});
+const CREATE_CARD_AUTH_TYPES = ['api_key', 'oauth2', 'mcp'];
+const CREATE_CARD_EFFECTS = ['read', 'write'];
+const CREATE_CARD_AUTH_LABELS = { api_key: 'API Key', oauth2: 'OAuth 2.0', mcp: 'MCP' };
+const CREATE_CARD_EFFECT_LABELS = { read: '读', write: '写' };
+// Same character set cws-connect's slug generator emits (lowercase a-z0-9 runs
+// joined by '-'; '_' also occurs in platform slugs), no leading/trailing
+// separator. The card's slug must equal the slug later passed to conn.app_import.
+export const CONNECTOR_SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
+const CREATE_CARD_TOP_KEYS = new Set([
+  'conversationId', 'conversation_id', 'connector', 'actions', 'application_id', 'applicationId',
+  'org', 'orgId', 'org_id',
+]);
+const CREATE_CARD_CONNECTOR_KEYS = new Set(['name', 'slug', 'icon_url', 'description', 'base_url', 'auth_type']);
+const CREATE_CARD_ACTION_KEYS = new Set(['name', 'effect', 'summary']);
+
+// A key that names a secret, compared on its lowercased alphanumerics so
+// `client_secret`, `clientSecret`, `OAUTH-CLIENT-SECRET`, `apiKey`, `access_token`
+// all match. Deliberately broad: a false positive costs a rename, a false
+// negative leaks a credential into a chat message. Covers signed-URL
+// parameters too (`sig` / `signature` / `X-Amz-Signature` / `X-Goog-Credential`,
+// Azure SAS `sig`), JWTs (`jwt`, `id_token`) and refresh tokens.
+export function isSecretLikeKey(key) {
+  const k = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!k) return false;
+  if (['key', 'pat', 'otp', 'sig', 'sas', 'jwt'].includes(k)) return true;
+  if (/(secret|password|passwd|passphrase|privatekey|accesskey|signingkey)/.test(k)) return true;
+  return /(token|apikey|credential|credentials|authorization|bearer|cookie|pin|signature|jwt)$/.test(k);
+}
+
+// Best-effort: a URL path segment or query value that LOOKS like a credential
+// even though nothing names it as one. Only well-known token formats, each
+// with a minimum body length so locale codes and words (`sk-SK`, `sk_SK`,
+// `xoxo-gossip`) pass. There is deliberately NO generic "long random string"
+// rule: Google Drive / Notion / S3 ids look exactly like that, and a false
+// positive would block legitimate URLs. Catching everything is impossible —
+// secret-named parameters are checked separately (isSecretLikeKey).
+const TOKEN_PATTERNS = [
+  /^sk-[A-Za-z0-9_-]{16,}$/, //                         OpenAI / Anthropic style
+  /^(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}$/, //      Stripe secret / restricted
+  /^gh[pousr]_[A-Za-z0-9]{20,}$/, //                    GitHub tokens
+  /^github_pat_[A-Za-z0-9_]{20,}$/, //                  GitHub fine-grained PAT
+  /^glpat-[A-Za-z0-9_-]{20,}$/, //                      GitLab PAT
+  /^xox[abprs]-[A-Za-z0-9-]{10,}$/, //                  Slack tokens
+  /^eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]*)?$/, // JWT
+  /^(?:AKIA|ASIA)[0-9A-Z]{16}$/, //                     AWS access key id
+];
+export function looksLikeToken(value) {
+  const v = String(value);
+  return TOKEN_PATTERNS.some((re) => re.test(v));
+}
+
+// The one refusal for a secret on the card. `location` names WHERE (a field
+// path or a URL parameter name), never the value.
+function secretFieldError(location) {
+  return Object.assign(
+    new Error(`secret-like ${location} is not allowed on the connector create card — never put a key, token, password or client secret on it (not in a field, not in a URL). The user enters the OAuth Client Secret on the connections page (the card's「填写 Client Secret」button); an API key is entered when they authorize the connector.`),
+    { status: 400, code: 'secret_field_rejected' },
+  );
+}
+
+// Walk every object key at any depth (arrays included) and refuse the first
+// secret-like one with its path. Runs before any other validation so a secret
+// is never echoed into a later error message either.
+export function assertNoSecretKeys(value, path = '') {
+  const seen = new Set();
+  const walk = (v, p) => {
+    if (!v || typeof v !== 'object' || seen.has(v)) return;
+    seen.add(v);
+    if (Array.isArray(v)) { v.forEach((item, i) => walk(item, `${p}[${i}]`)); return; }
+    for (const k of Object.keys(v)) {
+      const kp = p ? `${p}.${k}` : k;
+      if (isSecretLikeKey(k)) throw secretFieldError(`field "${kp}"`);
+      walk(v[k], kp);
+    }
+  };
+  walk(value, path);
+}
+
+function cardString(v, field, max, { required = false, joiners = 'none' } = {}) {
+  if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '' && !required)) {
+    if (required) throw bad(`${field} is required`);
+    return undefined;
+  }
+  if (typeof v !== 'string') throw bad(`${field} must be a string`);
+  const s = v.trim();
+  if (!s) throw bad(`${field} is required`);
+  if ([...s].length > max) throw bad(`${field} is too long (max ${max} characters)`);
+  if (hasForbiddenChar(s, joiners)) {
+    throw bad(`${field} must not contain control, invisible formatting or line-separator characters (e.g. U+202E, U+200B, U+2028)`);
+  }
+  return s;
+}
+
+// Control (Cc), invisible formatting (Cf: bidi controls U+200E/F, U+202A–202E,
+// U+2066–2069, U+200B, U+2060–2064, BOM, tag characters, …), every other
+// Default_Ignorable_Code_Point that renders as nothing (Hangul fillers U+115F,
+// U+1160, U+3164, U+FFA0; Mongolian variation selectors U+180B–180F; variation
+// selectors U+FE00–FE0F / U+E0100–E01EF; U+034F; …) and the line / paragraph
+// separators U+2028 / U+2029 can make the card display something other than
+// what will be created, so they are refused. The only exceptions, by field
+// (`joiners`):
+//   'none'  — slug, action names, URLs: no exception at all.
+//   'emoji' — connector name, action summary:
+//             * VS16 U+FE0F directly after an emoji character (❤️, 1️⃣);
+//             * ZWJ U+200D only BETWEEN two emoji (Extended_Pictographic,
+//               optionally followed by VS16 / a skin-tone modifier, e.g.
+//               👨‍👩‍👧, 🏳️‍🌈);
+//             * tag characters only in a complete subdivision-flag sequence:
+//               U+1F3F4, then 3–6 tags from U+E0030–E0039 / U+E0061–E007A
+//               (digits / lowercase letters), then U+E007F (🏴󠁧󠁢󠁳󠁣󠁴󠁿).
+//   'text'  — description: 'emoji' plus ZWNJ U+200C after a letter or mark
+//             ([\p{L}\p{M}], e.g. a Devanagari virama or Arabic harakat) and
+//             before a letter (Persian, Indic scripts). ZWNJ is refused elsewhere.
+// Known limitation: look-alike letters from different scripts (Cyrillic "а" vs
+// Latin "a") are not detected.
+const PICTO_RE = /\p{Extended_Pictographic}/u;
+const EMOJI_RE = /\p{Emoji}/u;
+const LETTER_RE = /\p{L}/u;
+const LETTER_OR_MARK_RE = /[\p{L}\p{M}]/u;
+const INVISIBLE_RE = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/u;
+const isFlagTag = (cp) => (cp >= 0xE0030 && cp <= 0xE0039) || (cp >= 0xE0061 && cp <= 0xE007A);
+const isEmojiTail = (cp) => cp === 0xFE0F || (cp >= 0x1F3FB && cp <= 0x1F3FF);
+function hasForbiddenChar(s, joiners = 'none') {
+  const cps = [...s].map((c) => c.codePointAt(0));
+  const ch = (cp) => (cp === undefined ? '' : String.fromCodePoint(cp));
+  const allowed = new Set();
+  if (joiners !== 'none') {
+    for (let i = 0; i < cps.length; i += 1) {
+      const cp = cps[i];
+      if (cp === 0x1F3F4) {
+        let j = i + 1;
+        while (j < cps.length && isFlagTag(cps[j])) j += 1;
+        const n = j - (i + 1);
+        if (n >= 3 && n <= 6 && cps[j] === 0xE007F) { for (let k = i + 1; k <= j; k += 1) allowed.add(k); i = j; }
+        continue;
+      }
+      if (cp === 0xFE0F) {
+        if (EMOJI_RE.test(ch(cps[i - 1]))) allowed.add(i);
+        continue;
+      }
+      if (cp === 0x200D) {
+        let b = i - 1;
+        while (b >= 0 && isEmojiTail(cps[b])) b -= 1;
+        if (b >= 0 && PICTO_RE.test(ch(cps[b])) && PICTO_RE.test(ch(cps[i + 1]))) allowed.add(i);
+        continue;
+      }
+      if (cp === 0x200C && joiners === 'text'
+        && LETTER_OR_MARK_RE.test(ch(cps[i - 1])) && LETTER_RE.test(ch(cps[i + 1]))) allowed.add(i);
+    }
+  }
+  for (let i = 0; i < cps.length; i += 1) {
+    if (INVISIBLE_RE.test(ch(cps[i])) && !allowed.has(i)) return true;
+  }
+  return false;
+}
+
+// Duplicate-detection key for action names: NFKC folds compatibility forms
+// (full-width letters, ligatures, …), default-ignorable code points are removed
+// (defensive — validation already refuses them in action names), then
+// lower-cased. Cross-script look-alikes (Cyrillic vs Latin) still differ.
+export function actionNameKey(name) {
+  return name.normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
+}
+
+// [name, value] pairs of a query string or fragment ("a=1&b=2;c"), split on
+// BOTH '&' and ';' (URLSearchParams only splits on '&', so "?x=1;api_key=…"
+// would hide the second name), decoded best-effort.
+function urlParamPairs(raw) {
+  const str = raw.replace(/^[?#]/, '');
+  if (!str) return [];
+  const dec = (x) => { try { return decodeURIComponent(x.replace(/\+/g, ' ')); } catch { return x; } };
+  return str.split(/[&;]/).filter(Boolean).map((pair) => {
+    const i = pair.indexOf('=');
+    return i < 0 ? [dec(pair), ''] : [dec(pair.slice(0, i)), dec(pair.slice(i + 1))];
+  });
+}
+
+function cardUrl(v, field) {
+  const s = cardString(v, field, CREATE_CARD_LIMITS.url);
+  if (s === undefined) return undefined;
+  let u;
+  try { u = new URL(s); } catch { throw bad(`${field} must be an absolute http(s) URL`); }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw bad(`${field} must be an absolute http(s) URL`);
+  if (u.username || u.password) throw bad(`${field} must not embed credentials`);
+  // A secret can also ride in the query string or the fragment
+  // (?api_key=…, ?x=1;sig=…, #access_token=…). Name the parameter, never its
+  // value. Best-effort, value side: a token-shaped query value or path segment.
+  for (const [name, value] of urlParamPairs(u.search)) {
+    if (isSecretLikeKey(name)) throw secretFieldError(`URL query parameter "${name}" in ${field}`);
+    if (looksLikeToken(value)) throw secretFieldError(`token-like value of URL query parameter "${name}" in ${field}`);
+  }
+  for (const [name] of urlParamPairs(u.hash)) {
+    if (isSecretLikeKey(name)) throw secretFieldError(`URL fragment parameter "${name}" in ${field}`);
+  }
+  u.pathname.split('/').forEach((seg, i) => {
+    let d = seg;
+    try { d = decodeURIComponent(seg); } catch { /* keep raw */ }
+    if (seg && looksLikeToken(d)) throw secretFieldError(`token-like URL path segment #${i} in ${field}`);
+  });
+  if (u.hash) throw bad(`${field} must not have a #fragment`);
+  // Echo the parsed, normalized form so the card shows the host that will
+  // actually be used (e.g. "https://evil.com\\@good.com" → "https://evil.com/@good.com").
+  const href = u.href;
+  if ([...href].length > CREATE_CARD_LIMITS.url) throw bad(`${field} is too long (max ${CREATE_CARD_LIMITS.url} characters)`);
+  return href;
+}
+
+function rejectUnknownKeys(obj, allowed, where) {
+  for (const k of Object.keys(obj)) {
+    if (!allowed.has(k)) throw bad(`unknown field "${where}${k}" — allowed: ${[...allowed].join(', ')}`);
+  }
+}
+
+// Validate + normalize the conn.create_card input. Pure (no network); throws
+// {status:400} on the first problem. Returns {conversationId, connector,
+// actions, application_id?} with trimmed strings and optional fields omitted
+// when absent.
+export function parseCreateCardInput(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) throw bad('params object is required');
+  assertNoSecretKeys(p);
+  rejectUnknownKeys(p, CREATE_CARD_TOP_KEYS, '');
+  const conversationId = requireTargetConversationId(p);
+
+  const c = p.connector;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) throw bad('connector object is required');
+  rejectUnknownKeys(c, CREATE_CARD_CONNECTOR_KEYS, 'connector.');
+  const connector = { name: cardString(c.name, 'connector.name', CREATE_CARD_LIMITS.name, { required: true, joiners: 'emoji' }) };
+  const slug = cardString(c.slug, 'connector.slug', CREATE_CARD_LIMITS.slug, { required: true });
+  if (!CONNECTOR_SLUG_RE.test(slug)) {
+    throw bad('connector.slug must be lowercase letters/digits joined by "-" or "_" (no leading/trailing separator, max 64), e.g. "acme-crm" — and must be the exact slug you will pass to conn.app_import');
+  }
+  connector.slug = slug;
+  if (!CREATE_CARD_AUTH_TYPES.includes(c.auth_type)) {
+    throw bad(`connector.auth_type must be one of ${CREATE_CARD_AUTH_TYPES.join(' | ')}`);
+  }
+  connector.auth_type = c.auth_type;
+  const iconUrl = cardUrl(c.icon_url, 'connector.icon_url');
+  if (iconUrl !== undefined) connector.icon_url = iconUrl;
+  const description = cardString(c.description, 'connector.description', CREATE_CARD_LIMITS.description, { joiners: 'text' });
+  if (description !== undefined) connector.description = description;
+  const baseUrl = cardUrl(c.base_url, 'connector.base_url');
+  if (baseUrl !== undefined) connector.base_url = baseUrl;
+
+  if (!Array.isArray(p.actions) || p.actions.length === 0) throw bad('actions (non-empty list) is required');
+  if (p.actions.length > CREATE_CARD_MAX_ACTIONS) throw bad(`at most ${CREATE_CARD_MAX_ACTIONS} actions per card`);
+  const seenNames = new Set();
+  const actions = p.actions.map((a, i) => {
+    const where = `actions[${i}]`;
+    if (!a || typeof a !== 'object' || Array.isArray(a)) throw bad(`${where} must be an object`);
+    rejectUnknownKeys(a, CREATE_CARD_ACTION_KEYS, `${where}.`);
+    const name = cardString(a.name, `${where}.name`, CREATE_CARD_LIMITS.action_name, { required: true });
+    // Bare action segment, exactly what conn.app_import submits (the server
+    // prepends "{slug}/").
+    if (name.includes('/')) throw bad(`${where}.name must be the bare action name (no "/"; the server prepends the connector slug)`);
+    const key = actionNameKey(name);
+    if (seenNames.has(key)) throw bad(`${where}.name "${name}" is duplicated`);
+    seenNames.add(key);
+    if (!CREATE_CARD_EFFECTS.includes(a.effect)) throw bad(`${where}.effect must be one of ${CREATE_CARD_EFFECTS.join(' | ')}`);
+    const summary = cardString(a.summary, `${where}.summary`, CREATE_CARD_LIMITS.action_summary, { required: true, joiners: 'emoji' });
+    return { name, effect: a.effect, summary };
+  });
+
+  const out = { conversationId, connector, actions };
+  const appId = p.application_id ?? p.applicationId;
+  if (appId !== undefined && appId !== null && appId !== '') {
+    if (!isUuid(appId)) throw bad('application_id must be a UUID');
+    out.application_id = appId;
+  }
+  return out;
+}
+
+// Plain-text version for clients that do not render the card.
+export function buildCreateCardFallbackText({ connector, actions }) {
+  const lines = [
+    `准备创建自定义连接器「${connector.name}」（${connector.slug}）`,
+    `认证方式：${CREATE_CARD_AUTH_LABELS[connector.auth_type]}`,
+  ];
+  if (connector.description) lines.push(`说明：${connector.description}`);
+  if (connector.base_url) lines.push(`服务地址：${connector.base_url}`);
+  lines.push(`动作（${actions.length}）：`);
+  for (const a of actions) lines.push(`- [${CREATE_CARD_EFFECT_LABELS[a.effect]}] ${a.name}：${a.summary}`);
+  lines.push(`回复「确认创建 ${connector.name}」开始创建，或「我要改 ${connector.name}」修改。`);
+  if (connector.auth_type === 'oauth2') {
+    lines.push('Client Secret 请在「连接」页面填写，不要发在聊天里。');
+  }
+  return lines.join('\n');
+}
+
+// Pure builder. `input` is the parseCreateCardInput result; `cardId` is
+// injectable for tests (defaults to a fresh UUID).
+export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
+  const { connector, actions } = input;
+  const fallbackText = buildCreateCardFallbackText(input);
+  const body = {
+    schema: CONNECTOR_CREATE_CARD_SCHEMA,
+    card_id: cardId,
+    connector: { ...connector },
+    actions: actions.map((a) => ({ ...a })),
+    ...(input.application_id ? { application_id: input.application_id } : {}),
+    fallback_text: fallbackText,
+  };
+  // Compact render projection: what the card shows, nothing else (no
+  // description / base_url / fallback_text — the full body is one GetMessage
+  // away when the card is opened).
+  const meta = {
+    schema: CONNECTOR_CREATE_CARD_SCHEMA,
+    card_id: cardId,
+    connector: {
+      name: connector.name,
+      slug: connector.slug,
+      auth_type: connector.auth_type,
+      ...(connector.icon_url ? { icon_url: connector.icon_url } : {}),
+    },
+    actions: actions.map((a) => ({ name: a.name, effect: a.effect, summary: a.summary })),
+    ...(input.application_id ? { application_id: input.application_id } : {}),
+  };
+  return {
+    client_msg_id: randomUUID(),
+    type: 'AGENT_STRUCTURED',
+    content: { content_type: 'connector_create_card', body, attachments: [] },
+    metadata: { connector_create_card: meta },
+    fallback_text: fallbackText,
+  };
+}
+
+// The one send path for the structured connector cards (auth_notice and
+// create_card): POST the message into the target conversation. `post` is
+// injectable for tests; production passes postForOrg.
+// Module boundary for the card POST (tests replace `post` to observe that a
+// command entry routes through sendConnectorCard).
+export const connectorCardTransport = { post: (...args) => postForOrg(...args) };
+
+export async function sendConnectorCard(orgId, conversationId, message, post = connectorCardTransport.post) {
+  return post(orgId, apiPath(`/conversations/${conversationId}/messages`), message, { timeoutMs: 30_000, quietOnSuccess: true });
+}
+
+function messageIdOf(resp) {
+  for (const v of [resp?.id, resp?.message_id, resp?.message?.id]) {
+    if (typeof v === 'string' && v) return v;
+  }
+  return null;
+}
+
+// conn.auth_notice body: validate → resolve against the catalog → build → send
+// through the shared card send path. Catalog readers and `post` are injectable
+// for tests; production uses the org-scoped helpers.
+export async function runAuthNotice(p, { resolveOrg, getApplication, listApplicationsPage, post } = {}) {
+  const convId = requireTargetConversationId(p);
+  const apps = parseAuthNoticeApps(p);
+  const orgId = resolveOrg();
+  const connectors = await resolveAuthNoticeConnectors(apps, {
+    getApplication: getApplication
+      || ((id) => getForOrg(orgId, apiPath(`/connect/applications/${encodeURIComponent(id)}`))),
+    listApplicationsPage: listApplicationsPage || ((q, cursor) => getForOrgPage(
+      orgId, apiPath('/connect/applications'),
+      { query: q, limit: String(AUTH_NOTICE_PAGE_SIZE), ...(cursor ? { cursor } : {}) },
+    )),
+  });
+  const message = buildConnectorAuthNoticeMessage(connectors);
+  await sendConnectorCard(orgId, convId, message, post);
+  return { status: 'sent', conversation_id: convId, connectors };
+}
+
+// Validate → build → send. Validation (incl. the secret-key refusal) runs before
+// the org is resolved or anything is sent.
+export async function runCreateCard(p, { resolveOrg, post, cardId } = {}) {
+  const input = parseCreateCardInput(p);
+  const orgId = resolveOrg();
+  const message = buildConnectorCreateCardMessage(input, cardId);
+  const resp = await sendConnectorCard(orgId, input.conversationId, message, post);
+  return {
+    status: 'sent',
+    conversation_id: input.conversationId,
+    card_id: message.content.body.card_id,
+    message_id: messageIdOf(resp),
+    connector: { name: input.connector.name, slug: input.connector.slug, auth_type: input.connector.auth_type },
+    actions_total: input.actions.length,
+  };
+}
+
 function connectionListOf(resp) {
   return Array.isArray(resp) ? resp : (Array.isArray(resp?.connections) ? resp.connections : []);
 }
@@ -853,7 +1261,7 @@ export async function resolveGuardConversationType(rawConversationId, fetchConve
   return type || null;
 }
 
-const COMMANDS = {
+export const COMMANDS = {
   // List connections available to this agent.
   // Always uses the agent's own member_id (resolveSelfMemberId) — no
   // client-supplied override; see the security note above resolveSelfMemberId.
@@ -897,21 +1305,14 @@ const COMMANDS = {
   // conn.check → not_authorized: post the structured "go authorize" card into
   // the given conversation (see buildConnectorAuthNoticeMessage). Validation
   // runs before any request.
-  'conn.auth_notice': async () => {
-    const convId = requireTargetConversationId(params);
-    const apps = parseAuthNoticeApps(params);
-    const orgId = requireOrgId();
-    const connectors = await resolveAuthNoticeConnectors(apps, {
-      getApplication: (id) => getForOrg(orgId, apiPath(`/connect/applications/${encodeURIComponent(id)}`)),
-      listApplicationsPage: (q, cursor) => getForOrgPage(
-        orgId, apiPath('/connect/applications'),
-        { query: q, limit: String(AUTH_NOTICE_PAGE_SIZE), ...(cursor ? { cursor } : {}) },
-      ),
-    });
-    const message = buildConnectorAuthNoticeMessage(connectors);
-    await postForOrg(orgId, apiPath(`/conversations/${convId}/messages`), message, { timeoutMs: 30_000, quietOnSuccess: true });
-    return { status: 'sent', conversation_id: convId, connectors };
-  },
+  'conn.auth_notice': () => runAuthNotice(params, { resolveOrg: requireOrgId }),
+
+  // conn.create_card {conversationId, connector:{name, slug, auth_type, icon_url?,
+  // description?, base_url?}, actions:[{name, effect, summary}], application_id?}
+  // — post the "create this custom connector?" confirmation card (OPENM-836).
+  // Creates nothing; on the owner's confirmation the Agent runs conn.app_import
+  // with the same slug + actions. Secret-like keys anywhere → 400, nothing sent.
+  'conn.create_card': () => runCreateCard(params, { resolveOrg: requireOrgId }),
 
   // Acquire a credential for a connection. This verb is DIRECT-only: it returns
   // credential_mode:'direct' + access_token for local egress. A proxy/Composio
@@ -1369,6 +1770,8 @@ Connections
   conn.list           {}                                        # list connections available to this agent (self only)
   conn.check          {app}                                     # read-only: authorized | not_authorized | needs_reauth
   conn.auth_notice    {conversationId, apps:[slug...]}          # post the "go authorize" card into that conversation
+  conn.create_card    {conversationId, connector:{name, slug, auth_type, icon_url?, description?, base_url?}, actions:[{name, effect, summary}], application_id?}
+                                                                 # post the "create this custom connector?" confirmation card (creates nothing; no secrets)
   conn.acquire        {connectionId}                            # acquire the direct access_token for a connection
   conn.actions        {connectionId, cursor?, limit?}           # discover named actions for a connection (paged: next_cursor → cursor)
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)

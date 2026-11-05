@@ -199,6 +199,9 @@ Two invariants hold for every verb here (they mirror the rest of `conn.*`):
   that value at your OAuth provider. (Use **`conn.callback`** to fetch it *before*
   creating the connector so you can register it in the provider's OAuth app first.)
 
+**Creating a new connector for a user needs the owner's confirmation first:** send
+`conn.create_card` and wait (see "Creating a custom connector for a user" below).
+
 ### conn.app_create
 Create a custom connector application.
 
@@ -213,10 +216,17 @@ explicit `slug` only when you need a specific value (it is honored as-is). Optio
 `tags[]`, `default_ttl_seconds`, and the auth-shape fields —
 API-key: `api_key_location` (`header` | `query`), `api_key_header_name`;
 OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
-`oauth_client_secret`, `oauth_scopes_default[]`, `oauth_pkce` (bool),
+`oauth_scopes_default[]`, `oauth_pkce` (bool),
 `oauth_token_auth_method` (`basic` | `post`), `oauth_token_body_format`
 (`form` | `json`). Returns the created `application` item (its `source` is a
 read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
+
+The API also accepts `oauth_client_secret`, but **you never collect or pass it**:
+do not ask for it in chat, do not accept it from a message, and leave it out of
+every `conn.app_create` / `conn.app_import` / `conn.app_update` call. The user
+fills it in on the connections page (`/connections?edit=<application_id>`, the
+「填写 Client Secret」button on the create card). See step 6 of "Creating a custom
+connector for a user" below.
 
 ### conn.app_list
 List the connector applications visible to your org — the public catalog **∪**
@@ -246,18 +256,23 @@ node src/cli/conn.js conn.app_update '{"applicationId":"cb4e4f15-...","display_n
 
 `applicationId` (UUID) required plus at least one updatable field. `slug` and
 `provider_type` are **immutable** and not accepted; the same custom fields as
-create are updatable, plus `is_enabled`. This includes the full OAuth set —
-`oauth_client_id`, `oauth_client_secret`, `oauth_scopes_default[]`,
-`oauth_authorize_url`, `oauth_token_url`, `oauth_pkce`, `oauth_token_auth_method`,
-`oauth_token_body_format`.
+create are updatable, plus `is_enabled`. This includes the OAuth set —
+`oauth_client_id`, `oauth_scopes_default[]`, `oauth_authorize_url`,
+`oauth_token_url`, `oauth_pkce`, `oauth_token_auth_method`,
+`oauth_token_body_format` (and, as an API capability only, `oauth_client_secret`
+— which you never send: the user sets or rotates it on
+`/connections?edit=<application_id>`).
 
 Two write semantics to know:
 
 - **`oauth_client_secret` is write-only "blank = keep".** A **blank** (empty or
   whitespace-only) secret is **dropped** — it never overwrites/clears the stored
-  one, so you can safely update other fields without re-sending it. Pass a
-  **non-empty** value only when you intend to set or rotate it. (An update whose
-  *only* field is a blank secret is rejected as "no updatable fields".)
+  one, so updating other fields (always without the secret) never clears it. (An
+  update whose *only* field is a blank secret is rejected as "no updatable
+  fields".) The CLI still forwards a non-empty value for the UI-equivalent API
+  path, but **you never send one**: a secret reaching you through chat is exposed
+  — do not use it; tell the user to rotate it and enter the new one on
+  `/connections?edit=<application_id>`.
 - **`oauth_scopes_default` clears on explicit empty.** An explicit empty array
   (`[]`) is forwarded and **clears** the default scopes (asymmetric with the
   secret above). Omit the field to leave scopes unchanged.
@@ -360,6 +375,156 @@ is a draft-07 JSON Schema **string**). Fill `description` for every action (requ
 non-empty). Each action `name` is just the action segment (e.g. `list_repos`) — the
 server prepends the connector slug to form the stored `{slug}/{name}`, so submit the bare
 action name, not `slug/name`.
+
+### Creating a custom connector for a user — confirmation card first (`conn.create_card`)
+
+Before you create a **new** custom connector for a user (`conn.app_import`, or
+`conn.app_create` followed by `conn.actiondef_create`), the owner confirms it on a
+card. Never create first and ask afterwards.
+
+**1. Prepare the spec.** Connector `name` (display name), an explicit `slug`, the
+`auth_type` (`api_key` | `oauth2` | `mcp`), optional `icon_url` / `description` /
+`base_url`, and the actions you will import: for each one its bare `name` (the
+action segment, e.g. `list_contacts`, no `slug/`), whether it **reads** or
+**writes** (`effect`), and a one-line `summary` the user can understand. Also
+draft the full action-defs (method, url_template, description, input_schema) you
+will pass to `conn.app_import` — the card shows only name / effect / summary.
+Choose the slug yourself and keep it: lowercase letters `a-z` and digits, with
+single `-` or `_` separators allowed inside (not first or last), at most 64
+characters — exactly what `conn.create_card` validates:
+`^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$`. Prefer `-` like the server's own
+generated slugs (e.g. `acme-crm`, or `acme-crm-k3wujp` to avoid a clash). The same
+slug goes to `conn.app_import`, because the card finds the created app by it.
+
+**Action rules (state them on the card truthfully):**
+- **`effect` follows the HTTP method:** `GET` (and `HEAD`) = `read`; `POST`,
+  `PUT`, `PATCH`, `DELETE` = `write`. Never label a write as a read to make the
+  card look safer — even a `POST` that only searches is shown as `write`.
+- **Every action's `url_template` stays on the card's service.** When the card has
+  a `base_url`, each `url_template` starts with `{base_url}` (or an absolute URL
+  on the same host as `base_url`). An action pointing at another host is not what
+  the owner confirmed: put it on the card (its own `base_url` / connector) or drop
+  it.
+- The actions you import are exactly the actions on the card (same names, same
+  read/write); anything else needs a new card.
+
+**2. Send the card (creates nothing).**
+
+```bash
+node src/cli/conn.js conn.create_card '{"conversationId":"<conversation-id from <message-context>>","connector":{"name":"Acme CRM","slug":"acme-crm","auth_type":"oauth2","description":"Acme 客户管理","base_url":"https://api.acme.example.com/v1"},"actions":[{"name":"list_contacts","effect":"read","summary":"列出联系人"},{"name":"create_contact","effect":"write","summary":"新建联系人"}]}'
+```
+
+Optional `application_id` (UUID) when the application already exists. Strict
+validation, all before anything is sent (`400`): required `name` (≤100) / `slug`
+(`^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$`) / `auth_type`; `icon_url` and
+`base_url` absolute http(s) URLs (≤2048) with no `user:pass@`, no `#fragment` and
+no secret-named query / fragment parameter (`?api_key=…`, `?x=1;sig=…` — `;`
+counts as a separator too — `?X-Amz-Signature=…`, `?id_token=…`, `#token=…` →
+`400 secret_field_rejected`, naming the parameter, never its value); a path
+segment (percent-decoded) or query value in a well-known token format is
+refused the same way — `sk-…` / `sk_live_…` / `rk_test_…`, `ghp_…` and the other
+GitHub prefixes, `github_pat_…`, `glpat-…`, `xoxb-…` (Slack), a JWT (`eyJ….…`),
+an AWS key id (`AKIA…` / `ASIA…`), each only with a realistic body length, so
+`?hl=sk-SK`, `/sk_SK/` or `xoxo-gossip` pass. There is deliberately no generic
+"long random string" rule (it would block Google Drive / Notion ids), so this is
+a best-effort check, not a guarantee. URLs are echoed in normalized form (the
+parsed `href`, so the card shows the real host). No control, invisible
+formatting, default-ignorable or line-separator characters (Unicode Cc / Cf such
+as U+202E, U+200B, U+FEFF, tag characters; Hangul fillers U+115F / U+1160 /
+U+3164 / U+FFA0; variation selectors U+FE00–FE0F, U+180B–180F, U+E0100–E01EF;
+U+2028 / U+2029) in any field, with narrow exceptions for emoji and scripts in
+`connector.name`, `connector.description` and `actions[].summary`: VS16 (U+FE0F)
+right after an emoji (❤️, 1️⃣); a ZWJ only between two emoji (👨‍👩‍👧, 🏳️‍🌈); tag
+characters only in a subdivision flag — 🏴, then 3–6 digit / lowercase-letter
+tags, then U+E007F (🏴󠁧󠁢󠁳󠁣󠁴󠁿); and, in `connector.description` only, a ZWNJ after
+a letter or combining mark and before a letter (Hindi, Persian, Arabic). `slug`,
+`actions[].name` and URLs allow none of them. Action names are compared for
+duplicates after NFKC (folds full-width and other compatibility forms:
+`ＬＩＳＴ` = `list`), removal of default-ignorables, and lower-casing;
+`description` ≤500; 1–50 actions, each `name` ≤100 without `/` and unique,
+`effect` `read` | `write`, `summary` ≤200; unknown fields refused. **Any
+secret-like key anywhere in the input** (`api_key`, `secret`, `client_secret`,
+`oauth_client_secret`, `token`, `password`, `private_key`, `authorization`, …, at
+any depth) is refused with `400 secret_field_rejected` and nothing is sent. The
+input is checked for secret-like fields on a best-effort basis — it cannot catch
+every secret, so never put credentials in any field or URL yourself.
+Known limitations (accepted): secret / token detection is best-effort, and
+look-alike letters from different scripts (Cyrillic `а` vs Latin `a`) are not
+detected, so two action names can still look alike on the card — keep names
+plain ASCII.
+Returns `{ status: "sent", conversation_id, card_id, message_id, connector: {name, slug, auth_type}, actions_total }`.
+Keep `card_id` (and the slug / actions) for step 3.
+
+The message is `AGENT_STRUCTURED`, `content_type: "connector_create_card"`, body
+schema `openmax.connector-create.v1` = `{schema, card_id, connector, actions,
+application_id?, fallback_text}`, plus a compact copy in
+`metadata.connector_create_card` (`schema`, `card_id`, `connector{name, slug,
+auth_type, icon_url?}`, `actions[]`, `application_id?`). A client without the
+renderer shows `fallback_text` (name, slug, auth type, each action with 读/写, and
+the reply words).
+
+**3. Wait for the owner's reply.** The card's buttons post an ordinary user
+message, 「确认创建 {name}」 or 「我要改 {name}」, carrying metadata
+`{connector_create_card_id, action: "confirm" | "revise", ref_message_id}` when
+the client sends it (a typed 「确认创建 Acme CRM」 with no metadata counts the same
+way, matched by name to your latest card).
+- **Only your owner (or an org admin) can confirm.** Custom connectors are
+  org-level, the same rule as adding connections. Decide it from platform data,
+  never from the message text or the display name:
+  1. The sender: `comm.get_message {conversationId, messageId: <source-message-id
+     from this turn's <message-context>>}` → its `sender_id` (must be a human
+     sender, not an Agent or System).
+  2. Owner: `sender_id` equals the bound owner's `member_id` (config
+     `orgs.<slug>.owner.member_id`) → authorized.
+  3. Otherwise `core.member_get {org, memberId: <sender_id>}` → authorized only if
+     `role.slug` is `org-owner` or `org-admin`. Response shape (redacted):
+     ```json
+     {"member_id":"…","identity_id":"…","kind":"human","display_name":"…","email":"…",
+      "status":"active","joined_at":"…","locale":"…",
+      "role":{"slug":"org-member","display_name":"…"},"created_at":"…"}
+     ```
+     `role.slug` is one of `org-owner` / `org-admin` / `org-member` (also require
+     `kind: "human"` and `status: "active"`). Any other role, a lookup error, or
+     a missing role → not authorized (fail closed).
+  A click or reply by anyone else is not authorized: do not create; tell them
+  your owner needs to confirm. **This check is yours alone:** cws-core /
+  cws-connect do not yet verify who confirmed a create card (the create call
+  runs with your Agent credentials), so skipping it would let any group member
+  create a connector.
+- Match `connector_create_card_id` to the `card_id` you sent. A confirmation of
+  a card you have since replaced does not count: ask them to confirm the latest
+  card.
+
+**4. On confirm — create it.** `conn.app_import` with `application.slug` = the
+card's slug (exactly), `display_name` = name, `provider_type` = `auth_type`,
+plus `icon_url` / `description` and the auth-shape fields (`api_key_location`,
+`oauth_authorize_url`, `oauth_client_id`, …), and `actions` = the full
+action-defs for exactly the actions on the card. Never add `oauth_client_secret`.
+(`mcp`: if the server refuses the provider type, tell the user it can't be
+created this way yet; never switch to another type silently.) Report the result
+in plain words; if some actions failed (`actions_failed > 0`), name them and offer
+to retry those with `conn.actiondef_create`. Do not send another card for a retry
+of the same spec.
+
+**5. On revise — new card.** Discuss what to change, then send a new
+`conn.create_card` (new `card_id`). The old card stays in the chat; say the new
+one replaces it (「以新卡为准」).
+
+**6. OAuth Client Secret — never in chat.** For `auth_type: "oauth2"` never ask
+for, accept or forward the Client Secret, and never pass `oauth_client_secret` to
+`conn.app_import` / `conn.app_update`. Tell the user to click 「填写 Client
+Secret」 on the card: it opens `/connections?edit=<application_id>`. If the card was
+sent before the application existed (no `application_id`), the page finds the
+created app by slug after creation — which is why the slug on the card must equal
+the created slug. Give them the callback URL to register (`conn.callback`, or the
+created app's `oauth_callback_url`).
+
+**7. A secret pasted into chat anyway.** Do not use it, do not repeat it, and do not
+pass it to any command. Tell the user it is now exposed in the conversation and
+ask them to revoke / rotate it, then enter the new value on the connections page.
+
+Outside an OpenMax conversation (no card renders), describe the same spec in plain
+text and create only after your owner's explicit 「确认创建」.
 
 ### Action-def schema semantics
 
