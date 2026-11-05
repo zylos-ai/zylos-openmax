@@ -33,6 +33,7 @@ import { randomUUID } from 'crypto';
 import { extractWorkReferences, formatWorkReferenceContext } from './work-reference.js';
 import { formatConnectorPreference } from './connector-preference.js';
 import { formatWfContext } from './wf-context.js';
+import { formatQuotedExcerpt } from './quote-excerpt.js';
 
 const TYPE_TAG = { dm: '[OPENMAX DM]', group: '[OPENMAX GROUP]', thread: '[OPENMAX THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
@@ -179,7 +180,7 @@ function formatContextLine(m) {
  * @param {Array}  [recent] - recent group messages used for `<group-context>`
  * @param {object} [opts]   - { groupName, quotedContent, threadContext,
  *                              threadRootId, smartHint, receipt,
- *                              preferredConnectors, wfRef,
+ *                              preferredConnectors, wfRef, quotedExcerpt,
  *                              systemSender: { memberId? } | undefined }
  *                            `systemSender` is set by the bridge only for a
  *                            platform System Member (sender_type=SYSTEM).
@@ -190,7 +191,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
   const {
     groupName, quotedContent, threadContext, threadRootId, smartHint, orgId, orgName, receipt, systemSender,
-    preferredConnectors, wfRef,
+    preferredConnectors, wfRef, quotedExcerpt,
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
@@ -320,6 +321,8 @@ Before handling the current message, invoke the openmax skill and follow it. For
     const qsender = escapeXml(quotedContent.sender || quotedContent.senderName || 'unknown');
     const qtext   = escapeXml(quotedContent.text   || quotedContent.content    || '');
     parts.push(`<replying-to>\n[${qsender}]: ${qtext}\n</replying-to>\n\n`);
+    const excerpt = formatQuotedExcerpt(quotedContent.sender || quotedContent.senderName, quotedExcerpt);
+    if (excerpt) parts.push(`${excerpt}\n\n`);
   }
 
   if (smartHint) {

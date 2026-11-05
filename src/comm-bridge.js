@@ -40,6 +40,7 @@ import { classifySystemEvent, routeImOwnerNotice } from './lib/system-event-rout
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { preferredConnectorsFrom } from './lib/connector-preference.js';
 import { wfRefFrom } from './lib/wf-context.js';
+import { quoteExcerptFrom } from './lib/quote-excerpt.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
@@ -1338,6 +1339,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       recent,
       {
         groupName, smartHint, quotedContent,
+        quotedExcerpt: quoteExcerptFrom(msg, quotedMsgId),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
         preferredConnectors: preferredConnectorsFrom(msg),
