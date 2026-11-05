@@ -686,8 +686,9 @@ own default is `false`). Send `allow_other: false` only where free text makes no
 sense, such as a yes/no confirmation; an explicit value is sent as given.
 Since "其他" is always there, never add an option of your own that means
 "other" (「其他情况」, 「有问题要改（请在其他里说）」): it shows the same entry
-twice. An acceptance card has the single option 「验收通过」; any other answer
-comes through "其他" (SKILL.md "Writing a choice form").
+twice. An acceptance card offers 「验收通过」 and 「不通过」 (at least 2 options per
+question; "其他" does not count) with "其他" on for the reason
+(SKILL.md "Writing a choice form").
 
 **No secrets in typed answers.** A text question, and a choice question with
 "other" (every one unless `allow_other: false`), whose `key`, `label`,
