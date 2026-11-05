@@ -208,7 +208,7 @@ test('parseCreateCardInput: flag tag sequences — only 🏴 + 3–6 digit/lower
     flag('gb ct'), //          space tag U+E0020
     flag('gbsct', ''), //      no terminator
     flag('gbsct', '', '\u{1F3F4}') + '\u{E0020}',
-    flag('gbsct', '\u{E007F}', '\u{1F600}'), // B3: sequence after 😀, not 🏴
+    flag('gbsct', '\u{E007F}', '\u{1F600}'), // tag sequence after a non-flag emoji
     flag('gbsct', '\u{E007F}', 'a'),
     '\u{E007F}', //            lone terminator
   ];
@@ -219,7 +219,7 @@ test('parseCreateCardInput: flag tag sequences — only 🏴 + 3–6 digit/lower
   }
 });
 
-test('parseCreateCardInput: ZWJ needs an emoji on BOTH sides (B6: letter + ZWJ + emoji)', () => {
+test('parseCreateCardInput: ZWJ needs an emoji on BOTH sides (letter + ZWJ + emoji is refused)', () => {
   for (const v of ['a‍\u{1F468}', '\u{1F468}‍a', '1‍\u{1F468}', '‍\u{1F468}', '\u{1F468}‍‍\u{1F469}']) {
     rejects400(withConnector({ name: v }), /invisible formatting/);
     rejects400(withConnector({ description: v }), /invisible formatting/);
