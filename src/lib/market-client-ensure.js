@@ -27,8 +27,6 @@ const INSTALL_TIMEOUT_MS = 180_000;
 const QUERY_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REPORT_RETRY_DELAY_MS = 30_000;
-// Must stay within the server's 10-minute self-hosted request deadline.
-const UNAVAILABLE_BACKOFF_MS = 10 * 60 * 1000;
 const MAX_REMEMBERED_REQUESTS = 50;
 
 const SEMVER_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})$/;
@@ -69,12 +67,18 @@ function atLeast(version, target) {
   return true;
 }
 
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype;
+}
+
 export function fileStore(statePath = defaultStatePath()) {
   return {
     load() {
       try {
         const parsed = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
-        return parsed && typeof parsed.requests === 'object' && parsed.requests ? parsed : { requests: {} };
+        const valid = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          && isPlainObject(parsed.requests);
+        return valid ? parsed : { requests: {} };
       } catch {
         return { requests: {} };
       }
@@ -115,9 +119,8 @@ export function createMarketClientEnsurer({
   queryTimeoutMs = QUERY_TIMEOUT_MS,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   reportRetryDelayMs = REPORT_RETRY_DELAY_MS,
-  unavailableBackoffMs = UNAVAILABLE_BACKOFF_MS,
 } = {}) {
-  const unavailableUntil = new Map();
+  const notified404 = new Set();
   let chain = Promise.resolve();
 
   // { state: 'installed', version } | { state: 'absent' } | { state: 'error' }.
@@ -216,7 +219,6 @@ export function createMarketClientEnsurer({
     let memberId = orgConfig.self?.member_id;
     if (!memberId) memberId = loadConfig?.().orgs?.[slug]?.self?.member_id || '';
     if (!memberId) return;
-    if ((unavailableUntil.get(slug) || 0) > now()) return;
 
     let pending;
     try {
@@ -224,15 +226,15 @@ export function createMarketClientEnsurer({
         { quietOnSuccess: true, quietStatuses: [404], timeoutMs: requestTimeoutMs });
     } catch (err) {
       if (err?.status === 404) {
-        if (!unavailableUntil.has(slug)) {
-          log(`[${slug}] market client request endpoint not available (404), re-checking every 10 min`);
+        if (!notified404.has(slug)) {
+          notified404.add(slug);
+          log(`[${slug}] market client request endpoint not available (404), skipping`);
         }
-        unavailableUntil.set(slug, now() + unavailableBackoffMs);
         return;
       }
       throw err;
     }
-    unavailableUntil.delete(slug);
+    notified404.delete(slug);
     if (!pending || pending.required !== true) return;
 
     const requestId = typeof pending.request_id === 'string' ? pending.request_id : '';
