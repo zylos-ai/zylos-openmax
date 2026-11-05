@@ -418,17 +418,25 @@ Optional `application_id` (UUID) when the application already exists. Strict
 validation, all before anything is sent (`400`): required `name` (≤100) / `slug`
 (`^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$`) / `auth_type`; `icon_url` and
 `base_url` absolute http(s) URLs (≤2048) with no `user:pass@`, no `#fragment` and
-no secret-named query / fragment parameter (`?api_key=…`, `?access_token=…`,
-`#token=…` → `400 secret_field_rejected`, naming the parameter, never its value);
-they are echoed in normalized form (the parsed `href`, so the card shows the real
-host); no control or invisible formatting characters (Unicode Cc / Cf, e.g.
-U+202E) in any text field or URL;
+no secret-named query / fragment parameter (`?api_key=…`, `?x=1;sig=…` — `;`
+counts as a separator too — `?X-Amz-Signature=…`, `?id_token=…`, `#token=…` →
+`400 secret_field_rejected`, naming the parameter, never its value); a path
+segment or query value that looks like a token (a known prefix such as `sk_`,
+`ghp_`, `xoxb-`, `eyJ…` (JWT), `AKIA…`, or ≥32 characters of `[A-Za-z0-9_-]`
+mixing upper case, lower case and digits) is refused the same way — a
+best-effort heuristic, not a guarantee; they are echoed in normalized form (the
+parsed `href`, so the card shows the real host); no control, invisible
+formatting or line-separator characters (Unicode Cc / Cf such as U+202E, U+200B,
+U+FEFF, and U+2028 / U+2029) in any field — text fields (name, description,
+summary) still allow the emoji joiners ZWNJ / ZWJ and the tag characters
+U+E0020–U+E007F (family emoji, subdivision flags); URLs and the slug allow none;
 `description` ≤500; 1–50 actions, each `name` ≤100 without `/` and unique,
 `effect` `read` | `write`, `summary` ≤200; unknown fields refused. **Any
 secret-like key anywhere in the input** (`api_key`, `secret`, `client_secret`,
 `oauth_client_secret`, `token`, `password`, `private_key`, `authorization`, …, at
-any depth) is refused with `400 secret_field_rejected` and nothing is sent — the
-card never carries a secret.
+any depth) is refused with `400 secret_field_rejected` and nothing is sent. The
+input is checked for secret-like fields on a best-effort basis — it cannot catch
+every secret, so never put credentials in any field or URL yourself.
 Returns `{ status: "sent", conversation_id, card_id, message_id, connector: {name, slug, auth_type}, actions_total }`.
 Keep `card_id` (and the slug / actions) for step 3.
 
@@ -454,7 +462,14 @@ way, matched by name to your latest card).
   2. Owner: `sender_id` equals the bound owner's `member_id` (config
      `orgs.<slug>.owner.member_id`) → authorized.
   3. Otherwise `core.member_get {org, memberId: <sender_id>}` → authorized only if
-     `role.slug` is `org-owner` or `org-admin`. Any other role, a lookup error, or
+     `role.slug` is `org-owner` or `org-admin`. Response shape (redacted):
+     ```json
+     {"member_id":"…","identity_id":"…","kind":"human","display_name":"…","email":"…",
+      "status":"active","joined_at":"…","locale":"…",
+      "role":{"slug":"org-member","display_name":"…"},"created_at":"…"}
+     ```
+     `role.slug` is one of `org-owner` / `org-admin` / `org-member` (also require
+     `kind: "human"` and `status: "active"`). Any other role, a lookup error, or
      a missing role → not authorized (fail closed).
   A click or reply by anyone else is not authorized: do not create; tell them
   your owner needs to confirm. **This check is yours alone:** cws-core /

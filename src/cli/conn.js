@@ -828,13 +828,26 @@ const CREATE_CARD_ACTION_KEYS = new Set(['name', 'effect', 'summary']);
 // A key that names a secret, compared on its lowercased alphanumerics so
 // `client_secret`, `clientSecret`, `OAUTH-CLIENT-SECRET`, `apiKey`, `access_token`
 // all match. Deliberately broad: a false positive costs a rename, a false
-// negative leaks a credential into a chat message.
+// negative leaks a credential into a chat message. Covers signed-URL
+// parameters too (`sig` / `signature` / `X-Amz-Signature` / `X-Goog-Credential`,
+// Azure SAS `sig`), JWTs (`jwt`, `id_token`) and refresh tokens.
 export function isSecretLikeKey(key) {
   const k = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
   if (!k) return false;
-  if (k === 'key' || k === 'pat' || k === 'otp') return true;
+  if (['key', 'pat', 'otp', 'sig', 'sas', 'jwt'].includes(k)) return true;
   if (/(secret|password|passwd|passphrase|privatekey|accesskey|signingkey)/.test(k)) return true;
-  return /(token|apikey|credential|credentials|authorization|bearer|cookie|pin)$/.test(k);
+  return /(token|apikey|credential|credentials|authorization|bearer|cookie|pin|signature|jwt)$/.test(k);
+}
+
+// Best-effort: a URL path segment or query value that LOOKS like a credential
+// even though nothing names it as one. Conservative on purpose (ids, hashes and
+// slugs pass): a well-known token prefix, or a long run (>=32) of
+// [A-Za-z0-9_-] that mixes upper case, lower case and digits.
+const TOKEN_PREFIX_RE = /^(?:sk|rk)[_-]|^(?:ghp|gho|ghu|ghs|ghr)_|^github_pat_|^glpat-|^xox[abposr]-|^eyJ[A-Za-z0-9_-]{4,}\.|^AKIA[0-9A-Z]{16}$/;
+export function looksLikeToken(value) {
+  const v = String(value);
+  if (TOKEN_PREFIX_RE.test(v)) return true;
+  return v.length >= 32 && /^[A-Za-z0-9_-]+$/.test(v) && /[a-z]/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v);
 }
 
 // The one refusal for a secret on the card. `location` names WHERE (a field
@@ -864,7 +877,7 @@ export function assertNoSecretKeys(value, path = '') {
   walk(value, path);
 }
 
-function cardString(v, field, max, { required = false } = {}) {
+function cardString(v, field, max, { required = false, emojiJoiners = true } = {}) {
   if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '' && !required)) {
     if (required) throw bad(`${field} is required`);
     return undefined;
@@ -873,40 +886,64 @@ function cardString(v, field, max, { required = false } = {}) {
   const s = v.trim();
   if (!s) throw bad(`${field} is required`);
   if ([...s].length > max) throw bad(`${field} is too long (max ${max} characters)`);
-  // Control (Cc) AND invisible formatting (Cf: bidi overrides like U+202E,
-  // zero-width chars, BOM) — both can make the card display something other
-  // than what will be created.
-  if (/[\p{Cc}\p{Cf}]/u.test(s)) {
-    throw bad(`${field} must not contain control or invisible formatting characters (e.g. U+202E, zero-width spaces)`);
+  if (hasForbiddenChar(s, { emojiJoiners })) {
+    throw bad(`${field} must not contain control, invisible formatting or line-separator characters (e.g. U+202E, U+200B, U+2028)`);
   }
   return s;
 }
 
-// key=value pairs of a URL fragment ("#a=1&b=2;c"), decoded best-effort.
-function fragmentKeys(hash) {
-  const frag = hash.replace(/^#/, '');
-  if (!frag) return [];
-  return frag.split(/[&;]/).map((pair) => {
-    const k = pair.split('=')[0];
-    try { return decodeURIComponent(k.replace(/\+/g, ' ')); } catch { return k; }
-  }).filter(Boolean);
+// Control (Cc), invisible formatting (Cf: bidi controls U+200E/F, U+202A–202E,
+// U+2066–2069, U+200B, U+2060–2064, BOM, …) and the line / paragraph
+// separators U+2028 / U+2029 can make the card display something other than
+// what will be created. Text fields still allow the emoji-sequence joiners:
+// ZWNJ U+200C, ZWJ U+200D (👨‍👩‍👧) and the tag characters U+E0020–U+E007F
+// (subdivision flags like 🏴󠁧󠁢󠁳󠁣󠁴󠁿). URLs and slugs allow none of them.
+function hasForbiddenChar(s, { emojiJoiners = true } = {}) {
+  for (const ch of s) {
+    const cp = ch.codePointAt(0);
+    if (cp === 0x2028 || cp === 0x2029) return true;
+    if (!/[\p{Cc}\p{Cf}]/u.test(ch)) continue;
+    if (emojiJoiners && (cp === 0x200C || cp === 0x200D || (cp >= 0xE0020 && cp <= 0xE007F))) continue;
+    return true;
+  }
+  return false;
+}
+
+// [name, value] pairs of a query string or fragment ("a=1&b=2;c"), split on
+// BOTH '&' and ';' (URLSearchParams only splits on '&', so "?x=1;api_key=…"
+// would hide the second name), decoded best-effort.
+function urlParamPairs(raw) {
+  const str = raw.replace(/^[?#]/, '');
+  if (!str) return [];
+  const dec = (x) => { try { return decodeURIComponent(x.replace(/\+/g, ' ')); } catch { return x; } };
+  return str.split(/[&;]/).filter(Boolean).map((pair) => {
+    const i = pair.indexOf('=');
+    return i < 0 ? [dec(pair), ''] : [dec(pair.slice(0, i)), dec(pair.slice(i + 1))];
+  });
 }
 
 function cardUrl(v, field) {
-  const s = cardString(v, field, CREATE_CARD_LIMITS.url);
+  const s = cardString(v, field, CREATE_CARD_LIMITS.url, { emojiJoiners: false });
   if (s === undefined) return undefined;
   let u;
   try { u = new URL(s); } catch { throw bad(`${field} must be an absolute http(s) URL`); }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') throw bad(`${field} must be an absolute http(s) URL`);
   if (u.username || u.password) throw bad(`${field} must not embed credentials`);
   // A secret can also ride in the query string or the fragment
-  // (?api_key=…, #access_token=…). Name the parameter, never its value.
-  for (const name of u.searchParams.keys()) {
+  // (?api_key=…, ?x=1;sig=…, #access_token=…). Name the parameter, never its
+  // value. Best-effort, value side: a token-shaped query value or path segment.
+  for (const [name, value] of urlParamPairs(u.search)) {
     if (isSecretLikeKey(name)) throw secretFieldError(`URL query parameter "${name}" in ${field}`);
+    if (looksLikeToken(value)) throw secretFieldError(`token-like value of URL query parameter "${name}" in ${field}`);
   }
-  for (const name of fragmentKeys(u.hash)) {
+  for (const [name] of urlParamPairs(u.hash)) {
     if (isSecretLikeKey(name)) throw secretFieldError(`URL fragment parameter "${name}" in ${field}`);
   }
+  u.pathname.split('/').forEach((seg, i) => {
+    let d = seg;
+    try { d = decodeURIComponent(seg); } catch { /* keep raw */ }
+    if (seg && looksLikeToken(d)) throw secretFieldError(`token-like URL path segment #${i} in ${field}`);
+  });
   if (u.hash) throw bad(`${field} must not have a #fragment`);
   // Echo the parsed, normalized form so the card shows the host that will
   // actually be used (e.g. "https://evil.com\\@good.com" → "https://evil.com/@good.com").
@@ -935,7 +972,7 @@ export function parseCreateCardInput(p) {
   if (!c || typeof c !== 'object' || Array.isArray(c)) throw bad('connector object is required');
   rejectUnknownKeys(c, CREATE_CARD_CONNECTOR_KEYS, 'connector.');
   const connector = { name: cardString(c.name, 'connector.name', CREATE_CARD_LIMITS.name, { required: true }) };
-  const slug = cardString(c.slug, 'connector.slug', CREATE_CARD_LIMITS.slug, { required: true });
+  const slug = cardString(c.slug, 'connector.slug', CREATE_CARD_LIMITS.slug, { required: true, emojiJoiners: false });
   if (!CONNECTOR_SLUG_RE.test(slug)) {
     throw bad('connector.slug must be lowercase letters/digits joined by "-" or "_" (no leading/trailing separator, max 64), e.g. "acme-crm" — and must be the exact slug you will pass to conn.app_import');
   }
@@ -1036,7 +1073,11 @@ export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
 // The one send path for the structured connector cards (auth_notice and
 // create_card): POST the message into the target conversation. `post` is
 // injectable for tests; production passes postForOrg.
-export async function sendConnectorCard(orgId, conversationId, message, post = postForOrg) {
+// Module boundary for the card POST (tests replace `post` to observe that a
+// command entry routes through sendConnectorCard).
+export const connectorCardTransport = { post: (...args) => postForOrg(...args) };
+
+export async function sendConnectorCard(orgId, conversationId, message, post = connectorCardTransport.post) {
   return post(orgId, apiPath(`/conversations/${conversationId}/messages`), message, { timeoutMs: 30_000, quietOnSuccess: true });
 }
 
@@ -1050,7 +1091,7 @@ function messageIdOf(resp) {
 // conn.auth_notice body: validate → resolve against the catalog → build → send
 // through the shared card send path. Catalog readers and `post` are injectable
 // for tests; production uses the org-scoped helpers.
-export async function runAuthNotice(p, { resolveOrg, getApplication, listApplicationsPage, post = postForOrg } = {}) {
+export async function runAuthNotice(p, { resolveOrg, getApplication, listApplicationsPage, post } = {}) {
   const convId = requireTargetConversationId(p);
   const apps = parseAuthNoticeApps(p);
   const orgId = resolveOrg();
@@ -1069,7 +1110,7 @@ export async function runAuthNotice(p, { resolveOrg, getApplication, listApplica
 
 // Validate → build → send. Validation (incl. the secret-key refusal) runs before
 // the org is resolved or anything is sent.
-export async function runCreateCard(p, { resolveOrg, post = postForOrg, cardId } = {}) {
+export async function runCreateCard(p, { resolveOrg, post, cardId } = {}) {
   const input = parseCreateCardInput(p);
   const orgId = resolveOrg();
   const message = buildConnectorCreateCardMessage(input, cardId);
@@ -1155,7 +1196,7 @@ export async function resolveGuardConversationType(rawConversationId, fetchConve
   return type || null;
 }
 
-const COMMANDS = {
+export const COMMANDS = {
   // List connections available to this agent.
   // Always uses the agent's own member_id (resolveSelfMemberId) — no
   // client-supplied override; see the security note above resolveSelfMemberId.

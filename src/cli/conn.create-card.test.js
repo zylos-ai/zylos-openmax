@@ -11,7 +11,7 @@ import {
   CONNECTOR_CREATE_CARD_SCHEMA, CREATE_CARD_MAX_ACTIONS, CREATE_CARD_LIMITS,
   isSecretLikeKey, assertNoSecretKeys, parseCreateCardInput,
   buildConnectorCreateCardMessage, buildCreateCardFallbackText,
-  sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage, runAuthNotice,
+  sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage, looksLikeToken,
 } from './conn.js';
 
 // conn.create_card (OPENM-836): the "create this custom connector?" card.
@@ -142,7 +142,8 @@ test('parseCreateCardInput: slug with an uppercase letter anywhere is rejected',
 });
 
 test('parseCreateCardInput: control / invisible formatting characters (Cc, Cf) rejected in every text field', () => {
-  const bad = ['a\u202Eb', 'a\u200Bb', 'a\uFEFFb', 'a\u0007b', 'a\tb', 'a\u2066b'];
+  const bad = ['a\u202Eb', 'a\u202Ab', 'a\u200Eb', 'a\u200Fb', 'a\u200Bb', 'a\uFEFFb', 'a\u2060b', 'a\u2064b',
+    'a\u0007b', 'a\tb', 'a\u2066b', 'a\u2069b', 'a\u2028b', 'a\u2029b', 'a\u{E0001}b'];
   const fields = [
     (v) => withConnector({ name: v }), (v) => withConnector({ description: v }), (v) => withConnector({ slug: v }),
     (v) => withAction({ name: v }), (v) => withAction({ summary: v }),
@@ -150,10 +151,25 @@ test('parseCreateCardInput: control / invisible formatting characters (Cc, Cf) r
   ];
   for (const mk of fields) {
     for (const v of bad) {
-      assert.throws(() => parseCreateCardInput(mk(v)), (e) => e.status === 400 && /control or invisible formatting|connector\.slug/.test(e.message), JSON.stringify(v));
+      assert.throws(() => parseCreateCardInput(mk(v)), (e) => e.status === 400 && /control, invisible formatting or line-separator|connector\.slug/.test(e.message), JSON.stringify(v));
     }
   }
-  assert.throws(() => parseCreateCardInput(withConnector({ name: 'Acme\u202Emrc' })), /invisible formatting characters/);
+  assert.throws(() => parseCreateCardInput(withConnector({ name: 'Acme\u202Emrc' })), /invisible formatting/);
+});
+
+test('parseCreateCardInput: emoji joiners (ZWNJ, ZWJ, tag chars) allowed in text, not in URLs / slug', () => {
+  const family = '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}'; // 👨‍👩‍👧
+  const scotland = '\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}'; // 🏴󠁧󠁢󠁳󠁣󠁴󠁿
+  const zwnj = 'می\u200Cخواهم';
+  for (const v of [family, scotland, zwnj]) {
+    assert.equal(parseCreateCardInput(withConnector({ name: `CRM ${v}` })).connector.name, `CRM ${v}`);
+    assert.equal(parseCreateCardInput(withConnector({ description: v })).connector.description, v);
+    assert.equal(parseCreateCardInput(withAction({ summary: v })).actions[0].summary, v);
+  }
+  rejects400(withConnector({ name: `${family}\u202E` }), /invisible formatting/);
+  rejects400(withConnector({ base_url: 'https://a.example.com/x\u200Dy' }), /invisible formatting/);
+  rejects400(withConnector({ icon_url: `https://a.example.com/${scotland}` }), /invisible formatting/);
+  rejects400(withConnector({ slug: 'a\u200Db' }), /connector\.slug/);
 });
 
 test('parseCreateCardInput: URLs — credentials in any form rejected; normalized href echoed', () => {
@@ -194,6 +210,107 @@ test('parseCreateCardInput: secrets in URL query / fragment → secret_field_rej
   // harmless query params pass through
   assert.equal(parseCreateCardInput(withConnector({ base_url: 'https://a.example.com/v1?version=2' })).connector.base_url,
     'https://a.example.com/v1?version=2');
+});
+
+test('URLs: ";" is a query separator too; signed-URL / JWT parameter names refused', () => {
+  const cases = [
+    ['https://a.example.com/?x=1;api_key=V', 'api_key'],
+    ['https://a.example.com/?x=1;sig=V', 'sig'],
+    ['https://a.example.com/?sv=2022-11-02&sig=V', 'sig'],
+    ['https://a.example.com/?X-Amz-Signature=V', 'X-Amz-Signature'],
+    ['https://a.example.com/?X-Amz-Credential=V', 'X-Amz-Credential'],
+    ['https://a.example.com/?X-Goog-Signature=V', 'X-Goog-Signature'],
+    ['https://a.example.com/?X-Goog-Credential=V', 'X-Goog-Credential'],
+    ['https://a.example.com/?signature=V', 'signature'],
+    ['https://a.example.com/?jwt=V', 'jwt'],
+    ['https://a.example.com/?id_token=V', 'id_token'],
+    ['https://a.example.com/?refresh_token=V', 'refresh_token'],
+  ];
+  for (const [u, name] of cases) {
+    assert.throws(() => parseCreateCardInput(withConnector({ base_url: u })), (e) => e.code === 'secret_field_rejected'
+      && e.message.includes(`query parameter "${name}"`), u);
+  }
+  // ordinary names still pass
+  for (const u of ['https://a.example.com/?sv=2022-11-02', 'https://a.example.com/?page=2;size=10', 'https://a.example.com/?design=1&signed_up=0']) {
+    assert.doesNotThrow(() => parseCreateCardInput(withConnector({ base_url: u })), u);
+  }
+});
+
+test('URLs: token-shaped path segments / query values refused (best-effort), ordinary ids pass', () => {
+  const tokens = [
+    'sk_live_abc123', 'sk-proj-abc', 'rk_test_x', 'ghp_abcdefghijklmnop', 'github_pat_11ABC', 'glpat-xyz', 'xoxb-123-456',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig', 'AKIAIOSFODNN7EXAMPLE', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv',
+  ];
+  for (const t of tokens) {
+    assert.equal(looksLikeToken(t), true, t);
+    assert.throws(() => parseCreateCardInput(withConnector({ base_url: `https://a.example.com/hooks/${t}` })),
+      (e) => e.code === 'secret_field_rejected' && /token-like URL path segment #2/.test(e.message) && !e.message.includes(t), t);
+    assert.throws(() => parseCreateCardInput(withConnector({ icon_url: `https://a.example.com/i.png?v=${t}` })),
+      (e) => e.code === 'secret_field_rejected' && /token-like value of URL query parameter "v"/.test(e.message), t);
+  }
+  const ok = ['3f401897-545e-4633-a486-5b3c464137a5', 'd41d8cd98f00b204e9800998ecf8427e', 'list-all-repositories-for-the-current-user',
+    'v1', 'API', 'Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0U', 'skills', 'eyJ'];
+  for (const t of ok) {
+    assert.equal(looksLikeToken(t), false, t);
+    assert.doesNotThrow(() => parseCreateCardInput(withConnector({ base_url: `https://a.example.com/${t}/x` })), t);
+  }
+});
+
+// The command ENTRY (COMMANDS['conn.auth_notice'] / ['conn.create_card']) runs in a
+// child process with the shared transport replaced: if either entry bypassed
+// sendConnectorCard, the stub would see no call and the fake server would see a POST.
+function runCommandWithStubbedTransport(command, params, apiUrl, home) {
+  const code = `
+    process.argv = [process.execPath, '', ${JSON.stringify(command)}, ${JSON.stringify(JSON.stringify(params))}];
+    const mod = await import(${JSON.stringify(new URL('./conn.js', import.meta.url).href)});
+    const calls = [];
+    mod.connectorCardTransport.post = async (...args) => { calls.push(args); return { id: 'msg-stub' }; };
+    const out = await mod.COMMANDS[${JSON.stringify(command)}]();
+    process.stdout.write(JSON.stringify({ out, calls }));
+  `;
+  return new Promise((resolve) => {
+    const env = { ...process.env, HOME: home, COCO_API_URL: apiUrl, COCO_AUTH_TOKEN: 'test-token', COCO_RPC_LOG: '0' };
+    execFile(process.execPath, ['--input-type=module', '-e', code], { env }, (error, stdout, stderr) => {
+      resolve({ code: error ? (error.code ?? 1) : 0, stdout, stderr });
+    });
+  });
+}
+
+test('command entries conn.auth_notice and conn.create_card route through sendConnectorCard', async () => {
+  const seen = [];
+  const server = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    if (req.method === 'GET' && req.url.startsWith('/api/v1/connect/applications')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'a1', slug: 'notion', display_name: 'Notion' }], request_id: 'r1' }));
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"error":{"detail":"unexpected"},"request_id":"r9"}');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  try {
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const home = setupHome();
+    for (const [command, params, contentType] of [
+      ['conn.auth_notice', { conversationId: CONV, apps: ['notion'] }, 'connector_auth_notice'],
+      ['conn.create_card', valid(), 'connector_create_card'],
+    ]) {
+      const { code, stdout, stderr } = await runCommandWithStubbedTransport(command, params, url, home);
+      assert.equal(code, 0, stderr);
+      const { out, calls } = JSON.parse(stdout);
+      assert.equal(out.status, 'sent', command);
+      assert.equal(calls.length, 1, command);
+      const [orgId, p, message, opts] = calls[0];
+      assert.equal(orgId, 'org-1');
+      assert.equal(p, `/api/v1/conversations/${CONV}/messages`);
+      assert.equal(message.content.content_type, contentType);
+      assert.deepEqual(opts, { timeoutMs: 30_000, quietOnSuccess: true });
+    }
+    assert.equal(seen.some((s) => s.startsWith('POST')), false, 'no card POST bypassed the shared transport');
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
 });
 
 test('runCreateCard: secret in a URL → nothing sent (network stub 0 calls)', async () => {
@@ -318,28 +435,6 @@ test('sendConnectorCard: auth_notice and create_card share one send path (POST c
     status: 'sent', conversation_id: CONV, card_id: CARD_ID, message_id: 'msg-9',
     connector: { name: 'Acme CRM', slug: 'acme-crm', auth_type: 'oauth2' }, actions_total: 2,
   });
-});
-
-test('conn.auth_notice command routes through the shared card send path', async () => {
-  // command entry delegates to runAuthNotice (no private send of its own)
-  const src = fs.readFileSync(cliPath, 'utf8');
-  assert.match(src, /'conn\.auth_notice': \(\) => runAuthNotice\(params, \{ resolveOrg: requireOrgId \}\)/);
-  assert.match(src, /'conn\.create_card': \(\) => runCreateCard\(params, \{ resolveOrg: requireOrgId \}\)/);
-  assert.equal((src.match(/\/conversations\/\$\{[a-zA-Z]+\}\/messages/g) || []).length, 1, 'exactly one card POST site');
-  // and runAuthNotice sends via sendConnectorCard's post contract
-  const calls = [];
-  const out = await runAuthNotice({ conversationId: CONV, apps: ['notion'] }, {
-    resolveOrg: () => 'org-1',
-    getApplication: async () => { throw Object.assign(new Error('nf'), { status: 404 }); },
-    listApplicationsPage: async () => ({ data: [{ id: 'a1', slug: 'notion', display_name: 'Notion' }] }),
-    post: async (...args) => { calls.push(args); return { id: 'msg-2' }; },
-  });
-  assert.equal(out.status, 'sent');
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0][0], 'org-1');
-  assert.match(calls[0][1], new RegExp(`/conversations/${CONV}/messages$`));
-  assert.equal(calls[0][2].content.content_type, 'connector_auth_notice');
-  assert.deepEqual(calls[0][3], { timeoutMs: 30_000, quietOnSuccess: true });
 });
 
 test('runCreateCard: invalid / secret input → nothing sent, org not resolved', async () => {
