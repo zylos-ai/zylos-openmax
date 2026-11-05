@@ -105,9 +105,10 @@ test('a selection of rendered markdown verifies against the markdown source', ()
     ['link', 'see [the docs](https://x.test/a_b) now', 'see the docs now'],
     ['bullet list', 'steps:\n- one\n* two\n+ three', 'one two three'],
     ['numbered list', '1. first\n2) second', 'first second'],
-    ['inline code', 'run `npm test` first', 'run npm test first'],
+    ['inline code', 'run `snake_case` first', 'run snake_case first'],
     ['fenced code', 'try:\n```js\nconst a = 1;\n```\ndone', 'try: const a = 1; done'],
-    ['heading', '## Why later\nbecause of #162', 'Why later because of #162'],
+    ['heading', 'intro\n## Why later\nbecause of #162', 'intro Why later because of #162'],
+    ['blockquote', 'he said:\n> ship it\nok', 'he said: ship it ok'],
   ];
   for (const [name, parent, selection] of cases) {
     const out = render(
