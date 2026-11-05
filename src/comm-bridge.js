@@ -42,7 +42,7 @@ import { preferredConnectorsFrom } from './lib/connector-preference.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
-import { getMediaUrl, downloadMedia } from './cli/as.js';
+import { downloadInboundAttachment } from './lib/inbound-media.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
 import { createChannelInstaller } from './lib/channel-connector.js';
 import { logSystemFrame } from './lib/system-events.js';
@@ -1188,12 +1188,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       const item = { id: attId, fileName: attFileName };
       if (shouldDownload) {
         try {
-          const { url } = await getMediaUrl(attId, orgConfig.org_id);
-          if (url) {
-            const ext = attFileName ? path.extname(attFileName) : '';
-            const saveName = attId + ext;
-            item.localPath = await downloadMedia(url, saveName);
-          }
+          // By id, in this org: a fresh short-lived link per attempt (see inbound-media.js).
+          item.localPath = await downloadInboundAttachment(orgConfig, attId, attFileName);
         } catch (e) {
           warn('media fetch failed:', attId, e.message);
         }
@@ -1297,16 +1293,11 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
           const qMediaId = qAtt?.artifact_id;
           if (!qMediaId) continue;
           try {
-            const { url } = await getMediaUrl(qMediaId, orgConfig.org_id);
-            if (url) {
-              const qOrigName = qAtt?.file_name;
-              const qExt = qOrigName ? path.extname(qOrigName) : '';
-              const qSaveName = qMediaId + qExt;
-              const qPath = await downloadMedia(url, qSaveName);
-              if (qPath) {
-                qText += ` ---- ${qKind}: ${qPath}`;
-                if (qOrigName) qText += ` name="${qOrigName}"`;
-              }
+            const qOrigName = qAtt?.file_name;
+            const qPath = await downloadInboundAttachment(orgConfig, qMediaId, qOrigName);
+            if (qPath) {
+              qText += ` ---- ${qKind}: ${qPath}`;
+              if (qOrigName) qText += ` name="${qOrigName}"`;
             }
           } catch (e) {
             warn('quoted media fetch failed:', qMediaId, e.message);

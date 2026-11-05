@@ -35,6 +35,7 @@ import { loadConfig, resolveDefaultOrgId } from './config.js';
 import { getAccessToken, invalidate as invalidateToken, exchange as exchangeToken } from './token.js';
 import { cfAccessHeaders } from './cf-access.js';
 import { redactSecrets } from './redact.js';
+import { fetchFollowingRedirects } from './follow-redirects.js';
 
 // 401 → refresh-and-retry throttle. Keyed by effective orgId (default-org
 // resolved when orgId is omitted). Records the timestamp of the last
@@ -472,11 +473,22 @@ export async function putBytes(url, buf, contentType, extraHeaders = {}) {
 }
 
 /**
- * GET raw bytes from an absolute URL. Used to follow pre-signed download
- * URLs returned by cws-as. Mirrors `putBytes` re: CF Access injection.
+ * GET raw bytes from an absolute URL. Used to fetch the download URLs returned
+ * by `/artifacts/resolve`. Mirrors `putBytes` re: CF Access injection.
+ *
+ * The URL may be a short-lived platform link that redirects to the storage
+ * object; redirects are followed (bounded, https never downgraded, each URL
+ * requested once — see follow-redirects.js). A failed GET is not retried here:
+ * the link may be single-use, so callers that can re-resolve do so instead.
  */
-export async function getBytes(url) {
-  const res = await fetch(url, { headers: cfAccessHeaders() });
-  if (!res.ok) throw new Error(`GET ${res.status}: ${res.statusText}`);
+export async function getBytes(url, { fetchImpl } = {}) {
+  const res = await fetchFollowingRedirects(url, { headers: cfAccessHeaders(), fetchImpl });
+  if (!res.ok) {
+    // Release the failed response's body (the caller may re-resolve and retry).
+    try { await res.body?.cancel?.(); } catch { /* best effort */ }
+    const err = new Error(`GET ${res.status}: ${res.statusText}`);
+    err.status = res.status;
+    throw err;
+  }
   return Buffer.from(await res.arrayBuffer());
 }
