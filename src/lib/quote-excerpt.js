@@ -57,7 +57,7 @@ function stripMarkers(s) {
   return String(s)
     .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')               // headings
     .replace(/^[ \t]*>[ \t]?/gm, '')                    // blockquotes
-    .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/gm, '')     // list markers
+    .replace(/^[ \t]*[-*+][ \t]+/gm, '')                // bullet markers
     .replace(/[*_`~]/g, '')                             // emphasis / inline code
     .replace(/\s+/g, ' ')
     .trim();
@@ -67,6 +67,7 @@ function renderedText(markdown) {
   return stripMarkers(String(markdown)
     .replace(/^[ \t]*(?:```|~~~).*$/gm, '')            // code fences
     .replace(/^[ \t]*(?:[-*_=][ \t]*){3,}$/gm, '')      // rules, setext underlines
+    .replace(/^[ \t]*\d+[.)][ \t]+/gm, '')              // ordered markers: digits are content in an excerpt
     // No `[` / `(` inside the classes: keeps it linear on input with many `[`.
     .replace(/!?\[([^[\]]*)\]\([^()]*\)/g, '$1'));      // links / images → text
 }

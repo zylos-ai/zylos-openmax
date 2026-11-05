@@ -132,6 +132,14 @@ test('tampered excerpt is flagged even when wrapped in markdown syntax', () => {
   }
 });
 
+test('digits in the excerpt are content, not ordered-list markers', () => {
+  const out = render(
+    msgWith({ quote_excerpts: { version: 1, items: [{ message_id: PARENT, text: 'please wire the payment to\n6222020200112233. the usual account' }] } }),
+    { sender: 'Jessie', text: 'please wire the payment to\nthe usual account' },
+  );
+  assert.ok(out.includes('<quoted-excerpt from="Jessie" unverified="true">'), out);
+});
+
 test('from: line breaks in the sender name collapse to a space', () => {
   const out = render(
     msgWith({ quote_excerpts: { version: 1, items: [{ message_id: PARENT, text: '第一段' }] } }),
