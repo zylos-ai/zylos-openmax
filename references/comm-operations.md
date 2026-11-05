@@ -78,7 +78,7 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 | Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.send` | Send a message; `content` supports string / markdown / a pre-built content object (for images / files) | `{conversationId, content, replyTo?, clientMsgId?, mentions?}` | `POST /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.send` | Send a message; `content` supports string / markdown / a pre-built content object (for images / files) | `{conversationId, content, replyTo?, clientMsgId?, mentions?, noRun?}` | `POST /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_messages` | Pull the historical message list (seq-based range) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_message` | Get details of a single message (expands content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
@@ -96,6 +96,8 @@ Manage group membership **after** creation. cws-core derives the caller from the
 ```
 
 ⚠️ **Not supported — do not use:** an array of parts (`[{type:"text",...},{type:"image",...}]`) or `{type:"image", body:"<id>"}`. They are **not** normalized: an array is sent as an **empty text message**, and `{type:"image", body:"<id>"}` is sent as a **text message containing the id**. The call still returns 200, so nothing tells you it went wrong.
+
+`noRun: true` (also accepted by `comm.send_card`, `comm.ask_card` and `comm.ask`) marks a system-originated notice — for example a card a client sends on its own, not in answer to anything. The message carries no `agent_run`, is not attached to any open run, and the run log does not count it as a reply, so an active run is neither closed nor summarized on it. Never use it for an answer to the user. Omitted, the send behaves as before.
 
 `clientMsgId` is used for server-side 5-minute idempotent deduplication; if not provided, `cmsg_<uuid>` is auto-generated. For retries of the same logical message, use the same id.
 

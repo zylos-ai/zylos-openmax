@@ -31,6 +31,19 @@ test('scanShellSends: env / exec / timeout prefixes; node options; unknown runne
   assert.equal(scanShellSends('sed -n 1,40p src/cli/comm.js').commSends.length, 0);
 });
 
+test('scanShellSends: a literal noRun send is not a reply send', () => {
+  const B = '019f0000-aaaa-7bbb-8ccc-00000000000b';
+  for (const verb of ['comm.send', 'comm.send_card', 'comm.ask_card', 'comm.ask']) {
+    assert.deepEqual(scanShellSends(`node src/cli/comm.js ${verb} '{"conversationId":"${B}","noRun":true}'`).commSends, [], verb);
+  }
+  assert.deepEqual(scanShellSends(`node src/cli/comm.js comm.send '{"conversationId":"${B}","noRun":false}'`).commSends, [{ command: 'comm.send', conversationId: B }]);
+  assert.deepEqual(scanShellSends(`node src/cli/comm.js comm.send '{"conversationId":"${B}","noRun":"true"}'`).commSends, [{ command: 'comm.send', conversationId: B }]);
+  // Only the top level counts: a noRun inside the content is text.
+  assert.deepEqual(scanShellSends(`node src/cli/comm.js comm.send '{"conversationId":"${B}","content":{"noRun":true}}'`).commSends, [{ command: 'comm.send', conversationId: B }]);
+  // Not provable from a computed argument: unchanged.
+  assert.deepEqual(scanShellSends('node src/cli/comm.js comm.send "$(cat /tmp/p.json)"').commSends, [{ command: 'comm.send', conversationId: null }]);
+});
+
 test('argvToScript: sh -c script as is; other argv shell-quoted', () => {
   assert.equal(argvToScript(['bash', '-lc', 'node x.js a']), 'node x.js a');
   assert.equal(argvToScript(['node', 'x.js', 'a b', "it's"]), `node x.js 'a b' 'it'\\''s'`);
