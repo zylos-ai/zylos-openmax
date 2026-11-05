@@ -231,3 +231,115 @@ for (const kind of ['timer', 'webhook']) {
     assert.throws(() => automationMutation({ source_kind: kind, configuration: base, ...proof }, kind, 'update'), /update requires/);
   });
 }
+
+const lead = '01000000-0000-4000-8000-0000000000a1';
+const owner = '01000000-0000-4000-8000-0000000000b2';
+const joining = { ...base, lead_member_id: lead, owner_member_id: owner };
+const scoped = (kind, configuration) => ({ ...configuration, ...(kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}) });
+const memberAdditionLists = [[lead], [owner], [lead, owner], [owner, lead], []];
+
+test('confirmed project member additions pass through nested proposals, previews and mutations verbatim', () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      for (const additions of memberAdditionLists) {
+        const configuration = scoped(source_kind, { ...joining, project_member_additions: additions });
+        const scope = operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {};
+        const proposal = automationAuthorizationProposal({ source_kind, operation, request_id: cardID, configuration, ...scope });
+        assert.equal(proposal.configuration, configuration);
+        assert.equal(proposal.configuration.project_member_additions, additions);
+        assert.equal(Object.hasOwn(proposal, 'project_member_additions'), false);
+        assert.equal(automationAuthorizationPreview({ source_kind, operation, configuration, ...scope }).configuration, configuration);
+        const body = automationMutation({ source_kind, configuration, id: 'binding', expected_version: 7,
+          authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID }, source_kind, operation);
+        assert.deepEqual(body.project_member_additions, additions);
+        assert.equal(body.lead_member_id, lead);
+        assert.equal(body.owner_member_id, owner);
+      }
+    }
+  }
+});
+
+test('flat bodies map project member additions onto the top-level POST/PUT field', () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      for (const additions of memberAdditionLists) {
+        const flat = { source_kind, ...scoped(source_kind, joining), project_member_additions: additions };
+        assert.deepEqual(automationConfiguration(flat, source_kind).project_member_additions, additions);
+        const body = automationMutation({ ...flat, id: 'binding', expected_version: 7,
+          authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID }, source_kind, operation);
+        assert.deepEqual(body.project_member_additions, additions);
+        assert.equal(Object.hasOwn(body, 'configuration'), false);
+      }
+      const aliases = { source_kind, leadMemberId: lead, ownerMemberId: owner, projectId: 'project', title: 'Task',
+        ...(source_kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}), project_member_additions: [owner, lead] };
+      const body = automationConfiguration(aliases, source_kind);
+      assert.deepEqual(body.project_member_additions, [owner, lead]);
+      assert.equal(body.lead_member_id, lead);
+      assert.equal(body.owner_member_id, owner);
+    }
+  }
+});
+
+test('project member additions outside the configured Lead/Owner never reach a request', () => {
+  const invalid = [
+    ['other member', ['01000000-0000-4000-8000-0000000000c3'], /lead_member_id and\/or owner_member_id, each once/],
+    ['requester instead of Owner', [cardID], /each once/],
+    ['duplicate Lead', [lead, lead], /each once/],
+    ['duplicate Owner', [owner, owner], /each once/],
+    ['case-variant Lead', [lead.toUpperCase()], /each once/],
+    ['more than two', [lead, owner, lead], /at most 2/],
+    ['non-array string', lead, /must be an array/],
+    ['non-array object', { 0: lead }, /must be an array/],
+    ['null', null, /must be an array/],
+    ['empty string entry', [''], /non-empty member ID strings/],
+    ['blank entry', ['   '], /non-empty member ID strings/],
+    ['non-string entry', [42], /non-empty member ID strings/],
+    ['null entry', [lead, null], /non-empty member ID strings/],
+  ];
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const [name, project_member_additions, message] of invalid) {
+      const configuration = scoped(source_kind, { ...joining, project_member_additions });
+      const proof = { id: 'binding', expected_version: 7, authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID };
+      for (const operation of ['create', 'update']) {
+        const scope = operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {};
+        for (const call of [
+          () => automationAuthorizationProposal({ source_kind, operation, request_id: cardID, configuration, ...scope }),
+          () => automationAuthorizationPreview({ source_kind, operation, configuration, ...scope }),
+          () => automationMutation({ source_kind, configuration, ...proof }, source_kind, operation),
+          () => automationMutation({ source_kind, ...configuration, ...proof }, source_kind, operation),
+        ]) {
+          assert.throws(call, error => error.status === 400 && message.test(error.message), `${source_kind} ${operation}: ${name}`);
+        }
+      }
+    }
+    // The Owner may be listed only when the configuration names one.
+    const ownerless = scoped(source_kind, { lead_member_id: lead, spec: base.spec });
+    assert.deepEqual(automationConfiguration({ source_kind, ...ownerless, project_member_additions: [lead] }, source_kind).project_member_additions, [lead]);
+    assert.throws(() => automationConfiguration({ source_kind, configuration: { ...ownerless, project_member_additions: [owner] } }, source_kind), /each once/);
+    assert.throws(() => automationConfiguration({ source_kind, configuration: { ...ownerless, project_member_additions: [''] } }, source_kind), /non-empty/);
+  }
+});
+
+test('absent project member additions keep proposal and request bodies unchanged', () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      const configuration = scoped(source_kind, joining);
+      const scope = operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {};
+      const proposal = automationAuthorizationProposal({ source_kind, operation, request_id: cardID, configuration, ...scope });
+      assert.equal(proposal.configuration, configuration);
+      assert.deepEqual(Object.keys(proposal.configuration).sort(), Object.keys(configuration).sort());
+      const proof = { id: 'binding', expected_version: 7, authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID };
+      for (const body of [automationMutation({ source_kind, configuration, ...proof }, source_kind, operation),
+        automationMutation({ source_kind, ...configuration, ...proof }, source_kind, operation),
+        automationConfiguration({ source_kind, ...configuration }, source_kind)]) {
+        assert.equal(Object.hasOwn(body, 'project_member_additions'), false);
+      }
+      assert.deepEqual(automationConfiguration({ source_kind, ...configuration }, source_kind), {
+        lead_member_id: lead, owner_member_id: owner, spec: { project_id: 'project', title: 'Task', description: undefined },
+        ...(source_kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}),
+      });
+    }
+  }
+  assert.throws(() => automationConfiguration({ source_kind: 'timer', configuration: { ...joining, projectMemberAdditions: [lead] } }, 'timer'), /unsupported timer configuration field: projectMemberAdditions/);
+  assert.throws(() => automationConfiguration({ source_kind: 'webhook', configuration: { ...joining, spec: { ...base.spec, project_member_additions: [lead] } } }, 'webhook'), /unsupported spec field/);
+});

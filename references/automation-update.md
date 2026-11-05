@@ -19,6 +19,10 @@ The fenced envelope requires `kind: "automation-update-request"`, `schema_versio
 IDs must be nonzero UUIDs; `expected_version` a positive safe integer.
 `source_kind` is the desired `timer` or `webhook` kind. Configuration is a full
 replacement using that kind's REST fields; reject unknown fields or schemas.
+Optional `project_member_additions` follows Common's
+[Project member additions](automation-common.md#project-member-additions) rules:
+it is a write-time list, not a stored field, so carry only the handoff's list
+verbatim and never derive one from the baseline binding.
 `form_context` is display context, never API parameters or authorization.
 
 1. Complete Common's identity verification first, including explicit verified
@@ -54,6 +58,10 @@ colleague in `configuration.owner_member_id`. Core validates that the final
 target is an active human in the same organization, a member of the selected
 project, and permitted to chat with the final Lead. Failure blocks the operation;
 never grant membership, reset the target to the requester, or impersonate them.
+A target Owner listed in the handoff's `configuration.project_member_additions`
+joins the project when the confirmed update succeeds; their current
+non-membership is not a blocker. Pass that list verbatim; it is not you granting
+membership, and you must not add one that the handoff did not carry.
 
 The server card must explain the old and new Owner, loss of Owner-level config
 editing rights, and that existing runs and pending approvals remain with the
@@ -106,6 +114,10 @@ empty first page is also complete. Missing or inconsistent pagination, a repeate
 or unexpected page, changing totals, or any failed page leaves membership
 unresolved: report "unable to confirm project membership" and stop before
 confirmation, never report "not a member" from partial results.
+When a form handoff's `configuration.project_member_additions` lists B, a
+completed traversal without B is expected and not a blocker: B joins the
+project when the confirmed update succeeds. Otherwise B must already be a
+member. A direct chat request carries no such list; never create one.
 A rejected or unavailable directory read
 stops before confirmation; do not add project membership, upgrade Agents or change flags.
 Core enforces B's runtime readiness through server-side admission at proposal

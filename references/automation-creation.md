@@ -52,15 +52,26 @@ rollout, read [Recovery](automation-recovery.md).
    already supplied. Preserve clarified task instructions in `spec.description`;
    do not merely leave information required at execution time in the DM. For a
    draft timer, apply the [schedule-resolution rules](automation-schedule.md) before proposing.
+   A Lead (including you) or Owner listed in `configuration.project_member_additions`
+   joins the project when the confirmed write succeeds, so their current
+   non-membership is not missing access and not a blocker. Do not add members
+   yourself; pass the confirmed list verbatim (see
+   [Project member additions](automation-common.md#project-member-additions)).
 3. Follow Automation Common's server plan/card process with `operation:"create"`.
    Omit proposal `requester_member_id` when the desired Owner is the verified creator.
    When `configuration.owner_member_id` names a colleague, pass the verified
    creator as `requester_member_id`; Core must support that contract before use.
    The creator must be an active human in the same organization and a member of
    the selected project; the server revalidates this before accepting confirmation.
-   The creator confirms in
+   A creator listed as Owner in `configuration.project_member_additions` joins
+   the project with the write instead of already being a member. Any non-empty
+   list also requires the creator to have project write access (an effective
+   project member or org owner/admin); the server checks it. The creator confirms in
    this DM; the colleague does not confirm on their behalf. The server validates
    the target's active human membership, project membership and Lead chat access.
+   A target Owner listed in `project_member_additions` joins the project when the
+   confirmed write succeeds instead of already being a member; chat access with
+   the Lead is still required.
    Confirmed status is not mutation success; apply its exact proof and uncertainty rules.
 4. After the server verifies the latest plan's confirmation, call `src/cli/tm.js` with
    `event-binding.create` for timer or `webhook.create` for webhook. Pass

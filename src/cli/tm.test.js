@@ -883,3 +883,78 @@ test('project member commands match BFF paths and bodies', async () => {
   assert.equal(removeRequest.method, 'DELETE');
   assert.equal(removeRequest.url, '/api/v1/projects/project-1/members/member-1');
 });
+
+test('confirmed project member additions reach proposal and every write route', async () => {
+  const lead = '01000000-0000-4000-8000-0000000000a1';
+  const owner = '01000000-0000-4000-8000-0000000000b2';
+  for (const source_kind of ['timer', 'webhook']) {
+    const route = source_kind === 'timer' ? 'event-binding' : 'webhook';
+    const path = source_kind === 'timer' ? '/api/v1/event-bindings' : '/api/v1/webhooks';
+    for (const operation of ['create', 'update']) {
+      for (const additions of [[lead], [owner], [lead, owner]]) {
+        const configuration = { lead_member_id: lead, owner_member_id: owner, spec: { project_id: 'project', title: 'Task' },
+          ...(source_kind === 'timer' ? { schedule_kind: 'cron', cron_expr: '0 9 * * *', timezone: 'Asia/Singapore' } : {}),
+          project_member_additions: additions };
+        const scope = operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {};
+        const proposed = await captureRequest('automation.authorization_propose', {
+          org: 'org-automation', request_id: readableProposal.request_id, source_kind, operation, configuration, ...scope,
+        });
+        assert.equal(proposed.url, '/api/v1/automation-authorizations/proposals');
+        assert.deepEqual(proposed.body.configuration, configuration);
+        assert.equal(Object.hasOwn(proposed.body, 'project_member_additions'), false);
+        const nested = await captureRequest(`${route}.${operation}`, {
+          org: 'org-automation', source_kind, configuration, id: 'binding', expected_version: 7, ...cardProof,
+        });
+        const flat = await captureRequest(`${route}.${operation}`, {
+          org: 'org-automation', source_kind, ...configuration, id: 'binding', expected_version: 7, ...cardProof,
+        });
+        for (const mutated of [nested, flat]) {
+          assert.equal(mutated.method, operation === 'create' ? 'POST' : 'PUT');
+          assert.equal(mutated.url, operation === 'create' ? path : `${path}/binding`);
+          assert.deepEqual(mutated.body.project_member_additions, additions);
+          assert.equal(Object.hasOwn(mutated.body, 'configuration'), false);
+          assert.equal(mutated.body.authorization_card_interaction_id, cardProof.authorization_card_interaction_id);
+        }
+      }
+      const omitted = await captureRequest(`${route}.${operation}`, {
+        org: 'org-automation', source_kind, id: 'binding', expected_version: 7, ...cardProof,
+        configuration: { lead_member_id: lead, owner_member_id: owner, spec: { project_id: 'project', title: 'Task' } },
+      });
+      assert.equal(Object.hasOwn(omitted.body, 'project_member_additions'), false);
+    }
+  }
+});
+
+test('invalid project member additions are rejected before CLI sends HTTP', async () => {
+  const lead = '01000000-0000-4000-8000-0000000000a1';
+  const owner = '01000000-0000-4000-8000-0000000000b2';
+  let requests = 0;
+  const server = createServer((req, res) => { requests++; req.resume(); res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const source_kind of ['timer', 'webhook']) {
+      const route = source_kind === 'timer' ? 'event-binding' : 'webhook';
+      for (const project_member_additions of [['01000000-0000-4000-8000-0000000000c3'], [lead, lead],
+        [lead, owner, owner], lead, null, ['']]) {
+        const configuration = { lead_member_id: lead, owner_member_id: owner, spec: { project_id: 'project', title: 'Task' },
+          ...(source_kind === 'timer' ? { timezone: 'Asia/Singapore' } : {}), project_member_additions };
+        for (const [command, input] of [
+          ['automation.authorization_propose', { source_kind, operation: 'update', request_id: readableProposal.request_id,
+            target_binding_id: 'binding', expected_version: 7, configuration }],
+          ['automation.authorization_preview', { source_kind, operation: 'create', configuration }],
+          ...['create', 'update'].map(operation => [`${route}.${operation}`,
+            { source_kind, configuration, id: 'binding', expected_version: 7, ...cardProof }]),
+          [`${route}.create`, { source_kind, ...configuration, ...cardProof }],
+        ]) {
+          const result = await new Promise(resolve => execFile(process.execPath,
+            [cliPath, command, JSON.stringify({ org: 'org-automation', ...input })], {
+              env: { ...process.env, COCO_API_URL: `http://127.0.0.1:${server.address().port}`, COCO_AUTH_TOKEN: 'test', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0' }, timeout: 5000,
+            }, (error, stdout, stderr) => resolve({ error, stderr })));
+          assert.ok(result.error, command);
+          assert.match(result.stderr, /project_member_additions/);
+          assert.equal(requests, 0, `${command} sent invalid project member additions`);
+        }
+      }
+    }
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
