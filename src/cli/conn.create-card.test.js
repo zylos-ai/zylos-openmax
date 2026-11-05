@@ -11,7 +11,7 @@ import {
   CONNECTOR_CREATE_CARD_SCHEMA, CREATE_CARD_MAX_ACTIONS, CREATE_CARD_LIMITS,
   isSecretLikeKey, assertNoSecretKeys, parseCreateCardInput,
   buildConnectorCreateCardMessage, buildCreateCardFallbackText,
-  sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage,
+  sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage, runAuthNotice,
 } from './conn.js';
 
 // conn.create_card (OPENM-836): the "create this custom connector?" card.
@@ -115,6 +115,95 @@ test('parseCreateCardInput: actions', () => {
 test('parseCreateCardInput: application_id must be a UUID; unknown top-level keys refused', () => {
   rejects400(valid({ application_id: 'acme' }), /application_id must be a UUID/);
   rejects400(valid({ extra: 1 }), /unknown field "extra"/);
+});
+
+test('parseCreateCardInput: every length cap — exactly at cap accepted, cap+1 rejected', () => {
+  const L = CREATE_CARD_LIMITS;
+  const urlOf = (n) => { const base = 'https://a.example.com/'; return base + 'x'.repeat(n - base.length); };
+  const cases = [
+    ['connector.name', (n) => withConnector({ name: 'x'.repeat(n) }), L.name, (o) => o.connector.name],
+    ['connector.slug', (n) => withConnector({ slug: 'a'.repeat(n) }), L.slug, (o) => o.connector.slug],
+    ['connector.description', (n) => withConnector({ description: 'x'.repeat(n) }), L.description, (o) => o.connector.description],
+    ['connector.icon_url', (n) => withConnector({ icon_url: urlOf(n) }), L.url, (o) => o.connector.icon_url],
+    ['connector.base_url', (n) => withConnector({ base_url: urlOf(n) }), L.url, (o) => o.connector.base_url],
+    ['actions[0].name', (n) => withAction({ name: 'x'.repeat(n) }), L.action_name, (o) => o.actions[0].name],
+    ['actions[0].summary', (n) => withAction({ summary: 'x'.repeat(n) }), L.action_summary, (o) => o.actions[0].summary],
+  ];
+  for (const [field, make, cap, get] of cases) {
+    assert.equal([...get(parseCreateCardInput(make(cap)))].length, cap, `${field} at cap`);
+    assert.throws(() => parseCreateCardInput(make(cap + 1)), (e) => e.status === 400 && e.message.includes(field), `${field} cap+1`);
+  }
+  // characters, not UTF-16 units: 100 CJK / emoji characters fit the name cap
+  assert.doesNotThrow(() => parseCreateCardInput(withConnector({ name: '😀'.repeat(L.name) })));
+});
+
+test('parseCreateCardInput: slug with an uppercase letter anywhere is rejected', () => {
+  for (const s of ['acmeCrm', 'acme-Crm', 'Acme', 'acmE']) rejects400(withConnector({ slug: s }), /connector\.slug/);
+});
+
+test('parseCreateCardInput: control / invisible formatting characters (Cc, Cf) rejected in every text field', () => {
+  const bad = ['a\u202Eb', 'a\u200Bb', 'a\uFEFFb', 'a\u0007b', 'a\tb', 'a\u2066b'];
+  const fields = [
+    (v) => withConnector({ name: v }), (v) => withConnector({ description: v }), (v) => withConnector({ slug: v }),
+    (v) => withAction({ name: v }), (v) => withAction({ summary: v }),
+    (v) => withConnector({ base_url: `https://a.example.com/${v}` }), (v) => withConnector({ icon_url: `https://a.example.com/${v}` }),
+  ];
+  for (const mk of fields) {
+    for (const v of bad) {
+      assert.throws(() => parseCreateCardInput(mk(v)), (e) => e.status === 400 && /control or invisible formatting|connector\.slug/.test(e.message), JSON.stringify(v));
+    }
+  }
+  assert.throws(() => parseCreateCardInput(withConnector({ name: 'Acme\u202Emrc' })), /invisible formatting characters/);
+});
+
+test('parseCreateCardInput: URLs — credentials in any form rejected; normalized href echoed', () => {
+  for (const u of ['https://user:pass@a.example.com', 'https://:pass@a.example.com', 'https://user:@a.example.com', 'https://user@a.example.com']) {
+    rejects400(withConnector({ base_url: u }), /must not embed credentials/);
+    rejects400(withConnector({ icon_url: u }), /must not embed credentials/);
+  }
+  // backslash trick: displayed host must be the real host
+  const o = parseCreateCardInput(withConnector({ base_url: 'https://evil.example.com\\@good.example.com', icon_url: 'HTTPS://A.Example.COM/i.png' }));
+  assert.equal(o.connector.base_url, 'https://evil.example.com/@good.example.com');
+  assert.equal(o.connector.icon_url, 'https://a.example.com/i.png');
+  const m = buildConnectorCreateCardMessage(o, CARD_ID);
+  assert.equal(m.content.body.connector.base_url, 'https://evil.example.com/@good.example.com');
+  assert.match(m.fallback_text, /服务地址：https:\/\/evil\.example\.com\/@good\.example\.com/);
+  assert.equal(m.metadata.connector_create_card.connector.icon_url, 'https://a.example.com/i.png');
+  // a plain fragment is refused too
+  rejects400(withConnector({ icon_url: 'https://a.example.com/i.png#x' }), /#fragment/);
+  rejects400(withConnector({ base_url: 'https://a.example.com/#section' }), /#fragment/);
+});
+
+test('parseCreateCardInput: secrets in URL query / fragment → secret_field_rejected naming the parameter, never the value', () => {
+  const urls = [
+    ['https://a.example.com/?api_key=SECRETVAL', 'query parameter "api_key"'],
+    ['https://a.example.com/v1?x=1&access_token=SECRETVAL', 'query parameter "access_token"'],
+    ['https://a.example.com/?client%5Fsecret=SECRETVAL', 'query parameter "client_secret"'],
+    ['https://a.example.com/?Password=SECRETVAL', 'query parameter "Password"'],
+    ['https://a.example.com/#token=SECRETVAL', 'fragment parameter "token"'],
+    ['https://a.example.com/#state=1&id_token=SECRETVAL', 'fragment parameter "id_token"'],
+    ['https://a.example.com/#a=1;apiKey=SECRETVAL', 'fragment parameter "apiKey"'],
+  ];
+  for (const field of ['base_url', 'icon_url']) {
+    for (const [u, where] of urls) {
+      assert.throws(() => parseCreateCardInput(withConnector({ [field]: u })), (e) => e.status === 400
+        && e.code === 'secret_field_rejected' && e.message.includes(where) && e.message.includes(`connector.${field}`)
+        && !e.message.includes('SECRETVAL'), `${field} ${u}`);
+    }
+  }
+  // harmless query params pass through
+  assert.equal(parseCreateCardInput(withConnector({ base_url: 'https://a.example.com/v1?version=2' })).connector.base_url,
+    'https://a.example.com/v1?version=2');
+});
+
+test('runCreateCard: secret in a URL → nothing sent (network stub 0 calls)', async () => {
+  let calls = 0;
+  const deps = { resolveOrg: () => 'org-1', post: async () => { calls += 1; return { id: 'm' }; } };
+  for (const u of ['https://a.example.com/?api_key=k', 'https://a.example.com/#access_token=t']) {
+    await assert.rejects(runCreateCard(withConnector({ base_url: u }), deps), (e) => e.code === 'secret_field_rejected');
+    await assert.rejects(runCreateCard(withConnector({ icon_url: u }), deps), (e) => e.code === 'secret_field_rejected');
+  }
+  assert.equal(calls, 0);
 });
 
 // --- secret refusal -------------------------------------------------------------
@@ -229,6 +318,28 @@ test('sendConnectorCard: auth_notice and create_card share one send path (POST c
     status: 'sent', conversation_id: CONV, card_id: CARD_ID, message_id: 'msg-9',
     connector: { name: 'Acme CRM', slug: 'acme-crm', auth_type: 'oauth2' }, actions_total: 2,
   });
+});
+
+test('conn.auth_notice command routes through the shared card send path', async () => {
+  // command entry delegates to runAuthNotice (no private send of its own)
+  const src = fs.readFileSync(cliPath, 'utf8');
+  assert.match(src, /'conn\.auth_notice': \(\) => runAuthNotice\(params, \{ resolveOrg: requireOrgId \}\)/);
+  assert.match(src, /'conn\.create_card': \(\) => runCreateCard\(params, \{ resolveOrg: requireOrgId \}\)/);
+  assert.equal((src.match(/\/conversations\/\$\{[a-zA-Z]+\}\/messages/g) || []).length, 1, 'exactly one card POST site');
+  // and runAuthNotice sends via sendConnectorCard's post contract
+  const calls = [];
+  const out = await runAuthNotice({ conversationId: CONV, apps: ['notion'] }, {
+    resolveOrg: () => 'org-1',
+    getApplication: async () => { throw Object.assign(new Error('nf'), { status: 404 }); },
+    listApplicationsPage: async () => ({ data: [{ id: 'a1', slug: 'notion', display_name: 'Notion' }] }),
+    post: async (...args) => { calls.push(args); return { id: 'msg-2' }; },
+  });
+  assert.equal(out.status, 'sent');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'org-1');
+  assert.match(calls[0][1], new RegExp(`/conversations/${CONV}/messages$`));
+  assert.equal(calls[0][2].content.content_type, 'connector_auth_notice');
+  assert.deepEqual(calls[0][3], { timeoutMs: 30_000, quietOnSuccess: true });
 });
 
 test('runCreateCard: invalid / secret input → nothing sent, org not resolved', async () => {

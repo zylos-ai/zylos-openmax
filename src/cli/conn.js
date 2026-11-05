@@ -837,6 +837,15 @@ export function isSecretLikeKey(key) {
   return /(token|apikey|credential|credentials|authorization|bearer|cookie|pin)$/.test(k);
 }
 
+// The one refusal for a secret on the card. `location` names WHERE (a field
+// path or a URL parameter name), never the value.
+function secretFieldError(location) {
+  return Object.assign(
+    new Error(`secret-like ${location} is not allowed on the connector create card — never put a key, token, password or client secret on it (not in a field, not in a URL). The user enters the OAuth Client Secret on the connections page (the card's「填写 Client Secret」button); an API key is entered when they authorize the connector.`),
+    { status: 400, code: 'secret_field_rejected' },
+  );
+}
+
 // Walk every object key at any depth (arrays included) and refuse the first
 // secret-like one with its path. Runs before any other validation so a secret
 // is never echoed into a later error message either.
@@ -848,12 +857,7 @@ export function assertNoSecretKeys(value, path = '') {
     if (Array.isArray(v)) { v.forEach((item, i) => walk(item, `${p}[${i}]`)); return; }
     for (const k of Object.keys(v)) {
       const kp = p ? `${p}.${k}` : k;
-      if (isSecretLikeKey(k)) {
-        throw Object.assign(
-          new Error(`secret-like field "${kp}" is not allowed on the connector create card — never put a key, token, password or client secret on it. The user enters the OAuth Client Secret on the connections page (the card's「填写 Client Secret」button); an API key is entered when they authorize the connector.`),
-          { status: 400, code: 'secret_field_rejected' },
-        );
-      }
+      if (isSecretLikeKey(k)) throw secretFieldError(`field "${kp}"`);
       walk(v[k], kp);
     }
   };
@@ -869,8 +873,23 @@ function cardString(v, field, max, { required = false } = {}) {
   const s = v.trim();
   if (!s) throw bad(`${field} is required`);
   if ([...s].length > max) throw bad(`${field} is too long (max ${max} characters)`);
-  if (/[\u0000-\u001f\u007f]/.test(s)) throw bad(`${field} must not contain control characters`);
+  // Control (Cc) AND invisible formatting (Cf: bidi overrides like U+202E,
+  // zero-width chars, BOM) — both can make the card display something other
+  // than what will be created.
+  if (/[\p{Cc}\p{Cf}]/u.test(s)) {
+    throw bad(`${field} must not contain control or invisible formatting characters (e.g. U+202E, zero-width spaces)`);
+  }
   return s;
+}
+
+// key=value pairs of a URL fragment ("#a=1&b=2;c"), decoded best-effort.
+function fragmentKeys(hash) {
+  const frag = hash.replace(/^#/, '');
+  if (!frag) return [];
+  return frag.split(/[&;]/).map((pair) => {
+    const k = pair.split('=')[0];
+    try { return decodeURIComponent(k.replace(/\+/g, ' ')); } catch { return k; }
+  }).filter(Boolean);
 }
 
 function cardUrl(v, field) {
@@ -880,7 +899,20 @@ function cardUrl(v, field) {
   try { u = new URL(s); } catch { throw bad(`${field} must be an absolute http(s) URL`); }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') throw bad(`${field} must be an absolute http(s) URL`);
   if (u.username || u.password) throw bad(`${field} must not embed credentials`);
-  return s;
+  // A secret can also ride in the query string or the fragment
+  // (?api_key=…, #access_token=…). Name the parameter, never its value.
+  for (const name of u.searchParams.keys()) {
+    if (isSecretLikeKey(name)) throw secretFieldError(`URL query parameter "${name}" in ${field}`);
+  }
+  for (const name of fragmentKeys(u.hash)) {
+    if (isSecretLikeKey(name)) throw secretFieldError(`URL fragment parameter "${name}" in ${field}`);
+  }
+  if (u.hash) throw bad(`${field} must not have a #fragment`);
+  // Echo the parsed, normalized form so the card shows the host that will
+  // actually be used (e.g. "https://evil.com\\@good.com" → "https://evil.com/@good.com").
+  const href = u.href;
+  if ([...href].length > CREATE_CARD_LIMITS.url) throw bad(`${field} is too long (max ${CREATE_CARD_LIMITS.url} characters)`);
+  return href;
 }
 
 function rejectUnknownKeys(obj, allowed, where) {
@@ -1015,6 +1047,26 @@ function messageIdOf(resp) {
   return null;
 }
 
+// conn.auth_notice body: validate → resolve against the catalog → build → send
+// through the shared card send path. Catalog readers and `post` are injectable
+// for tests; production uses the org-scoped helpers.
+export async function runAuthNotice(p, { resolveOrg, getApplication, listApplicationsPage, post = postForOrg } = {}) {
+  const convId = requireTargetConversationId(p);
+  const apps = parseAuthNoticeApps(p);
+  const orgId = resolveOrg();
+  const connectors = await resolveAuthNoticeConnectors(apps, {
+    getApplication: getApplication
+      || ((id) => getForOrg(orgId, apiPath(`/connect/applications/${encodeURIComponent(id)}`))),
+    listApplicationsPage: listApplicationsPage || ((q, cursor) => getForOrgPage(
+      orgId, apiPath('/connect/applications'),
+      { query: q, limit: String(AUTH_NOTICE_PAGE_SIZE), ...(cursor ? { cursor } : {}) },
+    )),
+  });
+  const message = buildConnectorAuthNoticeMessage(connectors);
+  await sendConnectorCard(orgId, convId, message, post);
+  return { status: 'sent', conversation_id: convId, connectors };
+}
+
 // Validate → build → send. Validation (incl. the secret-key refusal) runs before
 // the org is resolved or anything is sent.
 export async function runCreateCard(p, { resolveOrg, post = postForOrg, cardId } = {}) {
@@ -1147,21 +1199,7 @@ const COMMANDS = {
   // conn.check → not_authorized: post the structured "go authorize" card into
   // the given conversation (see buildConnectorAuthNoticeMessage). Validation
   // runs before any request.
-  'conn.auth_notice': async () => {
-    const convId = requireTargetConversationId(params);
-    const apps = parseAuthNoticeApps(params);
-    const orgId = requireOrgId();
-    const connectors = await resolveAuthNoticeConnectors(apps, {
-      getApplication: (id) => getForOrg(orgId, apiPath(`/connect/applications/${encodeURIComponent(id)}`)),
-      listApplicationsPage: (q, cursor) => getForOrgPage(
-        orgId, apiPath('/connect/applications'),
-        { query: q, limit: String(AUTH_NOTICE_PAGE_SIZE), ...(cursor ? { cursor } : {}) },
-      ),
-    });
-    const message = buildConnectorAuthNoticeMessage(connectors);
-    await sendConnectorCard(orgId, convId, message);
-    return { status: 'sent', conversation_id: convId, connectors };
-  },
+  'conn.auth_notice': () => runAuthNotice(params, { resolveOrg: requireOrgId }),
 
   // conn.create_card {conversationId, connector:{name, slug, auth_type, icon_url?,
   // description?, base_url?}, actions:[{name, effect, summary}], application_id?}
