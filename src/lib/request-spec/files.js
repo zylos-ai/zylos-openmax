@@ -237,6 +237,8 @@ export async function resolveOneFile(paramName, rawValue, fileSpec = {}, deps = 
           throw specError(502, `file "${paramName}": artifact download failed (${err.message})`);
         }
         if (res.status >= 200 && res.status < 300) break;
+        // Release the failed response's body before resolving a new link.
+        try { await res.body?.cancel?.(); } catch { /* best effort */ }
         if (attempt >= ARTIFACT_FETCH_ATTEMPTS) throw specError(502, `file "${paramName}": artifact download failed (HTTP ${res.status})`);
       }
       bytes = await readCappedStream(res.body, cap, `file "${paramName}"`);

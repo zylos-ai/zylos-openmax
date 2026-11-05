@@ -213,11 +213,11 @@ Returns `{localPath}`, landing at `~/zylos/components/openmax/media/<filename>`.
 ### `as.resolve` details
 
 Batch-resolves URIs in the `artifact://<id>` form into short-lived download URLs. Artifacts without permission do not 403 but return partial results (listed in the `failed` field).
-These URLs are short-lived and may be single-use, like `as.url`'s (the output carries the same `notice`); never post or persist them.
+These URLs are short-lived and may be single-use, like `as.url`'s (the output carries the same `shortLived: true` and `notice`); never post or persist them.
 
 ```bash
 node src/cli/as.js as.resolve '{"uris":["artifact://art_y","artifact://art_z"]}'
-# -> {resolved:{...}, failed:[...]}
+# -> {resolved:{...}, failed:[...], shortLived:true, notice:"..."}
 ```
 
 ## Typical Flows
@@ -265,7 +265,7 @@ node src/cli/as.js as.url '{"artifactId":"art_..."}'
 
 # Batch-resolve multiple URIs (for inter-service calls)
 node src/cli/as.js as.resolve '{"uris":["artifact://art_a","artifact://art_b"]}'
-# -> {resolved:{...}, failed:[...]}
+# -> {resolved:{...}, failed:[...], shortLived:true, notice:"..."}
 ```
 
 ## Selection Comparison

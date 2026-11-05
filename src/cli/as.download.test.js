@@ -27,7 +27,7 @@ function setupHome() {
 // /api/public/artifacts/download/<ticket> redeems it once (302 to the object),
 // any later use 404s. `failFirstRedeem` makes the first ticket fail as if it
 // had already been used or had expired.
-function fakeCore({ failFirstRedeem = false } = {}) {
+function fakeCore({ failFirstRedeem = false, failAllRedeems = false } = {}) {
   const log = { resolves: 0, redeems: [], objects: 0 };
   const used = new Set();
   let base = '';
@@ -53,7 +53,7 @@ function fakeCore({ failFirstRedeem = false } = {}) {
     const m = req.url.match(/^\/api\/public\/artifacts\/download\/(\w+)$/);
     if (m) {
       log.redeems.push(m[1]);
-      if (used.has(m[1]) || (failFirstRedeem && m[1] === 't1')) {
+      if (used.has(m[1]) || failAllRedeems || (failFirstRedeem && m[1] === 't1')) {
         used.add(m[1]);
         res.statusCode = 404;
         res.end();
@@ -134,6 +134,22 @@ test('as.download re-resolves after a failed link and never re-requests it', asy
   }
 });
 
+test('as.download gives up after exactly one re-resolve when every link fails', async () => {
+  const core = fakeCore({ failAllRedeems: true });
+  const base = await core.start();
+  try {
+    const home = setupHome();
+    const r = await run(home, 'as.download', { artifactId: 'a1' }, base);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stderr, /GET 404/);
+    assert.equal(core.log.resolves, 2);
+    assert.deepEqual(core.log.redeems, ['t1', 't2']);
+    assert.equal(core.log.objects, 0);
+  } finally {
+    await core.stop();
+  }
+});
+
 test('as.url / as.resolve mark the link as short-lived and not for messages', async () => {
   const core = fakeCore();
   const base = await core.start();
@@ -148,7 +164,10 @@ test('as.url / as.resolve mark the link as short-lived and not for messages', as
     assert.match(out.notice, /as\.download/);
     const b = await run(home, 'as.resolve', { uris: ['artifact://a1'] }, base);
     assert.equal(b.code, 0, b.stderr);
-    assert.match(JSON.parse(b.stdout).notice, /Do not post it in messages/);
+    const bOut = JSON.parse(b.stdout);
+    assert.equal(bOut.shortLived, true);
+    assert.match(bOut.notice, /Do not post it in messages/);
+    assert.match(bOut.resolved['artifact://a1'].download_url, /\/download\/t2$/);
     // Resolving alone never redeems the link.
     assert.deepEqual(core.log.redeems, []);
   } finally {

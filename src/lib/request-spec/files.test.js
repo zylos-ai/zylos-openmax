@@ -206,3 +206,55 @@ test('artifact source: a failed link is not re-requested — the artifact is re-
   await assert.rejects(resolveOneFile('f', 'artifact://abc', {}, failing), { status: 502 });
   assert.deepEqual(fetched, ['https://core.example/api/public/artifacts/download/t1', 'https://core.example/api/public/artifacts/download/t2']);
 });
+
+test('artifact source: a fetch that throws (network error / bad redirect) re-resolves exactly once', async () => {
+  let n = 0;
+  const fetched = [];
+  const deps = {
+    resolveArtifact: async () => ({ url: `https://core.example/api/public/artifacts/download/t${++n}` }),
+    fetchImpl: async (url) => {
+      fetched.push(url);
+      if (url.endsWith('/t1')) throw new Error('socket hang up');
+      return { status: 200, body: new Blob([Buffer.from('ok')]).stream() };
+    },
+  };
+  const f = await resolveOneFile('f', 'artifact://abc', {}, deps);
+  assert.equal(f.bytes.toString(), 'ok');
+  assert.equal(n, 2);
+  assert.deepEqual(fetched, ['https://core.example/api/public/artifacts/download/t1', 'https://core.example/api/public/artifacts/download/t2']);
+
+  // Throws every time: 502 after exactly two fresh links.
+  n = 0;
+  fetched.length = 0;
+  const failing = { ...deps, fetchImpl: async (url) => { fetched.push(url); throw new Error('socket hang up'); } };
+  await assert.rejects(resolveOneFile('f', 'artifact://abc', {}, failing), (err) => err.status === 502 && /socket hang up/.test(err.message));
+  assert.equal(n, 2);
+  assert.equal(fetched.length, 2);
+});
+
+test('artifact source: a failed response body is released before the retry', async () => {
+  let n = 0;
+  const cancelled = [];
+  const deps = {
+    resolveArtifact: async () => ({ url: `https://core.example/api/public/artifacts/download/t${++n}` }),
+    fetchImpl: async (url) => {
+      if (url.endsWith('/t1')) {
+        return { status: 500, headers: new Headers(), body: { cancel: async () => { cancelled.push(url); } } };
+      }
+      return { status: 200, body: new Blob([Buffer.from('ok')]).stream() };
+    },
+  };
+  const f = await resolveOneFile('f', 'artifact://abc', {}, deps);
+  assert.equal(f.bytes.toString(), 'ok');
+  assert.deepEqual(cancelled, ['https://core.example/api/public/artifacts/download/t1']);
+
+  // A body whose cancel throws does not break the retry.
+  n = 0;
+  const throwingCancel = {
+    ...deps,
+    fetchImpl: async (url) => (url.endsWith('/t1')
+      ? { status: 500, headers: new Headers(), body: { cancel: async () => { throw new Error('locked'); } } }
+      : { status: 200, body: new Blob([Buffer.from('ok')]).stream() }),
+  };
+  assert.equal((await resolveOneFile('f', 'artifact://abc', {}, throwingCancel)).bytes.toString(), 'ok');
+});

@@ -84,3 +84,60 @@ test('refuses https → http downgrade, non-http schemes, loops, missing Locatio
   for (let i = 0; i < 5; i++) chain[`https://a.example/${i}`] = { status: 302, location: `https://a.example/${i + 1}` };
   await assert.rejects(fetchFollowingRedirects('https://a.example/0', { fetchImpl: scripted(chain).fetchImpl, maxRedirects: 3 }), /more than 3/);
 });
+
+function chain(n) {
+  // n redirects, then the object.
+  const routes = {};
+  for (let i = 0; i < n; i++) routes[`https://a.example/${i}`] = { status: 302, location: `https://a.example/${i + 1}` };
+  routes[`https://a.example/${n}`] = { status: 200 };
+  return scripted(routes);
+}
+
+test('default hop limit: exactly 3 redirects are followed, a 4th is refused', async () => {
+  const ok = chain(3);
+  const res = await fetchFollowingRedirects('https://a.example/0', { fetchImpl: ok.fetchImpl });
+  assert.equal(res.status, 200);
+  assert.equal(ok.calls.length, 4);
+
+  const tooMany = chain(4);
+  await assert.rejects(fetchFollowingRedirects('https://a.example/0', { fetchImpl: tooMany.fetchImpl }), /more than 3 redirects/);
+  // The 4th redirect answer is read but its target is never requested.
+  assert.deepEqual(tooMany.calls.map((c) => c.url), [0, 1, 2, 3].map((i) => `https://a.example/${i}`));
+});
+
+test('cross-origin redirect drops authorization, proxy-authorization and cookie (as fetch does); same-origin keeps them', async () => {
+  const { calls, fetchImpl } = scripted({
+    'https://core.example/t1': { status: 302, location: '/t1b' },
+    'https://core.example/t1b': { status: 302, location: 'https://store.example/obj' },
+    'https://store.example/obj': { status: 302, location: 'https://core.example/back' },
+    'https://core.example/back': { status: 200 },
+  });
+  const headers = {
+    Authorization: 'Bearer x',
+    'Proxy-Authorization': 'Basic y',
+    Cookie: 'c=1',
+    'CF-Access-Client-Id': 'id',
+    'CF-Access-Client-Secret': 's',
+  };
+  await fetchFollowingRedirects('https://core.example/t1', { headers, fetchImpl });
+  assert.deepEqual(calls[0].opts.headers, headers);
+  assert.deepEqual(calls[1].opts.headers, headers);
+  const stripped = { 'CF-Access-Client-Id': 'id', 'CF-Access-Client-Secret': 's' };
+  assert.deepEqual(calls[2].opts.headers, stripped);
+  // Once dropped they stay dropped, even back on the original origin.
+  assert.deepEqual(calls[3].opts.headers, stripped);
+  // The caller's object is not mutated.
+  assert.equal(headers.Authorization, 'Bearer x');
+});
+
+test('cross-origin stripping also works for a Headers instance', async () => {
+  const { calls, fetchImpl } = scripted({
+    'https://core.example/t1': { status: 302, location: 'https://store.example/obj' },
+    'https://store.example/obj': { status: 200 },
+  });
+  await fetchFollowingRedirects('https://core.example/t1', {
+    headers: new Headers({ authorization: 'Bearer x', cookie: 'c=1', 'cf-access-client-id': 'id' }),
+    fetchImpl,
+  });
+  assert.deepEqual(calls[1].opts.headers, { 'cf-access-client-id': 'id' });
+});

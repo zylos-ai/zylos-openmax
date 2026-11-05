@@ -365,7 +365,7 @@ const COMMANDS = {
       throw new Error('uris (non-empty array) is required');
     }
     const res = await resolveUris(params.uris, requireOrgIdFrom(params), { inline: params.inline === true });
-    return res && typeof res === 'object' ? { ...res, notice: DOWNLOAD_URL_NOTICE } : res;
+    return res && typeof res === 'object' ? { ...res, shortLived: true, notice: DOWNLOAD_URL_NOTICE } : res;
   },
 };
 
@@ -391,7 +391,7 @@ Commands
                 # process, never post it in a message, delivery, comment or memory.
 
   as.resolve    {uris:["artifact://abc-123", ...], inline?}
-                # passthrough to /artifacts/resolve → {resolved, failed, notice} (same URL rules as as.url)
+                # passthrough to /artifacts/resolve → {resolved, failed, shortLived, notice} (same URL rules as as.url)
 
 Environment:
   COCO_API_URL       cws-core base URL

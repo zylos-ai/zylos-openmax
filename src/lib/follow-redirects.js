@@ -10,9 +10,11 @@
  *   - at most `maxRedirects` hops, each a fresh URL; a URL is never requested
  *     twice (a link may be single-use);
  *   - only http(s) targets, and never a downgrade from https to http;
- *   - the same headers go to every hop (the CF Access headers are needed by the
- *     gateway that fronts both the API and the storage, and are what fetch's
- *     default follow sent before).
+ *   - the caller's headers go to every hop, as with fetch's default follow (the
+ *     CF Access headers are needed by the gateway that fronts both the API and
+ *     the storage) — except that, like fetch, `authorization`,
+ *     `proxy-authorization` and `cookie` are dropped once a redirect leaves the
+ *     origin, and stay dropped for the remaining hops.
  *
  * Returns the final response, whatever its status. A redirect without a
  * `Location`, or one that breaks the rules above, throws.
@@ -22,12 +24,21 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 export const DEFAULT_MAX_REDIRECTS = 3;
 
+// Headers fetch removes when a redirect goes to another origin.
+const CROSS_ORIGIN_DROPPED = new Set(['authorization', 'proxy-authorization', 'cookie']);
+
+function withoutCredentialHeaders(headers) {
+  const entries = headers instanceof Headers ? [...headers.entries()] : Object.entries(headers || {});
+  return Object.fromEntries(entries.filter(([k]) => !CROSS_ORIGIN_DROPPED.has(String(k).toLowerCase())));
+}
+
 export async function fetchFollowingRedirects(url, {
-  headers = {},
+  headers: initialHeaders = {},
   fetchImpl = fetch,
   maxRedirects = DEFAULT_MAX_REDIRECTS,
 } = {}) {
   let current = new URL(url);
+  let headers = initialHeaders;
   const seen = new Set();
   for (let hop = 0; ; hop++) {
     if (current.protocol !== 'https:' && current.protocol !== 'http:') {
@@ -46,6 +57,7 @@ export async function fetchFollowingRedirects(url, {
     if (current.protocol === 'https:' && next.protocol !== 'https:') {
       throw new Error('download: refusing a redirect from https to a non-https URL');
     }
+    if (next.origin !== current.origin) headers = withoutCredentialHeaders(headers);
     current = next;
   }
 }

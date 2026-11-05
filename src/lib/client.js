@@ -484,6 +484,8 @@ export async function putBytes(url, buf, contentType, extraHeaders = {}) {
 export async function getBytes(url, { fetchImpl } = {}) {
   const res = await fetchFollowingRedirects(url, { headers: cfAccessHeaders(), fetchImpl });
   if (!res.ok) {
+    // Release the failed response's body (the caller may re-resolve and retry).
+    try { await res.body?.cancel?.(); } catch { /* best effort */ }
     const err = new Error(`GET ${res.status}: ${res.statusText}`);
     err.status = res.status;
     throw err;
