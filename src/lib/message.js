@@ -321,7 +321,11 @@ Before handling the current message, invoke the openmax skill and follow it. For
     const qsender = escapeXml(quotedContent.sender || quotedContent.senderName || 'unknown');
     const qtext   = escapeXml(quotedContent.text   || quotedContent.content    || '');
     parts.push(`<replying-to>\n[${qsender}]: ${qtext}\n</replying-to>\n\n`);
-    const excerpt = formatQuotedExcerpt(quotedContent.sender || quotedContent.senderName, quotedExcerpt);
+    const excerpt = formatQuotedExcerpt(
+      quotedContent.sender || quotedContent.senderName,
+      quotedExcerpt,
+      quotedContent.text || quotedContent.content,
+    );
     if (excerpt) parts.push(`${excerpt}\n\n`);
   }
 

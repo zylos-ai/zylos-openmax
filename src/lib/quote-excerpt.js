@@ -49,11 +49,33 @@ function escapeAttr(s) {
   return escapeText(s).replace(/"/g, '&quot;').replace(/[\r\n\u2028\u2029]+/g, ' ');
 }
 
+// The FE selects rendered text, so markdown syntax is reduced to what a reader
+// sees before comparing. Applied to both sides: syntax added to a tampered
+// excerpt is stripped too, and what remains must still be in the original.
+function comparable(s) {
+  return String(s)
+    .replace(/^[ \t]*(?:```|~~~).*$/gm, '')            // code fences
+    .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')               // headings
+    .replace(/^[ \t]*>[ \t]?/gm, '')                    // blockquotes
+    .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/gm, '')     // list markers
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')           // links / images → text
+    .replace(/[*_`~]/g, '')                             // emphasis / inline code
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /**
  * Render the <quoted-excerpt> element, or '' when there is no usable excerpt
  * (a tombstone renders nothing: the quoted text was recalled).
+ *
+ * The excerpt comes from the quoting client, not from the quoted message, yet
+ * `from` names the quoted author; `unverified="true"` marks an excerpt not
+ * found in `parentText` so it cannot pass as that author's words.
  */
-export function formatQuotedExcerpt(sender, excerpt) {
+export function formatQuotedExcerpt(sender, excerpt, parentText) {
   if (excerpt?.kind !== 'excerpt') return '';
-  return `<quoted-excerpt from="${escapeAttr(sender || 'unknown')}">\n${escapeText(excerpt.text)}\n</quoted-excerpt>`;
+  const needle = comparable(excerpt.text);
+  const verified = needle !== '' && comparable(parentText ?? '').includes(needle);
+  const unverified = verified ? '' : ' unverified="true"';
+  return `<quoted-excerpt from="${escapeAttr(sender || 'unknown')}"${unverified}>\n${escapeText(excerpt.text)}\n</quoted-excerpt>`;
 }
