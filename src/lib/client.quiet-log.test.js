@@ -8,7 +8,7 @@
 
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { putForOrg, postForOrg, setApiKey, setBaseUrl, setHeaders } from './client.js';
+import { getForOrg, putForOrg, postForOrg, setApiKey, setBaseUrl, setHeaders } from './client.js';
 
 // Isolate stdout logging: keep RPC stdout on, file sink off.
 const savedEnv = {};
@@ -95,4 +95,20 @@ test('postForOrg forwards quietOnSuccess: 2xx suppressed', async () => {
   globalThis.fetch = async () => fakeResponse(200, { data: { triggered: false }, request_id: 'r1' });
   await postForOrg('org-1', '/api/v1/agents/m-1/online-report', undefined, { quietOnSuccess: true });
   assert.equal(logs.filter((l) => l.includes('[rpc]')).length, 0);
+});
+
+test('quietStatuses: a listed error status is not printed to stdout; others still warn', async () => {
+  globalThis.fetch = async () => fakeResponse(404, { error: { detail: 'not found' } });
+  await assert.rejects(
+    () => getForOrg('org-1', '/api/v1/agents/m-1/market-client', undefined, { quietOnSuccess: true, quietStatuses: [404] }),
+    (err) => err.status === 404,
+  );
+  assert.equal([...logs, ...warns].filter((l) => l.includes('[rpc]')).length, 0);
+
+  globalThis.fetch = async () => fakeResponse(500, { error: { detail: 'boom' } });
+  await assert.rejects(
+    () => getForOrg('org-1', '/api/v1/agents/m-1/market-client', undefined, { quietOnSuccess: true, quietStatuses: [404] }),
+    /boom/,
+  );
+  assert.equal(warns.filter((l) => l.includes('[rpc] ←') && l.includes('resp 500')).length, 1);
 });
