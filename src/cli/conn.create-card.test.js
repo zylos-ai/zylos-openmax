@@ -194,6 +194,73 @@ test('parseCreateCardInput: emoji ZWJ / tag sequences allowed only where valid; 
   rejects400(withConnector({ slug: 'a‍b' }), /connector\.slug/);
 });
 
+test('parseCreateCardInput: flag tag sequences — only 🏴 + 3–6 digit/lowercase tags + U+E007F', () => {
+  const tag = (str) => [...str].map((c) => String.fromCodePoint(0xE0000 + c.codePointAt(0))).join('');
+  const flag = (str, end = '\u{E007F}', base = '\u{1F3F4}') => `${base}${tag(str)}${end}`;
+  for (const ok of ['gbeng', 'gbsct', 'gbwls', 'usca', 'fr75c', 'abc', 'abcdef']) {
+    assert.doesNotThrow(() => parseCreateCardInput(withConnector({ name: `X ${flag(ok)}` })), ok);
+  }
+  const bad = [
+    flag('ab'), //             too short
+    flag('abcdefg'), //        too long
+    flag('GBSCT'), //          uppercase tags (U+E0041–E005A)
+    flag('gb-ct'), //          hyphen tag U+E002D
+    flag('gb ct'), //          space tag U+E0020
+    flag('gbsct', ''), //      no terminator
+    flag('gbsct', '', '\u{1F3F4}') + '\u{E0020}',
+    flag('gbsct', '\u{E007F}', '\u{1F600}'), // B3: sequence after 😀, not 🏴
+    flag('gbsct', '\u{E007F}', 'a'),
+    '\u{E007F}', //            lone terminator
+  ];
+  for (const v of bad) {
+    rejects400(withConnector({ name: `X ${v}` }), /invisible formatting/);
+    rejects400(withConnector({ description: v }), /invisible formatting/);
+    rejects400(withAction({ summary: v }), /invisible formatting/);
+  }
+});
+
+test('parseCreateCardInput: ZWJ needs an emoji on BOTH sides (B6: letter + ZWJ + emoji)', () => {
+  for (const v of ['a‍\u{1F468}', '\u{1F468}‍a', '1‍\u{1F468}', '‍\u{1F468}', '\u{1F468}‍‍\u{1F469}']) {
+    rejects400(withConnector({ name: v }), /invisible formatting/);
+    rejects400(withConnector({ description: v }), /invisible formatting/);
+    rejects400(withAction({ summary: v }), /invisible formatting/);
+  }
+});
+
+test('parseCreateCardInput: non-Cf default-ignorables refused; VS16 only right after an emoji', () => {
+  const ignorables = ['ㅤ', 'ᅟ', 'ᅠ', 'ﾠ', '᠋', '᠌', '᠍', '᠏', '͏',
+    '︀', '︎', '\u{E0100}'];
+  for (const c of ignorables) {
+    for (const mk of [(v) => withConnector({ name: v }), (v) => withConnector({ description: v }),
+      (v) => withAction({ summary: v }), (v) => withAction({ name: v })]) {
+      assert.throws(() => parseCreateCardInput(mk(`a${c}b`)), (e) => e.status === 400, `U+${c.codePointAt(0).toString(16)}`);
+    }
+    rejects400(withConnector({ name: c }), /invisible formatting/); // a name made only of a Hangul filler
+  }
+  // VS16 after an emoji (❤️, 1️⃣ keycap) ok in text; elsewhere refused
+  for (const ok of ['❤️', '1️⃣', '\u{1F3F3}️']) {
+    assert.doesNotThrow(() => parseCreateCardInput(withConnector({ name: `X ${ok}` })), ok);
+  }
+  for (const v of ['a️', '️', '❤️️']) rejects400(withConnector({ name: v }), /invisible formatting/);
+  rejects400(withAction({ name: 'list️' }), /invisible formatting/);
+});
+
+test('parseCreateCardInput: ZWNJ in description after a letter or mark, before a letter (Hindi, Persian, Arabic)', () => {
+  const samples = [
+    'क्‌ष', //            Devanagari: ka + virama (Mn) + ZWNJ + ssa
+    'स्‌त्री',
+    'می‌خواهم', //        Persian
+    'مِ‌ن', //            Arabic letter + kasra (Mn) + ZWNJ + letter
+  ];
+  for (const v of samples) {
+    assert.equal(parseCreateCardInput(withConnector({ description: v })).connector.description, v, v);
+    rejects400(withConnector({ name: v }), /invisible formatting/);
+  }
+  for (const v of ['‌क', 'क‌', 'क‌1', '1‌क', '\u{1F600}‌क', 'क‌́']) {
+    rejects400(withConnector({ description: v }), /invisible formatting/);
+  }
+});
+
 test('parseCreateCardInput: action-name duplicates detected after NFKC + default-ignorable stripping', () => {
   const two = (n0, n1) => valid({ actions: [{ name: n0, effect: 'read', summary: 's' }, { name: n1, effect: 'write', summary: 's' }] });
   rejects400(two('list', 'list\u{E0020}'), /invisible formatting/); // the invisible variant never gets in

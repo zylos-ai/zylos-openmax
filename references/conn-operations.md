@@ -429,15 +429,18 @@ an AWS key id (`AKIA…` / `ASIA…`), each only with a realistic body length, s
 "long random string" rule (it would block Google Drive / Notion ids), so this is
 a best-effort check, not a guarantee. URLs are echoed in normalized form (the
 parsed `href`, so the card shows the real host). No control, invisible
-formatting or line-separator characters (Unicode Cc / Cf such as U+202E, U+200B,
-U+FEFF, tag characters, U+2028 / U+2029) in any field, with narrow exceptions
-for emoji: in `connector.name`, `connector.description` and `actions[].summary`
-a ZWJ is allowed only between two emoji (👨‍👩‍👧, 🏳️‍🌈) and tag characters only
-inside a complete flag tag sequence (🏴 … U+E007F, e.g. 🏴󠁧󠁢󠁳󠁣󠁴󠁿); ZWNJ is
-allowed only in `connector.description`, between two letters (Persian, Indic
-scripts). `slug`, `actions[].name` and URLs allow none of them. Action names are
-compared for duplicates after NFKC and removing default-ignorable characters
-(`ＬＩＳＴ` = `list`);
+formatting, default-ignorable or line-separator characters (Unicode Cc / Cf such
+as U+202E, U+200B, U+FEFF, tag characters; Hangul fillers U+115F / U+1160 /
+U+3164 / U+FFA0; variation selectors U+FE00–FE0F, U+180B–180F, U+E0100–E01EF;
+U+2028 / U+2029) in any field, with narrow exceptions for emoji and scripts in
+`connector.name`, `connector.description` and `actions[].summary`: VS16 (U+FE0F)
+right after an emoji (❤️, 1️⃣); a ZWJ only between two emoji (👨‍👩‍👧, 🏳️‍🌈); tag
+characters only in a subdivision flag — 🏴, then 3–6 digit / lowercase-letter
+tags, then U+E007F (🏴󠁧󠁢󠁳󠁣󠁴󠁿); and, in `connector.description` only, a ZWNJ after
+a letter or combining mark and before a letter (Hindi, Persian, Arabic). `slug`,
+`actions[].name` and URLs allow none of them. Action names are compared for
+duplicates after NFKC (folds full-width and other compatibility forms:
+`ＬＩＳＴ` = `list`), removal of default-ignorables, and lower-casing;
 `description` ≤500; 1–50 actions, each `name` ≤100 without `/` and unique,
 `effect` `read` | `write`, `summary` ≤200; unknown fields refused. **Any
 secret-like key anywhere in the input** (`api_key`, `secret`, `client_secret`,
@@ -445,6 +448,10 @@ secret-like key anywhere in the input** (`api_key`, `secret`, `client_secret`,
 any depth) is refused with `400 secret_field_rejected` and nothing is sent. The
 input is checked for secret-like fields on a best-effort basis — it cannot catch
 every secret, so never put credentials in any field or URL yourself.
+Known limitations (accepted): secret / token detection is best-effort, and
+look-alike letters from different scripts (Cyrillic `а` vs Latin `a`) are not
+detected, so two action names can still look alike on the card — keep names
+plain ASCII.
 Returns `{ status: "sent", conversation_id, card_id, message_id, connector: {name, slug, auth_type}, actions_total }`.
 Keep `card_id` (and the slug / actions) for step 3.
 

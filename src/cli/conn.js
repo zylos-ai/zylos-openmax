@@ -904,57 +904,72 @@ function cardString(v, field, max, { required = false, joiners = 'none' } = {}) 
 }
 
 // Control (Cc), invisible formatting (Cf: bidi controls U+200E/F, U+202A–202E,
-// U+2066–2069, U+200B, U+2060–2064, BOM, tag characters, …) and the line /
-// paragraph separators U+2028 / U+2029 can make the card display something
-// other than what will be created, so they are refused. The only exceptions,
-// by field (`joiners`):
+// U+2066–2069, U+200B, U+2060–2064, BOM, tag characters, …), every other
+// Default_Ignorable_Code_Point that renders as nothing (Hangul fillers U+115F,
+// U+1160, U+3164, U+FFA0; Mongolian variation selectors U+180B–180F; variation
+// selectors U+FE00–FE0F / U+E0100–E01EF; U+034F; …) and the line / paragraph
+// separators U+2028 / U+2029 can make the card display something other than
+// what will be created, so they are refused. The only exceptions, by field
+// (`joiners`):
 //   'none'  — slug, action names, URLs: no exception at all.
-//   'emoji' — connector name, action summary: ZWJ U+200D only BETWEEN two
-//             emoji (Extended_Pictographic, optionally followed by VS16 /
-//             a skin-tone modifier, e.g. 👨‍👩‍👧, 🏳️‍🌈), and tag characters
-//             U+E0020–U+E007E only inside a complete emoji tag sequence:
-//             U+1F3F4 + tags + U+E007F (subdivision flags like 🏴󠁧󠁢󠁳󠁣󠁴󠁿).
-//   'text'  — description: 'emoji' plus ZWNJ U+200C between two letters
-//             (Persian, Indic scripts need it). ZWNJ is refused elsewhere.
+//   'emoji' — connector name, action summary:
+//             * VS16 U+FE0F directly after an emoji character (❤️, 1️⃣);
+//             * ZWJ U+200D only BETWEEN two emoji (Extended_Pictographic,
+//               optionally followed by VS16 / a skin-tone modifier, e.g.
+//               👨‍👩‍👧, 🏳️‍🌈);
+//             * tag characters only in a complete subdivision-flag sequence:
+//               U+1F3F4, then 3–6 tags from U+E0030–E0039 / U+E0061–E007A
+//               (digits / lowercase letters), then U+E007F (🏴󠁧󠁢󠁳󠁣󠁴󠁿).
+//   'text'  — description: 'emoji' plus ZWNJ U+200C after a letter or mark
+//             ([\p{L}\p{M}], e.g. a Devanagari virama or Arabic harakat) and
+//             before a letter (Persian, Indic scripts). ZWNJ is refused elsewhere.
+// Known limitation: look-alike letters from different scripts (Cyrillic "а" vs
+// Latin "a") are not detected.
 const PICTO_RE = /\p{Extended_Pictographic}/u;
+const EMOJI_RE = /\p{Emoji}/u;
 const LETTER_RE = /\p{L}/u;
-const isTag = (cp) => cp >= 0xE0020 && cp <= 0xE007F;
+const LETTER_OR_MARK_RE = /[\p{L}\p{M}]/u;
+const INVISIBLE_RE = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\u2028\u2029]/u;
+const isFlagTag = (cp) => (cp >= 0xE0030 && cp <= 0xE0039) || (cp >= 0xE0061 && cp <= 0xE007A);
 const isEmojiTail = (cp) => cp === 0xFE0F || (cp >= 0x1F3FB && cp <= 0x1F3FF);
 function hasForbiddenChar(s, joiners = 'none') {
-  const cps = [...s].map((ch) => ch.codePointAt(0));
+  const cps = [...s].map((c) => c.codePointAt(0));
   const ch = (cp) => (cp === undefined ? '' : String.fromCodePoint(cp));
   const allowed = new Set();
   if (joiners !== 'none') {
     for (let i = 0; i < cps.length; i += 1) {
-      // complete tag sequence: 🏴 + ≥1 tag (E0020–E007E) + cancel tag E007F
-      if (cps[i] === 0x1F3F4) {
+      const cp = cps[i];
+      if (cp === 0x1F3F4) {
         let j = i + 1;
-        while (j < cps.length && cps[j] >= 0xE0020 && cps[j] <= 0xE007E) j += 1;
-        if (j > i + 1 && cps[j] === 0xE007F) { for (let k = i + 1; k <= j; k += 1) allowed.add(k); i = j; }
+        while (j < cps.length && isFlagTag(cps[j])) j += 1;
+        const n = j - (i + 1);
+        if (n >= 3 && n <= 6 && cps[j] === 0xE007F) { for (let k = i + 1; k <= j; k += 1) allowed.add(k); i = j; }
         continue;
       }
-      if (cps[i] === 0x200D) {
+      if (cp === 0xFE0F) {
+        if (EMOJI_RE.test(ch(cps[i - 1]))) allowed.add(i);
+        continue;
+      }
+      if (cp === 0x200D) {
         let b = i - 1;
         while (b >= 0 && isEmojiTail(cps[b])) b -= 1;
         if (b >= 0 && PICTO_RE.test(ch(cps[b])) && PICTO_RE.test(ch(cps[i + 1]))) allowed.add(i);
         continue;
       }
-      if (cps[i] === 0x200C && joiners === 'text'
-        && LETTER_RE.test(ch(cps[i - 1])) && LETTER_RE.test(ch(cps[i + 1]))) allowed.add(i);
+      if (cp === 0x200C && joiners === 'text'
+        && LETTER_OR_MARK_RE.test(ch(cps[i - 1])) && LETTER_RE.test(ch(cps[i + 1]))) allowed.add(i);
     }
   }
   for (let i = 0; i < cps.length; i += 1) {
-    const cp = cps[i];
-    if (cp === 0x2028 || cp === 0x2029) return true;
-    if (!/[\p{Cc}\p{Cf}]/u.test(ch(cp)) && !isTag(cp)) continue;
-    if (!allowed.has(i)) return true;
+    if (INVISIBLE_RE.test(ch(cps[i])) && !allowed.has(i)) return true;
   }
   return false;
 }
 
-// Identity of an action name for duplicate detection: NFKC (full-width and
-// compatibility forms fold), default-ignorable code points removed, lower-cased
-// — so visually identical variants collide.
+// Duplicate-detection key for action names: NFKC folds compatibility forms
+// (full-width letters, ligatures, …), default-ignorable code points are removed
+// (defensive — validation already refuses them in action names), then
+// lower-cased. Cross-script look-alikes (Cyrillic vs Latin) still differ.
 export function actionNameKey(name) {
   return name.normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
 }
