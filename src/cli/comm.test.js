@@ -651,6 +651,48 @@ test('comm.ask form: a caller clientMsgId stays the form key and the claim key; 
   });
 });
 
+test('comm.send noRun: no agent_run and no claim, even with a live run; the default still attaches', async () => {
+  await withLiveRun(async (store) => {
+    const { requests, ok } = await runAgainstFlakyServer('comm.send', { conversationId: RUN_CONV, content: 'notice', noRun: true }, { failures: 0 });
+    assert.equal(ok, true);
+    assert.equal('agent_run' in requests[0].body, false);
+    assert.equal('noRun' in requests[0].body, false);
+    assert.equal(store.claimExists('r_000000c1'), false);
+    const dflt = await runAgainstFlakyServer('comm.send', { conversationId: RUN_CONV, content: 'reply', noRun: false }, { failures: 0 });
+    assert.equal(dflt.requests[0].body.agent_run.run_id, 'r_000000c1');
+    assert.equal(store.readClaim('r_000000c1').client_msg_id, dflt.requests[0].body.client_msg_id);
+  });
+});
+
+test('comm.send_card / ask_card / ask noRun: no agent_run and no claim, even with a live run', async () => {
+  const form = {
+    conversationId: RUN_CONV, kind: 'k', askedOf: 'm-owner', title: '两个问题', noRun: true,
+    fields: [{ key: 'who', label: '谁来用？', options: ['内部', '外部'] }],
+  };
+  for (const [command, params] of [
+    ['comm.send_card', plainCard({ noRun: true })],
+    ['comm.ask_card', plainCard({ kind: 'k', askedOf: 'm-owner', noRun: true })],
+    ['comm.ask', plainCard({ kind: 'k', askedOf: 'm-owner', interactionType: 'choice', noRun: true })],
+    ['comm.ask', form],
+  ]) {
+    await withLiveRun(async (store) => {
+      const { requests } = await runAgainstFlakyServer(command, params, { failures: 0 });
+      const post = requests.find((r) => r.url.endsWith('/interaction-requests'));
+      assert.ok(post, command);
+      assert.equal('agent_run' in post.body, false, command);
+      assert.equal('noRun' in post.body, false, command);
+      assert.equal(store.claimExists('r_000000c1'), false, command);
+    });
+  }
+});
+
+test('noRun must be a boolean', async () => {
+  const { requests, ok, failure } = await runAgainstFlakyServer('comm.send', { conversationId: RUN_CONV, content: 'x', noRun: 'yes' }, { failures: 0 });
+  assert.equal(ok, false);
+  assert.equal(requests.length, 0);
+  assert.match(JSON.stringify(failure), /noRun must be a boolean/);
+});
+
 test('onboarding cards carry no agent_run even with a live run', async () => {
   await withLiveRun(async (store) => {
     const { requests } = await runAgainstFlakyServer('comm.send_card', { ...onboardingTaskCard, conversationId: RUN_CONV }, { failures: 0 });

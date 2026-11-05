@@ -420,6 +420,21 @@ test('comm CLI reply verbs mark the owner replying in that conversation; a send 
   assert.deepEqual(kinds(b), ['tool:command']);
 });
 
+test('a noRun comm CLI send neither replies to nor closes the run, nor pauses attribution', () => {
+  const { attr, mkRun, finishes } = harness();
+  const a = mkRun('r_0000000a', CONV_A);
+  attr.handle(input('user', omBody(a)));
+  attr.handle(toolStart('t1', 'Bash', { command: `node src/cli/comm.js comm.send_card '{"conversationId":"${CONV_A}","title":"t","noRun":true}'` }));
+  attr.handle(toolStart('t2', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_B}","content":"notice","noRun":true}'` }));
+  assert.equal(a.state, 'active');
+  assert.equal(attr.turn.focus, a);
+  assert.deepEqual(kinds(a), ['tool:command', 'tool:command']);
+  attr.handle(toolStart('t3', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","content":"done"}'` }));
+  assert.equal(a.state, 'replied');
+  attr.handle({ t: 'turn_end', at: 1 });
+  assert.deepEqual(finishes, [['r_0000000a', 'done', null]]);
+});
+
 test('comm CLI reply matches the thread reply conversation', () => {
   const { attr, mkRun } = harness();
   const a = mkRun('r_0000000a', CONV_A, { endpoint: `${CONV_A}|thread:${CONV_B}|parent:9` });

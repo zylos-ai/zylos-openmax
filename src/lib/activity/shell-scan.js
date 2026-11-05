@@ -293,14 +293,17 @@ export function splitCommands(t) {
   return commands;
 }
 
-function topLevelConversationId(json) {
+function topLevelArgs(json) {
   try {
     const v = JSON.parse(json);
-    if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return { id: null, noRun: false };
     const id = v.conversationId;
-    return typeof id === 'string' && CONVERSATION_ID_RE.test(id) ? id : null;
+    return {
+      id: typeof id === 'string' && CONVERSATION_ID_RE.test(id) ? id : null,
+      noRun: v.noRun === true,
+    };
   } catch {
-    return null;
+    return { id: null, noRun: false };
   }
 }
 
@@ -741,7 +744,10 @@ function analyze(t, depth, inherited = {}) {
       accountHeredocs(cmd);
       if (!COMM_REPLY_COMMANDS.has(verb.value)) continue;
       const arg = args[0];
-      const id = arg && arg.value !== null && args.length === 1 ? topLevelConversationId(arg.value) : null;
+      const { id, noRun } = arg && arg.value !== null && args.length === 1 ? topLevelArgs(arg.value) : { id: null, noRun: false };
+      // A literal noRun send is a system notice, not a reply: no run is
+      // replied or closed on it, and attribution is not paused.
+      if (noRun) continue;
       pushComm({ command: verb.value, conversationId: id });
     }
   }

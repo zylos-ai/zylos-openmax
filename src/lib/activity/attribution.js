@@ -16,7 +16,8 @@
  *          <endpoint>, or comm.js comm.send / send_card / ask_card / ask
  *          {"conversationId": …} in the log) → that run is replied; focus is
  *          recomputed by ④. A comm CLI send to a conversation no owner of the
- *          turn replies to counts as ③.
+ *          turn replies to counts as ③; one with a literal "noRun": true is
+ *          neither a reply nor ③.
  *       ④ not foreign and every owner in one conversation → the earliest
  *          unreplied owner
  *   - turn end: replied owners → done; the others get 120 s to reply, then

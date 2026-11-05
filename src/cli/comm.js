@@ -368,6 +368,14 @@ function buildSendBody(params) {
   };
 }
 
+// `noRun: true` marks a system-originated notice: it is no run's reply, so it
+// carries no agent_run and claims no run. Only a real boolean is accepted.
+function readNoRun(params, verb) {
+  const v = params.noRun;
+  if (v !== undefined && typeof v !== 'boolean') throw new Error(`${verb}: noRun must be a boolean`);
+  return v === true;
+}
+
 // comm.ask_card, and comm.ask with interactionType "choice". `params` is the
 // verb's own object, shadowing the module-level one so both verbs read what
 // they were given. Messages name the verb that was called.
@@ -380,7 +388,8 @@ async function askChoice(params, verb) {
   // builder refuses all three — `kind` included, because the card family is
   // `cardKind` there. Passing them through made this verb throw on its own
   // required argument.
-  const { kind, askedOf, meta, ...cardParams } = params;
+  const noRun = readNoRun(params, verb);
+  const { kind, askedOf, meta, noRun: _noRun, ...cardParams } = params;
   const request = buildChoiceRequest(cardParams);
   assertAnswerable(request, verb);
   // onboarding.channel: refuse a card whose options are not exactly
@@ -392,7 +401,7 @@ async function askChoice(params, verb) {
   }, verb);
   // Agent activity (as comm.send_card). A caller-kept clientMsgId stays the
   // card's key, so a resend after a lost response stays one card.
-  const plan = attachRunToCardRequest({
+  const plan = noRun ? null : attachRunToCardRequest({
     convId: params.conversationId,
     request,
     clientMsgIdSupplied: cardParams.clientMsgId !== undefined,
@@ -676,13 +685,14 @@ const COMMANDS = {
     if (!Array.isArray(params.mentions) && needsRosterHydration(outboundText(params), params.conversationId)) {
       console.warn(`[comm.send] unresolvable @mention in conversation ${params.conversationId}; sending without a structured mention`);
     }
+    const noRun = readNoRun(params, 'comm.send');
     const body = buildSendBody(params);
     // Agent activity: a send into a conversation with a live run is that run's
     // reply, exactly like scripts/send.js — agent_run attached here
     // (never by the caller), claim keyed by this body's client_msg_id.
     // Retry hash = the whole semantic body (type, content, parent_id,
     // mentions …), not only the text: see semanticBodyHash.
-    const plan = attachRunMetadata({
+    const plan = noRun ? null : attachRunMetadata({
       convId: params.conversationId,
       kind: body.content?.content_type === 'image' || body.content?.content_type === 'file' ? 'media' : 'text',
       body,
@@ -725,8 +735,10 @@ const COMMANDS = {
   //   Agent activity: the card carries agent_run like a reply
   //   (onboarding cards excluded) — see attachRunToCardRequest.
   'comm.send_card': async () => {
-    const request = buildChoiceRequest(params);
-    const plan = attachRunToCardRequest({
+    const noRun = readNoRun(params, 'comm.send_card');
+    const { noRun: _noRun, ...cardParams } = params;
+    const request = buildChoiceRequest(cardParams);
+    const plan = noRun ? null : attachRunToCardRequest({
       convId: params.conversationId,
       request,
       clientMsgIdSupplied: params.clientMsgId !== undefined,
@@ -763,7 +775,8 @@ const COMMANDS = {
     const { interactionType, ...rest } = params;
     const type = resolveInteractionType(params);
     if (type === 'choice') return askChoice(rest, 'comm.ask');
-    const { kind, askedOf, meta, ...card } = rest;
+    const noRun = readNoRun(rest, 'comm.ask');
+    const { kind, askedOf, meta, noRun: _noRun, ...card } = rest;
     const asked = hasAskedOf(askedOf) ? askedOf : card.answerers;
     if (!kind || !hasAskedOf(asked)) {
       throw new Error('comm.ask: kind and askedOf (or answerers) are required — an answer with neither cannot be acted on');
@@ -778,7 +791,7 @@ const COMMANDS = {
         const conv = await get(apiPath(`/conversations/${id}`), undefined, { timeoutMs });
         return conv?.type || conv?.data?.type;
       },
-      attachRun: (request) => attachRunToCardRequest({
+      attachRun: noRun ? null : (request) => attachRunToCardRequest({
         convId: params.conversationId,
         request,
         clientMsgIdSupplied: card.clientMsgId !== undefined,
@@ -978,10 +991,13 @@ Conversation members (owner/admin only; pass {org} for multi-org installs)
   comm.leave                {conversationId, newOwnerId?, org?}                     # POST .../leave
 
 Messages
-  comm.send                 {conversationId, content, replyTo?, clientMsgId?, mentions?}
+  comm.send                 {conversationId, content, replyTo?, clientMsgId?, mentions?, noRun?}
+                            # noRun:true — system-originated notice, not a reply: no agent_run,
+                            #   and the run log does not count it as a reply. Also on send_card,
+                            #   ask_card and ask. Never for an answer to the user
                             # content: string | {text|body, markdown?} | {type,body} | [{type,body}]
                             # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
-  comm.ask                  {conversationId, interactionType?, kind, askedOf?, meta?, ...card}
+  comm.ask                  {conversationId, interactionType?, kind, askedOf?, meta?, noRun?, ...card}
                             # THE entry for a question you intend to act on.
                             #   interactionType "form"   — choice form (select, then submit once):
                             #     {title, summary, text?|blocks?, fields:[{key, label, description?,
@@ -1010,7 +1026,7 @@ Messages
                             #   omitted: fields → form, options → choice; both → refused
                             # replying to a routed message? same JSON as a [CARD]{...} body
                             #   (fields → form, options → quick reply). See references/comm-operations.md
-  comm.ask_card             {conversationId, title, summary?, options, kind, askedOf, text?|blocks?, confirm?, cardKind?, meta?}
+  comm.ask_card             {conversationId, title, summary?, options, kind, askedOf, text?|blocks?, confirm?, cardKind?, meta?, noRun?}
                             # alias of comm.ask with interactionType "choice"
                             # send a choice card AND record what was asked, so the later receipt
                             #   can be decoded. Prefer this over comm.send_card for any question
@@ -1065,7 +1081,7 @@ Messages
   comm.pending              {}                                   # questions still awaiting an answer
   comm.pending_clear        {cardMessageId} | {conversationId, groupId}  # forget one that has been dealt with;
                             #   a split-group card only as the whole group (conversationId required)
-  comm.send_card            {conversationId, title, summary?, text?|blocks?, options, confirm?, cardKind?, clientMsgId?}
+  comm.send_card            {conversationId, title, summary?, text?|blocks?, options, confirm?, cardKind?, clientMsgId?, noRun?}
                             # cardKind picks an onboarding card family: onboarding.task |
                             #   onboarding.channel | onboarding.partner (omitted = plain choice card).
                             #   NOT "kind" — that is ask_card's "what the question is for"
