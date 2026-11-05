@@ -38,6 +38,16 @@ export function classifySystemEvent(eventName) {
 }
 
 /**
+ * A `message.updated` whose `data.cause` is set is a change the sender did not
+ * make (e.g. "quote_excerpt_recalled": cws-comm tombstoned a quoted excerpt);
+ * body and edited_at are unchanged, so it must not reach the agent as an edit.
+ */
+export function isSenderlessUpdate(payload) {
+  const cause = payload?.data?.cause;
+  return typeof cause === 'string' && cause !== '';
+}
+
+/**
  * Handle an IM-owner notice system frame in code (never forwarded to C4 / the
  * model, never arrears-gated). Returns true when the frame was an IM-owner
  * notice (handled or dropped as malformed), false for any other event.
