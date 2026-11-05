@@ -50,18 +50,25 @@ function escapeAttr(s) {
 }
 
 // The FE selects rendered text, so markdown syntax is reduced to what a reader
-// sees before comparing. Applied to both sides: syntax added to a tampered
-// excerpt is stripped too, and what remains must still be in the original.
-function comparable(s) {
+// sees before comparing. The excerpt side only drops marker characters: the
+// rules that delete content (fence lines, link targets) run on the original
+// alone, or they would hide arbitrary text inside a tampered excerpt.
+function stripMarkers(s) {
   return String(s)
-    .replace(/^[ \t]*(?:```|~~~).*$/gm, '')            // code fences
     .replace(/^[ \t]*#{1,6}[ \t]+/gm, '')               // headings
     .replace(/^[ \t]*>[ \t]?/gm, '')                    // blockquotes
     .replace(/^[ \t]*(?:[-*+]|\d+[.)])[ \t]+/gm, '')     // list markers
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')           // links / images → text
     .replace(/[*_`~]/g, '')                             // emphasis / inline code
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function renderedText(markdown) {
+  return stripMarkers(String(markdown)
+    .replace(/^[ \t]*(?:```|~~~).*$/gm, '')            // code fences
+    .replace(/^[ \t]*(?:[-*_=][ \t]*){3,}$/gm, '')      // rules, setext underlines
+    // No `[` / `(` inside the classes: keeps it linear on input with many `[`.
+    .replace(/!?\[([^[\]]*)\]\([^()]*\)/g, '$1'));      // links / images → text
 }
 
 /**
@@ -74,8 +81,8 @@ function comparable(s) {
  */
 export function formatQuotedExcerpt(sender, excerpt, parentText) {
   if (excerpt?.kind !== 'excerpt') return '';
-  const needle = comparable(excerpt.text);
-  const verified = needle !== '' && comparable(parentText ?? '').includes(needle);
+  const needle = stripMarkers(excerpt.text);
+  const verified = needle !== '' && renderedText(parentText ?? '').includes(needle);
   const unverified = verified ? '' : ' unverified="true"';
   return `<quoted-excerpt from="${escapeAttr(sender || 'unknown')}"${unverified}>\n${escapeText(excerpt.text)}\n</quoted-excerpt>`;
 }
