@@ -199,6 +199,9 @@ Two invariants hold for every verb here (they mirror the rest of `conn.*`):
   that value at your OAuth provider. (Use **`conn.callback`** to fetch it *before*
   creating the connector so you can register it in the provider's OAuth app first.)
 
+**Creating a new connector for a user needs the owner's confirmation first:** send
+`conn.create_card` and wait (see "Creating a custom connector for a user" below).
+
 ### conn.app_create
 Create a custom connector application.
 
@@ -360,6 +363,93 @@ is a draft-07 JSON Schema **string**). Fill `description` for every action (requ
 non-empty). Each action `name` is just the action segment (e.g. `list_repos`) — the
 server prepends the connector slug to form the stored `{slug}/{name}`, so submit the bare
 action name, not `slug/name`.
+
+### Creating a custom connector for a user — confirmation card first (`conn.create_card`)
+
+Before you create a **new** custom connector for a user (`conn.app_import`, or
+`conn.app_create` followed by `conn.actiondef_create`), the owner confirms it on a
+card. Never create first and ask afterwards.
+
+**1. Prepare the spec.** Connector `name` (display name), an explicit `slug`, the
+`auth_type` (`api_key` | `oauth2` | `mcp`), optional `icon_url` / `description` /
+`base_url`, and the actions you will import: for each one its bare `name` (the
+action segment, e.g. `list_contacts`, no `slug/`), whether it **reads** or
+**writes** (`effect`), and a one-line `summary` the user can understand. Also
+draft the full action-defs (method, url_template, description, input_schema) you
+will pass to `conn.app_import` — the card shows only name / effect / summary.
+Choose the slug yourself and keep it: lowercase letters/digits joined by `-`
+(e.g. `acme-crm`, or the server's style `acme-crm-k3wujp` to avoid a clash); the
+same slug goes to `conn.app_import`, because the card finds the created app by it.
+
+**2. Send the card (creates nothing).**
+
+```bash
+node src/cli/conn.js conn.create_card '{"conversationId":"<conversation-id from <message-context>>","connector":{"name":"Acme CRM","slug":"acme-crm","auth_type":"oauth2","description":"Acme 客户管理","base_url":"https://api.acme.example.com/v1"},"actions":[{"name":"list_contacts","effect":"read","summary":"列出联系人"},{"name":"create_contact","effect":"write","summary":"新建联系人"}]}'
+```
+
+Optional `application_id` (UUID) when the application already exists. Strict
+validation, all before anything is sent (`400`): required `name` (≤100) / `slug`
+(`^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$`) / `auth_type`; `icon_url` and
+`base_url` absolute http(s) URLs without embedded credentials (≤2048);
+`description` ≤500; 1–50 actions, each `name` ≤100 without `/` and unique,
+`effect` `read` | `write`, `summary` ≤200; unknown fields refused. **Any
+secret-like key anywhere in the input** (`api_key`, `secret`, `client_secret`,
+`oauth_client_secret`, `token`, `password`, `private_key`, `authorization`, …, at
+any depth) is refused with `400 secret_field_rejected` and nothing is sent — the
+card never carries a secret.
+Returns `{ status: "sent", conversation_id, card_id, message_id, connector: {name, slug, auth_type}, actions_total }`.
+Keep `card_id` (and the slug / actions) for step 3.
+
+The message is `AGENT_STRUCTURED`, `content_type: "connector_create_card"`, body
+schema `openmax.connector-create.v1` = `{schema, card_id, connector, actions,
+application_id?, fallback_text}`, plus a compact copy in
+`metadata.connector_create_card` (`schema`, `card_id`, `connector{name, slug,
+auth_type, icon_url?}`, `actions[]`, `application_id?`). A client without the
+renderer shows `fallback_text` (name, slug, auth type, each action with 读/写, and
+the reply words).
+
+**3. Wait for the owner's reply.** The card's buttons post an ordinary user
+message, 「确认创建 {name}」 or 「我要改 {name}」, carrying metadata
+`{connector_create_card_id, action: "confirm" | "revise", ref_message_id}` when
+the client sends it (a typed 「确认创建 Acme CRM」 with no metadata counts the same
+way, matched by name to your latest card).
+- **Only your owner (or an org admin) can confirm.** Custom connectors are
+  org-level, the same rule as adding connections. A click or reply by anyone
+  else is not authorized: do not create; tell them your owner needs to confirm.
+- Match `connector_create_card_id` to the `card_id` you sent. A confirmation of
+  a card you have since replaced does not count: ask them to confirm the latest
+  card.
+
+**4. On confirm — create it.** `conn.app_import` with `application.slug` = the
+card's slug (exactly), `display_name` = name, `provider_type` = `auth_type`,
+plus `icon_url` / `description` and the auth-shape fields (`api_key_location`,
+`oauth_authorize_url`, `oauth_client_id`, …), and `actions` = the full
+action-defs for exactly the actions on the card. Never add `oauth_client_secret`.
+(`mcp`: if the server refuses the provider type, tell the user it can't be
+created this way yet; never switch to another type silently.) Report the result
+in plain words; if some actions failed (`actions_failed > 0`), name them and offer
+to retry those with `conn.actiondef_create`. Do not send another card for a retry
+of the same spec.
+
+**5. On revise — new card.** Discuss what to change, then send a new
+`conn.create_card` (new `card_id`). The old card stays in the chat; say the new
+one replaces it (「以新卡为准」).
+
+**6. OAuth Client Secret — never in chat.** For `auth_type: "oauth2"` never ask
+for, accept or forward the Client Secret, and never pass `oauth_client_secret` to
+`conn.app_import` / `conn.app_update`. Tell the user to click 「填写 Client
+Secret」 on the card: it opens `/connections?edit=<application_id>`. If the card was
+sent before the application existed (no `application_id`), the page finds the
+created app by slug after creation — which is why the slug on the card must equal
+the created slug. Give them the callback URL to register (`conn.callback`, or the
+created app's `oauth_callback_url`).
+
+**7. A secret pasted into chat anyway.** Do not use it, do not repeat it, and do not
+pass it to any command. Tell the user it is now exposed in the conversation and
+ask them to revoke / rotate it, then enter the new value on the connections page.
+
+Outside an OpenMax conversation (no card renders), describe the same spec in plain
+text and create only after your owner's explicit 「确认创建」.
 
 ### Action-def schema semantics
 

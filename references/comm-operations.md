@@ -690,10 +690,12 @@ sense, such as a yes/no confirmation; an explicit value is sent as given.
 `description` or `placeholder` names a password, passcode, secret, token, API
 key, private key, OTP or verification code (in English or Chinese) is refused
 by cws-comm with
-`CARD_FORM_SECRET_FIELD`. Rephrase the question, or collect the secret with the
-T4 secret card (OPENM-673): typed answers are visible to everyone in the
-conversation, go into the receipt and the audit record, and cannot be deleted
-by the person. Never ask for bank card or ID numbers in a card either.
+`CARD_FORM_SECRET_FIELD`. Rephrase the question; never collect the secret in the
+chat at all: typed answers are visible to everyone in the conversation, go into
+the receipt and the audit record, and cannot be deleted by the person. The
+person enters a secret on the platform's own page (a custom connector's OAuth
+Client Secret: the「填写 Client Secret」button on its `conn.create_card` card,
+see `references/conn-operations.md`). Never ask for bank card or ID numbers in a card either.
 
 A question is **answered** when it has a selected option or "other" text that
 is not blank. `selection_mode: "multiple"`, `min_select` / `max_select`,

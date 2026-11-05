@@ -1015,7 +1015,8 @@ Messages
                             #       200), multiline ≤4000 (default 2000), ≤3 multiline per card
                             #     never collect a password, passphrase, key, token, verification
                             #       code, bank card or ID number via a text question or "other"
-                            #       (use the T4 secret card); cws-comm refuses secret-named
+                            #       (secrets are entered on the platform's own page, never in
+                            #       chat — see conn.create_card); cws-comm refuses secret-named
                             #       questions (CARD_FORM_SECRET_FIELD)
                             #     askedOf: member id or list; defaults to answerers
                             #     label is the bare question: the client numbers questions itself,

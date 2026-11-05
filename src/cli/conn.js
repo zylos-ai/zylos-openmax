@@ -782,6 +782,256 @@ function requireTargetConversationId(p) {
   return raw;
 }
 
+// --- conn.create_card: "create this custom connector?" confirmation card ------
+//
+// Before the Agent creates a custom connector (conn.app_import /
+// conn.actiondef_create) it posts ONE structured card describing exactly what
+// will be created, and waits for the owner's confirmation (OPENM-836). The card
+// creates nothing: the frontend posts an ordinary user message on click
+// ("确认创建 {name}" / "我要改 {name}" with metadata {connector_create_card_id,
+// action, ref_message_id}), and the Agent then runs conn.app_import with the
+// SAME slug and actions.
+//
+// Shape mirrors conn.auth_notice / channel.js: AGENT_STRUCTURED + content
+// {content_type, body{schema,...}} + a compact metadata copy (cws-comm trims
+// structured bodies from the list hot path) + a plain-text fallback_text.
+//
+// The schema string MUST stay byte-identical to the cws-fe renderer's constant.
+// No secret ever travels on this card: any secret-like key anywhere in the
+// input is refused before anything is sent (the OAuth Client Secret is entered
+// by the user on the connections page via the card's「填写 Client Secret」button).
+export const CONNECTOR_CREATE_CARD_SCHEMA = 'openmax.connector-create.v1';
+export const CREATE_CARD_MAX_ACTIONS = 50;
+export const CREATE_CARD_LIMITS = Object.freeze({
+  name: 100,
+  slug: 64,
+  description: 500,
+  url: 2048,
+  action_name: 100,
+  action_summary: 200,
+});
+const CREATE_CARD_AUTH_TYPES = ['api_key', 'oauth2', 'mcp'];
+const CREATE_CARD_EFFECTS = ['read', 'write'];
+const CREATE_CARD_AUTH_LABELS = { api_key: 'API Key', oauth2: 'OAuth 2.0', mcp: 'MCP' };
+const CREATE_CARD_EFFECT_LABELS = { read: '读', write: '写' };
+// Same character set cws-connect's slug generator emits (lowercase a-z0-9 runs
+// joined by '-'; '_' also occurs in platform slugs), no leading/trailing
+// separator. The card's slug must equal the slug later passed to conn.app_import.
+export const CONNECTOR_SLUG_RE = /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/;
+const CREATE_CARD_TOP_KEYS = new Set([
+  'conversationId', 'conversation_id', 'connector', 'actions', 'application_id', 'applicationId',
+  'org', 'orgId', 'org_id',
+]);
+const CREATE_CARD_CONNECTOR_KEYS = new Set(['name', 'slug', 'icon_url', 'description', 'base_url', 'auth_type']);
+const CREATE_CARD_ACTION_KEYS = new Set(['name', 'effect', 'summary']);
+
+// A key that names a secret, compared on its lowercased alphanumerics so
+// `client_secret`, `clientSecret`, `OAUTH-CLIENT-SECRET`, `apiKey`, `access_token`
+// all match. Deliberately broad: a false positive costs a rename, a false
+// negative leaks a credential into a chat message.
+export function isSecretLikeKey(key) {
+  const k = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!k) return false;
+  if (k === 'key' || k === 'pat' || k === 'otp') return true;
+  if (/(secret|password|passwd|passphrase|privatekey|accesskey|signingkey)/.test(k)) return true;
+  return /(token|apikey|credential|credentials|authorization|bearer|cookie|pin)$/.test(k);
+}
+
+// Walk every object key at any depth (arrays included) and refuse the first
+// secret-like one with its path. Runs before any other validation so a secret
+// is never echoed into a later error message either.
+export function assertNoSecretKeys(value, path = '') {
+  const seen = new Set();
+  const walk = (v, p) => {
+    if (!v || typeof v !== 'object' || seen.has(v)) return;
+    seen.add(v);
+    if (Array.isArray(v)) { v.forEach((item, i) => walk(item, `${p}[${i}]`)); return; }
+    for (const k of Object.keys(v)) {
+      const kp = p ? `${p}.${k}` : k;
+      if (isSecretLikeKey(k)) {
+        throw Object.assign(
+          new Error(`secret-like field "${kp}" is not allowed on the connector create card — never put a key, token, password or client secret on it. The user enters the OAuth Client Secret on the connections page (the card's「填写 Client Secret」button); an API key is entered when they authorize the connector.`),
+          { status: 400, code: 'secret_field_rejected' },
+        );
+      }
+      walk(v[k], kp);
+    }
+  };
+  walk(value, path);
+}
+
+function cardString(v, field, max, { required = false } = {}) {
+  if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '' && !required)) {
+    if (required) throw bad(`${field} is required`);
+    return undefined;
+  }
+  if (typeof v !== 'string') throw bad(`${field} must be a string`);
+  const s = v.trim();
+  if (!s) throw bad(`${field} is required`);
+  if ([...s].length > max) throw bad(`${field} is too long (max ${max} characters)`);
+  if (/[\u0000-\u001f\u007f]/.test(s)) throw bad(`${field} must not contain control characters`);
+  return s;
+}
+
+function cardUrl(v, field) {
+  const s = cardString(v, field, CREATE_CARD_LIMITS.url);
+  if (s === undefined) return undefined;
+  let u;
+  try { u = new URL(s); } catch { throw bad(`${field} must be an absolute http(s) URL`); }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw bad(`${field} must be an absolute http(s) URL`);
+  if (u.username || u.password) throw bad(`${field} must not embed credentials`);
+  return s;
+}
+
+function rejectUnknownKeys(obj, allowed, where) {
+  for (const k of Object.keys(obj)) {
+    if (!allowed.has(k)) throw bad(`unknown field "${where}${k}" — allowed: ${[...allowed].join(', ')}`);
+  }
+}
+
+// Validate + normalize the conn.create_card input. Pure (no network); throws
+// {status:400} on the first problem. Returns {conversationId, connector,
+// actions, application_id?} with trimmed strings and optional fields omitted
+// when absent.
+export function parseCreateCardInput(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) throw bad('params object is required');
+  assertNoSecretKeys(p);
+  rejectUnknownKeys(p, CREATE_CARD_TOP_KEYS, '');
+  const conversationId = requireTargetConversationId(p);
+
+  const c = p.connector;
+  if (!c || typeof c !== 'object' || Array.isArray(c)) throw bad('connector object is required');
+  rejectUnknownKeys(c, CREATE_CARD_CONNECTOR_KEYS, 'connector.');
+  const connector = { name: cardString(c.name, 'connector.name', CREATE_CARD_LIMITS.name, { required: true }) };
+  const slug = cardString(c.slug, 'connector.slug', CREATE_CARD_LIMITS.slug, { required: true });
+  if (!CONNECTOR_SLUG_RE.test(slug)) {
+    throw bad('connector.slug must be lowercase letters/digits joined by "-" or "_" (no leading/trailing separator, max 64), e.g. "acme-crm" — and must be the exact slug you will pass to conn.app_import');
+  }
+  connector.slug = slug;
+  if (!CREATE_CARD_AUTH_TYPES.includes(c.auth_type)) {
+    throw bad(`connector.auth_type must be one of ${CREATE_CARD_AUTH_TYPES.join(' | ')}`);
+  }
+  connector.auth_type = c.auth_type;
+  const iconUrl = cardUrl(c.icon_url, 'connector.icon_url');
+  if (iconUrl !== undefined) connector.icon_url = iconUrl;
+  const description = cardString(c.description, 'connector.description', CREATE_CARD_LIMITS.description);
+  if (description !== undefined) connector.description = description;
+  const baseUrl = cardUrl(c.base_url, 'connector.base_url');
+  if (baseUrl !== undefined) connector.base_url = baseUrl;
+
+  if (!Array.isArray(p.actions) || p.actions.length === 0) throw bad('actions (non-empty list) is required');
+  if (p.actions.length > CREATE_CARD_MAX_ACTIONS) throw bad(`at most ${CREATE_CARD_MAX_ACTIONS} actions per card`);
+  const seenNames = new Set();
+  const actions = p.actions.map((a, i) => {
+    const where = `actions[${i}]`;
+    if (!a || typeof a !== 'object' || Array.isArray(a)) throw bad(`${where} must be an object`);
+    rejectUnknownKeys(a, CREATE_CARD_ACTION_KEYS, `${where}.`);
+    const name = cardString(a.name, `${where}.name`, CREATE_CARD_LIMITS.action_name, { required: true });
+    // Bare action segment, exactly what conn.app_import submits (the server
+    // prepends "{slug}/").
+    if (name.includes('/')) throw bad(`${where}.name must be the bare action name (no "/"; the server prepends the connector slug)`);
+    const key = name.toLowerCase();
+    if (seenNames.has(key)) throw bad(`${where}.name "${name}" is duplicated`);
+    seenNames.add(key);
+    if (!CREATE_CARD_EFFECTS.includes(a.effect)) throw bad(`${where}.effect must be one of ${CREATE_CARD_EFFECTS.join(' | ')}`);
+    const summary = cardString(a.summary, `${where}.summary`, CREATE_CARD_LIMITS.action_summary, { required: true });
+    return { name, effect: a.effect, summary };
+  });
+
+  const out = { conversationId, connector, actions };
+  const appId = p.application_id ?? p.applicationId;
+  if (appId !== undefined && appId !== null && appId !== '') {
+    if (!isUuid(appId)) throw bad('application_id must be a UUID');
+    out.application_id = appId;
+  }
+  return out;
+}
+
+// Plain-text version for clients that do not render the card.
+export function buildCreateCardFallbackText({ connector, actions }) {
+  const lines = [
+    `准备创建自定义连接器「${connector.name}」（${connector.slug}）`,
+    `认证方式：${CREATE_CARD_AUTH_LABELS[connector.auth_type]}`,
+  ];
+  if (connector.description) lines.push(`说明：${connector.description}`);
+  if (connector.base_url) lines.push(`服务地址：${connector.base_url}`);
+  lines.push(`动作（${actions.length}）：`);
+  for (const a of actions) lines.push(`- [${CREATE_CARD_EFFECT_LABELS[a.effect]}] ${a.name}：${a.summary}`);
+  lines.push(`回复「确认创建 ${connector.name}」开始创建，或「我要改 ${connector.name}」修改。`);
+  if (connector.auth_type === 'oauth2') {
+    lines.push('Client Secret 请在「连接」页面填写，不要发在聊天里。');
+  }
+  return lines.join('\n');
+}
+
+// Pure builder. `input` is the parseCreateCardInput result; `cardId` is
+// injectable for tests (defaults to a fresh UUID).
+export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
+  const { connector, actions } = input;
+  const fallbackText = buildCreateCardFallbackText(input);
+  const body = {
+    schema: CONNECTOR_CREATE_CARD_SCHEMA,
+    card_id: cardId,
+    connector: { ...connector },
+    actions: actions.map((a) => ({ ...a })),
+    ...(input.application_id ? { application_id: input.application_id } : {}),
+    fallback_text: fallbackText,
+  };
+  // Compact render projection: what the card shows, nothing else (no
+  // description / base_url / fallback_text — the full body is one GetMessage
+  // away when the card is opened).
+  const meta = {
+    schema: CONNECTOR_CREATE_CARD_SCHEMA,
+    card_id: cardId,
+    connector: {
+      name: connector.name,
+      slug: connector.slug,
+      auth_type: connector.auth_type,
+      ...(connector.icon_url ? { icon_url: connector.icon_url } : {}),
+    },
+    actions: actions.map((a) => ({ name: a.name, effect: a.effect, summary: a.summary })),
+    ...(input.application_id ? { application_id: input.application_id } : {}),
+  };
+  return {
+    client_msg_id: randomUUID(),
+    type: 'AGENT_STRUCTURED',
+    content: { content_type: 'connector_create_card', body, attachments: [] },
+    metadata: { connector_create_card: meta },
+    fallback_text: fallbackText,
+  };
+}
+
+// The one send path for the structured connector cards (auth_notice and
+// create_card): POST the message into the target conversation. `post` is
+// injectable for tests; production passes postForOrg.
+export async function sendConnectorCard(orgId, conversationId, message, post = postForOrg) {
+  return post(orgId, apiPath(`/conversations/${conversationId}/messages`), message, { timeoutMs: 30_000, quietOnSuccess: true });
+}
+
+function messageIdOf(resp) {
+  for (const v of [resp?.id, resp?.message_id, resp?.message?.id]) {
+    if (typeof v === 'string' && v) return v;
+  }
+  return null;
+}
+
+// Validate → build → send. Validation (incl. the secret-key refusal) runs before
+// the org is resolved or anything is sent.
+export async function runCreateCard(p, { resolveOrg, post = postForOrg, cardId } = {}) {
+  const input = parseCreateCardInput(p);
+  const orgId = resolveOrg();
+  const message = buildConnectorCreateCardMessage(input, cardId);
+  const resp = await sendConnectorCard(orgId, input.conversationId, message, post);
+  return {
+    status: 'sent',
+    conversation_id: input.conversationId,
+    card_id: message.content.body.card_id,
+    message_id: messageIdOf(resp),
+    connector: { name: input.connector.name, slug: input.connector.slug, auth_type: input.connector.auth_type },
+    actions_total: input.actions.length,
+  };
+}
+
 function connectionListOf(resp) {
   return Array.isArray(resp) ? resp : (Array.isArray(resp?.connections) ? resp.connections : []);
 }
@@ -909,9 +1159,16 @@ const COMMANDS = {
       ),
     });
     const message = buildConnectorAuthNoticeMessage(connectors);
-    await postForOrg(orgId, apiPath(`/conversations/${convId}/messages`), message, { timeoutMs: 30_000, quietOnSuccess: true });
+    await sendConnectorCard(orgId, convId, message);
     return { status: 'sent', conversation_id: convId, connectors };
   },
+
+  // conn.create_card {conversationId, connector:{name, slug, auth_type, icon_url?,
+  // description?, base_url?}, actions:[{name, effect, summary}], application_id?}
+  // — post the "create this custom connector?" confirmation card (OPENM-836).
+  // Creates nothing; on the owner's confirmation the Agent runs conn.app_import
+  // with the same slug + actions. Secret-like keys anywhere → 400, nothing sent.
+  'conn.create_card': () => runCreateCard(params, { resolveOrg: requireOrgId }),
 
   // Acquire a credential for a connection. This verb is DIRECT-only: it returns
   // credential_mode:'direct' + access_token for local egress. A proxy/Composio
@@ -1369,6 +1626,8 @@ Connections
   conn.list           {}                                        # list connections available to this agent (self only)
   conn.check          {app}                                     # read-only: authorized | not_authorized | needs_reauth
   conn.auth_notice    {conversationId, apps:[slug...]}          # post the "go authorize" card into that conversation
+  conn.create_card    {conversationId, connector:{name, slug, auth_type, icon_url?, description?, base_url?}, actions:[{name, effect, summary}], application_id?}
+                                                                 # post the "create this custom connector?" confirmation card (creates nothing; no secrets)
   conn.acquire        {connectionId}                            # acquire the direct access_token for a connection
   conn.actions        {connectionId, cursor?, limit?}           # discover named actions for a connection (paged: next_cursor → cursor)
   conn.status         {connectionId}                            # get connection details (status, owner, scopes)
