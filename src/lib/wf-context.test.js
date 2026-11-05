@@ -7,7 +7,8 @@ import { wfRefFrom, formatWfContext, MAX_WF_REF_VALUE_LENGTH } from './wf-contex
 import { formatInboundForC4 } from './message.js';
 
 // Messages sent from the workflows page right panel carry server-written
-// metadata  wf_ref: { workflow_id, run_id, page }  (null when not applicable).
+// metadata  wf_ref: { workflow_id, run_id, page, step_n }  (null when not
+// applicable; step_n only on the step page).
 // The bridge renders it as a structural <wf-context .../> element in the
 // header; values are passed through, only escaped.
 
@@ -37,6 +38,37 @@ test('detail page without a run: run_id null → no run-id attribute (not an emp
 
 test('create page: workflow_id and run_id null → only page', () => {
   assert.equal(render({ workflow_id: null, run_id: null, page: 'create' }), '<wf-context page="create"/>');
+});
+
+test('step page: step_n is rendered as step-n (number as string)', () => {
+  assert.equal(
+    render({ workflow_id: 'wf-1', run_id: null, page: 'step', step_n: 3 }),
+    '<wf-context workflow-id="wf-1" page="step" step-n="3"/>',
+  );
+  assert.equal(
+    render({ workflow_id: 'wf-1', run_id: 'run-9', page: 'step', step_n: 3 }),
+    '<wf-context workflow-id="wf-1" run-id="run-9" page="step" step-n="3"/>',
+  );
+});
+
+test('other pages: step_n null or missing → no step-n attribute', () => {
+  for (const page of ['detail', 'run', 'create', 'start', 'inline']) {
+    assert.equal(render({ workflow_id: 'wf-1', run_id: null, page, step_n: null }), `<wf-context workflow-id="wf-1" page="${page}"/>`);
+    assert.equal(render({ workflow_id: 'wf-1', run_id: null, page }), `<wf-context workflow-id="wf-1" page="${page}"/>`);
+  }
+});
+
+test('step_n as an object / array → no step-n attribute', () => {
+  for (const step_n of [{ n: 3 }, [3], []]) {
+    assert.equal(render({ workflow_id: 'wf-1', run_id: null, page: 'step', step_n }), '<wf-context workflow-id="wf-1" page="step"/>');
+  }
+});
+
+test('step_n is passed through and escaped, not validated', () => {
+  assert.equal(
+    render({ workflow_id: null, run_id: null, page: 'step', step_n: '3"/><x' }),
+    '<wf-context page="step" step-n="3&quot;/&gt;&lt;x"/>',
+  );
 });
 
 test('page values are passed through, not allow-listed', () => {

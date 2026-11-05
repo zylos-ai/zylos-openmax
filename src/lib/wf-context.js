@@ -4,11 +4,13 @@
  * A message sent from the right-hand panel of the OpenMax workflows page
  * carries message metadata written by the server
  *
- *   wf_ref: { workflow_id: string|null, run_id: string|null, page: string }
+ *   wf_ref: { workflow_id: string|null, run_id: string|null, page: string,
+ *             step_n: number|null }
  *
  * telling the Agent which workflow, which run, and which page the user is on
  * (`run_id` is null when there is no run; on the create page `workflow_id` is
- * null too). The key is absent on every other message.
+ * null too; `step_n` — which step is being edited — is set only on the `step`
+ * page). The key is absent on every other message.
  *
  * The bridge renders it as a structural self-closing <wf-context .../> element
  * in the inbound header (next to <message-context> / <connector-preference>),
@@ -24,6 +26,7 @@ const WF_REF_ATTRS = [
   ['workflow-id', 'workflow_id'],
   ['run-id', 'run_id'],
   ['page', 'page'],
+  ['step-n', 'step_n'],
 ];
 
 // Sanity bound on a malformed/abusive payload, far above any real id or page
@@ -46,7 +49,7 @@ function attrText(raw) {
 /**
  * Read `wf_ref` from a fetched message (top-level `metadata`, or the nested
  * `message.metadata` envelope — same lookup as preferred_connectors). Returns
- * `{ 'workflow-id'?, 'run-id'?, page? }` (attribute name → value) with only
+ * `{ 'workflow-id'?, 'run-id'?, page?, 'step-n'? }` (attribute name → value) with only
  * the usable values, or null when wf_ref is missing, not an object, or has no
  * usable value.
  */
