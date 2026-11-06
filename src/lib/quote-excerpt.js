@@ -1,5 +1,5 @@
 /**
- * Quoted excerpt (OPENM-945, phase 1).
+ * Quoted excerpt (phase 1).
  *
  * When a user quotes part of a message, the web FE sends `parent_id` plus
  * message metadata
