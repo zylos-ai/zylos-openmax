@@ -78,7 +78,7 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 | Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.send` | Send a message; `content` supports string / markdown / a pre-built content object (for images / files) | `{conversationId, content, replyTo?, clientMsgId?, mentions?, noRun?}` | `POST /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.send` | Send a message; `content` supports string / markdown / `{text?, attachments}` / a pre-built content object (for images / files) | `{conversationId, content, attachments?, replyTo?, clientMsgId?, mentions?, noRun?}` | `POST /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_messages` | Pull the historical message list (seq-based range) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_message` | Get details of a single message (expands content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
@@ -93,9 +93,20 @@ Manage group membership **after** creation. cws-core derives the caller from the
 {content_type:"image", body:{file_name},         → IMAGE message (pre-built; type inferred from content_type)
  attachments:[{artifact_id, file_name,
                content_type, size_bytes}]}
+{text?:"caption", attachments:[{artifact_id,     → IMAGE message when every attachment's content_type
+  file_name, content_type, size_bytes}]}            is image/*, otherwise FILE; body = {file_name, text?}
+"caption" + top-level attachments:[...]          → same as the line above
 ```
 
-⚠️ **Not supported — do not use:** an array of parts (`[{type:"text",...},{type:"image",...}]`) or `{type:"image", body:"<id>"}`. They are **not** normalized: an array is sent as an **empty text message**, and `{type:"image", body:"<id>"}` is sent as a **text message containing the id**. The call still returns 200, so nothing tells you it went wrong.
+Attachment rules (enforced client-side; the call fails with an error and nothing is sent):
+
+- Every attachment — in the shorthand **and** in a pre-built `{content_type, body, attachments}` object — must be written in snake_case as `{artifact_id, file_name, content_type, size_bytes}`, with `artifact_id`, `file_name` and `content_type` non-empty strings and `size_bytes` a non-negative integer (the server requires it on every item). `as.upload` returns camel-case `{artifactId, fileName, mimeType, sizeBytes}` — rename **all** of them: `artifact_id` = `artifactId` (not `mediaId`), `file_name` = `fileName`, `content_type` = `mimeType`, `size_bytes` = `sizeBytes`. An item missing any of these four keys (or with a non-integer or negative `size_bytes`), or carrying any camel-case key (`artifactId`, `fileName`, `mimeType`, `contentType`, `sizeBytes`), is refused; nothing is normalized.
+- `image/*` is matched case-insensitively: every attachment `image/*` → IMAGE message, otherwise FILE.
+- Give attachments in one place only: `content.attachments` **or** top-level `attachments`. A top-level `attachments` cannot be combined with a pre-built `{content_type, ...}` object — put them in its `content.attachments`.
+- A message with no text and no attachments is refused (`refusing to send an empty message`) instead of being posted blank.
+- A pre-built `{content_type, body}` object whose `body` is not an object (a string, array or null) is refused with that reason.
+
+⚠️ **Not supported — do not use:** an array of parts (`[{type:"text",...},{type:"image",...}]`) or `{type:"image", body:"<id>"}`. An array `content` is refused with an error (`content cannot be an array`), with or without top-level `attachments`. `{type:"image", body:"<id>"}` is **not** normalized: it is sent as a **text message containing the id** — the call still returns 200, so nothing tells you it went wrong.
 
 `noRun: true` (also accepted by `comm.send_card`, `comm.ask_card` and `comm.ask`) marks a system-originated notice — for example a card a client sends on its own, not in answer to anything. The message carries no `agent_run`, is not attached to any open run, and the run log does not count it as a reply, so an active run is neither closed nor summarized on it. Never use it for an answer to the user. Omitted, the send behaves as before.
 

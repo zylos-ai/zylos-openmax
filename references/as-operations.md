@@ -242,6 +242,7 @@ WS pushes over a frame `{content:{media_id:"art_xyz"}, ...}`, inside comm-bridge
 
 1. `as.downloadMedia("art_xyz", filename, orgId)` → resolves a fresh short-lived link, follows its redirect, saves to `/home/cocoai/zylos/components/openmax/media/<file>` (re-resolves once if the fetch fails)
 2. Stuffs the local path into the C4 outbound text as `---- image: <localPath>` — the Agent sees the tag and automatically invokes vision
+3. An attachment that cannot be fetched is still shown, never dropped: a failed download appears as `---- artifact_id: <id> name="…" [附件无法获取]` (retry with `as.download` by that id), and an attachment with no artifact id as `---- [附件无法获取] name="…" content_type="…"` (only the fields that are present)
 
 ### Agent proactively calls the CLI
 

@@ -260,9 +260,68 @@ async function fetchSelfMember(org) {
  * Caller can pass:
  *   - string                                            → text/markdown auto-detect
  *   - {text} | {body}                                   → text/markdown auto-detect
+ *   - {text?, attachments:[...]} (or string content plus
+ *     top-level params.attachments)                     → IMAGE / FILE message
  *   - {content_type, body, attachments?}                → pass-through (advanced)
  *   - already-built object with top-level type+content  → returned as-is
+ *
+ * Attachments given with shorthand content are carried, never dropped. Each
+ * item, shorthand or in a pre-built content object, must already be in the
+ * wire shape {artifact_id, file_name, content_type, size_bytes}: artifact_id,
+ * file_name and content_type non-empty strings, size_bytes a non-negative
+ * integer (cws-core requires it on every item), and no camel-case keys
+ * (as.upload returns artifactId / fileName / mimeType / sizeBytes, which must
+ * be renamed, not passed through). Anything else is refused before sending —
+ * items are passed through verbatim, so a half-renamed item would otherwise go
+ * out with no artifact_id or an empty file name, and an image downgraded to a
+ * file. All items with an `image/*` content_type (case-insensitive) make an
+ * IMAGE message, anything else a FILE message — the same body shape the
+ * `[MEDIA:image]` / `[MEDIA:file]` outbound path builds (buildMediaBody).
+ * A message with no text and no attachments is refused instead of being posted
+ * as a blank message, and array content is refused rather than read as one.
  */
+const ATTACHMENT_SHAPE = '{artifact_id, file_name, content_type, size_bytes} — snake_case, with artifact_id = the '
+  + 'artifactId returned by as.upload (not mediaId), file_name = its fileName, content_type = its mimeType, '
+  + 'size_bytes = its sizeBytes. Or send the file with c4-send.js "[MEDIA:image]/abs/path" / "[MEDIA:file]/abs/path".';
+const CAMEL_ATTACHMENT_KEYS = ['artifactId', 'fileName', 'mimeType', 'contentType', 'sizeBytes'];
+
+function shorthandAttachments(params) {
+  const c = params.content;
+  const fromContent = (c && typeof c === 'object' && !Array.isArray(c)) ? c.attachments : undefined;
+  const fromParams = params.attachments;
+  if (fromContent !== undefined && fromParams !== undefined) {
+    throw new Error('comm.send: attachments given both in content.attachments and top-level attachments — pass them in one place');
+  }
+  const list = fromContent ?? fromParams;
+  if (list === undefined || list === null) return [];
+  return validateAttachments(list);
+}
+
+// Both the shorthand and the pre-built content object pass attachment items
+// through verbatim, so both are held to the same wire shape.
+function validateAttachments(list) {
+  if (!Array.isArray(list)) throw new Error('comm.send: attachments must be an array');
+  const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
+  list.forEach((a, i) => {
+    const bad = (why) => new Error(`comm.send: attachments[${i}] ${why} — each attachment must be ${ATTACHMENT_SHAPE}`);
+    if (!a || typeof a !== 'object' || Array.isArray(a)) throw bad('is not an object');
+    const camel = CAMEL_ATTACHMENT_KEYS.filter((k) => k in a);
+    if (camel.length) throw bad(`has camel-case key(s) ${camel.join(', ')}`);
+    for (const k of ['artifact_id', 'file_name', 'content_type']) {
+      if (!nonEmpty(a[k])) throw bad(`has no ${k}`);
+    }
+    if (!Number.isInteger(a.size_bytes) || a.size_bytes < 0) throw bad('has no size_bytes (a non-negative integer)');
+  });
+  return list;
+}
+
+function isEmptyContent(body, attachments) {
+  if (Array.isArray(attachments) && attachments.length > 0) return false;
+  if (!body || typeof body !== 'object') return true;
+  return Object.entries(body).every(([k, v]) => v === undefined || v === null || v === ''
+    || (k === 'text' && typeof v === 'string' && !v.trim()));
+}
+
 /**
  * Best-effort text extraction for the mention pre-check — mirrors the plain-text
  * branch of buildSendBody(). A pre-built content object carries its text at
@@ -333,20 +392,42 @@ function buildSendBody(params) {
   let contentType, body, attachments;
   if (c && typeof c === 'object' && c.content_type) {
     // pre-built content object
+    if (params.attachments !== undefined) {
+      throw new Error('comm.send: top-level attachments cannot be combined with a pre-built content object — put them in content.attachments');
+    }
+    if (c.body !== undefined && (!c.body || typeof c.body !== 'object' || Array.isArray(c.body))) {
+      throw new Error('comm.send: a pre-built content object needs body to be an object ({text} or {file_name, text?}), '
+        + `got ${Array.isArray(c.body) ? 'an array' : c.body === null ? 'null' : typeof c.body}`);
+    }
     contentType = c.content_type;
     body        = c.body ?? {};
-    attachments = c.attachments ?? [];
+    attachments = (c.attachments === undefined || c.attachments === null) ? [] : validateAttachments(c.attachments);
     if (!msgType) msgType = contentType === 'image' ? 'IMAGE'
                        : contentType === 'file' ? 'FILE'
                        : 'AGENT_TEXT';
   } else {
+    if (Array.isArray(c)) {
+      throw new Error('comm.send: content cannot be an array (of parts) — pass a string, {text}, '
+        + '{text?, attachments:[...]} or a pre-built {content_type, body, attachments?} object');
+    }
     const text = (typeof c === 'string') ? c
               : (c && typeof c === 'object') ? (c.text ?? c.body ?? '')
               : '';
-    contentType = looksLikeMarkdown(text) ? 'markdown' : 'text';
-    body        = { text: String(text) };
-    attachments = [];
-    if (!msgType) msgType = 'AGENT_TEXT';
+    attachments = shorthandAttachments(params);
+    if (attachments.length > 0) {
+      const allImages = attachments.every((a) => a.content_type.toLowerCase().startsWith('image/'));
+      contentType = allImages ? 'image' : 'file';
+      body        = { file_name: attachments[0].file_name, ...(String(text) ? { text: String(text) } : {}) };
+      if (!msgType) msgType = allImages ? 'IMAGE' : 'FILE';
+    } else {
+      contentType = looksLikeMarkdown(text) ? 'markdown' : 'text';
+      body        = { text: String(text) };
+      if (!msgType) msgType = 'AGENT_TEXT';
+    }
+  }
+  if (isEmptyContent(body, attachments)) {
+    throw new Error('comm.send: refusing to send an empty message (no text and no attachments). '
+      + 'Pass content as a non-empty string or {text}, or attach files via {text?, attachments:[{artifact_id, ...}]}.');
   }
   // Resolve `@name` tokens in the text body to a structured mentions[]
   // entry (cws-core MentionInput[]) against known conversation
@@ -991,11 +1072,16 @@ Conversation members (owner/admin only; pass {org} for multi-org installs)
   comm.leave                {conversationId, newOwnerId?, org?}                     # POST .../leave
 
 Messages
-  comm.send                 {conversationId, content, replyTo?, clientMsgId?, mentions?, noRun?}
+  comm.send                 {conversationId, content, attachments?, replyTo?, clientMsgId?, mentions?, noRun?}
                             # noRun:true — system-originated notice, not a reply: no agent_run,
                             #   and the run log does not count it as a reply. Also on send_card,
                             #   ask_card and ask. Never for an answer to the user
-                            # content: string | {text|body, markdown?} | {type,body} | [{type,body}]
+                            # content: string | {text|body} | {text?, attachments} | {content_type, body, attachments?}
+                            # attachments: [{artifact_id, file_name, content_type, size_bytes}] —
+                            #   snake_case only (shorthand and pre-built alike): artifact_id =
+                            #   as.upload's artifactId, file_name, content_type required; a missing
+                            #   one or a camel-case key is refused. Array content is refused.
+                            #   All image/* → IMAGE message, otherwise FILE. Empty message refused.
                             # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
   comm.ask                  {conversationId, interactionType?, kind, askedOf?, meta?, noRun?, ...card}
                             # THE entry for a question you intend to act on.

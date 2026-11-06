@@ -44,7 +44,7 @@ import { quoteExcerptFrom } from './lib/quote-excerpt.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
-import { downloadInboundAttachment } from './lib/inbound-media.js';
+import { downloadInboundAttachment, collectInboundMedia } from './lib/inbound-media.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
 import { createChannelInstaller } from './lib/channel-connector.js';
 import { logSystemFrame } from './lib/system-events.js';
@@ -1182,22 +1182,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       allAttachments.push({ artifact_id: structured.media_id, file_name: structured.filename });
     }
     const shouldDownload = allAttachments.length > 0 && (convType === 'dm' || decision.mentioned || decision.mode === 'smart');
-    const mediaItems = [];
-    for (const att of allAttachments) {
-      const attId = att.artifact_id;
-      if (!attId) continue;
-      const attFileName = att.file_name;
-      const item = { id: attId, fileName: attFileName };
-      if (shouldDownload) {
-        try {
-          // By id, in this org: a fresh short-lived link per attempt (see inbound-media.js).
-          item.localPath = await downloadInboundAttachment(orgConfig, attId, attFileName);
-        } catch (e) {
-          warn('media fetch failed:', attId, e.message);
-        }
-      }
-      mediaItems.push(item);
-    }
+    const mediaItems = await collectInboundMedia(orgConfig, allAttachments, { shouldDownload, warn });
 
     // Prefer an inline display name from the message; otherwise resolve the
     // sender member via cws-core (cached). Fall back to the raw id only when

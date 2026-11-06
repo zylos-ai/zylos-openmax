@@ -161,6 +161,10 @@ function formatContextLine(m) {
   return `[${name}]: ${text}`;
 }
 
+// Shown for an inbound attachment that cannot be fetched (no artifact id, or
+// its download failed), so the message is not rendered as an empty one.
+export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
+
 /**
  * Build the C4-bridge inbound text for a single incoming message.
  *
@@ -361,6 +365,12 @@ When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
       } else if (item.id) {
         line += ` ---- artifact_id: ${escapeXml(item.id)}`;
         if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
+        if (item.downloadFailed) line += ` ${UNAVAILABLE_ATTACHMENT}`;
+      } else {
+        // No artifact id to fetch it by: say so, so the message is never blank.
+        line += ` ---- ${UNAVAILABLE_ATTACHMENT}`;
+        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
+        if (item.contentType) line += ` content_type="${escapeXml(item.contentType)}"`;
       }
     }
   } else if (current?.mediaLocalPath) {
