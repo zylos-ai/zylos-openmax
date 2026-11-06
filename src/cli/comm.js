@@ -266,18 +266,18 @@ async function fetchSelfMember(org) {
  *   - already-built object with top-level type+content  → returned as-is
  *
  * Attachments given with shorthand content are carried, never dropped. Each
- * item must already be in the wire shape {artifact_id, file_name, content_type,
- * size_bytes?}: artifact_id, file_name and content_type non-empty strings, and
- * no camel-case keys (as.upload returns artifactId / fileName / mimeType /
- * sizeBytes, which must be renamed, not passed through). Anything else is
- * refused before sending — items are passed through verbatim, like the
- * pre-built content object, so a half-renamed item would otherwise go out
- * with an empty file name and an image downgraded to a file. All items with an
- * `image/*` content_type (case-insensitive) make an IMAGE message, anything
- * else a FILE message — the same body shape the `[MEDIA:image]` /
- * `[MEDIA:file]` outbound path builds (buildMediaBody).
+ * item, shorthand or in a pre-built content object, must already be in the
+ * wire shape {artifact_id, file_name, content_type, size_bytes?}: artifact_id,
+ * file_name and content_type non-empty strings, and no camel-case keys
+ * (as.upload returns artifactId / fileName / mimeType / sizeBytes, which must
+ * be renamed, not passed through). Anything else is refused before sending —
+ * items are passed through verbatim, so a half-renamed item would otherwise go
+ * out with no artifact_id or an empty file name, and an image downgraded to a
+ * file. All items with an `image/*` content_type (case-insensitive) make an
+ * IMAGE message, anything else a FILE message — the same body shape the
+ * `[MEDIA:image]` / `[MEDIA:file]` outbound path builds (buildMediaBody).
  * A message with no text and no attachments is refused instead of being posted
- * as a blank message.
+ * as a blank message, and array content is refused rather than read as one.
  */
 const ATTACHMENT_SHAPE = '{artifact_id, file_name, content_type, size_bytes} — snake_case, with artifact_id = the '
   + 'artifactId returned by as.upload (not mediaId), file_name = its fileName, content_type = its mimeType, '
@@ -293,6 +293,12 @@ function shorthandAttachments(params) {
   }
   const list = fromContent ?? fromParams;
   if (list === undefined || list === null) return [];
+  return validateAttachments(list);
+}
+
+// Both the shorthand and the pre-built content object pass attachment items
+// through verbatim, so both are held to the same wire shape.
+function validateAttachments(list) {
   if (!Array.isArray(list)) throw new Error('comm.send: attachments must be an array');
   const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
   list.forEach((a, i) => {
@@ -393,11 +399,15 @@ function buildSendBody(params) {
     }
     contentType = c.content_type;
     body        = c.body ?? {};
-    attachments = c.attachments ?? [];
+    attachments = (c.attachments === undefined || c.attachments === null) ? [] : validateAttachments(c.attachments);
     if (!msgType) msgType = contentType === 'image' ? 'IMAGE'
                        : contentType === 'file' ? 'FILE'
                        : 'AGENT_TEXT';
   } else {
+    if (Array.isArray(c)) {
+      throw new Error('comm.send: content cannot be an array (of parts) — pass a string, {text}, '
+        + '{text?, attachments:[...]} or a pre-built {content_type, body, attachments?} object');
+    }
     const text = (typeof c === 'string') ? c
               : (c && typeof c === 'object') ? (c.text ?? c.body ?? '')
               : '';
@@ -1066,8 +1076,9 @@ Messages
                             #   ask_card and ask. Never for an answer to the user
                             # content: string | {text|body} | {text?, attachments} | {content_type, body, attachments?}
                             # attachments: [{artifact_id, file_name, content_type, size_bytes}] —
-                            #   snake_case only: artifact_id = as.upload's artifactId, file_name,
-                            #   content_type required; a missing one or a camel-case key is refused.
+                            #   snake_case only (shorthand and pre-built alike): artifact_id =
+                            #   as.upload's artifactId, file_name, content_type required; a missing
+                            #   one or a camel-case key is refused. Array content is refused.
                             #   All image/* → IMAGE message, otherwise FILE. Empty message refused.
                             # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
   comm.ask                  {conversationId, interactionType?, kind, askedOf?, meta?, noRun?, ...card}

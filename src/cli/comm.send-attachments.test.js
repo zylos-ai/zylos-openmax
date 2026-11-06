@@ -135,6 +135,65 @@ test('🔴 an item missing file_name or content_type is refused', async () => {
   }
 });
 
+test('🔴 a whitespace-only artifact_id / file_name / content_type is refused', async () => {
+  for (const k of ['artifact_id', 'file_name', 'content_type']) {
+    // eslint-disable-next-line no-await-in-loop
+    const { ok, posts, stderr } = await send({ conversationId: CONV, content: { attachments: [{ ...PNG, [k]: '   ' }] } });
+    assert.equal(ok, false, k);
+    assert.equal(posts.length, 0, k);
+    assert.match(stderr, new RegExp(`attachments\\[0\\] has no ${k}`));
+  }
+});
+
+test('🔴 every item is checked: a valid first item does not let an invalid second one through', async () => {
+  const { artifact_id: _drop, ...noId } = PDF;
+  for (const second of [noId, { ...PDF, fileName: 'weekly.pdf' }]) {
+    // eslint-disable-next-line no-await-in-loop
+    const { ok, posts, stderr } = await send({ conversationId: CONV, content: { text: 'x', attachments: [PNG, second] } });
+    assert.equal(ok, false, JSON.stringify(second));
+    assert.equal(posts.length, 0, JSON.stringify(second));
+    assert.match(stderr, /attachments\[1\] has/);
+  }
+});
+
+test('🔴 pre-built content object: camel-case or incomplete attachment items are refused', async () => {
+  const camel = { artifactId: 'art-png', fileName: 'shot.png', mimeType: 'image/png' };
+  const { artifact_id: _drop, ...noId } = PNG;
+  for (const [item, why] of [[camel, /attachments\[0\] has camel-case key\(s\)/], [noId, /attachments\[0\] has no artifact_id/]]) {
+    // eslint-disable-next-line no-await-in-loop
+    const { ok, posts, stderr } = await send({
+      conversationId: CONV,
+      content: { content_type: 'image', body: { file_name: 'shot.png' }, attachments: [item] },
+    });
+    assert.equal(ok, false, JSON.stringify(item));
+    assert.equal(posts.length, 0, JSON.stringify(item));
+    assert.match(stderr, why);
+  }
+  const notArray = await send({ conversationId: CONV, content: { content_type: 'image', body: { file_name: 'x' }, attachments: PNG } });
+  assert.equal(notArray.ok, false);
+  assert.equal(notArray.posts.length, 0);
+  assert.match(notArray.stderr, /attachments must be an array/);
+});
+
+test('pre-built content object with valid snake_case items still goes out unchanged', async () => {
+  const content = { content_type: 'image', body: { file_name: 'shot.png', text: 'cap' }, attachments: [PNG] };
+  const { ok, posts } = await send({ conversationId: CONV, content });
+  assert.equal(ok, true);
+  assert.equal(posts[0].body.type, 'IMAGE');
+  assert.deepEqual(posts[0].body.content, content);
+});
+
+test('🔴 array content is refused, with or without top-level attachments', async () => {
+  const parts = [{ type: 'text', body: 'hi' }];
+  for (const params of [{ content: parts }, { content: [] }, { content: parts, attachments: [PDF] }]) {
+    // eslint-disable-next-line no-await-in-loop
+    const { ok, posts, stderr } = await send({ conversationId: CONV, ...params });
+    assert.equal(ok, false, JSON.stringify(params));
+    assert.equal(posts.length, 0, JSON.stringify(params));
+    assert.match(stderr, /content cannot be an array/);
+  }
+});
+
 test('image detection ignores content_type case', async () => {
   const upper = { ...PNG, content_type: 'IMAGE/PNG' };
   const { ok, posts } = await send({ conversationId: CONV, content: { attachments: [upper] } });
@@ -160,7 +219,7 @@ test('attachments given in both places, or top-level with pre-built content, are
 });
 
 test('🔴 an empty message is refused client-side: nothing reaches the server', async () => {
-  for (const content of ['', '   ', { text: '' }, { attachments: [] }, undefined, []]) {
+  for (const content of ['', '   ', { text: '' }, { attachments: [] }, undefined]) {
     // eslint-disable-next-line no-await-in-loop
     const { ok, posts, stderr } = await send({ conversationId: CONV, content });
     assert.equal(ok, false, `content=${JSON.stringify(content)} must fail`);
