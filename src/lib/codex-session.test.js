@@ -118,3 +118,152 @@ test('readZylosRuntime: 读 .zylos/config.json 的 runtime；缺失/坏文件 �
   fs.writeFileSync(path.join(h.zylosDir, '.zylos', 'config.json'), '{oops');
   assert.equal(readZylosRuntime(h.zylosDir), null);
 });
+
+// ---------------------------------------------------------------------------
+// Day-folder / file-name pruning and realpath matching.
+// ---------------------------------------------------------------------------
+
+/**
+ * Write a rollout under an explicit local-time name `YYYY-MM-DDTHH-MM-SS`, with
+ * a session_meta creation time (`metaAt`) independent of the name. A "lure"
+ * (old name, new metaAt) wins the newest-thread pick if it is ever opened, so
+ * pruning is observable in the result, not only through the fs spy.
+ */
+function writeNamedRollout(codexHome, stamp, { id, metaAt, cwd, source = 'cli' }) {
+  const [, y, mo, da] = /^(\d{4})-(\d{2})-(\d{2})T/.exec(stamp);
+  const dir = path.join(codexHome, 'sessions', y, mo, da);
+  fs.mkdirSync(dir, { recursive: true });
+  const iso = new Date(metaAt).toISOString();
+  const meta = { timestamp: iso, type: 'session_meta', payload: { id, timestamp: iso, cwd, originator: 'codex-tui', source } };
+  const file = path.join(dir, `rollout-${stamp}-${id}.jsonl`);
+  fs.writeFileSync(file, `${JSON.stringify(meta)}\n`);
+  return file;
+}
+
+/** The real fs, recording every directory listed and every file opened. */
+function spyFs() {
+  const listed = [];
+  const opened = [];
+  const fsImpl = {
+    readdirSync: (dir, ...rest) => { listed.push(dir); return fs.readdirSync(dir, ...rest); },
+    openSync: (file, ...rest) => { opened.push(file); return fs.openSync(file, ...rest); },
+    readSync: (...args) => fs.readSync(...args),
+    closeSync: (...args) => fs.closeSync(...args),
+    realpathSync: (...args) => fs.realpathSync(...args),
+  };
+  return { fsImpl, listed, opened };
+}
+
+/** `sessions/`-relative, '/'-joined, sorted. */
+const relSessions = (codexHome, paths) => paths
+  .map((p) => path.relative(path.join(codexHome, 'sessions'), p).split(path.sep).join('/'))
+  .sort();
+
+test('readCodexSession 剪枝: 早于 launch − 1 天的年/月/日目录不 list，cutoff 之前的文件不 open（即使它会胜出）', (t) => {
+  const h = makeHome();
+  t.after(h.cleanup);
+  // LAUNCH = 2026-11-03T06:22:25Z ⇒ cutoff = 2026-11-02T06:22:25Z (cutoff day 2026-11-02).
+  // Every lure claims a creation time after the real thread: opening any of them changes the result.
+  const lure = { cwd: h.zylosDir, metaAt: LAUNCH + 3_600_000 };
+  writeNamedRollout(h.codexHome, '2025-12-31T23-59-59', { id: 'old-year', ...lure });
+  writeNamedRollout(h.codexHome, '2026-10-31T23-59-59', { id: 'old-month', ...lure });
+  writeNamedRollout(h.codexHome, '2026-11-01T23-59-59', { id: 'old-day', ...lure });
+  writeNamedRollout(h.codexHome, '2026-11-02T06-22-24', { id: 'pre-cutoff', ...lure }); // cutoff day, 1 s too old
+  const main = writeRollout(h.codexHome, { at: LAUNCH + 9_000, id: 'main', cwd: h.zylosDir });
+
+  const spy = spyFs();
+  const read = createCodexSessionReader({ codexHome: h.codexHome, zylosDir: h.zylosDir, fsImpl: spy.fsImpl, now: () => LAUNCH + 100_000 });
+  assert.equal(read({ launchAt: LAUNCH })?.session_id, 'main');
+  assert.deepEqual(relSessions(h.codexHome, spy.listed), ['', '2026', '2026/11', '2026/11/02', '2026/11/03'],
+    'only the cutoff day and later are listed (2025, 2026/10, 2026/11/01 are pruned)');
+  assert.deepEqual(spy.opened, [main], 'the pre-cutoff file in the cutoff-day folder is never opened');
+});
+
+test('readCodexSession 剪枝边界: cutoff 当天目录、名字时间 ≥ launch − 1 天的文件仍会读到（时区 slack）', (t) => {
+  const cases = [
+    { stamp: '2026-11-02T06-22-25', found: true, why: 'name time == launch − 1 day (the cutoff itself)' },
+    { stamp: '2026-11-02T06-22-24', found: false, why: 'name time 1 s before the cutoff' },
+    { stamp: '2026-11-02T18-22-26', found: true, why: 'UTC−12 host: a thread created 1 s after launch is named launch − 12 h' },
+    { stamp: '2026-11-03T20-22-26', found: true, why: 'UTC+14 host: named launch + 14 h' },
+  ];
+  for (const c of cases) {
+    const h = makeHome();
+    t.after(h.cleanup);
+    // metaAt after launch: the file qualifies whenever it is opened, so `null` means "skipped by name".
+    const file = writeNamedRollout(h.codexHome, c.stamp, { id: 'x', cwd: h.zylosDir, metaAt: LAUNCH + 1_000 });
+    const spy = spyFs();
+    const read = createCodexSessionReader({ codexHome: h.codexHome, zylosDir: h.zylosDir, fsImpl: spy.fsImpl, now: () => LAUNCH + 100_000 });
+    assert.equal(read({ launchAt: LAUNCH })?.session_id ?? null, c.found ? 'x' : null, c.why);
+    assert.deepEqual(spy.opened, c.found ? [file] : [], `${c.why}: opened`);
+  }
+});
+
+test('readCodexSession 剪枝边界: 跨年 launch 仍列出上一年 12/31，之前的月/日不 list', (t) => {
+  const h = makeHome();
+  t.after(h.cleanup);
+  const launch = Date.UTC(2027, 0, 1, 3, 0, 0); // cutoff = 2026-12-31T03:00:00Z
+  const lure = { cwd: h.zylosDir, metaAt: launch + 3_600_000 };
+  writeNamedRollout(h.codexHome, '2026-11-30T23-59-59', { id: 'old-month', ...lure });
+  writeNamedRollout(h.codexHome, '2026-12-30T23-59-59', { id: 'old-day', ...lure });
+  // UTC−12 host: a thread created 1 s after launch is named 2026-12-31T15-00-01.
+  writeNamedRollout(h.codexHome, '2026-12-31T15-00-01', { id: 'nye', cwd: h.zylosDir, metaAt: launch + 1_000 });
+
+  const spy = spyFs();
+  const read = createCodexSessionReader({ codexHome: h.codexHome, zylosDir: h.zylosDir, fsImpl: spy.fsImpl, now: () => launch + 100_000 });
+  assert.equal(read({ launchAt: launch })?.session_id, 'nye');
+  assert.deepEqual(relSessions(h.codexHome, spy.listed), ['', '2026', '2026/12', '2026/12/31']);
+});
+
+/** zylos dir as a real directory plus a symlink to it; also an unrelated real dir. */
+function linkedZylos(h) {
+  const real = fs.realpathSync(h.zylosDir);
+  const link = path.join(h.root, 'zylos-link');
+  fs.symlinkSync(real, link, 'dir');
+  const other = `${real}-other`;
+  fs.mkdirSync(other);
+  return { real, link, other };
+}
+
+test('readCodexSession realpath: zylos dir 经 symlink、thread cwd 记的是真实路径 ⇒ 仍匹配', (t) => {
+  const h = makeHome();
+  t.after(h.cleanup);
+  const { real, link } = linkedZylos(h);
+  assert.notEqual(link, real);
+  writeRollout(h.codexHome, { at: LAUNCH + 9_000, id: 'via-real', cwd: real });
+  const read = createCodexSessionReader({ codexHome: h.codexHome, zylosDir: link, now: () => LAUNCH + 100_000 });
+  assert.equal(read({ launchAt: LAUNCH })?.session_id, 'via-real');
+});
+
+test('readCodexSession realpath: zylos dir 经 symlink、thread cwd 记的也是 symlink 路径 ⇒ 匹配', (t) => {
+  const h = makeHome();
+  t.after(h.cleanup);
+  const { link } = linkedZylos(h);
+  writeRollout(h.codexHome, { at: LAUNCH + 9_000, id: 'via-link', cwd: link });
+  const read = createCodexSessionReader({ codexHome: h.codexHome, zylosDir: link, now: () => LAUNCH + 100_000 });
+  assert.equal(read({ launchAt: LAUNCH })?.session_id, 'via-link');
+});
+
+test('readCodexSession realpath: 另一个真实目录 / 指向别处的 symlink / 父目录 ⇒ 不匹配', (t) => {
+  const h = makeHome();
+  t.after(h.cleanup);
+  const { real, link, other } = linkedZylos(h);
+  const otherLink = path.join(h.root, 'other-link');
+  fs.symlinkSync(other, otherLink, 'dir');
+  writeRollout(h.codexHome, { at: LAUNCH + 1_000, id: 'zylos', cwd: real });
+  writeRollout(h.codexHome, { at: LAUNCH + 2_000, id: 'other-real', cwd: other });
+  writeRollout(h.codexHome, { at: LAUNCH + 3_000, id: 'other-link', cwd: otherLink });
+  writeRollout(h.codexHome, { at: LAUNCH + 4_000, id: 'parent', cwd: path.dirname(real) });
+  for (const zylosDir of [link, real]) {
+    const read = createCodexSessionReader({ codexHome: h.codexHome, zylosDir, now: () => LAUNCH + 100_000 });
+    assert.equal(read({ launchAt: LAUNCH })?.session_id, 'zylos', `zylosDir=${zylosDir}`);
+  }
+});
+
+test('readCodexSession realpath: zylos dir 尚不存在（realpath 抛错）⇒ 按字面路径匹配', (t) => {
+  const h = makeHome();
+  t.after(h.cleanup);
+  const missing = path.join(h.root, 'not-yet');
+  writeRollout(h.codexHome, { at: LAUNCH + 9_000, id: 'literal', cwd: missing });
+  const read = createCodexSessionReader({ codexHome: h.codexHome, zylosDir: missing, now: () => LAUNCH + 100_000 });
+  assert.equal(read({ launchAt: LAUNCH })?.session_id, 'literal');
+});
