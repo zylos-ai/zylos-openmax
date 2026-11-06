@@ -36,10 +36,11 @@ import { isSystemSender, systemEventPriority } from './lib/system-message.js';
 import {
   handleImOwnerNotice, createDedup, refreshOwnerEndpoint, IM_OWNER_NOTICE_TYPE,
 } from './lib/im-owner-notice.js';
-import { classifySystemEvent, routeImOwnerNotice } from './lib/system-event-routing.js';
+import { classifySystemEvent, isSenderlessUpdate, routeImOwnerNotice } from './lib/system-event-routing.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { preferredConnectorsFrom } from './lib/connector-preference.js';
 import { wfRefFrom } from './lib/wf-context.js';
+import { quoteExcerptFrom } from './lib/quote-excerpt.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
@@ -1338,6 +1339,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       recent,
       {
         groupName, smartHint, quotedContent,
+        quotedExcerpt: quoteExcerptFrom(msg, quotedMsgId),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
         preferredConnectors: preferredConnectorsFrom(msg),
@@ -1639,6 +1641,8 @@ async function handleSystemEvent(orgConfig, frame) {
       warn(`[${orgConfig.slug}] handleChannelCommand: ${e.message}`));
     return;
   }
+
+  if (kind === 'edit' && isSenderlessUpdate(payload)) return;
 
   const data = payload.data || {};
   const conversationId = payload.conversation_id || data.conversation_id;
