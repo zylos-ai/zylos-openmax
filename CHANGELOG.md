@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Combines PRs #236, #237, #238, #239, #240, #241, #242, #243, #244, #245, #247 and #248 (#240 is a follow-up to #239 within this cycle and is folded into the market client entry; #248 adds tests for #247).
+Combines PRs #236, #237, #238, #239, #240, #241, #242, #243, #244, #245, #246, #247 and #248 (#240 is a follow-up to #239 within this cycle and is folded into the market client entry; #248 adds tests for #247).
 
 ### Upgrade notes
 
