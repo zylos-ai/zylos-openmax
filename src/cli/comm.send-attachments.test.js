@@ -135,6 +135,20 @@ test('🔴 an item missing file_name or content_type is refused', async () => {
   }
 });
 
+test('🔴 an item without an integer size_bytes is refused (the server requires it)', async () => {
+  const { size_bytes: _drop, ...noSize } = PNG;
+  for (const item of [noSize, { ...PNG, size_bytes: '20' }, { ...PNG, size_bytes: -1 }, { ...PNG, size_bytes: 1.5 }]) {
+    // eslint-disable-next-line no-await-in-loop
+    const { ok, posts, stderr } = await send({ conversationId: CONV, content: { attachments: [item] } });
+    assert.equal(ok, false, JSON.stringify(item));
+    assert.equal(posts.length, 0, JSON.stringify(item));
+    assert.match(stderr, /attachments\[0\] has no size_bytes/);
+  }
+  const { ok, posts } = await send({ conversationId: CONV, content: { attachments: [{ ...PNG, size_bytes: 0 }] } });
+  assert.equal(ok, true);
+  assert.equal(posts.length, 1);
+});
+
 test('🔴 a whitespace-only artifact_id / file_name / content_type is refused', async () => {
   for (const k of ['artifact_id', 'file_name', 'content_type']) {
     // eslint-disable-next-line no-await-in-loop

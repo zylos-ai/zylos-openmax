@@ -267,8 +267,9 @@ async function fetchSelfMember(org) {
  *
  * Attachments given with shorthand content are carried, never dropped. Each
  * item, shorthand or in a pre-built content object, must already be in the
- * wire shape {artifact_id, file_name, content_type, size_bytes?}: artifact_id,
- * file_name and content_type non-empty strings, and no camel-case keys
+ * wire shape {artifact_id, file_name, content_type, size_bytes}: artifact_id,
+ * file_name and content_type non-empty strings, size_bytes a non-negative
+ * integer (cws-core requires it on every item), and no camel-case keys
  * (as.upload returns artifactId / fileName / mimeType / sizeBytes, which must
  * be renamed, not passed through). Anything else is refused before sending —
  * items are passed through verbatim, so a half-renamed item would otherwise go
@@ -309,6 +310,7 @@ function validateAttachments(list) {
     for (const k of ['artifact_id', 'file_name', 'content_type']) {
       if (!nonEmpty(a[k])) throw bad(`has no ${k}`);
     }
+    if (!Number.isInteger(a.size_bytes) || a.size_bytes < 0) throw bad('has no size_bytes (a non-negative integer)');
   });
   return list;
 }
