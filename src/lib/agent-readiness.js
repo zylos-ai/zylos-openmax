@@ -22,6 +22,15 @@
  * agent-status.json.runtime_launch_at` (the hook writes that file; a stale value
  * from a previous launch is rejected by the comparison).
  *
+ * CODEX RUNTIME: zylos-core writes foreground-session.json only for a managed
+ * Claude process, so on Codex the file is absent or a stale Claude record and
+ * the gate would hold forever. When the active runtime is Codex and the record
+ * does not belong to this launch, the newest foreground Codex thread (its
+ * rollout `session_meta`, see codex-session.js) stands in for it, under the
+ * same comparison against `runtime_launch_at`. Every other check — stale or
+ * unhealthy status, a dead process, busy/idle — is unchanged. Any other or
+ * unknown runtime keeps the original behavior exactly.
+ *
  * FAIL-OPEN BY DESIGN: the gate delays the trigger, it must never cancel it.
  * A permanently busy agent, a stopped activity monitor, or an unreadable status
  * file must not strand an org un-onboarded, so `waitUntilReady` gives up after
@@ -35,6 +44,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import { existsSync, statSync, readFileSync } from 'node:fs';
+import { createCodexSessionReader, readZylosRuntime } from './codex-session.js';
 
 /**
  * Blockers on which the fail-open cap must NOT release the report.
@@ -197,8 +207,15 @@ export function normalizeNumericOptions(raw, defaults, aliases = {}, { allowZero
  * @param {(ms: number) => Promise<void>} deps.sleep
  * @param {() => number} deps.now                                           epoch ms
  * @param {() => object} [deps.options]                                     overrides, read per call
+ * @param {() => (string|null)} [deps.readRuntime]                          active zylos runtime ('claude'|'codex'|null)
+ * @param {({launchAt}) => ({session_id, started_at}|null)} [deps.readCodexSession]
+ *   newest foreground Codex thread; consulted only on Codex when the
+ *   foreground record does not belong to this launch
  */
-export function createReadinessGate({ readStatus, readForeground, readProc, sleep, now, options = () => ({}) }) {
+export function createReadinessGate({
+  readStatus, readForeground, readProc, sleep, now, options = () => ({}),
+  readRuntime = () => null, readCodexSession = () => null,
+}) {
   function settings() {
     return { ...READINESS_DEFAULTS, ...normalizeReadinessOptions(options()) };
   }
@@ -220,8 +237,27 @@ export function createReadinessGate({ readStatus, readForeground, readProc, slee
     const statusAgeMs = now() - status.mtimeMs;
     const fg = readForeground();
     const proc = readProc();
-    const observedAt = Number(fg?.observed_at) || 0;
     const launchAt = Number(s.runtime_launch_at) || 0;
+    const inLaunch = (at) => (at ? (!launchAt || at >= launchAt) : false);
+    let observedAt = Number(fg?.observed_at) || 0;
+    let sessionId = fg?.session_id ?? null;
+
+    // Codex: nothing writes foreground-session.json, so take the newest
+    // foreground Codex thread instead — but only when the record does not
+    // already prove a session for this launch, and only on Codex.
+    let codex = null;
+    if (!inLaunch(observedAt) && readRuntime() === 'codex') {
+      codex = { session_source: 'none' };
+      const cx = readCodexSession({ launchAt });
+      const startedAt = Number(cx?.started_at) || 0;
+      // An in-launch thread always wins; an older one is still more telling
+      // than no record at all (→ session_predates_launch rather than no_session).
+      if (startedAt && (inLaunch(startedAt) || !observedAt)) {
+        observedAt = startedAt;
+        sessionId = cx.session_id ?? null;
+        codex.session_source = 'codex_rollout';
+      }
+    }
 
     // Snapshot every input the verdict depends on, so one log line explains it.
     const detail = {
@@ -231,10 +267,15 @@ export function createReadinessGate({ readStatus, readForeground, readProc, slee
       status_age_ms: statusAgeMs,
       session_observed_at: observedAt || null,
       runtime_launch_at: launchAt || null,
-      session_in_launch: observedAt ? (!launchAt || observedAt >= launchAt) : false,
+      session_in_launch: inLaunch(observedAt),
       proc_alive: proc ? proc.alive !== false : null,
-      session_id: fg?.session_id ?? null,
+      session_id: sessionId,
     };
+    // Only present when the Codex path ran, so the Claude snapshot is unchanged.
+    if (codex) {
+      detail.runtime = 'codex';
+      detail.session_source = codex.session_source;
+    }
     const verdict = (ready, reason) => ({ ready, reason, detail });
 
     // Order is by diagnostic value, not convenience: when several conditions
@@ -320,6 +361,8 @@ export function formatReadinessDetail(detail = {}) {
   ];
   if (detail.proc_alive !== null && detail.proc_alive !== undefined) parts.push(`proc=${detail.proc_alive ? 'alive' : 'dead'}`);
   if (detail.session_id) parts.push(`session_id=${detail.session_id}`);
+  if (detail.runtime) parts.push(`runtime=${detail.runtime}`);
+  if (detail.session_source) parts.push(`session_source=${detail.session_source}`);
   return parts.join(' ');
 }
 
@@ -401,6 +444,8 @@ export function createDefaultReadinessGate({ options } = {}) {
   const statusFile = path.join(monitorDir, 'agent-status.json');
   const foregroundFile = path.join(monitorDir, 'foreground-session.json');
   const procFile = path.join(monitorDir, 'proc-state.json');
+  const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || os.homedir(), '.codex');
+  const readCodexSession = createCodexSessionReader({ codexHome, zylosDir });
 
   // These files are rewritten atomically every second; a torn read is expected
   // occasionally and simply means "unknown this tick", never "not ready forever".
@@ -426,6 +471,8 @@ export function createDefaultReadinessGate({ options } = {}) {
     },
     readForeground: () => readJson(foregroundFile),
     readProc: () => readJson(procFile),
+    readRuntime: () => readZylosRuntime(zylosDir),
+    readCodexSession,
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     now: () => Date.now(),
     options,
