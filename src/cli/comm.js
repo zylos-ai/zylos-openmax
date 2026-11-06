@@ -265,14 +265,25 @@ async function fetchSelfMember(org) {
  *   - {content_type, body, attachments?}                → pass-through (advanced)
  *   - already-built object with top-level type+content  → returned as-is
  *
- * Attachments given with shorthand content are carried, never dropped: every
- * item must name its `artifact_id` (the `artifactId` from as.upload), or the
- * call is refused. All items with an `image/*` content_type make an IMAGE
- * message, anything else a FILE message — the same body shape the
- * `[MEDIA:image]` / `[MEDIA:file]` outbound path builds (buildMediaBody).
+ * Attachments given with shorthand content are carried, never dropped. Each
+ * item must already be in the wire shape {artifact_id, file_name, content_type,
+ * size_bytes?}: artifact_id, file_name and content_type non-empty strings, and
+ * no camel-case keys (as.upload returns artifactId / fileName / mimeType /
+ * sizeBytes, which must be renamed, not passed through). Anything else is
+ * refused before sending — items are passed through verbatim, like the
+ * pre-built content object, so a half-renamed item would otherwise go out
+ * with an empty file name and an image downgraded to a file. All items with an
+ * `image/*` content_type (case-insensitive) make an IMAGE message, anything
+ * else a FILE message — the same body shape the `[MEDIA:image]` /
+ * `[MEDIA:file]` outbound path builds (buildMediaBody).
  * A message with no text and no attachments is refused instead of being posted
  * as a blank message.
  */
+const ATTACHMENT_SHAPE = '{artifact_id, file_name, content_type, size_bytes} — snake_case, with artifact_id = the '
+  + 'artifactId returned by as.upload (not mediaId), file_name = its fileName, content_type = its mimeType, '
+  + 'size_bytes = its sizeBytes. Or send the file with c4-send.js "[MEDIA:image]/abs/path" / "[MEDIA:file]/abs/path".';
+const CAMEL_ATTACHMENT_KEYS = ['artifactId', 'fileName', 'mimeType', 'contentType', 'sizeBytes'];
+
 function shorthandAttachments(params) {
   const c = params.content;
   const fromContent = (c && typeof c === 'object' && !Array.isArray(c)) ? c.attachments : undefined;
@@ -283,13 +294,14 @@ function shorthandAttachments(params) {
   const list = fromContent ?? fromParams;
   if (list === undefined || list === null) return [];
   if (!Array.isArray(list)) throw new Error('comm.send: attachments must be an array');
+  const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
   list.forEach((a, i) => {
-    if (!a || typeof a !== 'object' || typeof a.artifact_id !== 'string' || !a.artifact_id.trim()) {
-      throw new Error(
-        `comm.send: attachments[${i}] has no artifact_id — each attachment must be `
-        + '{artifact_id, file_name, content_type, size_bytes} with artifact_id = the artifactId returned by as.upload '
-        + '(not mediaId). Or send the file with c4-send.js "[MEDIA:image]/abs/path" / "[MEDIA:file]/abs/path".',
-      );
+    const bad = (why) => new Error(`comm.send: attachments[${i}] ${why} — each attachment must be ${ATTACHMENT_SHAPE}`);
+    if (!a || typeof a !== 'object' || Array.isArray(a)) throw bad('is not an object');
+    const camel = CAMEL_ATTACHMENT_KEYS.filter((k) => k in a);
+    if (camel.length) throw bad(`has camel-case key(s) ${camel.join(', ')}`);
+    for (const k of ['artifact_id', 'file_name', 'content_type']) {
+      if (!nonEmpty(a[k])) throw bad(`has no ${k}`);
     }
   });
   return list;
@@ -301,6 +313,7 @@ function isEmptyContent(body, attachments) {
   return Object.entries(body).every(([k, v]) => v === undefined || v === null || v === ''
     || (k === 'text' && typeof v === 'string' && !v.trim()));
 }
+
 /**
  * Best-effort text extraction for the mention pre-check — mirrors the plain-text
  * branch of buildSendBody(). A pre-built content object carries its text at
@@ -374,6 +387,10 @@ function buildSendBody(params) {
     if (params.attachments !== undefined) {
       throw new Error('comm.send: top-level attachments cannot be combined with a pre-built content object — put them in content.attachments');
     }
+    if (c.body !== undefined && (!c.body || typeof c.body !== 'object' || Array.isArray(c.body))) {
+      throw new Error('comm.send: a pre-built content object needs body to be an object ({text} or {file_name, text?}), '
+        + `got ${Array.isArray(c.body) ? 'an array' : c.body === null ? 'null' : typeof c.body}`);
+    }
     contentType = c.content_type;
     body        = c.body ?? {};
     attachments = c.attachments ?? [];
@@ -386,9 +403,9 @@ function buildSendBody(params) {
               : '';
     attachments = shorthandAttachments(params);
     if (attachments.length > 0) {
-      const allImages = attachments.every((a) => typeof a.content_type === 'string' && a.content_type.startsWith('image/'));
+      const allImages = attachments.every((a) => a.content_type.toLowerCase().startsWith('image/'));
       contentType = allImages ? 'image' : 'file';
-      body        = { file_name: attachments[0].file_name || '', ...(String(text) ? { text: String(text) } : {}) };
+      body        = { file_name: attachments[0].file_name, ...(String(text) ? { text: String(text) } : {}) };
       if (!msgType) msgType = allImages ? 'IMAGE' : 'FILE';
     } else {
       contentType = looksLikeMarkdown(text) ? 'markdown' : 'text';
@@ -1049,7 +1066,8 @@ Messages
                             #   ask_card and ask. Never for an answer to the user
                             # content: string | {text|body} | {text?, attachments} | {content_type, body, attachments?}
                             # attachments: [{artifact_id, file_name, content_type, size_bytes}] —
-                            #   artifact_id = as.upload's artifactId; an item without it is refused.
+                            #   snake_case only: artifact_id = as.upload's artifactId, file_name,
+                            #   content_type required; a missing one or a camel-case key is refused.
                             #   All image/* → IMAGE message, otherwise FILE. Empty message refused.
                             # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
   comm.ask                  {conversationId, interactionType?, kind, askedOf?, meta?, noRun?, ...card}

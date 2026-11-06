@@ -161,6 +161,10 @@ function formatContextLine(m) {
   return `[${name}]: ${text}`;
 }
 
+// Shown for an inbound attachment that cannot be fetched (no artifact id, or
+// its download failed), so the message is not rendered as an empty one.
+export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
+
 /**
  * Build the C4-bridge inbound text for a single incoming message.
  *
@@ -186,10 +190,6 @@ function formatContextLine(m) {
  *                            platform System Member (sender_type=SYSTEM).
  * @returns {string}
  */
-// Shown for an inbound attachment that cannot be fetched (no artifact id, or
-// its download failed), so the message is not rendered as an empty one.
-export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
-
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
   const rawType = (conv?.type || '').toLowerCase();
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';

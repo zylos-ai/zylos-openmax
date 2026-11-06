@@ -12,7 +12,9 @@ import path from 'node:path';
 
 const cliPath = fileURLToPath(new URL('./comm.js', import.meta.url));
 
-// No live run may leak into these sends (see comm.test.js).
+// Hermetic: a temp HOME and an explicit org, so neither the host's org config
+// nor a live run (see comm.test.js) leaks into these sends.
+const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'om-comm-att-home-'));
 process.env.OPENMAX_RUNS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'om-comm-att-runs-'));
 
 // Run comm.send against a stub server; return every request it received and
@@ -39,6 +41,8 @@ async function send(params) {
         {
           env: {
             ...process.env,
+            HOME,
+            COCO_ORG_ID: 'org-test',
             COCO_API_URL: `http://127.0.0.1:${port}`,
             COCO_API_PREFIX: '/api/v1',
             COCO_AUTH_TOKEN: 'cli-contract-token',
@@ -97,13 +101,46 @@ test('🔴 top-level params.attachments with string content are carried', async 
 });
 
 test('🔴 an attachment without artifact_id is refused before anything is sent', async () => {
-  const { ok, posts, stderr } = await send({
-    conversationId: CONV,
-    content: { text: '', attachments: [{ artifactId: 'camel', fileName: 'a.png' }] },
-  });
+  const { artifact_id: _drop, ...noId } = PDF;
+  const { ok, posts, stderr } = await send({ conversationId: CONV, content: { text: 'x', attachments: [noId] } });
   assert.equal(ok, false);
   assert.equal(posts.length, 0);
   assert.match(stderr, /attachments\[0\] has no artifact_id/);
+});
+
+// as.upload returns {artifactId, fileName, mimeType, sizeBytes}. Renaming only
+// artifactId must not send a FILE with an empty name and the camel keys
+// passed through verbatim.
+test('🔴 an as.upload-shaped item (camel keys, only artifactId renamed) is refused', async () => {
+  const uploaded = { artifactId: 'art-png', fileName: 'shot.png', mimeType: 'image/png', sizeBytes: 20 };
+  const { artifactId, ...rest } = uploaded;
+  for (const item of [uploaded, { artifact_id: artifactId, ...rest }]) {
+    // eslint-disable-next-line no-await-in-loop
+    const { ok, posts, stderr } = await send({ conversationId: CONV, content: { attachments: [item] } });
+    assert.equal(ok, false, JSON.stringify(item));
+    assert.equal(posts.length, 0, JSON.stringify(item));
+    assert.match(stderr, /attachments\[0\] has camel-case key\(s\) .*fileName.*mimeType.*sizeBytes/);
+    assert.match(stderr, /snake_case/);
+  }
+});
+
+test('🔴 an item missing file_name or content_type is refused', async () => {
+  for (const k of ['file_name', 'content_type']) {
+    const { [k]: _drop, ...item } = PNG;
+    // eslint-disable-next-line no-await-in-loop
+    const { ok, posts, stderr } = await send({ conversationId: CONV, content: { attachments: [item] } });
+    assert.equal(ok, false, k);
+    assert.equal(posts.length, 0, k);
+    assert.match(stderr, new RegExp(`attachments\\[0\\] has no ${k}`));
+  }
+});
+
+test('image detection ignores content_type case', async () => {
+  const upper = { ...PNG, content_type: 'IMAGE/PNG' };
+  const { ok, posts } = await send({ conversationId: CONV, content: { attachments: [upper] } });
+  assert.equal(ok, true);
+  assert.equal(posts[0].body.type, 'IMAGE');
+  assert.deepEqual(posts[0].body.content.attachments, [upper]);
 });
 
 test('attachments given in both places, or top-level with pre-built content, are refused', async () => {
@@ -133,9 +170,21 @@ test('🔴 an empty message is refused client-side: nothing reaches the server',
 });
 
 test('a pre-built content object with neither text nor attachments is refused', async () => {
-  const { ok, posts } = await send({ conversationId: CONV, content: { content_type: 'image', body: {}, attachments: [] } });
+  const { ok, posts, stderr } = await send({ conversationId: CONV, content: { content_type: 'image', body: {}, attachments: [] } });
   assert.equal(ok, false);
   assert.equal(posts.length, 0);
+  assert.match(stderr, /refusing to send an empty message/);
+});
+
+test('a pre-built content object whose body is not an object is refused for that reason', async () => {
+  for (const [bodyValue, kind] of [['hi', 'string'], [['x'], 'an array'], [null, 'null']]) {
+    // eslint-disable-next-line no-await-in-loop
+    const { ok, posts, stderr } = await send({ conversationId: CONV, content: { content_type: 'text', body: bodyValue } });
+    assert.equal(ok, false, kind);
+    assert.equal(posts.length, 0, kind);
+    assert.match(stderr, new RegExp(`needs body to be an object .*got ${kind}`));
+    assert.doesNotMatch(stderr, /empty message/);
+  }
 });
 
 test('unchanged: plain text and the pre-built content object still go out as before', async () => {

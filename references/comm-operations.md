@@ -100,9 +100,11 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 Attachment rules (enforced client-side; the call fails with an error and nothing is sent):
 
-- Every attachment must carry `artifact_id` — the **`artifactId`** returned by `as.upload` (not `mediaId`). Camel-case keys (`artifactId`, `fileName`) are not accepted.
+- Every attachment must be written in snake_case as `{artifact_id, file_name, content_type, size_bytes}`, with `artifact_id`, `file_name` and `content_type` non-empty strings. `as.upload` returns camel-case `{artifactId, fileName, mimeType, sizeBytes}` — rename **all** of them: `artifact_id` = `artifactId` (not `mediaId`), `file_name` = `fileName`, `content_type` = `mimeType`, `size_bytes` = `sizeBytes`. An item missing one of the three required keys, or carrying any camel-case key (`artifactId`, `fileName`, `mimeType`, `contentType`, `sizeBytes`), is refused; nothing is normalized.
+- `image/*` is matched case-insensitively: every attachment `image/*` → IMAGE message, otherwise FILE.
 - Give attachments in one place only: `content.attachments` **or** top-level `attachments`. A top-level `attachments` cannot be combined with a pre-built `{content_type, ...}` object — put them in its `content.attachments`.
 - A message with no text and no attachments is refused (`refusing to send an empty message`) instead of being posted blank.
+- A pre-built `{content_type, body}` object whose `body` is not an object (a string, array or null) is refused with that reason.
 
 ⚠️ **Not supported — do not use:** an array of parts (`[{type:"text",...},{type:"image",...}]`) or `{type:"image", body:"<id>"}`. They are **not** normalized: an array has no text and is refused as an empty message, and `{type:"image", body:"<id>"}` is sent as a **text message containing the id** — the call still returns 200, so nothing tells you it went wrong.
 
