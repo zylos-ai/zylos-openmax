@@ -1185,8 +1185,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     const mediaItems = [];
     for (const att of allAttachments) {
       const attId = att.artifact_id;
-      if (!attId) continue;
       const attFileName = att.file_name;
+      if (!attId) {
+        // Nothing to fetch it by — keep it so the formatter can say so
+        // instead of rendering an empty message.
+        mediaItems.push({ fileName: attFileName, contentType: att.content_type });
+        continue;
+      }
       const item = { id: attId, fileName: attFileName };
       if (shouldDownload) {
         try {
@@ -1194,6 +1199,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
           item.localPath = await downloadInboundAttachment(orgConfig, attId, attFileName);
         } catch (e) {
           warn('media fetch failed:', attId, e.message);
+          item.downloadFailed = true;
         }
       }
       mediaItems.push(item);
