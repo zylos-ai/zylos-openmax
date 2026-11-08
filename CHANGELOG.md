@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Connecting a channel no longer leaves `~/zylos/.env` readable by other users.** The channel credential writer created its temporary file under the process umask (0644 under the usual 022) and renamed it over `.env`, so after a channel connect `.env` was 0644 again even where it had been tightened to 0600. The temporary file is now created 0600 and `.env` is set to 0600 after the rename, including when a leftover temporary file from an interrupted write already exists.
+
 ## [2.32.0] - 2026-11-07
 
 Combines PRs #236, #237, #238, #239, #240, #241, #242, #243, #244, #245, #246, #247 and #248 (#240 is a follow-up to #239 within this cycle and is folded into the market client entry; #248 adds tests for #247).

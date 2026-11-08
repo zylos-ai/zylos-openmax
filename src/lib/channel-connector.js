@@ -823,9 +823,12 @@ function defaultWriteEnv(vars, { home = HOME, fsDep = fs } = {}) {
       content += `${key}=${safeVal}\n`;
     }
   }
+  // .env holds credentials, so it stays owner-only: the temporary file is created 0600 rather than
+  // under the umask, and the replaced .env is set to 0600 whatever mode the file it replaced had.
   const tmp = `${envPath}.tmp.${process.pid}`;
-  fsDep.writeFileSync(tmp, content);
+  fsDep.writeFileSync(tmp, content, { mode: 0o600 });
   fsDep.renameSync(tmp, envPath);
+  fsDep.chmodSync(envPath, 0o600);
 }
 
 // Merge a patch into components/<component>/config.json. Atomic write.
@@ -929,7 +932,7 @@ export function createChannelInstaller({
   qrTimeoutMs = QR_LOGIN_TIMEOUT_MS,
   qrReadyTimeoutMs = QR_READY_TIMEOUT_MS,
 } = {}) {
-  const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
+  const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home, fsDep }));
   const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
 
   // In-memory per-channel "active login" registry (Fix B in-flight guard),
