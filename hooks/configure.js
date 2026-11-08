@@ -106,7 +106,10 @@ if (!config.cf_access) config.cf_access = { client_id: '', client_secret: '' };
 if (values.COCO_CF_ACCESS_CLIENT_ID)     config.cf_access.client_id     = values.COCO_CF_ACCESS_CLIENT_ID;
 if (values.COCO_CF_ACCESS_CLIENT_SECRET) config.cf_access.client_secret = values.COCO_CF_ACCESS_CLIENT_SECRET;
 
-fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+// config.json holds credentials (cf_access.client_secret here, agent.api_key once post-install
+// runs): created 0600, and an existing file is set to 0600 after the write.
+fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+fs.chmodSync(CONFIG_PATH, 0o600);
 console.log(`[configure] endpoints persisted: bff_url=${config.server.bff_url || '(unset)'} ws_url=${config.server.ws_url || '(unset)'}`);
 if (config.cf_access.client_id || config.cf_access.client_secret) {
   console.log('[configure] cf_access persisted from supplied values');
