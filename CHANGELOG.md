@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Credential files stay owner-only (0600) when this component writes them.** Several writers created files under the process umask (0644 under the usual 022), which undid the 0600 that zylos-core sets on `~/zylos/.env`, and left `config.json` readable by other users:
+  - Channel connect and disconnect: `~/zylos/.env` (channel credentials, written on connect) and `~/zylos/components/<channel>/config.json` (written on connect and disconnect). Both are now replaced through a temporary file that is created 0600 and set to 0600 before the rename, so the replaced file is never 0644, even when a leftover temporary file from an interrupted write already exists (a creation mode does not apply to an existing file).
+  - The configure hook: `components/openmax/config.json` is created 0600 and set to 0600 after the write.
+  - The post-upgrade hook's schema migration: the temporary file that replaces `config.json` is 0600 before the rename. (The hook already set `config.json` to 0600 at its end.)
+
+### Changed
+
+- **`npm test` names its test files explicitly:** `node --test 'src/**/*.test.js' 'hooks/**/*.test.js' 'scripts/**/*.test.js'` (needs Node 21 or later for the patterns; the runtime ships Node 22). The bare `node --test` also picked up the live-environment smoke scripts under `docs/` (they need a real environment and exit 2 without one); those are run on their own as their READMEs describe. No unit test file was dropped.
+
 ## [2.32.0] - 2026-11-07
 
 Combines PRs #236, #237, #238, #239, #240, #241, #242, #243, #244, #245, #246, #247 and #248 (#240 is a follow-up to #239 within this cycle and is folded into the market client entry; #248 adds tests for #247).

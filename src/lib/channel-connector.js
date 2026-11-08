@@ -823,9 +823,18 @@ function defaultWriteEnv(vars, { home = HOME, fsDep = fs } = {}) {
       content += `${key}=${safeVal}\n`;
     }
   }
-  const tmp = `${envPath}.tmp.${process.pid}`;
-  fsDep.writeFileSync(tmp, content);
-  fsDep.renameSync(tmp, envPath);
+  replaceOwnerOnly(envPath, content, fsDep);
+}
+
+// Atomically replace `file` with `content`, owner-only from the moment it is in place: .env holds
+// channel credentials and a component config.json can hold tokens. The temporary file is created
+// 0600 rather than under the umask, and is also set to 0600 before the rename, because a creation
+// mode does not apply when a leftover temporary file from an interrupted write already exists.
+function replaceOwnerOnly(file, content, fsDep) {
+  const tmp = `${file}.tmp.${process.pid}`;
+  fsDep.writeFileSync(tmp, content, { mode: 0o600 });
+  fsDep.chmodSync(tmp, 0o600);
+  fsDep.renameSync(tmp, file);
 }
 
 // Merge a patch into components/<component>/config.json. Atomic write.
@@ -836,9 +845,7 @@ function defaultWriteConfig(component, patch, { home = HOME, fsDep = fs } = {}) 
   let existing = {};
   try { existing = JSON.parse(fsDep.readFileSync(cfgPath, 'utf8')); } catch { /* new config */ }
   const merged = { ...existing, ...patch };
-  const tmp = `${cfgPath}.tmp.${process.pid}`;
-  fsDep.writeFileSync(tmp, JSON.stringify(merged, null, 2));
-  fsDep.renameSync(tmp, cfgPath);
+  replaceOwnerOnly(cfgPath, JSON.stringify(merged, null, 2), fsDep);
 }
 
 /**
@@ -929,8 +936,8 @@ export function createChannelInstaller({
   qrTimeoutMs = QR_LOGIN_TIMEOUT_MS,
   qrReadyTimeoutMs = QR_READY_TIMEOUT_MS,
 } = {}) {
-  const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home }));
-  const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home }));
+  const doWriteEnv = writeEnv || ((vars) => defaultWriteEnv(vars, { home, fsDep }));
+  const doWriteConfig = writeConfig || ((component, patch) => defaultWriteConfig(component, patch, { home, fsDep }));
 
   // In-memory per-channel "active login" registry (Fix B in-flight guard),
   // keyed by component name. A connect QR-login loop registers an entry; a

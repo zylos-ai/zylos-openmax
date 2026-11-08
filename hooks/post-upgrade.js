@@ -267,7 +267,9 @@ if (config.agent?.api_key && config.server?.bff_url) {
 // ── write back if anything changed ──────────────────────────────────────────
 if (legacyKeysSeen.length > 0) {
   const tmp = `${CONFIG_PATH}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n');
+  // config.json holds agent.api_key: the replacement is owner-only before it is renamed into place.
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, CONFIG_PATH);
 
   console.log('[post-upgrade] config.json migrated to multi-org schema (v0.4).');
