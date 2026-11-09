@@ -25,6 +25,20 @@ it is a write-time list, not a stored field, so carry only the handoff's list
 verbatim and never derive one from the baseline binding.
 `form_context` is display context, never API parameters or authorization.
 
+An update may switch an attached automation to no project (OPENM-1308): its
+spec then has `unattached: true` and `unattached_scope` and no `project_id`.
+Treat it as Common's
+[No project and output knowledge base](automation-common.md#no-project-and-output-knowledge-base)
+describes: do not ask for a project and never put the baseline `project_id`
+back, which would undo the change. The form takes the scope from the saved
+automation; the server refuses a real scope change
+(`AUTOMATION_SCOPE_CHANGE_FORBIDDEN`). A private automation needs its Owner's
+personal private project: on `AUTOMATION_PRIVATE_WORKSPACE_REQUIRED` explain
+that the Owner must create their private workspace first and stop; never attach
+it to a project instead. An edit of an automation that is already unattached
+names the system project its read returned and omits `unattached`, which keeps
+it unattached; `unattached: false` with a `project_id` attaches it.
+
 1. Complete Common's identity verification first, including explicit verified
    `org` on every call. Read `event-binding.get {org,id:target_binding_id}`.
    If the current binding is a webhook, also read
@@ -118,6 +132,17 @@ When a form handoff's `configuration.project_member_additions` lists B, a
 completed traversal without B is expected and not a blocker: B joins the
 project when the confirmed update succeeds. Otherwise B must already be a
 member. A direct chat request carries no such list; never create one.
+When the read has `spec.unattached: true`, its `project_id` is the Inbox or the
+Owner's hidden private project: skip the `core.project_members` traversal for
+B; Core validates B against that project at proposal and mutation, and a
+rejection stops the transfer.
+Likewise, when the confirmed spec moves the automation to no project in the
+same handoff (`unattached: true` and no `project_id`, even though the read
+still shows `unattached: false` and the old project), there is no confirmed
+project to traverse: skip the `core.project_members` traversal for B and never
+fall back to the old project. Core no longer requires membership in the
+original project (OPENM-1301) and validates B against the target (Inbox or
+hidden private project) at proposal and mutation; a rejection stops the transfer.
 A rejected or unavailable directory read
 stops before confirmation; do not add project membership, upgrade Agents or change flags.
 Core enforces B's runtime readiness through server-side admission at proposal
@@ -125,7 +150,12 @@ preparation and mutation. Do not query another Agent's automation eligibility or
 invent a readiness endpoint. A server admission rejection stops the transfer;
 never substitute the requesting Agent's readiness for B's.
 Check `automation.eligibility {org,memberId:<requesting A>,operation:"lead_change",projectId:<confirmed project>}`
-and require `status:"supported"` before proposing the transfer. Ordinary update
+(target named as in [Replacement eligibility](#replacement-eligibility))
+and require `status:"supported"` before proposing the transfer. Known limitation:
+for a confirmed spec with `unattached: true` and `unattached_scope: "private"`,
+Core resolves the hidden private project only for human callers, so this Agent
+eligibility check returns a rejection; stop and tell the Owner to make that
+change in the automation editor instead. Ordinary update
 eligibility is not evidence of Lead-change compatibility. Unknown operation,
 unsupported version, unavailable or stale capability data stops this transfer;
 never fall back to `operation:"update"` to bypass this compatibility check.
@@ -214,7 +244,9 @@ replacement, require all of the following:
   may additionally return `webhook_url`; get does not reveal it.
 
 For both paths, verify ID, owner, lead, source kind, returned version and complete
-confirmed configuration. Missing cross-links or inconsistent reads leave the
+confirmed configuration. A confirmed spec with `unattached: true` and no
+`project_id` is compared by `spec.unattached` and the binding's `scope`, not
+`project_id`, as in Common. Missing cross-links or inconsistent reads leave the
 outcome unknown. Report success only after the update result and readback agree.
 Report task name, actual state and returned next timer time with local timezone.
 No Automation list link, internal endpoint, binding/proof ID or raw metadata;
@@ -235,8 +267,14 @@ to obtain it. Never expose the secret in groups, logs, artifacts or public pages
 Before proposing a trigger change, require plugin 2.25.0 and the independent
 `AUTOMATION_REPLACE_MIN_AGENT_VERSION` gate (empty disables replacement). Call
 `automation.eligibility {org,memberId:<verified Agent>,operation:"replace",projectId:<confirmed project>}`
-and require `status:"supported"`. This checks replacement support; signed
-proposals and mutations still use `operation:"update"` with original target/version.
+and require `status:"supported"`. Name the target as the confirmed spec does:
+`projectId` when it has a `project_id` (for an automation that is already
+unattached, the system project its read returned), or
+`unattachedScope:<its unattached_scope>` (`org` when omitted) instead of
+`projectId` when it has `unattached: true` and no `project_id`; never both. A
+rejection stops; never retry with the other form. This checks replacement
+support; signed proposals and mutations still use `operation:"update"` with
+original target/version.
 Ordinary update eligibility is insufficient. Do not change minimum versions or
 upgrade the plugin to pass a request. Keep editing unavailable until compatible
 backend/plugin are deployed; consult Recovery before rollout/eligibility changes.

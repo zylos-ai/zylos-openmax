@@ -1,3 +1,8 @@
+// Spec fields beyond project_id/title/description: the knowledge base choice
+// and whether the automation belongs to no project (OPENM-959). They are
+// forwarded exactly as given; an absent field stays absent.
+const TARGET_SPEC_FIELDS = ['unattached', 'unattached_scope', 'knowledge_base_mode', 'knowledge_base_id'];
+
 // Preserve the form's REST fields without forwarding DM envelope metadata.
 export function automationConfiguration(params, sourceKind) {
   const fail = (message) => { throw Object.assign(new Error(message), { status: 400 }); };
@@ -21,6 +26,9 @@ export function automationConfiguration(params, sourceKind) {
     owner_member_id: input.owner_member_id ?? input.ownerMemberId,
     spec: { project_id: spec.project_id, title: spec.title, description: spec.description },
   };
+  for (const key of TARGET_SPEC_FIELDS) {
+    if (Object.hasOwn(spec, key)) body.spec[key] = spec[key];
+  }
   const fields = sourceKind === 'webhook'
     ? [['event_filter', 'eventFilter']]
     : [['schedule_kind', 'scheduleKind'], ['cron_expr', 'cronExpr'],
@@ -36,7 +44,7 @@ export function automationConfiguration(params, sourceKind) {
     if (!allowed.has(key)) fail(`unsupported ${sourceKind} configuration field: ${key}`);
   }
   for (const key of Object.keys(spec)) {
-    if (!['project_id', 'title', 'description'].includes(key)) fail(`unsupported spec field: ${key}`);
+    if (!['project_id', 'title', 'description', ...TARGET_SPEC_FIELDS].includes(key)) fail(`unsupported spec field: ${key}`);
   }
   if (Object.hasOwn(input, 'result_notification_policy')) {
     if (!['every', 'failure_only', 'none'].includes(input.result_notification_policy)) {
@@ -47,12 +55,38 @@ export function automationConfiguration(params, sourceKind) {
   if (Object.hasOwn(input, 'project_member_additions')) {
     body.project_member_additions = projectMemberAdditions(input.project_member_additions, body, fail);
   }
+  validateAutomationTarget(spec, fail);
   if (nested) return input;
   for (const [wire, alias] of fields) {
     const value = input[wire] ?? input[alias];
     if (value !== undefined) body[wire] = value;
   }
   return body;
+}
+
+// The shape of the project and knowledge base choice, as cws-core checks it
+// (AutomationCreationSpec.ValidateTarget, plus the field enums and the
+// "with unattached and no project_id" scope rule). Which project an unattached
+// write may name (the Inbox or the Owner's hidden private project) and whether
+// the knowledge base fits the scope stay server checks. unattached:true with a
+// project_id is valid: an update may name the system project a read returned.
+function validateAutomationTarget(spec, fail) {
+  if (Object.hasOwn(spec, 'unattached') && typeof spec.unattached !== 'boolean') fail('spec.unattached must be a boolean');
+  const unattached = spec.unattached === true;
+  const project = spec.project_id !== undefined && spec.project_id !== null && spec.project_id !== '';
+  if (!unattached && !project) fail('spec.project_id is required unless spec.unattached is true');
+  if (Object.hasOwn(spec, 'unattached_scope')) {
+    if (!['org', 'private'].includes(spec.unattached_scope)) fail('spec.unattached_scope must be org or private');
+    if (!unattached || project) fail('spec.unattached_scope applies only with spec.unattached true and no spec.project_id');
+  }
+  if (Object.hasOwn(spec, 'knowledge_base_mode') && !['project_default', 'custom', 'none'].includes(spec.knowledge_base_mode)) {
+    fail('spec.knowledge_base_mode must be project_default, custom or none');
+  }
+  if (spec.knowledge_base_mode === 'custom'
+    ? typeof spec.knowledge_base_id !== 'string' || !spec.knowledge_base_id.trim()
+    : Object.hasOwn(spec, 'knowledge_base_id')) {
+    fail('spec.knowledge_base_id is required exactly when spec.knowledge_base_mode is custom');
+  }
 }
 
 // The human-confirmed members who join spec.project_id with the write. Only the

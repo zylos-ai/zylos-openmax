@@ -26,7 +26,9 @@ may assign a different human Owner explicitly selected by the creator. Updates
 require the verified human to be the persisted current Owner; a different desired
 Owner is allowed only under Update's Owner handover rules. Never replace the
 requesting human with the target Owner to make an identity check pass.
-Resolve project/membership through existing directory APIs when necessary.
+Resolve project/membership through existing directory APIs when necessary,
+never for the system project of an automation that belongs to no project (see
+[No project and output knowledge base](#no-project-and-output-knowledge-base)).
 
 For a direct chat Lead-change or human Owner handover request without a form
 envelope, verify the exact
@@ -49,7 +51,7 @@ silently discard them. Preserve only these source-specific REST fields:
 
 | Scope | Fields |
 | --- | --- |
-| Both | `lead_member_id`, `owner_member_id`, optional `result_notification_policy`, optional `project_member_additions`, `spec` with `project_id`, `title`, `description` |
+| Both | `lead_member_id`, `owner_member_id`, optional `result_notification_policy`, optional `project_member_additions`, `spec` with `project_id`, `title`, `description` and optional `unattached`, `unattached_scope`, `knowledge_base_mode`, `knowledge_base_id` |
 | Timer | `schedule_kind` (`cron`, `once`, `interval`), `timezone`, applicable `cron_expr`, `run_at`, `interval_seconds`, `anchor_at` |
 | Webhook | Optional CEL `event_filter`; empty means all events |
 
@@ -124,6 +126,51 @@ and stop. The field is write-time only: binding reads do not return it, so
 compare the other confirmed fields on readback. For an update that resumes an
 automation paused because its Lead or Owner left the project, report the actual
 returned state; never assume it resumed.
+
+### No project and output knowledge base
+
+`spec.unattached: true` is the human's choice that the automation belongs to no
+project (「不挂项目」). It is a decision, not a missing project: do not ask for a
+project, pick one or treat the absent `project_id` as incomplete.
+`spec.unattached_scope` says where it runs: `org` (the organization Inbox) or
+`private` (the Owner's hidden private project, created on first use). Pass the
+handoff's `spec` verbatim in the proposal and mutation configuration; never add
+a `project_id`, drop `unattached` or `unattached_scope`, or change the scope.
+Rely on the server card's project line 「项目：不归属项目」 (private:
+「项目：不归属项目（私人）」) instead of resolving a project name yourself.
+
+The CLI refuses these shapes before HTTP, as Core does:
+
+- `unattached` is a boolean. Without `unattached: true`, `project_id` is required.
+- `unattached_scope` is `org` or `private`, only with `unattached: true` and no `project_id`.
+- `knowledge_base_mode` is `project_default`, `custom` or `none`;
+  `knowledge_base_id` is required exactly with `custom`.
+
+`unattached: true` together with a `project_id` is valid only for the system
+project an earlier read returned; the server refuses any other project. On
+update, an omitted `unattached` keeps the current attachment (the edit form of
+an automation that is already unattached names the system project its read
+returned), and `unattached: false` with a `project_id` attaches it to that
+project. An omitted knowledge base choice means `project_default` on create and
+keeps the current choice on update. Pass the human's knowledge base choice
+verbatim; never fill it in from a baseline or read. The server checks that a
+custom knowledge base fits the automation's scope.
+
+There is no project to verify: do not run `core.project_members` or any other
+membership check against the Inbox or a hidden private project, and do not add
+members. Everyone in the organization already belongs to the Inbox, so the
+server refuses `project_member_additions` there; for a private automation the
+Owner's own Agent joins the hidden project through the handoff's list. Pass the
+list verbatim; the server checks both.
+
+A binding read returns the system project's ID in `spec.project_id`, never "no
+project". When the confirmed spec has `unattached: true` and no `project_id`,
+compare `spec.unattached: true` and the binding's `scope` with the confirmed
+`unattached_scope` (`org` when omitted) on readback, not `project_id`. Compare
+`knowledge_base_mode` (a read shows `project_default` for the default) and
+`knowledge_base_id` with the confirmed choice. A server that rejects or does
+not support these fields requires a stop without mutation; never strip them,
+substitute a project or retry without them.
 
 ## Propose
 

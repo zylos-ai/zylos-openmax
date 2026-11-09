@@ -958,3 +958,105 @@ test('invalid project member additions are rejected before CLI sends HTTP', asyn
     }
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
+// OPENM-1305 / OPENM-1308: unattached and knowledge base spec fields.
+const unattachedSpecs = [
+  { title: 'Task', unattached: true, unattached_scope: 'org' },
+  { title: 'Task', unattached: true, unattached_scope: 'private', knowledge_base_mode: 'none' },
+  { project_id: 'project', title: 'Task', knowledge_base_mode: 'custom', knowledge_base_id: '01000000-0000-4000-8000-0000000000d4' },
+];
+
+test('unattached and knowledge base specs reach the proposal and every write route verbatim', async () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    const route = source_kind === 'timer' ? 'event-binding' : 'webhook';
+    for (const spec of unattachedSpecs) {
+      const configuration = { lead_member_id: 'agent', owner_member_id: 'human', spec,
+        ...(source_kind === 'timer' ? { timezone: 'Asia/Singapore', schedule_kind: 'cron', cron_expr: '0 9 * * *' } : {}) };
+      for (const operation of ['create', 'update']) {
+        const proposed = await captureRequest('automation.authorization_propose', {
+          org: 'org-automation', request_id: readableProposal.request_id, source_kind, operation, configuration,
+          ...(operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {}),
+        });
+        assert.deepEqual(proposed.body.configuration.spec, spec);
+        const written = await captureRequest(`${route}.${operation}`, {
+          org: 'org-automation', source_kind, configuration, id: 'binding', expected_version: 7, ...cardProof,
+        });
+        assert.deepEqual(written.body.spec, spec);
+        const flat = await captureRequest(`${route}.${operation}`, {
+          org: 'org-automation', source_kind, ...configuration, id: 'binding', expected_version: 7, ...cardProof,
+        });
+        assert.deepEqual(flat.body.spec, spec, 'flat calls drop no target field and add no project');
+      }
+    }
+  }
+});
+
+test('invalid unattached or knowledge base combinations fail before CLI sends HTTP', async () => {
+  let requests = 0;
+  const server = createServer((req, res) => { requests++; req.resume(); res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const [spec, message] of [
+      [{ title: 'Task', unattached_scope: 'org' }, /project_id is required/],
+      [{ project_id: 'project', title: 'Task', unattached: true, unattached_scope: 'org' }, /unattached_scope applies only/],
+      [{ title: 'Task', unattached: true, unattached_scope: 'public' }, /unattached_scope must be org or private/],
+      [{ title: 'Task', unattached: 'true' }, /spec\.unattached must be a boolean/],
+      [{ project_id: 'project', title: 'Task', knowledge_base_mode: 'custom' }, /knowledge_base_id is required exactly/],
+      [{ project_id: 'project', title: 'Task', knowledge_base_mode: 'shared' }, /knowledge_base_mode must be/],
+    ]) {
+      const configuration = { lead_member_id: 'agent', owner_member_id: 'human', spec, timezone: 'Asia/Singapore' };
+      for (const [command, input] of [
+        ['automation.authorization_propose', { source_kind: 'timer', operation: 'create', request_id: readableProposal.request_id, configuration }],
+        ['event-binding.update', { source_kind: 'timer', configuration, id: 'binding', expected_version: 7, ...cardProof }],
+      ]) {
+        const result = await new Promise(resolve => execFile(process.execPath,
+          [cliPath, command, JSON.stringify({ org: 'org-automation', ...input })], {
+            env: { ...process.env, COCO_API_URL: `http://127.0.0.1:${server.address().port}`, COCO_AUTH_TOKEN: 'test', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0' }, timeout: 5000,
+          }, (error, stdout, stderr) => resolve({ error, stderr })));
+        assert.ok(result.error, `${command} ${JSON.stringify(spec)}`);
+        assert.match(result.stderr, message);
+        assert.equal(requests, 0, `${command} sent ${JSON.stringify(spec)}`);
+      }
+    }
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('eligibility for an automation attached to no project sends unattached_scope instead of project_id', async () => {
+  for (const operation of ['lead_change', 'replace']) {
+    for (const unattachedScope of ['org', 'private']) {
+      const request = await captureRequest('automation.eligibility', { org: 'org-automation', memberId: 'agent', operation, unattachedScope });
+      assert.equal(request.method, 'GET');
+      const url = new URL(request.url, 'https://example.com');
+      assert.equal(url.pathname, '/api/v1/agents/agent/automation-creation-eligibility');
+      assert.equal(url.searchParams.get('operation'), operation);
+      assert.equal(url.searchParams.get('unattached_scope'), unattachedScope);
+      assert.equal(url.searchParams.has('project_id'), false);
+      assert.equal(request.body, undefined);
+    }
+  }
+  const attached = new URL((await captureRequest('automation.eligibility', {
+    org: 'org-automation', memberId: 'agent', operation: 'replace', projectId: 'project' })).url, 'https://example.com');
+  assert.equal(attached.searchParams.has('unattached_scope'), false);
+});
+
+test('eligibility refuses an invalid scope or both targets before HTTP', async () => {
+  let requests = 0;
+  const server = createServer((req, res) => { requests++; req.resume(); res.end('{}'); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    for (const target of [
+      ...['', 'ORG', 'public', null, 1, ['org']].map(unattachedScope => ({ unattachedScope })),
+      { unattachedScope: 'org', projectId: 'project' },
+      { unattachedScope: 'private', projectId: '' },
+    ]) {
+      const result = await new Promise(resolve => execFile(process.execPath, [cliPath, 'automation.eligibility', JSON.stringify({
+        org: 'org-automation', memberId: 'agent', operation: 'lead_change', ...target,
+      })], {
+        env: { ...process.env, COCO_API_URL: `http://127.0.0.1:${server.address().port}`, COCO_AUTH_TOKEN: 'test', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0' }, timeout: 5000,
+      }, (error, stdout, stderr) => resolve({ error, stderr })));
+      assert.ok(result.error, JSON.stringify(target));
+      assert.match(result.stderr, /unattachedScope must be org or private, without projectId/);
+    }
+    assert.equal(requests, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
