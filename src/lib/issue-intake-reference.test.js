@@ -7,7 +7,7 @@ import { formatInboundForC4 } from './message.js';
 // Shipped instructions are the contract here: no code decides whether an
 // inbound request gets the Issue-intake card — the Agent does, from the
 // Trigger in SKILL.md and the inbound <openmax-instruction>. These guards
-// protect that wording (wsb#747 AC1–AC5); they do not simulate an Agent.
+// protect that wording; they do not simulate an Agent.
 
 const rawSkill = readFileSync(new URL('../../SKILL.md', import.meta.url), 'utf8');
 const flat = s => s.replace(/\s+/g, ' ');
@@ -58,14 +58,14 @@ test('quick single-Agent work is done directly, with no time limit and no intake
     '**no intake card**',
     'without waiting on anyone',
     'short report',
-    'small code fix together with its PR',
+    'a small code fix together with its PR (reviewed within your own team)',
     'no time limit',
   ]) {
     assert.ok(quick.includes(phrase), `Quick bullet lost: ${phrase}`);
   }
 });
 
-test('AC4: quick work ends with at most one plain-text tracking offer, never a card', () => {
+test('quick work ends with at most one plain-text tracking offer, never a card', () => {
   const quick = bullet(trigger, 'Quick single-Agent work');
   assert.ok(quick.includes('**at most one plain-text line**'));
   assert.ok(quick.includes('never a card'));
@@ -78,8 +78,9 @@ test('cross-team or cross-time work keeps New-Issue Intake, including a PR anoth
     'New-Issue Intake',
     'several people, or several Agents',
     'spans time',
-    'same-team code review',
-    'needs review by another team',
+    'Any one signal is enough:',
+    'Ordinary same-team code review of a PR you open is not "later acceptance"; the PR is its own record.',
+    'A PR that needs review by another team is cross-team work.',
   ]) {
     assert.ok(tracked.includes(phrase), `tracked bullet lost: ${phrase}`);
   }
@@ -93,9 +94,10 @@ test('unsure requests do the doable part first, then make the same one-line offe
   assert.ok(unsure.includes('Do not block on the intake card first'));
   assert.ok(trigger.includes('Uncertain classification follows "Unsure which" above.'));
   assert.ok(!trigger.includes('(task classification,'), 'uncertain classification must not route to "consult the user first"');
+  assert.ok(unsure.includes('A request is unsure only when it shows no collaboration or time-span signal; any one signal (e.g. 「周五给我」) makes it cross-team or cross-time work, never unsure.'));
 });
 
-test('AC5: the example table covers at least 3 quick and 3 tracked requests', () => {
+test('the example table covers at least 3 quick and 3 tracked requests', () => {
   const quick = exampleRows('Quick');
   const tracked = exampleRows('Tracked');
   assert.ok(quick.length >= 3 && tracked.length >= 3, `quick=${quick.length} tracked=${tracked.length}`);
@@ -108,19 +110,37 @@ test('AC5: the example table covers at least 3 quick and 3 tracked requests', ()
   assert.ok(exampleRows('Unsure').some(row => row.includes('帮我把这个模块重构一下')));
 });
 
+const EXEMPTION = '**One exception, bound to one situation only:** after you have handed back, in this reply, finished quick ' +
+  'single-Agent work — or the part of an unsure request you could finish now — (see the Trigger in "Task ' +
+  'Classification and Execution Flow"), the single closing line offering to track it as an Issue ' +
+  '(「需要的话我建 Issue 跟踪」) is plain text, not a card. Write it as an offer, not as a 「要不要建 Issue?」 ' +
+  'question, and list no options. Nothing else is exempt: any other question, and any question asked before ' +
+  'the work is done or handed back, still follows the test above.';
+
+function exemptionParagraph() {
+  const from = rawSkill.indexOf('**One exception, bound to one situation only:**');
+  assert.ok(from >= 0, 'exemption paragraph missing');
+  const to = rawSkill.indexOf('\n\n', from);
+  return flat(rawSkill.slice(from, to)).trim();
+}
+
 test('🔴 card rule carries the tracking-offer exemption, bound to handed-back quick work only', () => {
-  const exemption = cardRule.slice(cardRule.indexOf('**One exception, bound to one situation only:**')).replace(/\s+/g, ' ');
   assert.ok(cardRule.includes('**One exception, bound to one situation only:**'), 'exemption must live inside the 🔴 card rule');
+  const exemption = exemptionParagraph();
   for (const phrase of [
-    'after you have handed back, in this reply, finished quick',
-    'any question asked before the work is done or handed back, still follows the test above',
-    'finished quick single-Agent work',
+    'after you have handed back, in this reply, finished quick single-Agent work',
     'the part of an unsure request you could finish now',
-    '「需要的话我建 Issue 跟踪」',
-    'Nothing else is exempt',
+    'the single closing line offering to track it as an Issue',
+    '(「需要的话我建 Issue 跟踪」) is plain text, not a card',
+    'Write it as an offer, not as a 「要不要建 Issue?」 question, and list no options',
+    'any question asked before the work is done or handed back, still follows the test above',
+    'Nothing else is exempt: any other question',
   ]) {
     assert.ok(exemption.includes(phrase), `exemption lost: ${phrase}`);
   }
+  assert.equal(exemption.split('Nothing else is exempt').length, 2, 'exactly one "Nothing else is exempt"');
+  assert.ok(exemption.endsWith('still follows the test above.'), 'nothing may follow the closing sentence');
+  assert.equal(exemption, EXEMPTION, 'exemption scope changed: widen or narrow it only deliberately');
 });
 
 test('🔴 card rule itself is unchanged by the exemption', () => {
@@ -146,7 +166,7 @@ test('old "every output is a task / ask even when simple" wording is gone', () =
   assert.ok(intake.includes('Applies only to new **cross-team or cross-time work**'));
 });
 
-test('AC3: explicit decisions and the no-repeat rule are unchanged', () => {
+test('explicit decisions and the no-repeat rule are unchanged', () => {
   assert.ok(intake.includes('**Do not ask twice.**'));
   for (const row of [
     '| Create an Issue | Yes | Nothing; proceed with the confirmed Project |',
@@ -160,6 +180,10 @@ test('AC3: explicit decisions and the no-repeat rule are unchanged', () => {
 
 test('frontmatter description no longer sends every new task through intake', () => {
   assert.ok(frontmatter.includes('finish quickly'));
+  assert.ok(frontmatter.includes('do it directly, no Issue card'));
+  assert.ok(frontmatter.includes('or when the human asks to track it, resolve the missing Issue-creation'));
+  assert.ok(frontmatter.includes('do not skip that flow for tracked work.'));
+  assert.ok(!frontmatter.includes('do not skip the flow and just start working'));
   assert.ok(frontmatter.includes('spans time'));
   assert.ok(!frontmatter.includes('if it is a new task, resolve'));
   assert.ok(frontmatter.includes('before generic Issue intake'), 'automation handoffs still route first');
@@ -186,4 +210,45 @@ test('inbound instruction classifies before intake, after the automation routes'
 
 test('automation handoffs still route before generic Issue intake', () => {
   assert.ok(skill.includes('[Automation Update](references/automation-update.md) before generic Issue intake'));
+});
+
+test('no blanket "every task goes through intake" wording anywhere', () => {
+  assert.ok(!/every new task/i.test(skill), 'no "every new task …" rule');
+  assert.ok(!/always (run|send|ask)[^.]*intake/i.test(skill), 'no "always run the intake" rule');
+  assert.ok(!/\bin doubt\b[^.]*intake/i.test(skill), 'doubt goes to "Unsure which", not to the intake card');
+  assert.ok(!/(two|both|several) signals/i.test(trigger), 'one signal is enough');
+  assert.ok(!skill.includes('new task first registers an Issue'));
+  assert.ok(!skill.includes('recognizes it as a work goal (not a simple Q&A)'));
+});
+
+test('New-Issue Intake states exactly when it applies', () => {
+  const scope = flat(boundedSection(rawSkill, 'Applies only to new **cross-team', '\n\n')).trim();
+  assert.equal(scope, 'Applies only to new **cross-team or cross-time work**, or when the human asks to track something (see the Trigger above). Quick single-Agent work skips it.');
+});
+
+test('references and Complex Task Flow use the Trigger, not the old task/intake split', () => {
+  const refs = boundedSection(skill, '### Work Object References', '**Trigger (do this for every message)**');
+  assert.ok(refs.includes('advance along the existing lifecycle; do not run New-Issue Intake for it.'));
+  assert.ok(refs.includes('classify the rest of the message by the Trigger below; if it runs New-Issue Intake, the Project is already explicit'));
+  assert.ok(refs.includes('(「proj://X 总结一下进度」 is quick work: answer it, no card.)'));
+  const complex = boundedSection(skill, '### Complex Task Flow', '2. **Resolve new-Issue intake');
+  assert.ok(complex.includes('recognizes it as cross-team or multi-Agent work (not chat or quick single-Agent work)'));
+});
+
+test('Common Mistakes, Guardrail #1 and the Onboarding exception still carry the quick-work rule', () => {
+  for (const row of [
+    '| Sending the Issue intake card for work one Agent can finish quickly in the conversation (read a doc, summarize, answer, look up, small edit, a short report, a small fix with its same-team-reviewed PR) | Do it directly; at most one plain-text line offering to track it |',
+    '| Treating cross-team or cross-time work as quick because the first step is easy | Any collaboration or time-span signal (other teams / people / Agents, a PR another team must review, future deadline, several days, later acceptance) sends it through intake |',
+  ]) {
+    assert.ok(skill.includes(row), `Common Mistakes lost: ${row}`);
+  }
+  assert.ok(skill.includes('(Quick single-Agent work never reaches this step; see the Trigger in "Task Classification and Execution Flow".)'));
+  assert.ok(skill.includes("- **Exception — Onboarding**: the owner's first task in the onboarding DM is executed directly in the conversation without this intake, unless they explicitly ask for an Issue."));
+});
+
+test('inbound instruction covers explicit tracking requests and the unsure path', () => {
+  const out = formatInboundForC4({ type: 'dm', id: 'cv-1' }, { displayName: 'Alice' }, { content: 'hi' }, [], {});
+  const instruction = flat(boundedSection(out, '<openmax-instruction>', '</openmax-instruction>'));
+  assert.ok(instruction.includes('or that the human asks to track;'));
+  assert.ok(instruction.includes('if unsure, do the part you can finish now, then offer in one plain-text line to track the rest.'));
 });
