@@ -206,10 +206,15 @@ Two invariants hold for every verb here (they mirror the rest of `conn.*`):
 Create a custom connector application.
 
 ```bash
-node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key","category":"crm"}'
+node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","auth_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key","category":"crm"}'
 ```
 
-Required: `display_name`, `provider_type` (`oauth2` | `api_key`). `slug` is
+Required: `display_name`, `auth_type` (`api_key` | `oauth2`, exactly as
+written — lowercase; anything else, e.g. `OAuth2` / `basic`, is refused locally
+with `400`; not sent for `connector_kind: "mcp"`, see below). `auth_type` is the
+same word the confirmation card uses; the CLI sends it to the platform as
+`provider_type` (the platform's name for it, still accepted as an alias — if you
+send both they must be equal). `slug` is
 **optional** — cws-core generates one from `display_name` when omitted; pass an
 explicit `slug` only when you need a specific value (it is honored as-is). Optional:
 `slug`, `description`, `icon_url`, `category`,
@@ -220,6 +225,26 @@ OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
 `oauth_token_auth_method` (`basic` | `post`), `oauth_token_body_format`
 (`form` | `json`). Returns the created `application` item (its `source` is a
 read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
+
+`connector_kind` (optional): `http` (default — the per-action HTTP connector) or
+`mcp` (an MCP server connector). It is a **separate axis** from `auth_type`:
+`auth_type` / `provider_type` is always the **auth model** (`api_key` | `oauth2`)
+and is **never** `"mcp"` — the CLI refuses `auth_type: "mcp"` and
+`provider_type: "mcp"` (any letter case) locally, pointing to `connector_kind`
+(the platform only stores `oauth2` / `api_key` and fails with HTTP 500 on
+anything else). For `connector_kind: "mcp"` send **no** `auth_type` (refused):
+the platform's `provider_type` is only a **placeholder** there, because the
+platform decides the auth per connection when the user connects it (OAuth
+discovery upgrades `api_key` → `oauth2`, but never downgrades — so `oauth2` on a
+no-auth / static-token server sticks). **Omit it** (the CLI then sends
+`provider_type: "api_key"`, as the openmax.com form does).
+Also for `mcp`: no OAuth endpoints or scopes — `oauth_authorize_url` /
+`oauth_token_url` / `oauth_scopes_default` are refused (they are discovered at
+connect time, and a preset value makes every connection fail);
+`oauth_client_id` is still accepted (the fallback client for a server without
+dynamic client registration); and **no MCP server config** — `server_url` /
+`mcp_server` are refused on the definition, because the server URL is entered
+per-connection when the user connects it (see "MCP connectors" below).
 
 The API also accepts `oauth_client_secret`, but **you never collect or pass it**:
 do not ask for it in chat, do not accept it from a message, and leave it out of
@@ -328,11 +353,14 @@ loop-create each action-def, reporting **per-action** success/failure so a parti
 import is visible (mirrors the cws-fe "actions JSON import" flow).
 
 ```bash
-node src/cli/conn.js conn.app_import '{"application":{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key"},"actions":[{"name":"list_repos","description":"List repositories","method":"GET","url_template":"{base_url}/user/repos"},{"name":"get_repo","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}"}]}'
+node src/cli/conn.js conn.app_import '{"application":{"slug":"acme","display_name":"Acme","auth_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key"},"actions":[{"name":"list_repos","description":"List repositories","method":"GET","url_template":"{base_url}/user/repos"},{"name":"get_repo","description":"Get one repository","method":"GET","url_template":"{base_url}/repos/{id}"}]}'
 ```
 
 `application` (same fields as `conn.app_create`) is validated **before** any network
-call; an invalid app body fails fast without creating anything. Returns
+call; an invalid app body fails fast without creating anything. For
+`connector_kind: "mcp"` send **no** `actions` (omit or `[]`): an MCP connector's
+tools come from the MCP server, so any action is refused (`400`) before anything
+is created. Returns
 `{ application, applicationId, actions_total, actions_created, actions_failed,
 results[] }` where each `results[i]` is `{ index, name, ok, id? , error?, status? }`.
 Action-def failures do **not** abort the remaining actions — the app and its
@@ -383,8 +411,10 @@ Before you create a **new** custom connector for a user (`conn.app_import`, or
 card. Never create first and ask afterwards.
 
 **1. Prepare the spec.** Connector `name` (display name), an explicit `slug`, the
-`auth_type` (`api_key` | `oauth2` | `mcp`), optional `icon_url` / `description` /
-`base_url`, and the actions you will import: for each one its bare `name` (the
+`connector_kind` (`http` | `mcp`) and, for `http` only, the `auth_type`
+(`api_key` | `oauth2`), optional `icon_url` / `description` / `base_url`, and the
+actions you will import (for `connector_kind: "mcp"` see "MCP connectors" below
+instead — no `auth_type`, a required `server_url`, no `base_url`, no actions): for each one its bare `name` (the
 action segment, e.g. `list_contacts`, no `slug/`), whether it **reads** or
 **writes** (`effect`), and a one-line `summary` the user can understand. Also
 draft the full action-defs (method, url_template, description, input_schema) you
@@ -411,12 +441,17 @@ slug goes to `conn.app_import`, because the card finds the created app by it.
 **2. Send the card (creates nothing).**
 
 ```bash
-node src/cli/conn.js conn.create_card '{"conversationId":"<conversation-id from <message-context>>","connector":{"name":"Acme CRM","slug":"acme-crm","auth_type":"oauth2","description":"Acme 客户管理","base_url":"https://api.acme.example.com/v1"},"actions":[{"name":"list_contacts","effect":"read","summary":"列出联系人"},{"name":"create_contact","effect":"write","summary":"新建联系人"}]}'
+node src/cli/conn.js conn.create_card '{"conversationId":"<conversation-id from <message-context>>","connector":{"name":"Acme CRM","slug":"acme-crm","connector_kind":"http","auth_type":"oauth2","description":"Acme 客户管理","base_url":"https://api.acme.example.com/v1"},"actions":[{"name":"list_contacts","effect":"read","summary":"列出联系人"},{"name":"create_contact","effect":"write","summary":"新建联系人"}]}'
 ```
 
 Optional `application_id` (UUID) when the application already exists. Strict
 validation, all before anything is sent (`400`): required `name` (≤100) / `slug`
-(`^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$`) / `auth_type`; `icon_url` and
+(`^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$`) / `connector_kind` (`http` | `mcp`);
+for `http` a required `auth_type` (`api_key` | `oauth2`); for `mcp` **no**
+`auth_type`, a required `server_url` (alias `mcp_server_url`, **https** only,
+same URL checks as below), no `base_url`, and no actions (omit `actions` or send
+`[]`); `auth_type: "mcp"` is refused (MCP is a `connector_kind`, not an auth
+type); `server_url` on an `http` card is refused; `icon_url` and
 `base_url` absolute http(s) URLs (≤2048) with no `user:pass@`, no `#fragment` and
 no secret-named query / fragment parameter (`?api_key=…`, `?x=1;sig=…` — `;`
 counts as a separator too — `?X-Amz-Signature=…`, `?id_token=…`, `#token=…` →
@@ -452,16 +487,19 @@ Known limitations (accepted): secret / token detection is best-effort, and
 look-alike letters from different scripts (Cyrillic `а` vs Latin `a`) are not
 detected, so two action names can still look alike on the card — keep names
 plain ASCII.
-Returns `{ status: "sent", conversation_id, card_id, message_id, connector: {name, slug, auth_type}, actions_total }`.
+Returns `{ status: "sent", conversation_id, card_id, message_id, connector: {name, slug, connector_kind, auth_type? (http), server_url? (mcp)}, actions_total }`.
 Keep `card_id` (and the slug / actions) for step 3.
 
 The message is `AGENT_STRUCTURED`, `content_type: "connector_create_card"`, body
 schema `openmax.connector-create.v1` = `{schema, card_id, connector, actions,
 application_id?, fallback_text}`, plus a compact copy in
 `metadata.connector_create_card` (`schema`, `card_id`, `connector{name, slug,
-auth_type, icon_url?}`, `actions[]`, `application_id?`). A client without the
-renderer shows `fallback_text` (name, slug, auth type, each action with 读/写, and
-the reply words).
+connector_kind, auth_type? (http), icon_url?, server_url? (mcp)}`, `actions[]`,
+`application_id?`). A client without the renderer shows `fallback_text` (name,
+slug, type HTTP / MCP 服务器, the auth type for `http`, each action with 读/写, and
+the reply words; for `mcp`: the MCP server address, that the tools come from the
+server, and the next step — connect it on openmax.com with that address and
+authorize). For `mcp` the address is carried only as `connector.server_url`.
 
 **3. Wait for the owner's reply.** The card's buttons post an ordinary user
 message, 「确认创建 {name}」 or 「我要改 {name}」, carrying metadata
@@ -496,13 +534,13 @@ way, matched by name to your latest card).
   card.
 
 **4. On confirm — create it.** `conn.app_import` with `application.slug` = the
-card's slug (exactly), `display_name` = name, `provider_type` = `auth_type`,
-plus `icon_url` / `description` and the auth-shape fields (`api_key_location`,
+card's slug (exactly), `display_name` = name, `connector_kind` and `auth_type` =
+the card's (`auth_type` exists **on `http` cards only**), plus `icon_url` /
+`description` and the auth-shape fields (`api_key_location`,
 `oauth_authorize_url`, `oauth_client_id`, …), and `actions` = the full
 action-defs for exactly the actions on the card. Never add `oauth_client_secret`.
-(`mcp`: if the server refuses the provider type, tell the user it can't be
-created this way yet; never switch to another type silently.) Report the result
-in plain words; if some actions failed (`actions_failed > 0`), name them and offer
+An `mcp` card has no `auth_type` and is never `auth_type` / `provider_type`
+`"mcp"` (refused): create it as described in "MCP connectors" below. Report the result in plain words; if some actions failed (`actions_failed > 0`), name them and offer
 to retry those with `conn.actiondef_create`. Do not send another card for a retry
 of the same spec.
 
@@ -525,6 +563,52 @@ ask them to revoke / rotate it, then enter the new value on the connections page
 
 Outside an OpenMax conversation (no card renders), describe the same spec in plain
 text and create only after your owner's explicit 「确认创建」.
+
+#### MCP connectors (`connector_kind: "mcp"`) — two steps
+
+An MCP connector is a **connector kind**, not an auth type: the platform stores
+`connector_kind: "mcp"` next to a placeholder `provider_type` (the auth model). The
+MCP server address is **not** part of the connector definition; it is entered
+per-connection when the user connects it, where the platform checks the server
+and runs its OAuth sign-in when needed. So creation has two steps:
+
+**(a) You create the connector definition — after the owner confirms.** Send the
+card with the server address and no actions:
+
+```bash
+node src/cli/conn.js conn.create_card '{"conversationId":"<conversation-id from <message-context>>","connector":{"name":"Plaud","slug":"plaud-mcp","connector_kind":"mcp","description":"Plaud 录音与转写","server_url":"https://<the MCP server address>"}}'
+```
+
+On the owner's confirmation (same check as step 3):
+
+```bash
+node src/cli/conn.js conn.app_import '{"application":{"slug":"plaud-mcp","display_name":"Plaud","description":"Plaud 录音与转写","connector_kind":"mcp"}}'
+```
+
+- `connector_kind: "mcp"`; **no `auth_type`** (refused) and **omit
+  `provider_type`** (the CLI sends `api_key`). For MCP it is only a
+  placeholder — the platform decides the auth when the user connects (OAuth
+  discovery upgrades `api_key` → `oauth2`, never the reverse, so an `oauth2` you
+  pick for a no-auth / static-token server sticks). Never `auth_type: "mcp"` /
+  `provider_type: "mcp"`.
+- No `actions` (refused), no `server_url` / `mcp_server` on the application
+  (refused), no `oauth_authorize_url` / `oauth_token_url` / `oauth_scopes_default`
+  (refused — discovered at connect time; a preset value makes every connection
+  fail), no client secret. `oauth_client_id` is accepted, only for a server
+  without dynamic client registration.
+
+**(b) The user connects it on openmax.com.** Creation cannot pre-fill the
+server address, so tell the user exactly what to do and give them the **exact
+URL to paste** (the one on the card), e.g.: 「连接器已创建。请打开 openmax.com 的
+「应用连接」页面，找到「Plaud」→ 新建连接，传输类型选「远程（Streamable HTTP）」，
+在「服务器 URL」里粘贴 `https://<the MCP server address>`，然后按提示完成授权。」
+That connection carries `mcp_server.server_url` with transport `remote_http`;
+for an OAuth server the page then sends the user to the provider to authorize.
+
+If the platform refuses any of this (the create call fails, or the connections
+page does not offer the MCP address field for this connector), tell the user
+plainly what failed and that this connector cannot be added this way yet —
+never switch to another connector kind or auth type silently.
 
 ### Action-def schema semantics
 

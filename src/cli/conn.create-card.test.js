@@ -27,6 +27,7 @@ function valid(overrides = {}) {
     connector: {
       name: 'Acme CRM',
       slug: 'acme-crm',
+      connector_kind: 'http',
       auth_type: 'oauth2',
       icon_url: 'https://acme.example.com/icon.png',
       description: 'Acme 的客户管理系统',
@@ -54,8 +55,8 @@ test('parseCreateCardInput: valid payload → trimmed, normalized', () => {
   assert.equal(out.application_id, APP_ID);
   assert.equal(out.actions.length, 2);
   // optional fields absent → omitted
-  const min = parseCreateCardInput({ conversationId: CONV, connector: { name: 'X', slug: 'x', auth_type: 'mcp' }, actions: [{ name: 'a', effect: 'read', summary: 's' }] });
-  assert.deepEqual(min.connector, { name: 'X', slug: 'x', auth_type: 'mcp' });
+  const min = parseCreateCardInput({ conversationId: CONV, connector: { name: 'X', slug: 'x', connector_kind: 'http', auth_type: 'api_key' }, actions: [{ name: 'a', effect: 'read', summary: 's' }] });
+  assert.deepEqual(min.connector, { name: 'X', slug: 'x', connector_kind: 'http', auth_type: 'api_key' });
   assert.equal('application_id' in min, false);
   // applicationId alias + conversation_id alias
   const alias = parseCreateCardInput({ ...valid(), conversationId: undefined, conversation_id: CONV, applicationId: APP_ID });
@@ -82,9 +83,12 @@ test('parseCreateCardInput: connector fields', () => {
   for (const ok of ['a', 'acme', 'acme-crm-k3wujp', 'tencent_ads', 'a1-b2']) {
     assert.equal(parseCreateCardInput(withConnector({ slug: ok })).connector.slug, ok);
   }
-  rejects400(withConnector({ auth_type: undefined }), /auth_type/);
-  rejects400(withConnector({ auth_type: 'basic' }), /auth_type must be one of api_key \| oauth2 \| mcp/);
-  rejects400(withConnector({ auth_type: 'OAUTH2' }), /auth_type/);
+  rejects400(withConnector({ auth_type: undefined }), /auth_type must be one of api_key \| oauth2 when connector_kind is "http"/);
+  rejects400(withConnector({ auth_type: 'basic' }), /auth_type must be one of api_key \| oauth2 when connector_kind is "http"/);
+  rejects400(withConnector({ auth_type: 'OAUTH2' }), /auth_type must be one of/);
+  rejects400(withConnector({ connector_kind: undefined }), /connector\.connector_kind is required: one of http \| mcp/);
+  rejects400(withConnector({ connector_kind: 'grpc' }), /connector_kind is required: one of http \| mcp/);
+  rejects400(withConnector({ connector_kind: 'HTTP' }), /connector_kind is required/);
   rejects400(withConnector({ icon_url: 'javascript:alert(1)' }), /icon_url/);
   rejects400(withConnector({ icon_url: 'not a url' }), /icon_url/);
   rejects400(withConnector({ base_url: 'ftp://acme.example.com' }), /base_url/);
@@ -468,7 +472,7 @@ test('isSecretLikeKey: catches secret names in any casing/separator, leaves card
     'authorization', 'bearer', 'credentials', 'cookie', 'aws_secret_access_key', 'webhook_secret']) {
     assert.equal(isSecretLikeKey(k), true, k);
   }
-  for (const k of ['name', 'slug', 'icon_url', 'description', 'base_url', 'auth_type', 'effect', 'summary',
+  for (const k of ['name', 'slug', 'icon_url', 'description', 'base_url', 'connector_kind', 'auth_type', 'server_url', 'effect', 'summary',
     'conversationId', 'actions', 'application_id', 'org']) {
     assert.equal(isSecretLikeKey(k), false, k);
   }
@@ -497,6 +501,96 @@ test('parseCreateCardInput: secret-like key at ANY depth → 400 secret_field_re
   assert.doesNotThrow(() => assertNoSecretKeys({ a: [{ b: 1 }], c: null }));
 });
 
+// --- connector_kind "mcp": MCP server address, no auth_type, no actions ----------
+
+const MCP_URL = 'https://api.plaud.ai/mcp';
+function validMcp(connectorPatch = {}, overrides = {}) {
+  return {
+    conversationId: CONV,
+    connector: { name: 'Plaud', slug: 'plaud-mcp', connector_kind: 'mcp', description: 'Plaud 录音', server_url: MCP_URL, ...connectorPatch },
+    ...overrides,
+  };
+}
+
+test('parseCreateCardInput mcp: server_url required (https), echoed as server_url only; no auth_type, no actions', () => {
+  const out = parseCreateCardInput(validMcp());
+  assert.deepEqual(out.connector, {
+    name: 'Plaud', slug: 'plaud-mcp', connector_kind: 'mcp', description: 'Plaud 录音', server_url: MCP_URL,
+  });
+  assert.deepEqual(out.actions, []);
+  // explicit empty actions list is fine too; mcp_server_url alias accepted
+  assert.deepEqual(parseCreateCardInput(validMcp({}, { actions: [] })).actions, []);
+  const alias = parseCreateCardInput(validMcp({ server_url: undefined, mcp_server_url: MCP_URL }));
+  assert.equal(alias.connector.server_url, MCP_URL);
+  // required + https only + the usual URL hygiene
+  rejects400(validMcp({ server_url: undefined }), /server_url .*required when connector_kind is "mcp"/);
+  rejects400(validMcp({ server_url: '  ' }), /server_url .*required/);
+  rejects400(validMcp({ server_url: 'http://api.plaud.ai/mcp' }), /must be an https URL/);
+  rejects400(validMcp({ server_url: 'not a url' }), /server_url/);
+  rejects400(validMcp({ server_url: 'https://u:p@api.plaud.ai/mcp' }), /credentials/);
+  assert.throws(() => parseCreateCardInput(validMcp({ server_url: `${MCP_URL}?api_key=1` })), (e) => e.code === 'secret_field_rejected');
+  rejects400(validMcp({ mcp_server_url: 'https://other.example.com/mcp' }), /differ/);
+  rejects400(validMcp({ base_url: 'https://api.plaud.ai' }), /base_url is not used when connector_kind is "mcp"/);
+});
+
+test('parseCreateCardInput: auth_type "mcp" is gone — refused with a pointer to connector_kind; mcp cards carry no auth_type', () => {
+  for (const at of ['mcp', 'MCP', ' Mcp ']) {
+    for (const kind of [undefined, 'http', 'mcp']) {
+      rejects400(validMcp({ auth_type: at, connector_kind: kind }),
+        /connector\.auth_type "mcp" is not valid .*connector\.connector_kind:"mcp" with no auth_type/);
+    }
+  }
+  for (const at of ['api_key', 'oauth2', null, '']) {
+    rejects400(validMcp({ auth_type: at }), /auth_type is not used when connector_kind is "mcp"/);
+  }
+});
+
+test('parseCreateCardInput mcp: actions refused (tools come from the MCP server)', () => {
+  rejects400(validMcp({}, { actions: [{ name: 'a', effect: 'read', summary: 's' }] }), /actions are not listed when connector_kind is "mcp"/);
+  rejects400(validMcp({}, { actions: 'x' }), /actions are not listed/);
+});
+
+test('parseCreateCardInput: server_url only for mcp; api_key / oauth2 unchanged (actions still required)', () => {
+  rejects400(withConnector({ server_url: MCP_URL }), /server_url is only for connector_kind "mcp"/);
+  rejects400(withConnector({ auth_type: 'api_key', mcp_server_url: MCP_URL }), /only for connector_kind "mcp"/);
+  rejects400(valid({ actions: [] }), /actions \(non-empty list\) is required/);
+  const out = parseCreateCardInput(valid());
+  assert.equal(out.connector.base_url, 'https://api.acme.example.com/v1');
+  assert.equal('server_url' in out.connector, false);
+});
+
+test('mcp card: body + metadata carry the server URL, zero actions; fallback text tells the next step', () => {
+  const input = parseCreateCardInput(validMcp());
+  const m = buildConnectorCreateCardMessage(input, CARD_ID);
+  assert.deepEqual(m.content.body.connector, {
+    name: 'Plaud', slug: 'plaud-mcp', connector_kind: 'mcp', description: 'Plaud 录音', server_url: MCP_URL,
+  });
+  assert.deepEqual(m.content.body.actions, []);
+  assert.deepEqual(m.metadata.connector_create_card.connector, {
+    name: 'Plaud', slug: 'plaud-mcp', connector_kind: 'mcp', server_url: MCP_URL,
+  });
+  assert.deepEqual(m.metadata.connector_create_card.actions, []);
+  const t = m.fallback_text;
+  assert.match(t, /类型：MCP 服务器/);
+  assert.doesNotMatch(t, /认证方式/);
+  assert.match(t, new RegExp(`MCP 服务器地址：${MCP_URL.replace(/[.]/g, '\\.')}`));
+  assert.match(t, /工具由 MCP 服务器提供/);
+  assert.match(t, /openmax\.com 的「应用连接」页面/);
+  assert.match(t, /传输类型选「远程（Streamable HTTP）」/);
+  assert.match(t, /在「服务器 URL」填入上面的 MCP 服务器地址/);
+  assert.doesNotMatch(t, /「MCP 服务器地址」/);
+  assert.match(t, /完成授权/);
+  assert.match(t, /确认创建 Plaud/);
+  assert.doesNotMatch(t, /动作（/);
+  assert.doesNotMatch(t, /Client Secret/);
+});
+
+test('runCreateCard mcp: returns server_url and actions_total 0', async () => {
+  const out = await runCreateCard(validMcp(), { resolveOrg: () => 'org-1', post: async () => ({ id: 'msg-1' }), cardId: CARD_ID });
+  assert.deepEqual(out.connector, { name: 'Plaud', slug: 'plaud-mcp', connector_kind: 'mcp', server_url: MCP_URL });
+  assert.equal(out.actions_total, 0);
+});
+
 // --- payload shape --------------------------------------------------------------
 
 test('buildConnectorCreateCardMessage: exact schema, AGENT_STRUCTURED body + compact metadata copy', () => {
@@ -519,7 +613,7 @@ test('buildConnectorCreateCardMessage: exact schema, AGENT_STRUCTURED body + com
   assert.deepEqual(meta, {
     schema: 'openmax.connector-create.v1',
     card_id: CARD_ID,
-    connector: { name: 'Acme CRM', slug: 'acme-crm', auth_type: 'oauth2', icon_url: 'https://acme.example.com/icon.png' },
+    connector: { name: 'Acme CRM', slug: 'acme-crm', connector_kind: 'http', auth_type: 'oauth2', icon_url: 'https://acme.example.com/icon.png' },
     actions: input.actions,
     application_id: APP_ID,
   });
@@ -541,7 +635,7 @@ test('buildConnectorCreateCardMessage: no application_id → omitted; card_id de
 test('fallback_text: name, slug, auth type, every action with 读/写, reply words', () => {
   const t = buildCreateCardFallbackText(parseCreateCardInput(valid()));
   assert.match(t, /「Acme CRM」（acme-crm）/);
-  assert.match(t, /认证方式：OAuth 2\.0/);
+  assert.match(t, /类型：HTTP\n认证方式：OAuth 2\.0/);
   assert.match(t, /- \[读\] list_contacts：列出联系人/);
   assert.match(t, /- \[写\] create_contact：新建联系人/);
   assert.match(t, /动作（2）/);
@@ -570,7 +664,7 @@ test('sendConnectorCard: auth_notice and create_card share one send path (POST c
   assert.equal(calls[1][2].content.body.card_id, CARD_ID);
   assert.deepEqual(out, {
     status: 'sent', conversation_id: CONV, card_id: CARD_ID, message_id: 'msg-9',
-    connector: { name: 'Acme CRM', slug: 'acme-crm', auth_type: 'oauth2' }, actions_total: 2,
+    connector: { name: 'Acme CRM', slug: 'acme-crm', connector_kind: 'http', auth_type: 'oauth2' }, actions_total: 2,
   });
 });
 
@@ -579,6 +673,7 @@ test('runCreateCard: invalid / secret input → nothing sent, org not resolved',
   const deps = { resolveOrg: () => { resolved += 1; return 'org-1'; }, post: async () => { posted += 1; } };
   await assert.rejects(runCreateCard(withConnector({ client_secret: 'x' }), deps), (e) => e.code === 'secret_field_rejected');
   await assert.rejects(runCreateCard(withConnector({ auth_type: 'basic' }), deps), (e) => e.status === 400);
+  await assert.rejects(runCreateCard(validMcp({ auth_type: 'mcp' }), deps), (e) => e.status === 400);
   assert.equal(posted, 0);
   assert.equal(resolved, 0);
 });
