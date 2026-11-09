@@ -257,10 +257,13 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   if (systemSender) {
     const memberAttr = systemSender.memberId ? ` member-id="${attrValue(systemSender.memberId)}"` : '';
     header += `<sender-context kind="system"${memberAttr}/>\n`;
-  } else if (senderMember && type === 'dm') {
+  } else if (senderMember && rawType === 'dm') {
     // DM sender identity: the human / agent OpenMax member id, from the
     // server frame's sender_id (never from metadata, display name or text).
     // Same forgery guarantees as kind="system" above. Not a platform event.
+    // Gated on the type the caller passed, not the defaulted `type`: other
+    // conversation types (strat / broadcast / bridge / …) fall back to the
+    // [OPENMAX DM] label but are not DMs, so they get no element.
     const memberId = attrValue(senderMember.memberId);
     const kind = senderMember.kind === 'human' || senderMember.kind === 'agent' ? senderMember.kind : '';
     if (memberId && kind) header += `<sender-context kind="${kind}" member-id="${memberId}"/>\n`;

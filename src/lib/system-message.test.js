@@ -59,6 +59,10 @@ test('senderMemberFrom: 嵌套 message.sender_type / message.sender_id（sync �
   assert.deepEqual(senderMemberFrom({ message: { sender_type: 'HUMAN', sender_id: 'm-alice' } }), { kind: 'human', memberId: 'm-alice' });
   assert.deepEqual(senderMemberFrom({ sender_id: 'm-top', message: { sender_type: 'AGENT', sender_id: 'm-nested' } }), { kind: 'agent', memberId: 'm-top' });
   assert.deepEqual(senderMemberFrom({ sender_type: 'HUMAN', message: { sender_id: 'm-nested' } }), { kind: 'human', memberId: 'm-nested' });
+  // Top-level sender_type wins over message.sender_type, as in isSystemSender.
+  assert.deepEqual(senderMemberFrom({ sender_type: 'HUMAN', sender_id: 'm-1', message: { sender_type: 'AGENT' } }), { kind: 'human', memberId: 'm-1' });
+  assert.deepEqual(senderMemberFrom({ sender_type: 'AGENT', sender_id: 'm-1', message: { sender_type: 'HUMAN' } }), { kind: 'agent', memberId: 'm-1' });
+  assert.equal(senderMemberFrom({ sender_type: 'SYSTEM', sender_id: 'm-1', message: { sender_type: 'HUMAN' } }), undefined);
 });
 
 test('senderMemberFrom: SYSTEM / 空 / 未知类型 / 缺 id → undefined（不猜 kind）', () => {
