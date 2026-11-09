@@ -31,6 +31,12 @@ JSON with this envelope:
 }
 ```
 
+For 「不挂项目」 the spec has no `project_id`:
+`{"unattached": true, "unattached_scope": "org", "title": "…", "description": "…"}`
+(`"private"` for a private automation). The form may also add
+`knowledge_base_mode` / `knowledge_base_id`. Both follow
+[No project and output knowledge base](automation-common.md#no-project-and-output-knowledge-base).
+
 **Required:** read [Automation Common](automation-common.md) in full before
 proceeding; it owns identity, configuration, server-card confirmation, proof and
 uncertain-write rules. For timers also read [Schedule Resolution](automation-schedule.md).
@@ -49,8 +55,10 @@ rollout, read [Recovery](automation-recovery.md).
 2. Check whether the task is actionable: trigger/timezone, project, executor,
    owner, required inputs/access, concrete work and expected output/destination.
    Ask only for missing or ambiguous information. Do not ask again for fields
-   already supplied. Preserve clarified task instructions in `spec.description`;
-   do not merely leave information required at execution time in the DM. For a
+   already supplied. `spec.unattached: true` already decides the project
+   question (no project): never ask for a project or suggest one. Preserve
+   clarified task instructions in `spec.description`; do not merely leave
+   information required at execution time in the DM. For a
    draft timer, apply the [schedule-resolution rules](automation-schedule.md) before proposing.
    A Lead (including you) or Owner listed in `configuration.project_member_additions`
    joins the project when the confirmed write succeeds, so their current
@@ -63,6 +71,8 @@ rollout, read [Recovery](automation-recovery.md).
    creator as `requester_member_id`; Core must support that contract before use.
    The creator must be an active human in the same organization and a member of
    the selected project; the server revalidates this before accepting confirmation.
+   With `spec.unattached: true` there is no selected project to check; the
+   server checks the Inbox or the Owner's hidden private project.
    A creator listed as Owner in `configuration.project_member_additions` joins
    the project with the write instead of already being a member. Any non-empty
    list also requires the creator to have project write access (an effective
@@ -86,6 +96,9 @@ rollout, read [Recovery](automation-recovery.md).
 5. Before reporting success, compare the returned binding's `source_kind`,
    owner, lead, spec and schedule/filter with the confirmed configuration.
    Use `event-binding.get` for timer or `webhook.get` for webhook when needed.
+   For `spec.unattached: true`, compare `spec.unattached` and the binding's
+   `scope` with the confirmed `unattached_scope`, not `project_id`: the read
+   returns the Inbox's or the hidden private project's ID.
    A mismatch or unreadable result is not verified success: report uncertainty,
    never automatically recreate or delete the binding.
    Record the returned binding ID privately. Report the task name, actual state
