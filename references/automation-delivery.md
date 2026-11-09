@@ -101,19 +101,27 @@ schedule: the later configured run remains expected unless the binding was
 explicitly changed. Read the current binding state and schedule before
 describing what remains pending.
 
-A webhook run with `replay_state: "replay"` is a replayed event (OPENM-1164):
-it arrived while the automation was paused or the organization was suspended,
-was held, and the human Owner chose to replay it when resuming. Its
-`trigger_kind` stays `webhook`, and its `scheduled_at` is the time the event
-was received, not the time the replay ran. Read `replay_state` from the
-matching run record; a `Replayed event:` line in the Issue description is only
-a hint. The event may be outdated: before acting, check the current state of
-the external object it refers to (for example, the merge request may already
-be merged) and act on that state, not on the payload alone. Only the human
-Owner decides, when resuming, whether held events are replayed; the Agent
-cannot replay or decline them. Holding applies to webhooks only: a timer
-automation still does not catch up runs missed while it was paused or the
-organization was suspended.
+A webhook run with `replay_state: "replay"` is a replayed event: it arrived
+while the automation was paused or the organization was suspended, was held,
+and the human Owner chose to replay it when resuming. Its `trigger_kind` stays
+`webhook`, and its `scheduled_at` is the time the event was received, not the
+time the replay ran. On a normal run `replay_state` is empty or absent. Read
+`replay_state` from the matching run record; the Issue description line
+`Replayed event <delivery_id>: received at <t> while the automation was not
+running; replayed at <t2>. It may be outdated.` is only a hint. The event may
+be outdated: before acting, check the current state of the external object it
+refers to (for example, the merge request may already be merged) and act on
+that state, not on the payload alone. If the event is outdated and nothing is
+left to do, take no action and complete the run as `success`; state clearly in
+the result that the event was outdated and no action was taken.
+
+The `<delivery_id>` in that line identifies the original webhook event (it is
+not the result `delivery.id`). Use it to correlate the replay with that event,
+and do not repeat side effects, such as reports or DMs, already produced for
+that delivery ID. Only the human Owner decides, when resuming, whether held
+events are replayed; the Agent cannot replay or decline them. Holding applies
+to webhooks only: a timer automation still does not catch up runs missed while
+it was paused or the organization was suspended.
 
 Two executions of the same automation are not automatically duplicates.
 Distinguish their occurrence/Issue identities and trigger kinds (`timer`,
