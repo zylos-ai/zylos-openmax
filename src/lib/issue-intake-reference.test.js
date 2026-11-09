@@ -109,10 +109,11 @@ test('AC5: the example table covers at least 3 quick and 3 tracked requests', ()
 });
 
 test('🔴 card rule carries the tracking-offer exemption, bound to handed-back quick work only', () => {
-  const exemption = cardRule.slice(cardRule.indexOf('**One exception, bound to one situation only:**'));
+  const exemption = cardRule.slice(cardRule.indexOf('**One exception, bound to one situation only:**')).replace(/\s+/g, ' ');
   assert.ok(cardRule.includes('**One exception, bound to one situation only:**'), 'exemption must live inside the 🔴 card rule');
   for (const phrase of [
-    'handed back',
+    'after you have handed back, in this reply, finished quick',
+    'any question asked before the work is done or handed back, still follows the test above',
     'finished quick single-Agent work',
     'the part of an unsure request you could finish now',
     '「需要的话我建 Issue 跟踪」',
@@ -131,6 +132,7 @@ test('🔴 card rule itself is unchanged by the exemption', () => {
 test('"A card asks only about its content" matches the 🔴 exemption', () => {
   const rule = boundedSection(skill, '**A card asks only about its content.**', '**Do not write `required`.**');
   assert.ok(rule.includes('after the work is done and handed back'));
+  assert.ok(rule.includes('for an unsure request, after the part you could finish now is handed back'));
   assert.ok(rule.includes('never a card'));
   assert.ok(rule.includes('see the exception under 🔴 "Replying"'));
 });
