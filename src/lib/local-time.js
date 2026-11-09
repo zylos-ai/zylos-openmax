@@ -23,11 +23,11 @@
  * deployment — and the failure would look like nothing, just times that are
  * some hours off.
  *
- * So the order is: `TZ` in the process environment (pm2 injects the configured
- * value, so this is the configured zone, not the host's), then the `TZ=` line
- * of the agent's own `.env`, and only then whatever `Intl` defaults to. The
- * middle step is what makes a CLI run outside pm2 — where nothing exported
- * `TZ` — still print the agent's time instead of the machine's.
+ * Read `TZ=` from the agent's own `.env` first: a process managed by pm2 may
+ * still inherit an older TZ after the file changes and an ordinary restart.
+ * If the file provides no zone, use `TZ` in the process environment, then
+ * whatever `Intl` defaults to. Deployments without a zylos `.env` keep the
+ * process-environment behavior.
  */
 
 import fs from 'fs';
@@ -48,8 +48,6 @@ function zylosDir() {
  * quiet wrongness of exactly the kind this module exists to remove.
  */
 export function agentTimeZone() {
-  const fromEnv = (process.env.TZ || '').trim();
-  if (fromEnv) return fromEnv;
   try {
     const raw = fs.readFileSync(path.join(zylosDir(), '.env'), 'utf8');
     // Last assignment wins, matching how a shell would source the file.
@@ -60,11 +58,11 @@ export function agentTimeZone() {
       const value = m[1].trim().replace(/^["']|["']$/g, '').split('#')[0].trim();
       if (value) found = value;
     }
-    return found;
+    if (found) return found;
   } catch {
-    // No .env, unreadable, or no HOME: fall through to the Intl default.
-    return '';
+    // No .env or unreadable: fall through to the process environment.
   }
+  return (process.env.TZ || '').trim();
 }
 
 /**

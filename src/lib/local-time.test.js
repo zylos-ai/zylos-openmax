@@ -66,14 +66,15 @@ function withEnv(vars, fn) {
   }
 }
 
-function zylosDirWith(envContents) {
+function zylosDirWith(t, envContents) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zylos-tz-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   if (envContents !== null) fs.writeFileSync(path.join(dir, '.env'), envContents);
   return dir;
 }
 
-test("🔴 with TZ unset, the zone comes from the agent's .env, not the host", () => {
-  const dir = zylosDirWith('FOO=1\nTZ=Pacific/Kiritimati\n');
+test("🔴 with TZ unset, the zone comes from the agent's .env, not the host", t => {
+  const dir = zylosDirWith(t, 'FOO=1\nTZ=Pacific/Kiritimati\n');
   withEnv({ TZ: undefined, ZYLOS_DIR: dir }, () => {
     assert.equal(agentTimeZone(), 'Pacific/Kiritimati');
     // +14 is a zone no host here would be in, so this also proves the value is
@@ -82,26 +83,50 @@ test("🔴 with TZ unset, the zone comes from the agent's .env, not the host", (
   });
 });
 
-test('TZ in the environment wins over the file (pm2 injects the configured value)', () => {
-  const dir = zylosDirWith('TZ=Pacific/Kiritimati\n');
+test('the agent file overrides an inherited process timezone', t => {
+  const dir = zylosDirWith(t, 'TZ=Pacific/Kiritimati\n');
   withEnv({ TZ: 'UTC', ZYLOS_DIR: dir }, () => {
-    assert.equal(agentTimeZone(), 'UTC');
+    assert.equal(agentTimeZone(), 'Pacific/Kiritimati');
+    assert.equal(formatLocalTime(UTC_NOON), '2026-09-25 02:30:00 (+14:00)');
   });
 });
 
-test('the .env line is parsed the way a shell would read it', () => {
-  const dir = zylosDirWith('export TZ = "Asia/Tokyo"   # set at provisioning\nTZ=Europe/Berlin\n');
-  withEnv({ TZ: undefined, ZYLOS_DIR: dir }, () => {
+test('the .env line is parsed the way a shell would read it', t => {
+  const dir = zylosDirWith(t, 'export TZ = "Asia/Tokyo"   # set at provisioning\nTZ=Europe/Berlin\n');
+  withEnv({ TZ: 'UTC', ZYLOS_DIR: dir }, () => {
     // Last assignment wins, quotes and trailing comment stripped.
     assert.equal(agentTimeZone(), 'Europe/Berlin');
   });
 });
 
-test('no .env, or no TZ line, resolves to empty so Intl picks the host zone', () => {
-  withEnv({ TZ: undefined, ZYLOS_DIR: zylosDirWith(null) }, () => {
-    assert.equal(agentTimeZone(), '');
-  });
-  withEnv({ TZ: undefined, ZYLOS_DIR: zylosDirWith('FOO=1\n') }, () => {
-    assert.equal(agentTimeZone(), '');
+test('the process timezone remains the fallback without a file timezone', t => {
+  for (const contents of [null, 'FOO=1\n', 'TZ=\n']) {
+    withEnv({ TZ: ' Asia/Tokyo ', ZYLOS_DIR: zylosDirWith(t, contents) }, () => {
+      assert.equal(agentTimeZone(), 'Asia/Tokyo');
+      assert.equal(formatLocalTime(UTC_NOON), '2026-09-24 21:30:00 (+09:00)');
+    });
+  }
+});
+
+test('without either timezone source Intl uses its default', t => {
+  for (const contents of [null, 'FOO=1\n']) {
+    withEnv({ TZ: undefined, ZYLOS_DIR: zylosDirWith(t, contents) }, () => {
+      assert.equal(agentTimeZone(), '');
+      assert.equal(formatLocalTime(UTC_NOON), formatLocalTime(UTC_NOON, {
+        timeZone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }));
+    });
+  }
+});
+
+test('each call reads timezone changes without caching the file', t => {
+  const dir = zylosDirWith(t, 'TZ=Asia/Tokyo\n');
+  withEnv({ TZ: 'UTC', ZYLOS_DIR: dir }, () => {
+    assert.equal(agentTimeZone(), 'Asia/Tokyo');
+    fs.writeFileSync(path.join(dir, '.env'), 'TZ=Pacific/Kiritimati\n');
+    assert.equal(agentTimeZone(), 'Pacific/Kiritimati');
+    assert.equal(formatLocalTime(UTC_NOON), '2026-09-25 02:30:00 (+14:00)');
+    fs.writeFileSync(path.join(dir, '.env'), 'FOO=1\n');
+    assert.equal(agentTimeZone(), 'UTC');
   });
 });
