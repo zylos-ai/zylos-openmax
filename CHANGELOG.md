@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Quick single-Agent work no longer gets an Issue-intake card (wsb#747, OPENM-1231, #255).** SKILL.md now decides by collaboration and time span, not output type: chat/Q&A and work one Agent can finish quickly in the conversation without waiting on anyone (reading, summarizing, answering, lookups, small edits, a short report, a small fix with its same-team-reviewed PR) are done directly, with no time limit on "quick", ending with at most one plain-text offer to track (the 🔴 card rule exempts only that closing line, after the work is handed back); only work that needs other teams (including a PR another team must review), several people or Agents, or spans time (future deadline, several days, later acceptance), or that the human asks to track, runs New-Issue Intake. A request is unsure only when it shows no collaboration or time-span signal; unsure cases do what can be finished now and then make the same one-line offer. Wording like "just do it" / 「直接做」 is not treated as an Issue decision; explicit "create / do not create an Issue" and the no-repeat rule are unchanged; automation handoffs, onboarding and issue:// references are unaffected, and the rest of a `proj://` message is classified by the same rule (the Project is already explicit if it runs intake). The inbound `<openmax-instruction>` says the same, and the smoke-4 prompt now carries a deadline and a review so it still exercises the Issue flow. Considered and deliberately left out of this release (owner decision): re-running intake when quick work turns out mid-way to need other teams or more days, and treating an ignored tracking offer as "not yet asked".
+
 ## [2.32.0] - 2026-11-07
 
 Combines PRs #236, #237, #238, #239, #240, #241, #242, #243, #244, #245, #246, #247 and #248 (#240 is a follow-up to #239 within this cycle and is folded into the market client entry; #248 adds tests for #247).

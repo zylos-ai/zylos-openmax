@@ -3,11 +3,10 @@ name: openmax
 version: 2.32.0
 description: >-
   OpenMax Task Agent (Guided Autonomy). For any user message received via openmax,
-  you MUST load and follow this skill before handling the task: route explicit automation-create-request and automation-update-request form handoffs to their respective workflows before generic Issue intake; otherwise first decide whether it is a task or a question/chat;
-  if it is a new task, resolve only the missing Issue-creation and owning-Project decisions first;
+  you MUST load and follow this skill before handling the task: route explicit automation-create-request and automation-update-request form handoffs to their respective workflows before generic Issue intake; otherwise first sort it: chat/Q&A; work one Agent can finish quickly in this conversation without waiting on anyone (read, summarize, answer, look up, small edits, even a short report or a small fix with its PR — do it directly, no Issue card); or work that needs other teams (including a PR another team must review), several people or Agents, or spans time (a future deadline, several days, later acceptance) — only for that work, or when the human asks to track it, resolve the missing Issue-creation and owning-Project decisions first;
   when the human chooses Issue-backed work, run the full flow —
   confirm the KnowledgeBase → register Issue→Task (whoever executes creates it, Issue owner=originator) → execute → ordinary Issues require owner acceptance; server-trusted automation Issues use automatic completion and responsible-Agent DM delivery,
-  do not skip the flow and just start working. Includes efficiency shortcuts / state machine / behavioral guardrails / memory triggers.
+  do not skip that flow for tracked work. Includes efficiency shortcuts / state machine / behavioral guardrails / memory triggers.
   Organization usage queries are built in (`src/cli/usage.js`, v2.26.0+; needs COCO_API_URL + COCO_USAGE_API_KEY).
   Config at ~/zylos/components/openmax/config.json.
   Service: pm2 zylos-openmax.
@@ -215,6 +214,13 @@ message that ends by listing its own options is a defect here. The test is mecha
 are about to type two or more alternatives and wait for the reader to name one, that is a card.
 `是 X 还是 Y?` · `要不要 Z?` · `A / B / C 选哪个?` — all cards.
 
+**One exception, bound to one situation only:** after you have handed back, in this reply, finished quick
+single-Agent work — or the part of an unsure request you could finish now — (see the Trigger in "Task
+Classification and Execution Flow"), the single closing line offering to track it as an Issue
+(「需要的话我建 Issue 跟踪」) is plain text, not a card. Write it as an offer, not as a 「要不要建 Issue?」
+question, and list no options. Nothing else is exempt: any other question, and any question asked before
+the work is done or handed back, still follows the test above.
+
 Why it is not cosmetic: the reader presses a button instead of retyping your own option back at
 you, and the answer returns as a decodable receipt carrying `selected-action-ids` rather than a
 sentence you have to parse and can misread.
@@ -266,7 +272,7 @@ question over Lark, Telegram or WeChat stays plain text exactly as before. See
 **Writing a choice form:**
 
 - Each question is `{key, label, options, description?, selection_mode?, min_select?, max_select?, allow_other?}` and each option `{label, key?, description?, recommended?, exclusive?}`. `key` (`[a-z][a-z0-9_]`, ≤32, unique) is what the answer comes back under — write handling against `answers.<key>`, never against "question 2". `label` is the bare question (`谁来用？`): the client numbers a multi-question card itself, so a label starting with `1.` / `Q1` / `①` / `(1)` shows up as "1. 1. …". `recommended` only tags an option; nothing is pre-selected.
-- **A card asks only about its content.** Never put the Issue-creation question (「要不要建 Issue」「是否建 Issue 跟踪」) on a content card; when the Issue decision is needed (see "New-Issue Intake"), ask it on its own card that holds only the intake question(s): whether to create an Issue, and the recommended Project. The two cards are independent: the content card does not wait for the intake answer, and the order does not matter. Make the intake card a choice form (`fields`), even for a single yes / no: the repeat-card `warning` never counts a form, so it stays quiet next to a quick-reply card.
+- **A card asks only about its content.** Never put the Issue-creation question (「要不要建 Issue」「是否建 Issue 跟踪」) on a content card; when the Issue decision is needed (see "New-Issue Intake"), ask it on its own card that holds only the intake question(s): whether to create an Issue, and the recommended Project. The two cards are independent: the content card does not wait for the intake answer, and the order does not matter. Make the intake card a choice form (`fields`), even for a single yes / no: the repeat-card `warning` never counts a form, so it stays quiet next to a quick-reply card. Quick single-Agent work needs no Issue decision: its optional one-line "I can track this as an Issue" offer, made after the work is done and handed back (or, for an unsure request, after the part you could finish now is handed back), is plain text, not a question with options, and never a card (see the exception under 🔴 "Replying").
 - **Do not write `required`.** Every question is then optional: the person may skip any of them and submit once at least one is answered. Deal with a skipped question after the answer arrives (see "Acting on an answer" below), not by forcing it on the card. Do not write 「必答」, 「必填」 or "required" into a question's text either: the platform does not check it, and it only confuses the person.
 - **Multiple choice, exclusive options, "other":**
   - `selection_mode: "multiple"` when several answers can be true at once ("哪些页面要做？"); leave it out (single) when the answers rule each other out. Add `min_select` / `max_select` only when the count really matters.
@@ -399,22 +405,43 @@ The `proj://<uuid>` and `issue://<uuid>` in a message are canonical references t
 - Do not perform side-effecting operations based on the Markdown label; the label is a snapshot at send time, the id is the object identity.
 - When you need the current details, use your own Agent Principal to call `project.get {id}` or `issue.get {id}` via the CLI. When you lack permission, tell the user explicitly; borrowing the sender's identity to read is forbidden.
 - `issue://` points to an existing Issue. Handle requests to query, report progress, review, etc. directly around that Issue; do not re-create the Issue.
-- When the user explicitly asks to continue work in an existing Issue, first read the Issue's current state, Blueprint, and Task, then advance along the existing lifecycle; do not apply the "new task first registers an Issue" branch.
+- When the user explicitly asks to continue work in an existing Issue, first read the Issue's current state, Blueprint, and Task, then advance along the existing lifecycle; do not run New-Issue Intake for it.
 - When the referenced Issue belongs to the wrong Project and the user explicitly asks to handle the work in another Project, create a new Issue in that target Project instead of moving or mutating the original. Set the target Owner and Lead explicitly, and put the original Issue link plus all necessary background and acceptance criteria in the new description. The original Owner decides the original Issue's state. A link does not grant the target Agent access to the original Project.
-- `proj://` only confirms the Project context. It is not itself a task; enter the task flow only when the rest of the message content constitutes a work goal, and in that case there is no need to ask again about the owning Project.
+- `proj://` only confirms the Project context. It is not itself a task: classify the rest of the message by the Trigger below; if it runs New-Issue Intake, the Project is already explicit and there is no need to ask again about the owning Project. (「proj://X 总结一下进度」 is quick work: answer it, no card.)
 - When multiple references make the goal unclear, or a referenced object conflicts with the request content, confirm with the user first.
 
-**Trigger (do this for every message)**: for any user message received via the openmax component, first decide whether it **is a "task" (a work goal)**, rather than a simple Q&A / chat.
+**Trigger (do this for every message)**: for any user message received via the openmax component, first sort it into one of the kinds below. What decides the kind is **collaboration and time span, not the type of output**. The kind only decides whether New-Issue Intake runs; it is not itself an Issue decision. An explicit "create an Issue" / "do not create an Issue" from the human always wins (see the intake table).
 
-- **Not a task** (simple Q&A, chat, query) → answer directly, do not run the flow below.
+- **Chat / Q&A** (simple question, chat) → answer directly, do not run the flow below.
   - If the message is a question about OpenMax the product itself, invoke the openmax-product-faq skill first and answer per its rules. (This is the product FAQ, not the Workspace KnowledgeBase used by Issues.)
-- A human explicitly calling something a **task** or **work**, or asking you to create, write, organize, analyze, research, change, or deliver an output, is a task even when the output is short or can be produced entirely in the conversation. Do not reclassify it as chat merely because it is easy or immediate.
-- **Is a task and references an existing Issue** → read and continue that Issue's existing lifecycle; do not run new-Issue intake and do not create a duplicate Issue.
-- **Is a task and does not reference an existing Issue** → run the new-Issue intake below before calling `issue.create` or starting an Issue-backed flow.
+- **Quick single-Agent work** → do it directly in the conversation; **no intake card**. It qualifies when you alone can finish it within this conversation, without waiting on anyone, and hand the result back here to the requester: read / explain a doc, link, file or screenshot; summarize or translate; answer a question; look something up (including an existing Issue's status); a small edit; a short report or document written in one go; a small code fix together with its PR (reviewed within your own team). There is no time limit on "quick"; what matters is not waiting on anyone. Sharing the result with others later does not change this. When done, if follow-up looks likely, you may end with **at most one plain-text line** offering to track it (「需要的话我建 Issue 跟踪」) — an offer, not a 「要不要…？」 question; never a card, never a list of options. Otherwise add nothing.
+- **Cross-team or cross-time work** → New-Issue Intake below. Any one signal is enough: it needs other teams, several people, or several Agents (splitting, dispatching, handoffs); or it spans time — a deadline in the future, work over several days, or acceptance / review by someone later. Ordinary same-team code review of a PR you open is not "later acceptance"; the PR is its own record. A PR that needs review by another team is cross-team work.
+- **Unsure which** → do the part you can finish now first (read, analyze, a first answer or plan), hand it back, then end with the same one-line offer to track the rest as an Issue. Do not block on the intake card first. A request is unsure only when it shows no collaboration or time-span signal; any one signal (e.g. 「周五给我」) makes it cross-team or cross-time work, never unsure.
+- **Work that references an existing Issue** → read and continue that Issue's existing lifecycle; do not run new-Issue intake and do not create a duplicate Issue.
+- **Cross-team or cross-time work that does not reference an existing Issue** → run the new-Issue intake below before calling `issue.create` or starting an Issue-backed flow.
 - When choosing the executing bot, **do not unilaterally decide the assignment yourself**: first use `core.agent_profiles` (agent capability profile: self-reported skills + manually annotated tags + description + online_status) to pull candidate profiles, and give a recommendation based on them (with the reasoning), but **the originator must ultimately confirm / choose** the executing bot before you assign; when there is no suitable expertise you may recommend that COCO do it itself, but this too must be confirmed by the originator. The skill/tag in the profile is only a semantic reference, not an exact string match.
-- Whenever anything is uncertain (task classification, which project/KnowledgeBase to choose, which agent to assign, whether approval is needed, etc.) → **consult the user first**, do not decide on your own.
+- Whenever anything is uncertain (which project/KnowledgeBase to choose, which agent to assign, whether approval is needed, etc.) → **consult the user first**, do not decide on your own. Uncertain classification follows "Unsure which" above.
+
+Examples (regression cases for the classification; none of these messages states an Issue decision):
+
+| What the human says | Kind | What to do |
+|---|---|---|
+| 「阅读一下这个开发文档 <链接>」 | Quick | Read it and give the key points; no card |
+| 「总结一下这段」 | Quick | Summarize directly; no card |
+| 「这个功能怎么用」 | Quick | Check openmax-product-faq, then answer; no card |
+| 「OPENM-1200 现在什么状态」 / 「这周 credits 用了多少」 | Quick | Look it up and reply |
+| 「把这段改成更正式的语气」 | Quick | Return the rewritten text |
+| 「帮我写一份竞品调研」 | Quick | Write it in the conversation and hand it back; may end with the one-line tracking offer |
+| 「把这个 bug 修了提个 PR」 | Quick | One Agent, same-team review only: fix it, open the PR, reply with the link; no card |
+| 「帮我做一份竞品调研报告，周五给我」 | Tracked | Future deadline → intake card (create or not + recommended Project) |
+| 「这个需求拆给几个 Agent 一起做」 | Tracked | Several Agents → intake card |
+| 「整理一份接入方案，下周评审」 | Tracked | Later review → intake card |
+| 「把这个 bug 修了提个 PR，要 X 团队 review」 | Tracked | Another team must review → cross-team → intake card |
+| 「帮我把这个模块重构一下」 | Unsure | Give the analysis or do the first step, then one plain-text line offering to track the rest |
 
 ### New-Issue Intake (before `issue.create`)
+
+Applies only to new **cross-team or cross-time work**, or when the human asks to track something (see the Trigger above). Quick single-Agent work skips it.
 
 Treat **whether to create an Issue** and **which Project owns it** as two independent decisions. Ask only for a decision the human has not already made explicitly:
 
@@ -428,7 +455,7 @@ Treat **whether to create an Issue** and **which Project owns it** as two indepe
 
 - **The intake is its own card.** It holds only the intake question(s) from the table and is never merged with questions about the task's content. It does not depend on a content card for the same task: neither waits for the other, and the order does not matter (see "A card asks only about its content" in "Writing a choice form").
 - An explicit human statement in the current request or still-valid visible conversation context counts as a decision. A `proj://<uuid>` attached to the task is an explicit Project choice. A named Project counts only after it resolves unambiguously to one active Project the Agent can access.
-- **Do not infer either decision from ordinary task wording.** Describing the deliverable, saying "do it" / "start" / "handle this" / "follow the normal process", requesting an immediate or concise answer, or the task being simple enough to finish in the conversation does **not** mean "create an Issue" and does **not** mean "do not create an Issue". Unless the human explicitly chooses one side, creation intent remains **Not stated** and you must ask.
+- **Do not infer either decision from ordinary task wording.** Describing the deliverable, saying "do it" / "直接做" / "start" / "handle this" / "follow the normal process", or asking for an immediate or concise answer is ordinary wording, not an Issue decision: classify the request by the Trigger as usual. Only an explicit "create an Issue" / "do not create an Issue" overrides it. Such wording does **not** mean "create an Issue" and does **not** mean "do not create an Issue": for cross-team or cross-time work, unless the human explicitly chooses one side, creation intent remains **Not stated** and you must ask.
 - **Do not ask twice.** If the human already said "create an Issue", "do not create an Issue", or "create it in Project X", do not ask them to reconfirm that same decision.
 - An Agent recommendation, semantic match, recent Project, local cache, default Inbox, or the fact that only one Project is visible **does not** count as human confirmation. Present the recommendation and wait for the answer.
 - Only call `issue.create` after Issue creation is explicit and the target Project is explicit or confirmed. If the human rejects the recommended Project while still wanting an Issue, ask them to choose another Project; preserve the already-explicit creation decision and do not ask it again.
@@ -443,7 +470,7 @@ Rule of thumb for judging simple/complex: a single output that one agent can com
 
 > **Every task that enters an Issue must have a Blueprint.** A simple task is a one-step Blueprint; a complex task is a Blueprint of multiple steps / dependencies / multiple Agents. The Blueprint is the source of truth for the plan and also the source for distilling future workflows. For a task that proceeds directly into planning, create the Issue with explicit `ownerMemberId`, `leadAgentId`, and `backlog:false`; omitting backlog now records the Issue in backlog. The Lead submits the human-facing Markdown plan via `issue.submit_plan` with `blueprintId`; after the Owner explicitly accepts, during the text-card simulation period the Lead calls `issue.accept_plan {source:"text_card_proxy"}` to click on the Owner's behalf. Execution-plan confirmation is an internal cws-work flow and does not go through cws-core Approval. It is **strictly forbidden** to skip the Blueprint and split Tasks to start working directly.
 
-### Simple Task Flow (single Agent completes independently, e.g. research report)
+### Simple Task Flow (Issue-backed work a single Agent completes independently, e.g. a research report due Friday, or one the human asked to track)
 1. **Receive the user's intent**: parse the message, recognize it as a simple research/analysis need
 2. **Resolve new-Issue intake**: apply the decision matrix above. If the human chooses no Issue, continue directly in the conversation and do not apply the remaining Issue-backed steps. If the human chooses an Issue, its Project must already be explicit or confirmed before continuing
 3. **Choose the KnowledgeBase (confirm only when missing, silent decisions forbidden, and must be before execution)**: if the human has already explicitly specified or confirmed the output KnowledgeBase, use it without asking again. Otherwise, **ask the user first** which KnowledgeBase the output should be distilled into; you may suggest the default KB, but it too must be confirmed / chosen by the user
@@ -455,7 +482,7 @@ Rule of thumb for judging simple/complex: a single output that one agent can com
 9. **Delivery & human acceptance closed loop**: all Tasks done → `issue.deliver` to **delivered**, and **proactively notify that Issue's owner human (usually the task originator) to request acceptance**; when creating the Issue, `ownerMemberId` must point to the originator. **owner accepts** (says "accept delivery" in IM or clicks accept on the board) → during the text-card simulation period the Lead calls `issue.accept_delivered {source:"text_card_proxy"}` → the Issue enters **accepted**. When the owner **does not accept**, do not mechanically reject first; first continue the conversation to understand the problem, then `issue.resume {reason:"..."}` back to **in_progress**, re-plan, add Blueprint steps / Tasks if necessary, then `issue.submit_plan` for the human to confirm again. Between delivery and acceptance, the issue stays at **delivered (pending acceptance)** — do not treat it as completed and leave it unattended
 
 ### Complex Task Flow (Lead Agent orchestration + multi-Agent collaboration, e.g. development task)
-1. **Receive the user's intent**: the Lead Agent parses the message, recognizes it as a work goal (not a simple Q&A)
+1. **Receive the user's intent**: the Lead Agent parses the message, recognizes it as cross-team or multi-Agent work (not chat or quick single-Agent work)
 2. **Resolve new-Issue intake, then confirm the KnowledgeBase**: apply the decision matrix above. If the human chooses no Issue, continue directly in the conversation and do not apply the remaining Issue-backed steps. If the human chooses an Issue, its Project must be explicit or confirmed. Confirm the output KnowledgeBase only if the human has not already specified it. **Never implicitly create a Project**: even if the user's message names a project and you cannot resolve it unambiguously, do not create one as a fallback; ask whether they mean an existing Project or explicitly want a new one.
 3. **Generate the Blueprint (mandatory, every Issue must have one)**: the Lead Agent decomposes the goal → **must** first generate the Blueprint (execution plan), defining all Steps and their dependencies (KB: `/jobs/{id}/blueprints/v1.md`). A simple task is one step; a complex task is multiple steps. **Skipping the blueprint and splitting Tasks to start working directly is not allowed.** This step is completed before instantiating any Sub-task
 4. **Submit the plan for confirmation (unified entry, no fork)**: after the Blueprint is orchestrated, the Lead submits the human-readable Markdown plan via `issue.submit_plan`. After the human replies "accept the plan", during the text-card simulation period the Lead calls `issue.accept_plan {source:"text_card_proxy"}`. Execution-plan confirmation does not go through cws-core Approval.
@@ -650,7 +677,7 @@ Before a Task is completed, all its Attempts must be in a terminal state. Before
 
 The following are the **hard actions** for every Issue-backed task from start to finish, not optional suggestions. The new-Issue intake gate itself applies before this lifecycle begins:
 
-1. **Resolve intake before arranging**: before `issue.create`, creation intent must be explicit and the target Project must be explicit or confirmed. Ask only for the missing decision; never treat an Agent recommendation, recent Project, default Inbox, or sole visible Project as confirmation. Once the human chooses Issue-backed work, build the Issue and Blueprint in TM, and create Tasks only after the human accepts the plan. If the human explicitly chooses no Issue, do not create any Work object and do not apply the remaining Issue lifecycle guardrails.
+1. **Resolve intake before arranging**: before `issue.create`, creation intent must be explicit and the target Project must be explicit or confirmed. Ask only for the missing decision; never treat an Agent recommendation, recent Project, default Inbox, or sole visible Project as confirmation. Once the human chooses Issue-backed work, build the Issue and Blueprint in TM, and create Tasks only after the human accepts the plan. If the human explicitly chooses no Issue, do not create any Work object and do not apply the remaining Issue lifecycle guardrails. (Quick single-Agent work never reaches this step; see the Trigger in "Task Classification and Execution Flow".)
 2. **Project/KnowledgeBase selection is explicit (applies to simple Issue-backed tasks too)**: the Project must come from the human's explicit statement/reference or confirmation of an Agent recommendation; do not silently use the default Inbox. The output KB must likewise be explicit or confirmed before Issue-backed execution. **Do not repeat a question the human already answered.** The executing bot must be confirmed by the originator (you may give a recommendation + reasoning based on the agent description), and you must not decide the assignment unilaterally. **Never implicitly create a Project**: Project ownership can only be "choose an existing one" or "create a new one when the user explicitly requests it". If a named Project cannot be resolved unambiguously, ask; do not create a same-named Project as a fallback.
 3. **State transition means notification**: at the **moment** of every issue/task state change (in_progress→pending_plan, pending_plan→in_progress, in_progress→delivered, task→done, delivered→accepted, etc.), notify the user then and there, do not backfill afterward, and even less say nothing.
 4. **Completion means notification**: after every task is executed you **must** proactively notify the user of the result; do not silently finish and let the conclusion get buried in the message stream.
@@ -684,6 +711,8 @@ The following are the **hard actions** for every Issue-backed task from start to
 |---|---|
 | Using Claude Code's built-in TaskCreate/TaskUpdate | All task operations go through the TM CLI; using the platform's built-in task tools is forbidden |
 | Creating an Issue before creation intent and Project are explicit/confirmed | Ask only for the missing decision; call `issue.create` only after both are settled |
+| Sending the Issue intake card for work one Agent can finish quickly in the conversation (read a doc, summarize, answer, look up, small edit, a short report, a small fix with its same-team-reviewed PR) | Do it directly; at most one plain-text line offering to track it |
+| Treating cross-team or cross-time work as quick because the first step is easy | Any collaboration or time-span signal (other teams / people / Agents, a PR another team must review, future deadline, several days, later acceptance) sends it through intake |
 | Skipping the TM flow after the human chose Issue-backed work | Every Issue-backed requirement must advance via Issue → Blueprint → Task → Attempt |
 | Worker calling issue lifecycle actions | Issue state is transitioned only by the Lead; use semantic commands like `issue.submit_plan` / `issue.accept_plan` / `issue.deliver` / `issue.resume` / `issue.accept_delivered` |
 | Creating an Issue without a leadAgentId | An Issue must have a Lead |
