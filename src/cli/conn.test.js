@@ -1066,14 +1066,67 @@ test('planAppCreate: connector_kind validated; mcp requires provider_type oauth2
   assert.throws(() => planAppCreate({ display_name: 'X', provider_type: 'api_key', connector_kind: 'grpc' }),
     (e) => e.status === 400 && /connector_kind must be one of http \| mcp/.test(e.message));
   assert.throws(() => planAppCreate({ display_name: 'X', provider_type: 'basic', connector_kind: 'mcp' }),
-    (e) => e.status === 400 && /provider_type for connector_kind "mcp" must be one of oauth2 \| api_key/.test(e.message));
-  assert.throws(() => planAppCreate({ display_name: 'X', connector_kind: 'mcp' }),
-    (e) => e.status === 400 && /provider_type is required/.test(e.message));
+    (e) => e.status === 400 && /provider_type must be one of oauth2 \| api_key/.test(e.message));
   for (const f of ['server_url', 'mcp_server_url', 'mcp_server']) {
     const v = f === 'mcp_server' ? { transport: 'remote_http', server_url: 'https://api.plaud.ai/mcp' } : 'https://api.plaud.ai/mcp';
     assert.throws(() => planAppCreate({ display_name: 'X', provider_type: 'oauth2', connector_kind: 'mcp', [f]: v }),
       (e) => e.status === 400 && new RegExp(`${f} is not accepted on an mcp connector definition`).test(e.message) && /per-connection/.test(e.message));
   }
+});
+
+test('planAppCreate: provider_type validated for EVERY connector_kind — exact lowercase oauth2 | api_key', () => {
+  for (const kind of [undefined, 'http', 'mcp']) {
+    const extra = kind === undefined ? {} : { connector_kind: kind };
+    for (const pt of ['OAuth2', 'OAUTH2', 'API_KEY', 'Api_Key', 'basic', 'none', 'bearer', ' oauth2', 'oauth2 ', 42, true]) {
+      assert.throws(() => planAppCreate({ display_name: 'X', provider_type: pt, ...extra }),
+        (e) => e.status === 400 && /provider_type must be one of oauth2 \| api_key \(exact, lowercase\)/.test(e.message),
+        `kind=${kind} provider_type=${JSON.stringify(pt)}`);
+    }
+  }
+  // http still requires it (no default outside mcp)
+  for (const extra of [{}, { connector_kind: 'http' }]) {
+    assert.throws(() => planAppCreate({ display_name: 'X', ...extra }),
+      (e) => e.status === 400 && /provider_type is required/.test(e.message));
+  }
+});
+
+test('planAppCreate: any letter case of "mcp" in provider_type gets the connector_kind hint (http or mcp path)', () => {
+  for (const pt of ['mcp', 'MCP', 'Mcp', ' mcp ']) {
+    for (const extra of [{}, { connector_kind: 'http' }, { connector_kind: 'mcp' }]) {
+      assert.throws(() => planAppCreate({ display_name: 'X', provider_type: pt, ...extra }),
+        (e) => e.status === 400 && /provider_type "mcp" is not valid/.test(e.message) && /connector_kind:"mcp"/.test(e.message),
+        `provider_type=${JSON.stringify(pt)} ${JSON.stringify(extra)}`);
+    }
+  }
+});
+
+test('planAppCreate mcp: provider_type omitted → api_key placeholder; explicit oauth2 / api_key kept', () => {
+  for (const omitted of [{}, { provider_type: undefined }, { provider_type: null }, { provider_type: '' }]) {
+    const plan = planAppCreate({ slug: 'plaud-mcp', display_name: 'Plaud', connector_kind: 'mcp', ...omitted });
+    assert.equal(plan.body.provider_type, 'api_key');
+    assert.equal(plan.body.connector_kind, 'mcp');
+  }
+  assert.equal(planAppCreate({ display_name: 'P', connector_kind: 'mcp', provider_type: 'oauth2' }).body.provider_type, 'oauth2');
+  assert.equal(planAppCreate({ display_name: 'P', connector_kind: 'mcp', provider_type: 'api_key' }).body.provider_type, 'api_key');
+});
+
+test('planAppCreate mcp: discovered OAuth endpoint / scope fields refused; oauth_client_id allowed', () => {
+  const cases = {
+    oauth_authorize_url: 'https://auth.example.com/authorize',
+    oauth_token_url: 'https://auth.example.com/token',
+    oauth_scopes_default: ['read'],
+  };
+  for (const [f, v] of Object.entries(cases)) {
+    assert.throws(() => planAppCreate({ display_name: 'X', connector_kind: 'mcp', [f]: v }),
+      (e) => e.status === 400 && new RegExp(`${f} is not accepted on an mcp connector definition`).test(e.message) && /discovered/.test(e.message),
+      f);
+    // the same field on an http oauth2 connector is still forwarded
+    const http = planAppCreate({ display_name: 'X', provider_type: 'oauth2', [f]: v });
+    assert.deepEqual(http.body[f], v);
+  }
+  const plan = planAppCreate({ display_name: 'X', connector_kind: 'mcp', oauth_client_id: 'byo-client' });
+  assert.equal(plan.body.oauth_client_id, 'byo-client');
+  assert.equal(plan.body.provider_type, 'api_key');
 });
 
 test('planAppCreate: http path unchanged — no connector_kind sent unless given; explicit http forwarded', () => {
@@ -1100,6 +1153,17 @@ test('runAppImport mcp: creates the app with connector_kind mcp + provider_type 
   assert.equal(actionCalls, 0);
   assert.equal(out.applicationId, APP_UUID);
   assert.equal(out.actions_total, 0);
+});
+
+test('runAppImport mcp: provider_type omitted → app created with the api_key placeholder', async () => {
+  const appBodies = [];
+  await runAppImport(
+    { application: { slug: 'plaud-mcp', display_name: 'Plaud', connector_kind: 'mcp' } },
+    { createApp: async (body) => { appBodies.push(body); return { id: APP_UUID }; }, createActionDef: async () => {} },
+  );
+  assert.equal(appBodies.length, 1);
+  assert.equal(appBodies[0].provider_type, 'api_key');
+  assert.equal(appBodies[0].connector_kind, 'mcp');
 });
 
 test('runAppImport mcp: actions refused / provider_type "mcp" refused — before any network call', async () => {

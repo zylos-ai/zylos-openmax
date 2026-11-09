@@ -209,7 +209,9 @@ Create a custom connector application.
 node src/cli/conn.js conn.app_create '{"slug":"acme","display_name":"Acme","provider_type":"api_key","api_key_location":"header","api_key_header_name":"X-Api-Key","category":"crm"}'
 ```
 
-Required: `display_name`, `provider_type` (`oauth2` | `api_key`). `slug` is
+Required: `display_name`, `provider_type` (`oauth2` | `api_key`, exactly as
+written — lowercase; anything else, e.g. `OAuth2` / `basic`, is refused locally
+with `400`; optional for `connector_kind: "mcp"`, see below). `slug` is
 **optional** — cws-core generates one from `display_name` when omitted; pass an
 explicit `slug` only when you need a specific value (it is honored as-is). Optional:
 `slug`, `description`, `icon_url`, `category`,
@@ -224,12 +226,18 @@ read-only derived `"custom"`; `oauth_callback_url` is returned for you to regist
 `connector_kind` (optional): `http` (default — the per-action HTTP connector) or
 `mcp` (an MCP server connector). It is a **separate axis** from `provider_type`:
 `provider_type` is always the **auth model** (`oauth2` | `api_key`) and is
-**never** `"mcp"` — the CLI refuses `provider_type: "mcp"` locally (the platform
-only stores `oauth2` / `api_key` and fails with HTTP 500 on anything else). For
-`connector_kind: "mcp"`: `provider_type` = `oauth2` for an OAuth MCP server (e.g.
-Plaud), `api_key` for a no-auth or static-token one — the platform probes the
-server when the user connects and adjusts the auth itself; no OAuth endpoints /
-client id (they are discovered); and **no MCP server config** — `server_url` /
+**never** `"mcp"` — the CLI refuses `provider_type: "mcp"` (any letter case)
+locally (the platform only stores `oauth2` / `api_key` and fails with HTTP 500 on
+anything else). For `connector_kind: "mcp"`, `provider_type` is only a
+**placeholder**: the platform decides the auth per connection when the user
+connects it (OAuth discovery upgrades `api_key` → `oauth2`, but never
+downgrades — so `oauth2` on a no-auth / static-token server sticks). **Omit it**
+(the CLI then sends `api_key`, as the openmax.com form does) or send `api_key`.
+Also for `mcp`: no OAuth endpoints or scopes — `oauth_authorize_url` /
+`oauth_token_url` / `oauth_scopes_default` are refused (they are discovered at
+connect time, and a preset value makes every connection fail);
+`oauth_client_id` is still accepted (the fallback client for a server without
+dynamic client registration); and **no MCP server config** — `server_url` /
 `mcp_server` are refused on the definition, because the server URL is entered
 per-connection when the user connects it (see "MCP connectors" below).
 
@@ -567,20 +575,25 @@ node src/cli/conn.js conn.create_card '{"conversationId":"<conversation-id from 
 On the owner's confirmation (same check as step 3):
 
 ```bash
-node src/cli/conn.js conn.app_import '{"application":{"slug":"plaud-mcp","display_name":"Plaud","description":"Plaud 录音与转写","connector_kind":"mcp","provider_type":"oauth2"}}'
+node src/cli/conn.js conn.app_import '{"application":{"slug":"plaud-mcp","display_name":"Plaud","description":"Plaud 录音与转写","connector_kind":"mcp"}}'
 ```
 
-- `connector_kind: "mcp"`, `provider_type` = the auth model: `oauth2` for an
-  OAuth MCP server (Plaud and most hosted MCP servers), `api_key` for a no-auth
-  or static-token server. Never `provider_type: "mcp"`.
+- `connector_kind: "mcp"`; **omit `provider_type`** (the CLI sends `api_key`).
+  For MCP it is only a placeholder — the platform decides the auth when the user
+  connects (OAuth discovery upgrades `api_key` → `oauth2`, never the reverse, so
+  an `oauth2` you pick for a no-auth / static-token server sticks). An explicit
+  `api_key` / `oauth2` is still accepted. Never `provider_type: "mcp"`.
 - No `actions` (refused), no `server_url` / `mcp_server` on the application
-  (refused), no OAuth endpoints / client id / secret (discovered at connect time).
+  (refused), no `oauth_authorize_url` / `oauth_token_url` / `oauth_scopes_default`
+  (refused — discovered at connect time; a preset value makes every connection
+  fail), no client secret. `oauth_client_id` is accepted, only for a server
+  without dynamic client registration.
 
 **(b) The user connects it on openmax.com.** Creation cannot pre-fill the
 server address, so tell the user exactly what to do and give them the **exact
 URL to paste** (the one on the card), e.g.: 「连接器已创建。请打开 openmax.com 的
-「连接」页面，找到「Plaud」→ 新建连接，在「MCP 服务器地址」里粘贴
-`https://<the MCP server address>`（传输方式保持远程 HTTP），然后按提示完成授权。」
+「应用连接」页面，找到「Plaud」→ 新建连接，传输类型选「远程（Streamable HTTP）」，
+在「服务器 URL」里粘贴 `https://<the MCP server address>`，然后按提示完成授权。」
 That connection carries `mcp_server.server_url` with transport `remote_http`;
 for an OAuth server the page then sends the user to the provider to authorize.
 

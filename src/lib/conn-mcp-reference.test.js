@@ -20,7 +20,17 @@ test('conn-operations no longer maps every auth_type straight to provider_type',
 
 test('conn-operations documents the two-step MCP connector path', () => {
   const mcp = section(connOps, '#### MCP connectors (`auth_type: "mcp"`) — two steps', '### Action-def schema semantics');
-  assert.match(mcp, /"connector_kind":"mcp","provider_type":"oauth2"/);
+  assert.match(mcp, /"connector_kind":"mcp"\}\}'/);
+  assert.doesNotMatch(mcp, /"provider_type":"oauth2"/);
+  assert.doesNotMatch(connOps, /Plaud and most hosted MCP/);
+  assert.match(mcp, /\*\*omit `provider_type`\*\* \(the CLI sends `api_key`\)/);
+  assert.match(mcp, /upgrades `api_key` → `oauth2`, never the reverse/);
+  assert.match(mcp, /no `oauth_authorize_url` \/ `oauth_token_url` \/ `oauth_scopes_default` \(refused/);
+  assert.match(mcp, /`oauth_client_id` is accepted/);
+  assert.match(mcp, /「应用连接」页面/);
+  assert.match(mcp, /传输类型选「远程（Streamable HTTP）」/);
+  assert.match(mcp, /在「服务器 URL」里粘贴/);
+  assert.doesNotMatch(mcp, /「MCP 服务器地址」/);
   assert.match(mcp, /"auth_type":"mcp"[^']*"server_url":"https:/);
   assert.match(mcp, /Never `provider_type: "mcp"`/);
   assert.match(mcp, /No `actions` \(refused\)/);
@@ -34,4 +44,7 @@ test('conn.app_create docs: connector_kind is a separate axis from provider_type
   const create = section(connOps, '### conn.app_create', '### conn.app_list');
   assert.match(create, /`connector_kind` \(optional\): `http` \(default/);
   assert.match(create, /\*\*never\*\* `"mcp"`/);
+  assert.match(create, /`provider_type` is only a \*\*placeholder\*\*/);
+  assert.match(create, /`oauth_authorize_url` \/\s*`oauth_token_url` \/ `oauth_scopes_default` are refused/);
+  assert.match(connOps, /exactly as written — lowercase; anything else, e\.g\. `OAuth2` \/ `basic`, is refused/);
 });

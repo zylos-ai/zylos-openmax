@@ -555,7 +555,10 @@ test('mcp card: body + metadata carry the server URL, zero actions; fallback tex
   assert.match(t, /认证方式：MCP/);
   assert.match(t, new RegExp(`MCP 服务器地址：${MCP_URL.replace(/[.]/g, '\\.')}`));
   assert.match(t, /工具由 MCP 服务器提供/);
-  assert.match(t, /openmax\.com 的「连接」页面/);
+  assert.match(t, /openmax\.com 的「应用连接」页面/);
+  assert.match(t, /传输类型选「远程（Streamable HTTP）」/);
+  assert.match(t, /在「服务器 URL」填入上面的 MCP 服务器地址/);
+  assert.doesNotMatch(t, /「MCP 服务器地址」/);
   assert.match(t, /完成授权/);
   assert.match(t, /确认创建 Plaud/);
   assert.doesNotMatch(t, /动作（/);

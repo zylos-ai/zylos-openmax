@@ -122,6 +122,8 @@ const APP_CREATE_FIELDS = [
 // HTTP connector) or "mcp" (a Model Context Protocol server connector).
 // provider_type always carries the AUTH model and the platform only stores
 // oauth2 | api_key (DB CHECK) — "mcp" is never a provider_type (sending it 500s).
+// For an mcp connector it is only a placeholder (default api_key): the auth is
+// decided per connection when the user connects it.
 // An mcp connector is a DEFINITION only: no MCP server config and no action
 // defs at create — the server URL is entered per-connection when the user
 // connects it (cws-core connectCreateConnectionMcpServerInput), where
@@ -131,6 +133,13 @@ const APP_PROVIDER_TYPES = Object.freeze(['oauth2', 'api_key']);
 // Per-connection MCP server fields an agent might be tempted to put on the
 // connector definition. cws-core's create schema has none of them.
 const MCP_CONNECT_TIME_FIELDS = ['mcp_server', 'server_url', 'mcp_server_url'];
+// OAuth endpoint fields an mcp definition must NOT carry: connect-time discovery
+// writes the discovered authorize/token URLs + scopes onto the application row,
+// and once the row has endpoints, a connection whose discovery resolves to
+// different ones is refused (cws-connect ErrMCPEndpointMismatch) — so a guessed
+// value would break every connection. oauth_client_id stays allowed: it is the
+// fallback client for an MCP server without dynamic client registration.
+const MCP_DISCOVERED_OAUTH_FIELDS = ['oauth_authorize_url', 'oauth_token_url', 'oauth_scopes_default'];
 // Application update body — pointer/optional fields (§1.2). `slug` and
 // `provider_type` are immutable server-side, so they are NOT accepted here.
 // `credential_source` / `visibility` / `credential_mode` are likewise NOT
@@ -223,25 +232,41 @@ function requireActionId(p) {
 // allowlist and is forwarded as-is — but the CLI no longer force-requires it.
 export function planAppCreate(p) {
   if (!p.display_name) throw bad('display_name is required');
-  if (p.provider_type === 'mcp') {
-    throw bad('provider_type "mcp" is not valid — MCP is a connector kind, not an auth model: send connector_kind:"mcp" with provider_type oauth2 | api_key (OAuth MCP servers use oauth2)');
-  }
-  if (!p.provider_type) throw bad('provider_type is required (oauth2 | api_key)');
   const kind = p.connector_kind;
   if (kind !== undefined && !CONNECTOR_KINDS.includes(kind)) {
     throw bad(`connector_kind must be one of ${CONNECTOR_KINDS.join(' | ')}`);
   }
+  // provider_type is checked for EVERY connector_kind: the platform stores only
+  // oauth2 | api_key (exact, lowercase — DB CHECK) and does not validate it
+  // before the insert, so any other value ("OAuth2", "basic", …) 500s.
+  const rawProviderType = p.provider_type;
+  if (typeof rawProviderType === 'string' && rawProviderType.trim().toLowerCase() === 'mcp') {
+    throw bad('provider_type "mcp" is not valid — MCP is a connector kind, not an auth model: send connector_kind:"mcp" (provider_type may then be omitted; it defaults to api_key)');
+  }
+  // For an mcp connector provider_type is only a placeholder: the platform
+  // decides the auth when the user connects (OAuth discovery upgrades api_key →
+  // oauth2, never the reverse). Default it to api_key, as the openmax.com form does.
+  const providerType = (kind === 'mcp' && (rawProviderType === undefined || rawProviderType === null || rawProviderType === ''))
+    ? 'api_key'
+    : rawProviderType;
+  if (!providerType) throw bad('provider_type is required (oauth2 | api_key)');
+  if (!APP_PROVIDER_TYPES.includes(providerType)) {
+    throw bad(`provider_type must be one of ${APP_PROVIDER_TYPES.join(' | ')} (exact, lowercase) — got ${JSON.stringify(providerType)}`);
+  }
   if (kind === 'mcp') {
-    if (!APP_PROVIDER_TYPES.includes(p.provider_type)) {
-      throw bad(`provider_type for connector_kind "mcp" must be one of ${APP_PROVIDER_TYPES.join(' | ')} (the auth model: oauth2 for an OAuth MCP server, api_key for a no-auth / static-token one)`);
-    }
     for (const f of MCP_CONNECT_TIME_FIELDS) {
       if (p[f] !== undefined) {
         throw bad(`${f} is not accepted on an mcp connector definition — the MCP server URL is entered per-connection when the user connects it on openmax.com (connections page)`);
       }
     }
+    for (const f of MCP_DISCOVERED_OAUTH_FIELDS) {
+      if (p[f] !== undefined) {
+        throw bad(`${f} is not accepted on an mcp connector definition — the OAuth endpoints and scopes are discovered from the MCP server when the user connects it (a preset value would make every connection fail); oauth_client_id is still allowed for a server without dynamic client registration`);
+      }
+    }
   }
   const body = dropBlankClientSecret(pick(p, APP_CREATE_FIELDS));
+  body.provider_type = providerType;
   return { method: 'POST', path: apiPath('/connect/applications'), body };
 }
 
@@ -1155,7 +1180,7 @@ export function buildCreateCardFallbackText({ connector, actions }) {
     lines.push(`MCP 服务器地址：${connector.server_url}`);
     lines.push('工具由 MCP 服务器提供，无需逐个配置动作。');
     lines.push(`回复「确认创建 ${connector.name}」开始创建，或「我要改 ${connector.name}」修改。`);
-    lines.push(`创建后下一步：在 openmax.com 的「连接」页面为「${connector.name}」新建连接，填入上面的 MCP 服务器地址，按提示完成授权。`);
+    lines.push(`创建后下一步：在 openmax.com 的「应用连接」页面为「${connector.name}」新建连接，传输类型选「远程（Streamable HTTP）」，在「服务器 URL」填入上面的 MCP 服务器地址，按提示完成授权。`);
     return lines.join('\n');
   }
   if (connector.base_url) lines.push(`服务地址：${connector.base_url}`);
@@ -1862,7 +1887,7 @@ Applications
   conn.callback       {}                                        # platform OAuth callback URL to register in the provider's OAuth app
 
 Applications (custom connector management)
-  conn.app_create     {display_name, provider_type, connector_kind?, slug?, ...} # create a custom connector application (slug optional — server-generated when omitted; connector_kind http|mcp, mcp keeps provider_type oauth2|api_key)
+  conn.app_create     {display_name, provider_type, connector_kind?, slug?, ...} # create a custom connector application (slug optional — server-generated when omitted; provider_type oauth2|api_key; connector_kind http|mcp — mcp: provider_type optional, defaults to api_key)
   conn.app_update     {applicationId, ...optional}              # update your own custom connector (slug/provider_type immutable; OAuth id/secret/scopes updatable)
   conn.actiondef_list   {applicationId}                         # list an app's HTTP action definitions
   conn.actiondef_create {applicationId, name, method, url_template, description, headers?, encoding?, input_schema?}  # description REQUIRED
