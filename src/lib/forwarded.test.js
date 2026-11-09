@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import {
   forwardedFromOf, chatHistoryOf, forwardedLabelOf,
   MAX_RECORDS, MAX_RECORD_TEXT_CODE_POINTS, MAX_FORWARDED_BLOCK_BYTES,
-  MAX_ATTR_CODE_POINTS, chatHistoryBudget,
+  MAX_ATTR_CODE_POINTS, chatHistoryBudget, CHAT_HISTORY_TOO_LONG,
 } from './forwarded.js';
 import { formatInboundForC4 } from './message.js';
 
@@ -427,6 +427,90 @@ test('when the rest leaves no room, every record is left out and the element is 
   assert.ok(block.includes('rendered-records="0"'), block.slice(0, 300));
   assert.ok(!block.includes('<record '));
   assert.ok(bytes(block) < 2048, `${bytes(block)} B`);
+});
+
+// Envelope whose rest (everything but the block) grows one byte per step of
+// `pad`: an ASCII context line of `pad` characters next to long CJK lines.
+function sweepEnvelope(pad, history, fallback) {
+  const recent = [
+    ...Array.from({ length: DEFAULT_CONTEXT - 1 }, () => ({ senderName: 'n', content: '字'.repeat(7000) })),
+    { senderName: 'p', content: 'a'.repeat(pad) },
+  ];
+  return formatInboundForC4({ type: 'group', id: 'cv-1', name: 'g' }, sender, { content: fallback ?? 'x', messageId: 'm-2' }, recent, {
+    chatHistory: history,
+  });
+}
+
+const blockOrNotice = (out) => blockOf(out);
+
+test('near-limit sweep, every rest size where the rest + run marker + smallest notice fits: '
+  + 'the final argv element is <= 131071 bytes and the block is the full element or the fixed notice', (t) => {
+  const history = chatHistoryOf(card(maxHistory()));
+  const restOf = (pad) => { const out = sweepEnvelope(pad, history); return bytes(out) - bytes(blockOrNotice(out)); };
+  const base = restOf(0);
+  // Range of the sweep: from where the budget still holds a few records down
+  // to the largest rest the smallest notice can still be delivered with.
+  // Beyond that the rest alone is (nearly) over the limit and fails on main too.
+  const lastRest = MAX_ARG_STRLEN - 1 - bytes(RUN_MARKER) - bytes(CHAT_HISTORY_TOO_LONG);
+  const firstRest = MAX_ARG_STRLEN - 1 - 1024 - 5000;
+  assert.ok(base < firstRest, `base rest ${base}`);
+  let full = 0; let notice = 0; let lastFull = -1; let firstNotice = -1;
+  for (let rest = firstRest; rest <= lastRest; rest += 1) {
+    const pad = rest - base;
+    const out = sweepEnvelope(pad, history);
+    const block = blockOrNotice(out);
+    assert.equal(bytes(out) - bytes(block), rest, `pad ${pad}`);
+    const arg = bytes(RUN_MARKER + out);
+    assert.ok(arg <= MAX_ARG_STRLEN - 1, `rest ${rest}: argv ${arg} B`);
+    if (block === CHAT_HISTORY_TOO_LONG) {
+      notice += 1;
+      if (firstNotice < 0) firstNotice = rest;
+    } else {
+      assert.ok(block.startsWith('<forwarded-chat-history forwarded-by='), block.slice(0, 80));
+      assert.equal(notice, 0, `full element after the notice at rest ${rest}`);
+      assert.ok(bytes(block) <= chatHistoryBudget(rest), `rest ${rest}: block ${bytes(block)} > ${chatHistoryBudget(rest)}`);
+      full += 1;
+      lastFull = rest;
+    }
+  }
+  assert.ok(full > 0 && notice > 0, `full ${full} notice ${notice}`);
+  t.diagnostic(`rest ${firstRest}..${lastRest}: full element ${full} sizes (last ${lastFull}), notice ${notice} sizes (first ${firstNotice})`);
+  // Real spawns at the band edges: last full element, first notice, last rest in range.
+  for (const rest of [lastFull, firstNotice, lastRest]) {
+    const arg = RUN_MARKER + sweepEnvelope(rest - base, history);
+    const r = spawnWith(arg);
+    assert.equal(r.error, undefined, `rest ${rest}: ${r.error}`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(Number(r.stdout), bytes(arg));
+  }
+});
+
+test('fallback tier under a shrunk budget: only fallback_text renders, cut to the room left, and the argv fits', () => {
+  // No body or preview: the 60,000-CJK fallback_text (180 KB) is all there is.
+  const history = chatHistoryOf(card(undefined, { fallback_text: `${'长'.repeat(60000)}END-MARK` }));
+  assert.equal(history.detail, 'fallback');
+  const base = (() => { const o = sweepEnvelope(0, history); return bytes(o) - bytes(blockOf(o)); })();
+  // Rest sized so the budget is 20,000 bytes, well under 64 KiB.
+  const out = sweepEnvelope(MAX_ARG_STRLEN - 1 - 1024 - 20000 - base, history);
+  const block = blockOf(out);
+  const rest = bytes(out) - bytes(block);
+  assert.equal(chatHistoryBudget(rest), 20000);
+  assert.ok(block.startsWith('<forwarded-chat-history forwarded-by="张三" detail="fallback" text-truncated="true">\n长'), block.slice(0, 120));
+  assert.ok(bytes(block) <= chatHistoryBudget(rest), `${bytes(block)} > ${chatHistoryBudget(rest)}`);
+  assert.ok(!block.includes('END-MARK'));
+  const arg = RUN_MARKER + out;
+  assert.ok(bytes(arg) < MAX_ARG_STRLEN);
+  const r = spawnWith(arg);
+  assert.equal(r.error, undefined, String(r.error));
+  assert.equal(r.status, 0, r.stderr);
+});
+
+test('fallback tier with no room at all → the fixed notice', () => {
+  const history = chatHistoryOf(card(undefined, { fallback_text: '长'.repeat(1000) }));
+  const base = (() => { const o = sweepEnvelope(0, history); return bytes(o) - bytes(blockOf(o)); })();
+  const out = sweepEnvelope(MAX_ARG_STRLEN - 1 - bytes(RUN_MARKER) - bytes(CHAT_HISTORY_TOO_LONG) - base, history);
+  assert.equal(blockOf(out), CHAT_HISTORY_TOO_LONG);
+  assert.equal(bytes(RUN_MARKER + out), MAX_ARG_STRLEN - 1);
 });
 
 test('opening-tag values are capped: a huge title or name cannot grow the block past the budget', () => {

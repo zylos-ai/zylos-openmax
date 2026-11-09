@@ -28,9 +28,10 @@ export const MAX_RECORD_TEXT_CODE_POINTS = 1000;
 // caps at MAX_ARG_STRLEN (131072 bytes, terminating NUL included); over it the
 // spawn fails with E2BIG and the message is lost. A full chat history is up to
 // ~311 KB rendered, so the <forwarded-chat-history> element gets at most 64 KiB
-// and never more than what the rest of the envelope leaves free (see
+// and no more than the rest of the envelope leaves free (see
 // chatHistoryBudget). Records past the budget are not rendered and the element
-// says how many were left out and where to read them.
+// says how many were left out and where to read them; when not even its tag
+// and that note fit, the fixed CHAT_HISTORY_TOO_LONG element replaces it.
 export const C4_ARG_MAX_BYTES = 131072;
 export const MAX_FORWARDED_BLOCK_BYTES = 64 * 1024;
 // Kept free for what the bridge adds after formatting: the 20-byte [OM-RUN …]
@@ -227,6 +228,11 @@ function escapedPrefix(s, budget) {
 
 const CLOSE = '</forwarded-chat-history>';
 
+// No attributes and nothing from the message, so its size is fixed.
+export const CHAT_HISTORY_TOO_LONG = '<forwarded-chat-history>\n'
+  + 'Too long to include here. Read it with comm.get_message, using the conversation-id and source-message-id of message-context.\n'
+  + CLOSE;
+
 /**
  * Bytes the <forwarded-chat-history> element may take when everything else in
  * the envelope already takes `restBytes`.
@@ -239,8 +245,7 @@ export function chatHistoryBudget(restBytes) {
  * Merged forward: one <record> per message. `ff` is set when the card itself
  * was forwarded one-by-one (its original sender is the one who merged it).
  * The result stays within `budget` bytes whenever the budget can hold the
- * opening tag and the omission marker; below that, every record is left out
- * and the element is just those (its attribute values are capped).
+ * opening tag and the omission note; below that it is CHAT_HISTORY_TOO_LONG.
  */
 export function formatForwardedChatHistory(forwarder, history, ff, budget = MAX_FORWARDED_BLOCK_BYTES) {
   if (!history) return '';
@@ -251,7 +256,7 @@ export function formatForwardedChatHistory(forwarder, history, ff, budget = MAX_
     const room = limit - byteLength(open) - byteLength(CLOSE) - OMITTED_RESERVE_BYTES;
     const { text, truncated } = escapedPrefix(history.text, Math.max(0, room));
     const mark = truncated ? ' text-truncated="true"' : '';
-    return `${open}${mark}>\n${text}\n${CLOSE}`;
+    return fitOrNotice(`${open}${mark}>\n${text}\n${CLOSE}`, limit);
   }
   const a = attrs([
     ...head,
@@ -277,7 +282,11 @@ export function formatForwardedChatHistory(forwarder, history, ff, budget = MAX_
   }
   const rendered = omitted > 0 ? ` rendered-records="${history.records.length - omitted}"` : '';
   const body = lines.join('\n');
-  return `<forwarded-chat-history${a}${rendered}>\n${body}${body ? '\n' : ''}${CLOSE}`;
+  return fitOrNotice(`<forwarded-chat-history${a}${rendered}>\n${body}${body ? '\n' : ''}${CLOSE}`, limit);
+}
+
+function fitOrNotice(element, limit) {
+  return byteLength(element) <= limit ? element : CHAT_HISTORY_TOO_LONG;
 }
 
 /**
