@@ -171,7 +171,13 @@ function formatContextLine(m) {
     || 'unknown',
   );
   const text = escapeXml(m.content ?? m.text ?? m.content_text ?? '');
-  return `[${name}]: ${text}`;
+  return `[${name}]${forwardedSuffix(m.forwardedLabel)}: ${text}`;
+}
+
+// A forwarded message in a context line is not its sender's own words; the
+// bridge passes forwardedLabelOf(msg) and it is shown after the name.
+function forwardedSuffix(label) {
+  return label ? ` (${escapeXml(String(label).replace(/[\r\n\u2028\u2029]+/g, ' '))})` : '';
 }
 
 // Shown for an inbound attachment that cannot be fetched (no artifact id, or
@@ -364,7 +370,7 @@ Before handling the current message, invoke the openmax skill and follow it. For
   if (quotedContent && !(threadContext && threadContext.length > 0)) {
     const qsender = escapeXml(quotedContent.sender || quotedContent.senderName || 'unknown');
     const qtext   = escapeXml(quotedContent.text   || quotedContent.content    || '');
-    parts.push(`<replying-to>\n[${qsender}]: ${qtext}\n</replying-to>\n\n`);
+    parts.push(`<replying-to>\n[${qsender}]${forwardedSuffix(quotedContent.forwardedLabel)}: ${qtext}\n</replying-to>\n\n`);
     const excerpt = formatQuotedExcerpt(
       quotedContent.sender || quotedContent.senderName,
       quotedExcerpt,

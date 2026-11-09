@@ -1,5 +1,5 @@
 /**
- * Forwarded messages (wsb#790, inbound rendering v1).
+ * Forwarded messages (inbound rendering v1).
  *
  * cws-comm writes two shapes when someone forwards messages:
  *
@@ -24,6 +24,16 @@
 
 export const MAX_RECORDS = 100;
 export const MAX_RECORD_TEXT_CODE_POINTS = 1000;
+// The whole C4 envelope reaches c4-receive as ONE argv element, which Linux
+// caps at MAX_ARG_STRLEN (131072 bytes); over it the spawn fails with E2BIG and
+// the message is lost. A full chat history is up to ~311 KB rendered, so the
+// <forwarded-chat-history> element is held to half of that cap and the rest is
+// left for the envelope around it. Records past the budget are not rendered
+// and the element says how many were left out and where to read them.
+export const MAX_FORWARDED_BLOCK_BYTES = 64 * 1024;
+// Room kept for the opening tag's `rendered-records` attribute and the
+// <records-omitted> element, which are only known after the records are laid out.
+const OMITTED_RESERVE_BYTES = 512;
 
 const CHAT_HISTORY_SCHEMA = 'cws.chat_history.v1';
 const CHAT_HISTORY_PREVIEW_SCHEMA = 'cws.chat_history.preview.v1';
@@ -184,16 +194,38 @@ export function formatForwardedMessage(forwarder, ff, content) {
   return `<forwarded-message${a}>\n${escapeText(content ?? '')}\n</forwarded-message>`;
 }
 
+const byteLength = (s) => Buffer.byteLength(s, 'utf8');
+
+// Longest prefix of `s` whose escaped form fits in `budget` bytes.
+function escapedPrefix(s, budget) {
+  const out = [];
+  let used = 0;
+  for (const ch of s) {
+    const e = escapeText(ch);
+    const n = byteLength(e);
+    if (used + n > budget) return { text: out.join(''), truncated: true };
+    out.push(e);
+    used += n;
+  }
+  return { text: out.join(''), truncated: false };
+}
+
+const CLOSE = '</forwarded-chat-history>';
+
 /**
  * Merged forward: one <record> per message. `ff` is set when the card itself
  * was forwarded one-by-one (its original sender is the one who merged it).
+ * The result never exceeds MAX_FORWARDED_BLOCK_BYTES.
  */
 export function formatForwardedChatHistory(forwarder, history, ff) {
   if (!history) return '';
   const head = [['forwarded-by', forwarder || 'unknown'], ...originalSenderAttrs(ff)];
   if (history.detail === 'fallback') {
-    return `<forwarded-chat-history${attrs([...head, ['detail', 'fallback']])}>\n`
-      + `${escapeText(history.text)}\n</forwarded-chat-history>`;
+    const open = `<forwarded-chat-history${attrs([...head, ['detail', 'fallback']])}`;
+    const room = MAX_FORWARDED_BLOCK_BYTES - byteLength(open) - byteLength(CLOSE) - OMITTED_RESERVE_BYTES;
+    const { text, truncated } = escapedPrefix(history.text, Math.max(0, room));
+    const mark = truncated ? ' text-truncated="true"' : '';
+    return `${open}${mark}>\n${text}\n${CLOSE}`;
   }
   const a = attrs([
     ...head,
@@ -202,6 +234,34 @@ export function formatForwardedChatHistory(forwarder, history, ff) {
     ['source-kind', history.sourceKind],
     ['detail', history.detail === 'preview' ? 'preview' : undefined],
   ]);
-  const body = history.records.map(formatRecord).join('\n');
-  return `<forwarded-chat-history${a}>\n${body}${body ? '\n' : ''}</forwarded-chat-history>`;
+  let room = MAX_FORWARDED_BLOCK_BYTES - byteLength(`<forwarded-chat-history${a}>\n${CLOSE}`) - OMITTED_RESERVE_BYTES;
+  const lines = [];
+  for (const r of history.records) {
+    const line = formatRecord(r);
+    const n = byteLength(line) + 1;
+    if (n > room) break;
+    lines.push(line);
+    room -= n;
+  }
+  const omitted = history.records.length - lines.length;
+  if (omitted > 0) {
+    lines.push(`<records-omitted count="${omitted}">Left out to keep this message within the delivery size limit. `
+      + 'Read every record with comm.get_message, using the conversation-id and source-message-id of message-context.'
+      + '</records-omitted>');
+  }
+  const rendered = omitted > 0 ? ` rendered-records="${history.records.length - omitted}"` : '';
+  const body = lines.join('\n');
+  return `<forwarded-chat-history${a}${rendered}>\n${body}${body ? '\n' : ''}${CLOSE}`;
+}
+
+/**
+ * Short marker for a forwarded message shown as a context line (group history,
+ * the message being replied to), so it is not read as the sender's own words:
+ * "forwarded from <original author>" or "forwarded chat history".
+ */
+export function forwardedLabelOf(msg) {
+  const ff = forwardedFromOf(msg);
+  if (ff) return `forwarded from ${ff.senderName || ff.senderId}`;
+  const type = isObject(msg) ? String(msg.type || msg.message?.type || '').toLowerCase() : '';
+  return type === 'chat_history' ? 'forwarded chat history' : undefined;
 }
