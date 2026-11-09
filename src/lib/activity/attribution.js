@@ -666,13 +666,17 @@ export function createAttribution({
       if (item && !item.answered && !answered.includes(item)) answered.push(item);
       return !!item;
     };
-    // OPENM-1337: an unmarked openmax message of this turn, by its server id.
-    // The reply named it, so once the send succeeds its arrival record is
-    // acknowledged (the group guard is lifted for it — see settleSend).
+    // OPENM-1337: an unmarked openmax message of this turn, by its server id,
+    // in the conversation the reply goes to (an id copied into another
+    // conversation's endpoint answers nothing). The reply named it, so once
+    // the send succeeds its arrival record is acknowledged (the group guard is
+    // lifted for it — see settleSend).
     const ackedByMsg = [];
-    const answerItemByMsg = (msgId) => {
+    const sameConv = (a, b) => a != null && b != null && String(a).toLowerCase() === String(b).toLowerCase();
+    const answerItemByMsg = (msgId, destConv) => {
       const item = turn.queue.find((it) => it.foreign && !it.answered && !answered.includes(it)
-        && it.reply?.channel === 'openmax' && it.msgId === msgId);
+        && it.reply?.channel === 'openmax' && it.msgId === msgId
+        && sameConv(replyConvOfEndpoint(it.reply.endpoint), destConv));
       if (item) {
         answered.push(item);
         ackedByMsg.push(item);
@@ -703,7 +707,7 @@ export function createAttribution({
         // by its id, or one whose id could not be read — and never another
         // run: send.js attaches no run's card either.
         else if (turn.owners.some(own)) { /* already replied */ }
-        else if (answerItemByMsg(src)) { /* answered by id */ }
+        else if (answerItemByMsg(src, reply.endpoint ? replyConvOfEndpoint(reply.endpoint) : reply.conversationId)) { /* answered by id */ }
         else if (reply.endpoint) answerItem('openmax', reply.endpoint, { idUnknownOnly: true });
         else if (!turn.owners.some(match)) external = unknownExternal = true;
         continue;

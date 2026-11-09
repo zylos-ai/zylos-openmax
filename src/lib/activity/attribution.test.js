@@ -2001,3 +2001,37 @@ test('1337: a failed `|msg:` send to an unmarked message acknowledges nothing an
   assert.deepEqual(ambiguous, []);
   assert.equal(item.answered, false);
 });
+
+test('1337 R2 P3-A: a msg id copied into another conversation\'s endpoint answers nothing and lifts no guard', () => {
+  const { attr, a, ambiguous } = guardHarness({ skipped: () => null });
+  const item = attr.turn.queue.find((it) => it.foreign);
+  a.source_message_id = '7300000000000000999';
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_B}|msg:1`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, false);
+  assert.deepEqual(ambiguous, []);
+  attr.handle(toolStart('s2', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_B}","content":"x","sourceMessageId":"1"}'` }));
+  attr.handle(toolEnd('s2', 2));
+  assert.equal(item.answered, false);
+  assert.deepEqual(ambiguous, []);
+  // Contrast: the same id in its own conversation's endpoint answers it.
+  attr.handle(toolStart('s3', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  attr.handle(toolEnd('s3', 3));
+  assert.equal(item.answered, true);
+  assert.deepEqual(ambiguous, [CONV_A]);
+});
+
+test('1337 R2 G5: a reply without msg that answers an unmarked message does not acknowledge it (no msg path)', () => {
+  const ambiguous = [];
+  const { attr, mkRun } = harness({ replySkipped: () => null, onAmbiguousReply: (conv, o) => ambiguous.push([conv, o?.msgId ?? null]) });
+  const b = mkRun('r_0000000b', CONV_B);
+  attr.handle(minput('user', omBody(b)));
+  attr.handle(minput('queued_command', omBody(null, { conv: CONV_A })));
+  const item = attr.turn.queue.find((it) => it.foreign);
+  assert.equal(item.msgId, '1');
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, true, 'answered by endpoint, as before');
+  assert.deepEqual(ambiguous, [], 'no acknowledgement without msg');
+  assert.equal(b.state, 'active');
+});

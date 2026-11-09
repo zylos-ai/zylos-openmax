@@ -1081,3 +1081,27 @@ test('1337 end to end: a reply naming the unregistered smart message (`|msg:`) l
   assert.ok(Array.isArray(p.firstAgentRun.steps));
   activity.stop();
 });
+
+test('1337 R2 G3: with two smart messages outstanding, a `|msg:` reply lifts only its own record — the guard stays until both are answered', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await guardedRun(h);                      // smart message 9000000000001
+  clock.advance(100);
+  activity.noteUnregisteredInput(CONV, '9000000000002');
+  append({ type: 'attachment', attachment: { type: 'queued_command', commandMode: 'prompt', prompt: smartMsg('9000000000002') } });
+  activity.pollNow();
+  const store = createRunStore({ dir: runsDir });
+  const send = (id, n) => {
+    append(toolUse(`toolu_m${n}`, 'Bash', { command: `node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${CONV}|msg:${id}" <<'EOF'\nx\nEOF` }));
+    append(toolOk(`toolu_m${n}`));
+    clock.advance(700);
+    activity.pollNow();
+  };
+  send('9000000000002', 1);
+  assert.ok(store.readActive().unregistered?.[CONV], 'the other smart message still holds the guard');
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store }), null, 'a no-msg reply is still skipped');
+  send('9000000000001', 2);
+  assert.equal(store.readActive().unregistered?.[CONV], undefined, 'both answered: guard lifted');
+  assert.equal(planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h2', newKey: () => 'c_2', now: clock.now(), store })?.runId, reg.runId);
+  activity.stop();
+});
