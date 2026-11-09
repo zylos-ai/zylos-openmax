@@ -1058,3 +1058,26 @@ test('1337 end to end: A and B merged, the agent reads B first — A\'s reply ca
   assert.deepEqual(warns, []);
   activity.stop();
 });
+
+test('1337 end to end: a reply naming the unregistered smart message (`|msg:`) lifts the guard — the next reply without msg claims the run', async () => {
+  const h = setup();
+  const { activity, clock, append, runsDir } = h;
+  const reg = await guardedRun(h);
+  const store = createRunStore({ dir: runsDir });
+  assert.ok(store.readActive().unregistered[CONV], 'guard set by the smart message');
+  // The smart message is answered via its own reply via: send.js attaches nothing.
+  const ep = `${CONV}|msg:9000000000001`;
+  assert.equal(planReplyMetadata({ convId: CONV, sourceMessageId: '9000000000001', kind: 'text', bodyHash: 'h0', newKey: () => 'c_0', now: clock.now(), store }), null);
+  assert.equal(store.readSkip(reg.runId), null);
+  append(toolUse('toolu_s0', 'Bash', { command: `node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${ep}" <<'EOF'\nx\nEOF` }));
+  append(toolOk('toolu_s0'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(store.readActive().unregistered?.[CONV], undefined, 'guard lifted');
+  assert.equal(store.readRun(reg.runId).state === 'closed', false, 'the run is not answered by it');
+  // The @ message is answered by an old-style reply (no msg): not blocked any more.
+  const p = planReplyMetadata({ convId: CONV, kind: 'text', bodyHash: 'h1', newKey: () => 'c_1', now: clock.now(), store });
+  assert.equal(p?.runId, reg.runId);
+  assert.ok(Array.isArray(p.firstAgentRun.steps));
+  activity.stop();
+});

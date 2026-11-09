@@ -20,8 +20,10 @@
  *          neither a reply nor ③. A reply that names its source message
  *          (endpoint `|msg:<id>`, or a literal comm CLI "sourceMessageId",
  *          OPENM-1337) replies only the owner with that source_message_id —
- *          or answers the merged-in unmarked openmax message with that id —
- *          and never another run (send.js selects the same way).
+ *          or answers the merged-in unmarked openmax message with that id
+ *          (once the send succeeds, its arrival record is acknowledged, so the
+ *          group guard is lifted for it) — and never another run (send.js
+ *          selects the same way).
  *       ④ not foreign and every owner in one conversation → the earliest
  *          unreplied owner
  *   - turn end: replied owners → done; the others get 120 s to reply, then
@@ -98,12 +100,23 @@ import { isVisibleTool, thinkingBody } from './present.js';
 import { startDetail, endDetail } from './tool-detail.js';
 import { normalizeDetail } from './detail.js';
 import { resolveMarkedRun, normEndpoint, parseMarker, sourceMessageIdFromSpillHead, endpointSourceMessageId } from './marker.js';
+import { parseEndpoint } from '../message.js';
 import {
   NO_REPLY_GRACE_MS, ACTIVE_IDLE_TIMEOUT_MS, QUEUED_NO_START_TIMEOUT_MS, REPLY_REF_WINDOW_MS,
   MAX_CONTINUATIONS_PER_TURN,
 } from './constants.js';
 
 const MAX_RUN_EVENTS = 2000;
+
+/** The conversation a reply to `endpoint` goes to (thread wins), as index.js keys the guard. */
+function replyConvOfEndpoint(endpoint) {
+  try {
+    const ep = parseEndpoint(endpoint);
+    return ep.threadConversationId || ep.conversationId;
+  } catch {
+    return null;
+  }
+}
 
 /** A merged-in message that is not a valid openmax run of this host. */
 function foreignItem(seg) {
@@ -524,6 +537,16 @@ export function createAttribution({
       }
     }
     if (!ok) for (const it of entry.items) reopenItem(it);
+    else {
+      // OPENM-1337: a reply that named an unmarked smart-mode message by its id
+      // answered it — acknowledge its arrival record, by identity, as a
+      // guard-deferred reply does (OPENM-1089 ②).
+      for (const it of entry.acks || []) {
+        if (!it.answered) continue;
+        const conv = replyConvOfEndpoint(it.reply?.endpoint);
+        if (conv) try { onAmbiguousReply(conv, { msgId: it.msgId }); } catch {}
+      }
+    }
   }
 
   /** The skip record send.js left for THIS send of `run`, or null. */
@@ -644,10 +667,16 @@ export function createAttribution({
       return !!item;
     };
     // OPENM-1337: an unmarked openmax message of this turn, by its server id.
+    // The reply named it, so once the send succeeds its arrival record is
+    // acknowledged (the group guard is lifted for it — see settleSend).
+    const ackedByMsg = [];
     const answerItemByMsg = (msgId) => {
       const item = turn.queue.find((it) => it.foreign && !it.answered && !answered.includes(it)
         && it.reply?.channel === 'openmax' && it.msgId === msgId);
-      if (item) answered.push(item);
+      if (item) {
+        answered.push(item);
+        ackedByMsg.push(item);
+      }
       return !!item;
     };
     const replied = [];
@@ -727,7 +756,10 @@ export function createAttribution({
         if (it) skipItems[r.run_id] = it;
       }
       sendCalls.set(input.callId, {
-        send: { runIds: replied.map((r) => r.run_id), items: [...marked], skipItems, at: t },
+        send: {
+          runIds: replied.map((r) => r.run_id), items: [...marked], skipItems, at: t,
+          acks: ackedByMsg.filter((it) => marked.includes(it)),
+        },
       });
     }
 

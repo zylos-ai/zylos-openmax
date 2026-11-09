@@ -531,3 +531,21 @@ test('1337: a card and a comm.send body naming the source attach that message\'s
   assert.equal(n.store.formCardExists('r_0000000a'), true);
   assert.equal(n.store.formCardExists('r_0000000b'), false);
 });
+
+test('1337 rule 1: two unclaimed runs of the same message, none focused → the newest (the continuation), not the oldest', () => {
+  // The parent's earlier reply was refused (claim released), so parent and
+  // continuation are both unclaimed; B, another message, holds the focus.
+  const s = setup({
+    runs: [
+      { run_id: 'r_0000000a', source_message_id: SRC_A, state: 'closed', closed_on_reply: true, ended_at: T0 + 2500 },
+      { run_id: 'r_0000000b', source_message_id: SRC_B, focus: true },
+      { run_id: 'r_0000000c', source_message_id: SRC_A, continues: 'r_0000000a', segment: 2 },
+    ],
+  });
+  const sel = selectRun({ store: s.store, active: s.store.readActive(), convId: CONV, sourceMessageId: SRC_A, now: T0 + 6000 });
+  assert.equal(sel.run.run_id, 'r_0000000c');
+  const p = planSrc(s, SRC_A, 'final', T0 + 6000);
+  assert.equal(p.runId, 'r_0000000c');
+  assert.ok(Array.isArray(p.firstAgentRun.steps));
+  assert.equal(s.store.claimExists('r_0000000a'), false);
+});

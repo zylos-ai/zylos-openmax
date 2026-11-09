@@ -266,3 +266,37 @@ test('1337: [CARD] via `|msg:A` carries A\'s run while B is focused', async () =
   assert.equal(post.body.agent_run.run_id, 'r_000013a0');
   assert.equal(fs.existsSync(path.join(RUNS_DIR, 'r_000013b0.reply')), false);
 });
+
+test('1337: [MEDIA:file] via `|msg:A` carries A\'s run while B is focused', async () => {
+  const conv = 'conv-1337-media';
+  writeMergedRuns(conv);
+  const file = path.join(tmpHome, 'report-1337.txt');
+  fs.writeFileSync(file, 'weekly numbers');
+  const posts = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (d) => { raw += d; });
+    req.on('end', () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.method === 'POST') posts.push({ url: req.url, body });
+      let out = { id: `m${posts.length}` };
+      if (req.url.endsWith('/uploads/prepare')) out = { upload_token: 'tok', instant_upload: true };
+      else if (req.url.endsWith('/uploads/finalize')) out = { media_id: 'med-1', artifact_id: 'art-1' };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(out));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { code, stderr } = await runSend(server.address().port, `${conv}|msg:${SRC_A}`, `[MEDIA:file]${file}`);
+    assert.equal(code, 0, stderr);
+  } finally {
+    server.close();
+  }
+  const send = posts.find((p) => p.url === `/api/v1/conversations/${conv}/messages`);
+  assert.ok(send, 'the media message was posted');
+  assert.equal(send.body.type, 'FILE');
+  assert.equal(send.body.agent_run.run_id, 'r_000013a0');
+  assert.equal(send.body.agent_run.source_message_id, SRC_A);
+  assert.equal(fs.existsSync(path.join(RUNS_DIR, 'r_000013b0.reply')), false, 'B is left for its own answer');
+});

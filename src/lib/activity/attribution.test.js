@@ -1968,13 +1968,15 @@ test('1337: a later reply to an already answered message marks no other run', ()
   assert.equal(b.state, 'active', 'B is left for its own answer');
 });
 
-test('1337: `|msg:` naming an unmarked smart-mode message answers that message, never the run', () => {
-  const { attr, a, finishes } = guardHarness({ skipped: () => null });
+test('1337: `|msg:` naming an unmarked smart-mode message answers that message, never the run; the guard is acknowledged for it', () => {
+  const { attr, a, finishes, ambiguous } = guardHarness({ skipped: () => null });
   const item = attr.turn.queue.find((it) => it.foreign);
   assert.equal(item.msgId, '1');
   a.source_message_id = '7300000000000000999';
   attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  assert.deepEqual(ambiguous, [], 'not before the send is known to have gone out');
   attr.handle(toolEnd('s1', 1));
+  assert.deepEqual(ambiguous, [CONV_A], 'its arrival record is acknowledged (guard lifted for it)');
   assert.equal(item.answered, true);
   assert.equal(a.state, 'active');
   assert.deepEqual(finishes, []);
@@ -1989,4 +1991,13 @@ test('1337: a comm CLI reply with a literal sourceMessageId marks exactly that r
   attr.handle(toolStart('s2', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","content":"?","sourceMessageId":"7300000000000000999"}'` }));
   assert.equal(b.state, 'active', 'a source no run has marks nothing');
   assert.equal(attr.turn.blocked, false, 'and is no send elsewhere (the conversation is the turn\'s)');
+});
+
+test('1337: a failed `|msg:` send to an unmarked message acknowledges nothing and reopens it', () => {
+  const { attr, ambiguous } = guardHarness({ skipped: () => null });
+  const item = attr.turn.queue.find((it) => it.foreign);
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  attr.handle(toolEnd('s1', 1, true));
+  assert.deepEqual(ambiguous, []);
+  assert.equal(item.answered, false);
 });
