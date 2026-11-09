@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 import {
   forwardedFromOf, chatHistoryOf, forwardedLabelOf,
   MAX_RECORDS, MAX_RECORD_TEXT_CODE_POINTS, MAX_FORWARDED_BLOCK_BYTES,
-  MAX_ATTR_CODE_POINTS, chatHistoryBudget, CHAT_HISTORY_TOO_LONG,
+  MAX_ATTR_CODE_POINTS, chatHistoryBudget, CHAT_HISTORY_TOO_LONG, formatForwardedChatHistory,
 } from './forwarded.js';
 import { formatInboundForC4 } from './message.js';
 
@@ -330,7 +330,7 @@ function maxHistory() {
 }
 
 // The bridge's context line counts (config may override them; message text has
-// no length cap in cws-comm, so line SIZE is unbounded and is varied below).
+// no length cap in the comm server, so line SIZE is unbounded and is varied below).
 const BRIDGE = fs.readFileSync(fileURLToPath(new URL('../comm-bridge.js', import.meta.url)), 'utf8');
 const DEFAULT_CONTEXT = Number(/const DEFAULT_CONTEXT_MESSAGES = (\d+);/.exec(BRIDGE)[1]);
 const MAX_CONTEXT = Number(/const DEFAULT_CONTEXT_MAX_MESSAGES = (\d+);/.exec(BRIDGE)[1]);
@@ -431,13 +431,13 @@ test('when the rest leaves no room, every record is left out and the element is 
 
 // Envelope whose rest (everything but the block) grows one byte per step of
 // `pad`: an ASCII context line of `pad` characters next to long CJK lines.
-function sweepEnvelope(pad, history, fallback) {
+function sweepEnvelope(pad, history, fallback, extra = {}) {
   const recent = [
     ...Array.from({ length: DEFAULT_CONTEXT - 1 }, () => ({ senderName: 'n', content: '字'.repeat(7000) })),
     { senderName: 'p', content: 'a'.repeat(pad) },
   ];
-  return formatInboundForC4({ type: 'group', id: 'cv-1', name: 'g' }, sender, { content: fallback ?? 'x', messageId: 'm-2' }, recent, {
-    chatHistory: history,
+  return formatInboundForC4({ type: 'group', id: 'cv-1', name: 'g' }, extra.sender ?? sender, { content: fallback ?? 'x', messageId: 'm-2' }, recent, {
+    chatHistory: history, forwardedFrom: extra.forwardedFrom,
   });
 }
 
@@ -450,7 +450,11 @@ test('near-limit sweep, every rest size where the rest + run marker + smallest n
   const base = restOf(0);
   // Range of the sweep: from where the budget still holds a few records down
   // to the largest rest the smallest notice can still be delivered with.
-  // Beyond that the rest alone is (nearly) over the limit and fails on main too.
+  // Beyond that the rest alone is within 195 bytes of the limit. That is not
+  // the same as "fails on main too": the forwarded framing costs up to 587
+  // bytes more than main's plain rendering of the card text (587 minus that
+  // text's byte length), so near the limit a message main delivers can fail
+  // here. Accepted as a known limit (CHANGELOG); not asserted.
   const lastRest = MAX_ARG_STRLEN - 1 - bytes(RUN_MARKER) - bytes(CHAT_HISTORY_TOO_LONG);
   const firstRest = MAX_ARG_STRLEN - 1 - 1024 - 5000;
   assert.ok(base < firstRest, `base rest ${base}`);
@@ -482,6 +486,68 @@ test('near-limit sweep, every rest size where the rest + run marker + smallest n
     assert.equal(r.error, undefined, `rest ${rest}: ${r.error}`);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(Number(r.stdout), bytes(arg));
+  }
+});
+
+// Attribute values at the 300 code point cap, made of characters that grow
+// when escaped (`"` → 6 bytes, `&` → 5, `<` → 4): the largest opening tag, so
+// the element-to-notice switch sits far higher (~8.5 KB records tier, ~4.7 KB
+// fallback tier) than with ordinary names.
+const HEAVY = '"&<'.repeat(100);
+const HEAVY_FF = forwardedFromOf(copyWith({ forwarded_from: { ...FF, sender_name: HEAVY, sender_type: HEAVY, sent_at: HEAVY } }));
+const HEAVY_TIERS = [
+  ['records', chatHistoryOf(card({ ...maxHistory(), title: HEAVY }))],
+  ['fallback', chatHistoryOf(card(undefined, { fallback_text: '长'.repeat(60000) }))],
+];
+
+for (const [tier, history] of HEAVY_TIERS) {
+  test(`escape-heavy attributes, ${tier} tier: budgets 0..12000 (every 25 bytes, every byte within 300 of the switch) give an element within budget or the fixed notice`, (t) => {
+    const check = (budget) => {
+      const out = formatForwardedChatHistory(HEAVY, history, HEAVY_FF, budget);
+      if (out === CHAT_HISTORY_TOO_LONG) return false;
+      assert.ok(bytes(out) <= budget, `budget ${budget}: element ${bytes(out)} B`);
+      return true;
+    };
+    let switchAt = -1;
+    for (let budget = 0; budget <= 12000; budget += 25) {
+      const element = check(budget);
+      if (!element) assert.equal(switchAt, -1, `notice again at budget ${budget} after an element at ${switchAt}`);
+      else if (switchAt < 0) switchAt = budget;
+    }
+    assert.ok(switchAt > 0, 'no element in range');
+    const coarse = switchAt;
+    switchAt = -1;
+    for (let budget = Math.max(0, coarse - 300); budget <= coarse + 300; budget += 1) {
+      const element = check(budget);
+      if (!element) assert.equal(switchAt, -1, `notice again at budget ${budget} after an element at ${switchAt}`);
+      else if (switchAt < 0) switchAt = budget;
+    }
+    // The switch must be the heavy one, well above ordinary-name elements (~1.1 KB).
+    assert.ok(switchAt > 4000, `first element at budget ${switchAt}`);
+    t.diagnostic(`${tier}: smallest element ${switchAt} B`);
+  });
+}
+
+test('escape-heavy attributes: real spawns on both sides of the records-tier switch, final argv <= 131071 bytes', () => {
+  const history = HEAVY_TIERS[0][1];
+  const isNotice = (budget) => formatForwardedChatHistory(HEAVY, history, HEAVY_FF, budget) === CHAT_HISTORY_TOO_LONG;
+  let smallest = 0;
+  while (isNotice(smallest + 25)) smallest += 25;
+  while (isNotice(smallest)) smallest += 1;
+  const extra = { sender: { displayName: HEAVY }, forwardedFrom: HEAVY_FF };
+  const restOf = (pad) => { const o = sweepEnvelope(pad, history, 'x', extra); return bytes(o) - bytes(blockOf(o)); };
+  const base = restOf(0);
+  for (const budget of [smallest - 1, smallest, smallest + 1]) {
+    const rest = MAX_ARG_STRLEN - 1 - 1024 - budget;
+    const out = sweepEnvelope(rest - base, history, 'x', extra);
+    const block = blockOf(out);
+    assert.equal(bytes(out) - bytes(block), rest);
+    assert.equal(block === CHAT_HISTORY_TOO_LONG, budget < smallest, `budget ${budget}`);
+    const arg = RUN_MARKER + out;
+    assert.ok(bytes(arg) <= MAX_ARG_STRLEN - 1, `budget ${budget}: argv ${bytes(arg)} B`);
+    const r = spawnWith(arg);
+    assert.equal(r.error, undefined, `budget ${budget}: ${r.error}`);
+    assert.equal(r.status, 0, r.stderr);
   }
 });
 

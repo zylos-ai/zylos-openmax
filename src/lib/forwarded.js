@@ -1,7 +1,7 @@
 /**
  * Forwarded messages (inbound rendering v1).
  *
- * cws-comm writes two shapes when someone forwards messages:
+ * The comm server writes two shapes when someone forwards messages:
  *
  *   - a one-by-one copy carries message metadata
  *       forwarded_from: { version: 1, sender_id, sender_type, sender_name, sent_at, source_kind }
