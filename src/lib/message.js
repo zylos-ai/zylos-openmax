@@ -16,6 +16,7 @@
  * Inbound C4 text format (tag on its own line; the attributed utterance lives
  * inside <current-message> for parity with other C4 channels):
  *   [OPENMAX DM]
+ *   <sender-context kind="human" member-id="<memberId>"/>   (DM only, when known)
  *   <openmax-instruction>...</openmax-instruction>
  *   <current-message>
  *   <name> said: <content>
@@ -185,9 +186,13 @@ export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
  * @param {object} [opts]   - { groupName, quotedContent, threadContext,
  *                              threadRootId, smartHint, receipt,
  *                              preferredConnectors, wfRef, quotedExcerpt,
- *                              systemSender: { memberId? } | undefined }
+ *                              systemSender: { memberId? } | undefined,
+ *                              senderMember: { kind:'human'|'agent', memberId } | undefined }
  *                            `systemSender` is set by the bridge only for a
  *                            platform System Member (sender_type=SYSTEM).
+ *                            `senderMember` (from sender_type / sender_id) is
+ *                            rendered only in a DM and only when there is no
+ *                            systemSender.
  * @returns {string}
  */
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
@@ -195,7 +200,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
   const {
     groupName, quotedContent, threadContext, threadRootId, smartHint, orgId, orgName, receipt, systemSender,
-    preferredConnectors, wfRef, quotedExcerpt,
+    senderMember, preferredConnectors, wfRef, quotedExcerpt,
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
@@ -252,6 +257,13 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   if (systemSender) {
     const memberAttr = systemSender.memberId ? ` member-id="${attrValue(systemSender.memberId)}"` : '';
     header += `<sender-context kind="system"${memberAttr}/>\n`;
+  } else if (senderMember && type === 'dm') {
+    // DM sender identity: the human / agent OpenMax member id, from the
+    // server frame's sender_id (never from metadata, display name or text).
+    // Same forgery guarantees as kind="system" above. Not a platform event.
+    const memberId = attrValue(senderMember.memberId);
+    const kind = senderMember.kind === 'human' || senderMember.kind === 'agent' ? senderMember.kind : '';
+    if (memberId && kind) header += `<sender-context kind="${kind}" member-id="${memberId}"/>\n`;
   }
   // An interaction receipt's answer and actor decide whether an irreversible
   // action runs, so they are emitted as a structural element rather than left

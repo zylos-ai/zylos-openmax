@@ -32,7 +32,7 @@ import { createSelfNameHydrator } from './lib/self-name-hydration.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
-import { isSystemSender, systemEventPriority } from './lib/system-message.js';
+import { isSystemSender, senderMemberFrom, systemEventPriority } from './lib/system-message.js';
 import {
   handleImOwnerNotice, createDedup, refreshOwnerEndpoint, IM_OWNER_NOTICE_TYPE,
 } from './lib/im-owner-notice.js';
@@ -1332,6 +1332,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         systemSender: isSystemSender(msg)
           ? { memberId: msg.sender_id || msg.message?.sender_id }
           : undefined,
+        senderMember: senderMemberFrom(msg),
       },
     );
 
