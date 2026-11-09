@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import {
   forwardedFromOf, chatHistoryOf, forwardedLabelOf,
   MAX_RECORDS, MAX_RECORD_TEXT_CODE_POINTS, MAX_FORWARDED_BLOCK_BYTES,
+  MAX_ATTR_CODE_POINTS, chatHistoryBudget,
 } from './forwarded.js';
 import { formatInboundForC4 } from './message.js';
 
@@ -328,39 +329,116 @@ function maxHistory() {
   return { ...BODY, title: name, record_count: MAX_RECORDS, records };
 }
 
-function maxEnvelope() {
-  // Group envelope at the configured context maximum (15 lines), each line a
-  // long message, so the measurement includes everything around the block.
-  const recent = Array.from({ length: 15 }, (_, i) => ({ senderName: '名'.repeat(64), content: '字'.repeat(500), forwardedLabel: i % 2 ? 'forwarded from x' : undefined }));
-  const msg = card(maxHistory());
+// The bridge's context line counts (config may override them; message text has
+// no length cap in cws-comm, so line SIZE is unbounded and is varied below).
+const BRIDGE = fs.readFileSync(fileURLToPath(new URL('../comm-bridge.js', import.meta.url)), 'utf8');
+const DEFAULT_CONTEXT = Number(/const DEFAULT_CONTEXT_MESSAGES = (\d+);/.exec(BRIDGE)[1]);
+const MAX_CONTEXT = Number(/const DEFAULT_CONTEXT_MAX_MESSAGES = (\d+);/.exec(BRIDGE)[1]);
+const RUN_MARKER = '[OM-RUN r_0123abcd] ';
+
+// Group envelope around the worst-case history (100 records x 1000 CJK chars,
+// long names, attachments, nested histories, escape-heavy text) with `lines`
+// context lines of `chars` CJK characters each (plus `<` that escapes to 4 bytes).
+function envelope(lines, chars, history = maxHistory()) {
+  const recent = Array.from({ length: lines }, (_, i) => ({
+    senderName: '名'.repeat(64), content: `${'字'.repeat(chars)}<<<<`, forwardedLabel: i % 2 ? 'forwarded from x' : undefined,
+  }));
+  const msg = card(history);
   return formatInboundForC4({ type: 'group', id: 'cv-1', name: '群'.repeat(64) }, { displayName: '名'.repeat(128) }, { content: '[会话记录] fallback', messageId: 'm-2' }, recent, {
     groupName: '群'.repeat(64), orgId: 'org-1', orgName: '组织'.repeat(32), smartHint: true,
     forwardedFrom: forwardedFromOf(msg), chatHistory: chatHistoryOf(msg),
   });
 }
 
-test('contract maximum (100 records x 1000 CJK chars) stays within the block budget and the argv limit', () => {
-  const out = maxEnvelope();
-  const block = blockOf(out);
-  assert.ok(bytes(block) <= MAX_FORWARDED_BLOCK_BYTES, `block ${bytes(block)} B`);
-  assert.ok(bytes(out) < MAX_ARG_STRLEN - 32 * 1024, `envelope ${bytes(out)} B`);
+function spawnWith(arg) {
+  return spawnSync(process.execPath, ['-e', 'process.stdout.write(String(Buffer.byteLength(process.argv[1])))', arg], { encoding: 'utf8' });
+}
 
-  const rendered = Number(/rendered-records="(\d+)"/.exec(block)?.[1]);
-  const omitted = Number(/<records-omitted count="(\d+)">/.exec(block)?.[1]);
-  assert.ok(rendered > 0 && omitted > 0, block.slice(0, 400));
-  assert.equal(rendered + omitted, MAX_RECORDS);
-  assert.equal(block.match(/<record /g).length, rendered);
-  assert.ok(block.includes('record-count="100"'));
-  assert.ok(block.includes('Read every record with comm.get_message'));
-  assert.equal(out.match(/<\/forwarded-chat-history>/g).length, 1);
+// [context lines, CJK chars per line]: small context; the reviewer's two
+// E2BIG cases at the default and maximum line counts; context that leaves the
+// block only a few KiB; context that leaves no room for any record.
+const CONTEXT_CASES = [
+  [MAX_CONTEXT, 500],
+  [DEFAULT_CONTEXT, 4400],
+  [MAX_CONTEXT, 1500],
+  [DEFAULT_CONTEXT, 7600],
+  [DEFAULT_CONTEXT, 8300],
+];
+
+for (const [lines, chars] of CONTEXT_CASES) {
+  test(`worst-case history + ${lines} context lines x ${chars} CJK: the final argv element fits and a real spawn succeeds`, () => {
+    const out = envelope(lines, chars);
+    const arg = RUN_MARKER + out;
+    assert.ok(bytes(arg) < MAX_ARG_STRLEN, `argv element ${bytes(arg)} B`);
+    const block = blockOf(out);
+    assert.ok(bytes(block) <= MAX_FORWARDED_BLOCK_BYTES, `block ${bytes(block)} B`);
+
+    const rendered = Number(/rendered-records="(\d+)"/.exec(block)?.[1]);
+    const omitted = Number(/<records-omitted count="(\d+)">/.exec(block)?.[1]);
+    assert.ok(omitted > 0, block.slice(0, 400));
+    assert.equal(rendered + omitted, MAX_RECORDS);
+    assert.equal((block.match(/<record /g) || []).length, rendered);
+    assert.ok(block.includes('record-count="100"'));
+    assert.ok(block.includes('Read every record with comm.get_message'));
+    assert.equal(out.match(/<\/forwarded-chat-history>/g).length, 1);
+
+    const r = spawnWith(arg);
+    assert.equal(r.error, undefined, String(r.error));
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(Number(r.stdout), bytes(arg));
+  });
+}
+
+test('the rest of the envelope is measured whole, media suffix after current-message included', () => {
+  const mediaItems = Array.from({ length: 12 }, (_, i) => ({ localPath: `/tmp/${'p'.repeat(600)}${i}.png`, fileName: `${'名'.repeat(100)}.png` }));
+  const recent = Array.from({ length: DEFAULT_CONTEXT }, () => ({ senderName: 'n', content: '字'.repeat(4400) }));
+  const msg = card(maxHistory());
+  const out = formatInboundForC4({ type: 'group', id: 'cv-1', name: 'g' }, sender, { content: 'x', messageId: 'm-2', type: 'image', mediaItems }, recent, {
+    chatHistory: chatHistoryOf(msg),
+  });
+  const block = blockOf(out);
+  const rest = bytes(out) - bytes(block);
+  assert.ok(rest > 70000 && out.endsWith(`${mediaItems.at(-1).fileName}"`), `rest ${rest}`);
+  // The records must fit the room left once the 512-byte marker reserve is taken out.
+  const records = block.slice(0, block.indexOf('<records-omitted'));
+  assert.ok(bytes(records) <= chatHistoryBudget(rest) - 512, `${bytes(records)} vs ${chatHistoryBudget(rest) - 512}`);
+  assert.ok(bytes(RUN_MARKER + out) < MAX_ARG_STRLEN);
 });
 
-test('contract maximum: the envelope is accepted as a single argv element (no E2BIG)', () => {
-  const out = maxEnvelope();
-  const r = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(Buffer.byteLength(process.argv[1])))', out], { encoding: 'utf8' });
-  assert.equal(r.error, undefined, String(r.error));
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(Number(r.stdout), bytes(out));
+test('at least 1000 bytes of the argv limit stay free in every context case', () => {
+  for (const [lines, chars] of CONTEXT_CASES) {
+    const arg = RUN_MARKER + envelope(lines, chars);
+    assert.ok(bytes(arg) + 1 <= MAX_ARG_STRLEN - 1000, `${lines}x${chars}: ${bytes(arg)} B`);
+  }
+});
+
+test('the block shrinks as context grows: room left by the rest bounds it, 64 KiB caps it', () => {
+  const small = blockOf(envelope(MAX_CONTEXT, 500));
+  const big = blockOf(envelope(DEFAULT_CONTEXT, 7600));
+  assert.ok(bytes(big) < bytes(small), `${bytes(big)} vs ${bytes(small)}`);
+  assert.equal(chatHistoryBudget(0), MAX_FORWARDED_BLOCK_BYTES);
+  // 131072 - NUL - 1024 margin (run marker + slack) - 100000 rest; pinned as a number.
+  assert.equal(chatHistoryBudget(100000), 30047);
+  assert.equal(chatHistoryBudget(129000), 1047);
+});
+
+test('when the rest leaves no room, every record is left out and the element is tag + marker only', () => {
+  const block = blockOf(envelope(DEFAULT_CONTEXT, 8300));
+  assert.ok(block.includes('rendered-records="0"'), block.slice(0, 300));
+  assert.ok(!block.includes('<record '));
+  assert.ok(bytes(block) < 2048, `${bytes(block)} B`);
+});
+
+test('opening-tag values are capped: a huge title or name cannot grow the block past the budget', () => {
+  const huge = 'T'.repeat(100000);
+  const out = formatInboundForC4(conv, { displayName: huge }, current, [], {
+    chatHistory: chatHistoryOf(card({ ...maxHistory(), title: huge })),
+    forwardedFrom: forwardedFromOf(copyWith({ forwarded_from: { ...FF, sender_name: huge } })),
+  });
+  const block = blockOf(out);
+  assert.ok(bytes(block) <= MAX_FORWARDED_BLOCK_BYTES, `${bytes(block)} B`);
+  assert.ok(block.includes(`title="${'T'.repeat(MAX_ATTR_CODE_POINTS)}…"`), block.slice(0, 200));
+  assert.ok(block.includes(`forwarded-by="${'T'.repeat(MAX_ATTR_CODE_POINTS)}…"`));
 });
 
 test('an oversized fallback_text is cut to the budget and marked text-truncated', () => {

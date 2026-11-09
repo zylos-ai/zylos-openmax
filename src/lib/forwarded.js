@@ -25,12 +25,20 @@
 export const MAX_RECORDS = 100;
 export const MAX_RECORD_TEXT_CODE_POINTS = 1000;
 // The whole C4 envelope reaches c4-receive as ONE argv element, which Linux
-// caps at MAX_ARG_STRLEN (131072 bytes); over it the spawn fails with E2BIG and
-// the message is lost. A full chat history is up to ~311 KB rendered, so the
-// <forwarded-chat-history> element is held to half of that cap and the rest is
-// left for the envelope around it. Records past the budget are not rendered
-// and the element says how many were left out and where to read them.
+// caps at MAX_ARG_STRLEN (131072 bytes, terminating NUL included); over it the
+// spawn fails with E2BIG and the message is lost. A full chat history is up to
+// ~311 KB rendered, so the <forwarded-chat-history> element gets at most 64 KiB
+// and never more than what the rest of the envelope leaves free (see
+// chatHistoryBudget). Records past the budget are not rendered and the element
+// says how many were left out and where to read them.
+export const C4_ARG_MAX_BYTES = 131072;
 export const MAX_FORWARDED_BLOCK_BYTES = 64 * 1024;
+// Kept free for what the bridge adds after formatting: the 20-byte [OM-RUN …]
+// marker and the argv string's NUL, with room to spare.
+export const ENVELOPE_MARGIN_BYTES = 1024;
+// Server-written names and titles are short (names <= 128 code points); the
+// cap only keeps an odd value from crowding out the records.
+export const MAX_ATTR_CODE_POINTS = 300;
 // Room kept for the opening tag's `rendered-records` attribute and the
 // <records-omitted> element, which are only known after the records are laid out.
 const OMITTED_RESERVE_BYTES = 512;
@@ -139,10 +147,17 @@ function escapeAttr(s) {
   return escapeText(s).replace(/"/g, '&quot;').replace(/[\r\n\u2028\u2029]+/g, ' ');
 }
 
+function clip(v) {
+  const chars = [...String(v)];
+  return chars.length > MAX_ATTR_CODE_POINTS ? `${chars.slice(0, MAX_ATTR_CODE_POINTS).join('')}…` : String(v);
+}
+
+// `attachments` lists artifact ids the Agent needs whole; a record carrying it
+// is counted against the byte budget as a unit instead.
 function attrs(pairs) {
   return pairs
     .filter(([, v]) => v !== undefined && v !== null && v !== '')
-    .map(([k, v]) => ` ${k}="${escapeAttr(v)}"`)
+    .map(([k, v]) => ` ${k}="${escapeAttr(k === 'attachments' ? v : clip(v))}"`)
     .join('');
 }
 
@@ -213,16 +228,27 @@ function escapedPrefix(s, budget) {
 const CLOSE = '</forwarded-chat-history>';
 
 /**
+ * Bytes the <forwarded-chat-history> element may take when everything else in
+ * the envelope already takes `restBytes`.
+ */
+export function chatHistoryBudget(restBytes) {
+  return Math.min(MAX_FORWARDED_BLOCK_BYTES, C4_ARG_MAX_BYTES - 1 - ENVELOPE_MARGIN_BYTES - restBytes);
+}
+
+/**
  * Merged forward: one <record> per message. `ff` is set when the card itself
  * was forwarded one-by-one (its original sender is the one who merged it).
- * The result never exceeds MAX_FORWARDED_BLOCK_BYTES.
+ * The result stays within `budget` bytes whenever the budget can hold the
+ * opening tag and the omission marker; below that, every record is left out
+ * and the element is just those (its attribute values are capped).
  */
-export function formatForwardedChatHistory(forwarder, history, ff) {
+export function formatForwardedChatHistory(forwarder, history, ff, budget = MAX_FORWARDED_BLOCK_BYTES) {
   if (!history) return '';
+  const limit = Math.min(MAX_FORWARDED_BLOCK_BYTES, budget);
   const head = [['forwarded-by', forwarder || 'unknown'], ...originalSenderAttrs(ff)];
   if (history.detail === 'fallback') {
     const open = `<forwarded-chat-history${attrs([...head, ['detail', 'fallback']])}`;
-    const room = MAX_FORWARDED_BLOCK_BYTES - byteLength(open) - byteLength(CLOSE) - OMITTED_RESERVE_BYTES;
+    const room = limit - byteLength(open) - byteLength(CLOSE) - OMITTED_RESERVE_BYTES;
     const { text, truncated } = escapedPrefix(history.text, Math.max(0, room));
     const mark = truncated ? ' text-truncated="true"' : '';
     return `${open}${mark}>\n${text}\n${CLOSE}`;
@@ -234,7 +260,7 @@ export function formatForwardedChatHistory(forwarder, history, ff) {
     ['source-kind', history.sourceKind],
     ['detail', history.detail === 'preview' ? 'preview' : undefined],
   ]);
-  let room = MAX_FORWARDED_BLOCK_BYTES - byteLength(`<forwarded-chat-history${a}>\n${CLOSE}`) - OMITTED_RESERVE_BYTES;
+  let room = limit - byteLength(`<forwarded-chat-history${a}>\n${CLOSE}`) - OMITTED_RESERVE_BYTES;
   const lines = [];
   for (const r of history.records) {
     const line = formatRecord(r);
