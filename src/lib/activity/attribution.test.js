@@ -2002,7 +2002,7 @@ test('1337: a failed `|msg:` send to an unmarked message acknowledges nothing an
   assert.equal(item.answered, false);
 });
 
-test('1337 R2 P3-A: a msg id copied into another conversation\'s endpoint answers nothing and lifts no guard', () => {
+test('1337: a msg id copied into another conversation\'s endpoint answers nothing and lifts no guard', () => {
   const { attr, a, ambiguous } = guardHarness({ skipped: () => null });
   const item = attr.turn.queue.find((it) => it.foreign);
   a.source_message_id = '7300000000000000999';
@@ -2021,7 +2021,7 @@ test('1337 R2 P3-A: a msg id copied into another conversation\'s endpoint answer
   assert.deepEqual(ambiguous, [CONV_A]);
 });
 
-test('1337 R2 G5: a reply without msg that answers an unmarked message does not acknowledge it (no msg path)', () => {
+test('1337: a reply without msg that answers an unmarked message does not acknowledge it (no msg path)', () => {
   const ambiguous = [];
   const { attr, mkRun } = harness({ replySkipped: () => null, onAmbiguousReply: (conv, o) => ambiguous.push([conv, o?.msgId ?? null]) });
   const b = mkRun('r_0000000b', CONV_B);
@@ -2034,4 +2034,43 @@ test('1337 R2 G5: a reply without msg that answers an unmarked message does not 
   assert.equal(item.answered, true, 'answered by endpoint, as before');
   assert.deepEqual(ambiguous, [], 'no acknowledgement without msg');
   assert.equal(b.state, 'active');
+});
+
+const THR = '019f0000-aaaa-7bbb-8ccc-0000000000f1';
+/** A run in CONV_A plus a smart-mode (unmarked) message of a thread under CONV_A, server id 1. */
+function threadGuardHarness() {
+  const acks = [];
+  const h = harness({ replySkipped: () => null, onAmbiguousReply: (conv, o) => acks.push([conv, o?.msgId ?? null]) });
+  const a = h.mkRun('r_0000000a', CONV_A);
+  h.attr.handle(minput('user', omBody(a)));
+  h.attr.handle(minput('queued_command', omBody(null, { conv: CONV_A, endpoint: `${CONV_A}|thread:${THR}|parent:5|msg:1` })));
+  const item = h.attr.turn.queue.find((it) => it.foreign);
+  assert.equal(item.msgId, '1');
+  return { ...h, a, item, acks };
+}
+
+test('1337: a thread message answered with its verbatim endpoint (`|thread:…|msg:`) is acknowledged in the thread', () => {
+  const { attr, item, acks } = threadGuardHarness();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|thread:${THR}|parent:5|msg:1`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, true);
+  assert.deepEqual(acks, [[THR, '1']]);
+});
+
+test('1337: a thread message\'s id sent to the parent conversation (`CONV|msg:`) is not acknowledged', () => {
+  const { attr, item, acks } = threadGuardHarness();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, false);
+  assert.deepEqual(acks, []);
+});
+
+test('1337: a comm CLI send with sourceMessageId to the message\'s own conversation acknowledges it', () => {
+  const { attr, a, ambiguous } = guardHarness({ skipped: () => null });
+  const item = attr.turn.queue.find((it) => it.foreign);
+  attr.handle(toolStart('s1', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","content":"x","sourceMessageId":"1"}'` }));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, true);
+  assert.deepEqual(ambiguous, [CONV_A]);
+  assert.equal(a.state, 'active', 'the run is not answered by it');
 });

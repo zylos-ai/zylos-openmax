@@ -1082,7 +1082,7 @@ test('1337 end to end: a reply naming the unregistered smart message (`|msg:`) l
   activity.stop();
 });
 
-test('1337 R2 G3: with two smart messages outstanding, a `|msg:` reply lifts only its own record — the guard stays until both are answered', async () => {
+test('1337: with two smart messages outstanding, a `|msg:` reply lifts only its own record — the guard stays until both are answered', async () => {
   const h = setup();
   const { activity, clock, append, runsDir } = h;
   const reg = await guardedRun(h);                      // smart message 9000000000001
