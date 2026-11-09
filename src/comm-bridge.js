@@ -41,6 +41,7 @@ import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/i
 import { preferredConnectorsFrom } from './lib/connector-preference.js';
 import { wfRefFrom } from './lib/wf-context.js';
 import { quoteExcerptFrom, quotedMessageText } from './lib/quote-excerpt.js';
+import { forwardedFromOf, chatHistoryOf } from './lib/forwarded.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
@@ -1327,6 +1328,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       {
         groupName, smartHint, quotedContent,
         quotedExcerpt: quoteExcerptFrom(msg, quotedMsgId),
+        forwardedFrom: forwardedFromOf(msg),
+        chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
         preferredConnectors: preferredConnectorsFrom(msg),
