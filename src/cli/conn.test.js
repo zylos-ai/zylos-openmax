@@ -1037,6 +1037,88 @@ test('planActionDefDelete: DELETE .../action-defs/{action_id}；两个 id 都需
   assert.match(plan.path, new RegExp(`/connect/applications/${APP_UUID}/action-defs/${ACTION_UUID}$`));
 });
 
+// --- connector_kind: http (default) | mcp ------------------------------------
+// MCP is a connector KIND, not an auth model (cws-connect connect.proto
+// Application.connector_kind). provider_type stays oauth2 | api_key — the
+// platform stores only those (DB CHECK); provider_type "mcp" 500s server-side.
+
+test('planAppCreate: provider_type "mcp" refused locally, pointing to connector_kind', () => {
+  for (const extra of [{}, { connector_kind: 'mcp' }]) {
+    assert.throws(
+      () => planAppCreate({ slug: 'plaud-mcp', display_name: 'Plaud', provider_type: 'mcp', ...extra }),
+      (e) => e.status === 400 && /provider_type "mcp" is not valid/.test(e.message) && /connector_kind:"mcp"/.test(e.message),
+    );
+  }
+});
+
+test('planAppCreate: connector_kind mcp → body carries connector_kind mcp + the auth model in provider_type', () => {
+  for (const pt of ['oauth2', 'api_key']) {
+    const plan = planAppCreate({ slug: 'plaud-mcp', display_name: 'Plaud', provider_type: pt, connector_kind: 'mcp' });
+    assert.equal(plan.method, 'POST');
+    assert.equal(plan.path, '/api/v1/connect/applications');
+    assert.equal(plan.body.connector_kind, 'mcp');
+    assert.equal(plan.body.provider_type, pt);
+    assert.notEqual(plan.body.provider_type, 'mcp');
+  }
+});
+
+test('planAppCreate: connector_kind validated; mcp requires provider_type oauth2 | api_key and no server config', () => {
+  assert.throws(() => planAppCreate({ display_name: 'X', provider_type: 'api_key', connector_kind: 'grpc' }),
+    (e) => e.status === 400 && /connector_kind must be one of http \| mcp/.test(e.message));
+  assert.throws(() => planAppCreate({ display_name: 'X', provider_type: 'basic', connector_kind: 'mcp' }),
+    (e) => e.status === 400 && /provider_type for connector_kind "mcp" must be one of oauth2 \| api_key/.test(e.message));
+  assert.throws(() => planAppCreate({ display_name: 'X', connector_kind: 'mcp' }),
+    (e) => e.status === 400 && /provider_type is required/.test(e.message));
+  for (const f of ['server_url', 'mcp_server_url', 'mcp_server']) {
+    const v = f === 'mcp_server' ? { transport: 'remote_http', server_url: 'https://api.plaud.ai/mcp' } : 'https://api.plaud.ai/mcp';
+    assert.throws(() => planAppCreate({ display_name: 'X', provider_type: 'oauth2', connector_kind: 'mcp', [f]: v }),
+      (e) => e.status === 400 && new RegExp(`${f} is not accepted on an mcp connector definition`).test(e.message) && /per-connection/.test(e.message));
+  }
+});
+
+test('planAppCreate: http path unchanged — no connector_kind sent unless given; explicit http forwarded', () => {
+  const plain = planAppCreate({ slug: 'acme', display_name: 'Acme', provider_type: 'api_key' });
+  assert.equal('connector_kind' in plain.body, false);
+  assert.deepEqual(plain.body, { slug: 'acme', display_name: 'Acme', provider_type: 'api_key' });
+  const http = planAppCreate({ slug: 'acme', display_name: 'Acme', provider_type: 'oauth2', connector_kind: 'http' });
+  assert.equal(http.body.connector_kind, 'http');
+});
+
+test('runAppImport mcp: creates the app with connector_kind mcp + provider_type oauth2, no action-defs', async () => {
+  const appBodies = [];
+  let actionCalls = 0;
+  const out = await runAppImport(
+    { application: { slug: 'plaud-mcp', display_name: 'Plaud', provider_type: 'oauth2', connector_kind: 'mcp' } },
+    {
+      createApp: async (body) => { appBodies.push(body); return { id: APP_UUID, slug: body.slug }; },
+      createActionDef: async () => { actionCalls += 1; },
+    },
+  );
+  assert.equal(appBodies.length, 1);
+  assert.equal(appBodies[0].connector_kind, 'mcp');
+  assert.equal(appBodies[0].provider_type, 'oauth2');
+  assert.equal(actionCalls, 0);
+  assert.equal(out.applicationId, APP_UUID);
+  assert.equal(out.actions_total, 0);
+});
+
+test('runAppImport mcp: actions refused / provider_type "mcp" refused — before any network call', async () => {
+  let createAppCalls = 0;
+  const deps = { createApp: async () => { createAppCalls += 1; return { id: APP_UUID }; }, createActionDef: async () => {} };
+  await assert.rejects(
+    () => runAppImport({
+      application: { slug: 'plaud-mcp', display_name: 'Plaud', provider_type: 'oauth2', connector_kind: 'mcp' },
+      actions: [{ name: 'list', description: 'x', method: 'GET', url_template: 'https://api.plaud.ai/x' }],
+    }, deps),
+    (e) => e.status === 400 && /actions are not accepted for connector_kind "mcp"/.test(e.message),
+  );
+  await assert.rejects(
+    () => runAppImport({ application: { slug: 'plaud-mcp', display_name: 'Plaud', provider_type: 'mcp' }, actions: [] }, deps),
+    (e) => e.status === 400 && /provider_type "mcp" is not valid/.test(e.message),
+  );
+  assert.equal(createAppCalls, 0);
+});
+
 // ============================================================================
 //  runAppImport: injectable bulk create (app + loop action-defs)
 // ============================================================================
