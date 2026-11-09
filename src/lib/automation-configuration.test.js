@@ -343,3 +343,103 @@ test('absent project member additions keep proposal and request bodies unchanged
   assert.throws(() => automationConfiguration({ source_kind: 'timer', configuration: { ...joining, projectMemberAdditions: [lead] } }, 'timer'), /unsupported timer configuration field: projectMemberAdditions/);
   assert.throws(() => automationConfiguration({ source_kind: 'webhook', configuration: { ...joining, spec: { ...base.spec, project_member_additions: [lead] } } }, 'webhook'), /unsupported spec field/);
 });
+
+// OPENM-1305 / OPENM-1308: a spec that belongs to no project, and the output
+// knowledge base choice, reach Core exactly as the form sent them.
+const { project_id: _project, ...detached } = base.spec;
+const kbID = '01000000-0000-4000-8000-0000000000d4';
+const targetSpecs = [
+  ['unattached org', { ...detached, unattached: true, unattached_scope: 'org' }],
+  ['unattached private', { ...detached, unattached: true, unattached_scope: 'private' }],
+  ['unattached default scope', { ...detached, unattached: true }],
+  ['unattached naming the read system project', { ...base.spec, unattached: true }],
+  ['attach an unattached automation', { ...base.spec, unattached: false }],
+  ['project default knowledge base', { ...base.spec, knowledge_base_mode: 'project_default' }],
+  ['no knowledge base', { ...base.spec, knowledge_base_mode: 'none' }],
+  ['custom knowledge base', { ...base.spec, knowledge_base_mode: 'custom', knowledge_base_id: kbID }],
+  ['unattached private with custom knowledge base',
+    { ...detached, unattached: true, unattached_scope: 'private', knowledge_base_mode: 'custom', knowledge_base_id: kbID }],
+  ['unattached org without knowledge base', { ...detached, unattached: true, unattached_scope: 'org', knowledge_base_mode: 'none' }],
+];
+const writeProof = { id: 'binding', expected_version: 7,
+  authorization_proposal_message_id: '1790220732844', authorization_card_interaction_id: cardID };
+
+test('unattached and knowledge base spec fields pass through preview, proposal and mutation verbatim', () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      for (const [name, spec] of targetSpecs) {
+        const configuration = scoped(source_kind, { ...base, spec });
+        const scope = operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {};
+        const label = `${source_kind} ${operation}: ${name}`;
+        const proposal = automationAuthorizationProposal({ source_kind, operation, request_id: cardID, configuration, ...scope });
+        assert.equal(proposal.configuration, configuration, label);
+        assert.deepEqual(proposal.configuration.spec, spec, label);
+        assert.equal(automationAuthorizationPreview({ source_kind, operation, configuration, ...scope }).configuration, configuration, label);
+        const nested = automationMutation({ source_kind, configuration, ...writeProof }, source_kind, operation);
+        assert.deepEqual(nested.spec, spec, label);
+        // Flat calls keep the three legacy keys and add a target field only when it was given.
+        const flat = automationMutation({ source_kind, ...configuration, ...writeProof }, source_kind, operation);
+        assert.deepEqual(flat.spec, { project_id: undefined, description: undefined, ...spec }, label);
+      }
+    }
+  }
+});
+
+test('an unattached private spec keeps the confirmed Lead joining the hidden project', () => {
+  const configuration = scoped('timer', { ...joining, spec: { ...detached, unattached: true, unattached_scope: 'private' },
+    project_member_additions: [lead] });
+  const proposal = automationAuthorizationProposal({ source_kind: 'timer', operation: 'create', request_id: cardID, configuration });
+  assert.equal(proposal.configuration, configuration);
+  const body = automationMutation({ source_kind: 'timer', ...configuration, ...writeProof }, 'timer');
+  assert.deepEqual(body.project_member_additions, [lead]);
+  assert.equal(body.spec.unattached_scope, 'private');
+});
+
+const invalidTargets = [
+  ['scope without unattached', { ...detached, unattached_scope: 'org' }, /project_id is required/],
+  ['scope without unattached but with project', { ...base.spec, unattached_scope: 'org' }, /unattached_scope applies only with spec\.unattached true and no spec\.project_id/],
+  ['scope with unattached false', { ...base.spec, unattached: false, unattached_scope: 'private' }, /unattached_scope applies only/],
+  ['scope with a project', { ...base.spec, unattached: true, unattached_scope: 'org' }, /unattached_scope applies only/],
+  ['private scope with a project', { ...base.spec, unattached: true, unattached_scope: 'private' }, /unattached_scope applies only/],
+  ...['', 'ORG', 'public', 'none', null, 1, true, ['org']].map(unattached_scope =>
+    [`scope ${JSON.stringify(unattached_scope)}`, { ...detached, unattached: true, unattached_scope }, /unattached_scope must be org or private/]),
+  ...['true', 1, 0, null, {}].map(unattached =>
+    [`unattached ${JSON.stringify(unattached)}`, { ...detached, unattached, unattached_scope: 'org' }, /spec\.unattached must be a boolean/]),
+  ['no project and not unattached', { ...detached }, /project_id is required unless spec\.unattached is true/],
+  ['unattached false without a project', { ...detached, unattached: false }, /project_id is required/],
+  ['empty project', { ...detached, project_id: '' }, /project_id is required/],
+  ...['', 'default', 'CUSTOM', 'org', null, 0].map(knowledge_base_mode =>
+    [`knowledge base mode ${JSON.stringify(knowledge_base_mode)}`, { ...base.spec, knowledge_base_mode }, /knowledge_base_mode must be project_default, custom or none/]),
+  ['custom without an id', { ...base.spec, knowledge_base_mode: 'custom' }, /knowledge_base_id is required exactly when/],
+  ...['', '   ', null, 7].map(knowledge_base_id =>
+    [`custom id ${JSON.stringify(knowledge_base_id)}`, { ...base.spec, knowledge_base_mode: 'custom', knowledge_base_id }, /knowledge_base_id is required exactly when/]),
+  ['id without a mode', { ...base.spec, knowledge_base_id: kbID }, /knowledge_base_id is required exactly when/],
+  ['id with the project default', { ...base.spec, knowledge_base_mode: 'project_default', knowledge_base_id: kbID }, /knowledge_base_id is required exactly when/],
+  ['id with no knowledge base', { ...detached, unattached: true, knowledge_base_mode: 'none', knowledge_base_id: kbID }, /knowledge_base_id is required exactly when/],
+  ['camel-case scope', { ...detached, unattached: true, unattachedScope: 'org' }, /unsupported spec field: unattachedScope/],
+  ['camel-case knowledge base', { ...base.spec, knowledgeBaseMode: 'none' }, /unsupported spec field: knowledgeBaseMode/],
+];
+
+test('invalid unattached and knowledge base combinations never reach a request', () => {
+  for (const source_kind of ['timer', 'webhook']) {
+    for (const operation of ['create', 'update']) {
+      const scope = operation === 'update' ? { target_binding_id: 'binding', expected_version: 7 } : {};
+      for (const [name, spec, message] of invalidTargets) {
+        const configuration = scoped(source_kind, { ...base, spec });
+        for (const call of [
+          () => automationAuthorizationProposal({ source_kind, operation, request_id: cardID, configuration, ...scope }),
+          () => automationAuthorizationPreview({ source_kind, operation, configuration, ...scope }),
+          () => automationMutation({ source_kind, configuration, ...writeProof }, source_kind, operation),
+          () => automationMutation({ source_kind, ...configuration, ...writeProof }, source_kind, operation),
+        ]) {
+          assert.throws(call, error => error.status === 400 && message.test(error.message), `${source_kind} ${operation}: ${name}`);
+        }
+      }
+    }
+  }
+});
+
+test('a legacy flat call without a project is refused before HTTP, as Core refuses it', () => {
+  assert.throws(() => automationConfiguration({ source_kind: 'timer', cronExpr: '0 9 * * *', leadMemberId: 'agent',
+    ownerMemberId: 'human', title: 'Legacy' }, 'timer'), /project_id is required/);
+});

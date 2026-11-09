@@ -447,16 +447,24 @@ const COMMANDS = {
   // another eligible human Owner. Requester and target Owner are distinct.
   // =========================================================================
 
+  // The target is a project (projectId) or, for an automation attached to no
+  // project, its unattached scope (unattachedScope → unattached_scope); Core
+  // refuses a query naming both.
   'automation.eligibility': () => {
-    if (typeof params.projectId !== 'string' || !params.projectId.trim()) {
-      throw Object.assign(new Error('eligibility requires projectId (project UUID)'), { status: 400 });
+    const scoped = params.unattachedScope !== undefined;
+    if (scoped && (!['org', 'private'].includes(params.unattachedScope) || params.projectId !== undefined)) {
+      throw Object.assign(new Error('eligibility unattachedScope must be org or private, without projectId'), { status: 400 });
+    }
+    if (!scoped && (typeof params.projectId !== 'string' || !params.projectId.trim())) {
+      throw Object.assign(new Error('eligibility requires projectId (project UUID) or unattachedScope (org or private)'), { status: 400 });
     }
     if (typeof params.memberId !== 'string' || !params.memberId.trim()
       || !['create', 'update', 'replace', 'lead_change'].includes(params.operation)) {
       throw Object.assign(new Error('eligibility requires memberId and operation create, update, replace or lead_change'), { status: 400 });
     }
     return get(apiPath(`/agents/${encodeURIComponent(params.memberId)}/automation-creation-eligibility`), {
-      operation: params.operation, project_id: params.projectId,
+      operation: params.operation,
+      ...(scoped ? { unattached_scope: params.unattachedScope } : { project_id: params.projectId }),
     });
   },
   'automation.authorization_preview': () => post(apiPath('/automation-authorizations/preview'), automationAuthorizationPreview(params)),
@@ -560,7 +568,7 @@ ATTEMPT  (all ✅ on contract-v2)
                           blockedOnApprovalRequestIds?}
 
 EVENT BINDING  (定时任务 / create-by-agent)
-  automation.eligibility {org, memberId, operation:"create"|"update"|"replace"|"lead_change", projectId} # required project UUID; read compatible Agent capability
+  automation.eligibility {org, memberId, operation:"create"|"update"|"replace"|"lead_change", projectId | unattachedScope:"org"|"private"} # project UUID, or the scope of an automation attached to no project (never both); read compatible Agent capability
   automation.authorization_propose {org, request_id, requester_member_id?, source_kind, operation, configuration, target_binding_id?, expected_version?, replaces_proposal_message_id?} # server sends one confirmation card to the verified requester
   automation.authorization_status {org, proposal_message_id} # authoritative card decision and interaction ID
   automation.authorization_preview {org, source_kind, operation, configuration, target_binding_id?, expected_version?} # retired; new server returns 410; never use as fallback
