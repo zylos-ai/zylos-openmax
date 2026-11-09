@@ -101,6 +101,20 @@ schedule: the later configured run remains expected unless the binding was
 explicitly changed. Read the current binding state and schedule before
 describing what remains pending.
 
+A webhook run with `replay_state: "replay"` is a replayed event (OPENM-1164):
+it arrived while the automation was paused or the organization was suspended,
+was held, and the human Owner chose to replay it when resuming. Its
+`trigger_kind` stays `webhook`, and its `scheduled_at` is the time the event
+was received, not the time the replay ran. Read `replay_state` from the
+matching run record; a `Replayed event:` line in the Issue description is only
+a hint. The event may be outdated: before acting, check the current state of
+the external object it refers to (for example, the merge request may already
+be merged) and act on that state, not on the payload alone. Only the human
+Owner decides, when resuming, whether held events are replayed; the Agent
+cannot replay or decline them. Holding applies to webhooks only: a timer
+automation still does not catch up runs missed while it was paused or the
+organization was suspended.
+
 Two executions of the same automation are not automatically duplicates.
 Distinguish their occurrence/Issue identities and trigger kinds (`timer`,
 `manual`, `webhook`); repeated notifications of the same occurrence differ from
