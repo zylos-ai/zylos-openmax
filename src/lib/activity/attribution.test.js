@@ -1911,3 +1911,82 @@ test('1089-② review R3: a skipped send with no smart message pending at its st
   assert.equal(a.ambiguous_reply, true, 'the sender\'s decision still wins for the run');
   assert.deepEqual(got, [], 'no acknowledged message: the guard is not touched');
 });
+
+// ── OPENM-1337: a log reply that names its source message (`|msg:<id>`) ──
+
+const SRC_A = '7300000000000000161';
+const SRC_B = '7300000000000000163';
+/** Two @s A and B of one group merged into one turn, the agent reading B first (B focused). */
+function mergedAB() {
+  const h = harness();
+  const a = h.mkRun('r_0000000a', CONV_A, { c4: 71, endpoint: `${CONV_A}|msg:${SRC_A}` });
+  const b = h.mkRun('r_0000000b', CONV_A, { c4: 72, endpoint: `${CONV_A}|msg:${SRC_B}` });
+  a.source_message_id = SRC_A;
+  b.source_message_id = SRC_B;
+  h.attr.handle(input('user', omBody(a)));
+  h.attr.handle(input('queued_command', omBody(b)));
+  h.attr.handle(toolStart('r1', 'Read', { file_path: SPILL(72) }));
+  assert.equal(h.attr.turn.focus, b, 'the agent is on B');
+  return { ...h, a, b };
+}
+
+test('1337: B answered first (`|msg:B`) marks B replied — A stays open and keeps its later steps', () => {
+  const { attr, a, b, finishes } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_B}`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(b.state, 'closed');
+  assert.deepEqual(finishes, [['r_0000000b', 'done', null]]);
+  assert.equal(a.state, 'active', 'A is not closed by B\'s answer');
+  assert.equal(attr.turn.focus, a);
+  attr.handle(toolStart('t2', 'Grep', { pattern: 'a' }));
+  assert.deepEqual(kinds(a).filter((k) => k.startsWith('tool:')), ['tool:search_files'], 'A\'s work is A\'s');
+  attr.handle(toolStart('s2', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_A}`)));
+  attr.handle(toolEnd('s2', 2));
+  assert.deepEqual(finishes, [['r_0000000b', 'done', null], ['r_0000000a', 'done', null]]);
+});
+
+test('1337: A answered while B is focused (`|msg:A`) marks A, not the focus', () => {
+  const { attr, a, b } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_A}`)));
+  assert.equal(a.state, 'replied');
+  assert.equal(b.state, 'active');
+});
+
+test('1337: no msg → unchanged: the same-endpoint earliest unreplied (A) is marked, even when B was answered', () => {
+  const { attr, a, b } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A)));
+  assert.equal(a.state, 'replied');
+  assert.equal(b.state, 'active');
+});
+
+test('1337: a later reply to an already answered message marks no other run', () => {
+  const { attr, a, b } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_A}`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(a.state, 'closed');
+  attr.handle(toolStart('s2', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_A}`)));
+  assert.equal(b.state, 'active', 'B is left for its own answer');
+});
+
+test('1337: `|msg:` naming an unmarked smart-mode message answers that message, never the run', () => {
+  const { attr, a, finishes } = guardHarness({ skipped: () => null });
+  const item = attr.turn.queue.find((it) => it.foreign);
+  assert.equal(item.msgId, '1');
+  a.source_message_id = '7300000000000000999';
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, true);
+  assert.equal(a.state, 'active');
+  assert.deepEqual(finishes, []);
+  assert.equal(attr.turn.focus, a, 'the queue moved on to the run');
+});
+
+test('1337: a comm CLI reply with a literal sourceMessageId marks exactly that run', () => {
+  const { attr, a, b } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","content":"A","sourceMessageId":"${SRC_A}"}'` }));
+  assert.equal(a.state, 'replied');
+  assert.equal(b.state, 'active');
+  attr.handle(toolStart('s2', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","content":"?","sourceMessageId":"7300000000000000999"}'` }));
+  assert.equal(b.state, 'active', 'a source no run has marks nothing');
+  assert.equal(attr.turn.blocked, false, 'and is no send elsewhere (the conversation is the turn\'s)');
+});

@@ -30,6 +30,17 @@
  * and carries ITS full agent_run. Without a continuation the next reply gets
  * the parent's reference form, as above.
  *
+ * Source match (OPENM-1337): a reply that names the inbound message it answers
+ * (the `|msg:<id>` segment of the `reply via` endpoint, or the comm CLI's
+ * sourceMessageId) belongs to that message's run, whatever the focus: among
+ * the conversation's runs with that source_message_id it takes the focused
+ * one (a continuation), else the newest unclaimed, else the newest (reference
+ * form). The group guard does not apply — the reply said what it answers. No
+ * run with that source (an unregistered smart-mode message, or a run gone
+ * from the list) → no agent_run at all, never another message's run. A reply
+ * without a source id is selected exactly as before (focus → earliest
+ * unclaimed with the group guard → reference of the latest).
+ *
  * Group guard (OPENM-1089 ②): when selectRun skips (an unregistered smart-mode
  * message may be what this reply answers), runs/<run_id>.skip records it for
  * the run that would have been chosen, so attribution does not count the log
@@ -68,14 +79,35 @@ function liveRuns(store, active, convId, now = Date.now()) {
     .sort((a, b) => a.created_at - b.created_at);
 }
 
+/** A reply's source message id as given (string), or null when none was. */
+function sourceIdOf(sourceMessageId) {
+  if (sourceMessageId == null) return null;
+  const id = String(sourceMessageId).trim();
+  return id || null;
+}
+
 /**
  * Pick the run a reply to `convId` belongs to.
- * @returns {{ run: object|null, skipped?: string, candidate?: object }}
- *   candidate: the run a guard skip passed over.
+ * @param {{ sourceMessageId?: string|null }} args  the inbound message the
+ *   reply answers (OPENM-1337), when the reply names one.
+ * @returns {{ run: object|null, skipped?: string, candidate?: object, matched?: true }}
+ *   candidate: the run a guard skip passed over; matched: chosen by its
+ *   source message.
  */
-export function selectRun({ store, active, convId, now = Date.now() }) {
+export function selectRun({ store, active, convId, sourceMessageId = null, now = Date.now() }) {
   const runs = liveRuns(store, active, convId, now).filter((r) => active?.gate?.[r.org_id] === 'open');
   if (runs.length === 0) return { run: null };
+  const src = sourceIdOf(sourceMessageId);
+  if (src) {
+    // The reply names its message: only that message's runs (the run and its
+    // continuations) qualify — no focus from another run, no guard, no guess.
+    const same = runs.filter((r) => r.source_message_id != null && String(r.source_message_id) === src);
+    if (same.length === 0) return { run: null, skipped: 'agent_run_skipped_no_source_run' };
+    const own = same.find((r) => r.focus === true)
+      || same.filter((r) => !store.claimExists(r.run_id)).pop()
+      || same[same.length - 1];
+    return { run: own, matched: true };
+  }
   const focus = runs.find((r) => r.focus === true);
   if (focus) return { run: focus };
   const unclaimed = runs.filter((r) => !store.claimExists(r.run_id));
@@ -93,19 +125,20 @@ export function selectRun({ store, active, convId, now = Date.now() }) {
 /**
  * Plan the agent_run of one reply.
  *
- * @param {{ convId: string, kind: 'text'|'media'|'card', bodyHash: string|(() => string), newKey: () => string,
- *           now?: number, store?: object }} args
+ * @param {{ convId: string, sourceMessageId?: string|null, kind: 'text'|'media'|'card',
+ *           bodyHash: string|(() => string), newKey: () => string, now?: number, store?: object }} args
  * @returns {null | { runId, firstAgentRun, laterAgentRun, clientMsgId, settle(outcome) }}
  *   firstAgentRun / laterAgentRun: the `agent_run` value for the first / a
  *   later message (null = none). settle('ok' | 'rejected' | 'uncertain') is
  *   called once after the first POST.
  */
-export function planReplyMetadata({ convId, kind, bodyHash, newKey, now = Date.now(), store = createRunStore() }) {
+export function planReplyMetadata({ convId, sourceMessageId = null, kind, bodyHash, newKey, now = Date.now(), store = createRunStore() }) {
   try {
     const active = store.readActive();
     if (!active || !convId) return null;
-    const { run, skipped, candidate } = selectRun({ store, active, convId, now });
+    const { run, skipped, candidate, matched } = selectRun({ store, active, convId, sourceMessageId, now });
     if (skipped) store.bumpSendStat(skipped);
+    if (matched) store.bumpSendStat('agent_run_source_matched');
     if (candidate) {
       // Tell attribution this reply is not the run's (best effort).
       try { store.writeSkip(candidate.run_id, { at: now, unreg: active.unregistered?.[convId] ?? null }); } catch {}
@@ -175,11 +208,11 @@ export function planReplyMetadata({ convId, kind, bodyHash, newKey, now = Date.n
  * claim. Cards now carry agent_run via attachRunToCardRequest; this stays for
  * a card whose agent_run the server refused (see postWithRunMetadata).
  */
-export function noteCardReply({ convId, store = createRunStore() }) {
+export function noteCardReply({ convId, sourceMessageId = null, store = createRunStore() }) {
   try {
     const active = store.readActive();
     if (!active) return;
-    const { run } = selectRun({ store, active, convId });
+    const { run } = selectRun({ store, active, convId, sourceMessageId });
     if (run) store.writeFormCard(run.run_id);
   } catch {}
 }
@@ -211,13 +244,13 @@ export function canonicalJson(value) {
  * @returns the plan (see planReplyMetadata) or null — call settle via
  *   postWithRunMetadata.
  */
-export function attachRunMetadata({ convId, kind, body, bodyHash, clientMsgIdSupplied = false, now = Date.now(), store = createRunStore() }) {
+export function attachRunMetadata({ convId, sourceMessageId = null, kind, body, bodyHash, clientMsgIdSupplied = false, now = Date.now(), store = createRunStore() }) {
   try {
     if (!body || typeof body !== 'object') return null;
     delete body.agent_run;
     const own = body.client_msg_id;
     if (typeof own !== 'string' || !own) return null;
-    const plan = planReplyMetadata({ convId, kind, bodyHash, newKey: () => own, now, store });
+    const plan = planReplyMetadata({ convId, sourceMessageId, kind, bodyHash, newKey: () => own, now, store });
     if (!plan) return null;
     if (plan.clientMsgId && plan.clientMsgId !== own) {
       if (clientMsgIdSupplied) {
@@ -269,14 +302,14 @@ export function cardBodyHash(request) {
  * Onboarding cards (choice.kind 'onboarding.*') are not replies to a run and
  * get nothing.
  */
-export function attachRunToCardRequest({ convId, request, clientMsgIdSupplied = false, now = Date.now(), store = createRunStore() }) {
+export function attachRunToCardRequest({ convId, sourceMessageId = null, request, clientMsgIdSupplied = false, now = Date.now(), store = createRunStore() }) {
   try {
     const cardKind = request?.choice?.kind;
     if (typeof cardKind === 'string' && cardKind.startsWith('onboarding.')) {
       if (request) delete request.agent_run;
       return null;
     }
-    return attachRunMetadata({ convId, kind: 'card', body: request, bodyHash: () => cardBodyHash(request), clientMsgIdSupplied, now, store });
+    return attachRunMetadata({ convId, sourceMessageId, kind: 'card', body: request, bodyHash: () => cardBodyHash(request), clientMsgIdSupplied, now, store });
   } catch {
     return null;
   }

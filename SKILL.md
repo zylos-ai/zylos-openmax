@@ -229,10 +229,10 @@ sentence you have to parse and can misread.
 
 **Then, and only then, the path:**
 
-- **Every reply to a message routed to you goes through the C4 reply path (`c4-send.js`) — card or text, one entry.** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<conversationId>"` line at its tail; reply using exactly that command. Text goes in the body as text. A card goes in as `[CARD]` followed by the card's JSON. Several questions for one person are one multi-question choice form (`fields`, one entry per question; in a group chat pass `answerers`):
+- **Every reply to a message routed to you goes through the C4 reply path (`c4-send.js`) — card or text, one entry.** Every inbound message carries a `reply via: node …/c4-send.js "openmax" "<endpoint>"` line at its tail; reply using exactly that command. 🔴 Copy the endpoint verbatim, including its trailing `|msg:<id>` (it names the message you are answering, so your answer is shown with that message's own activity card — drop it and the card may land on another message). When several messages reach you in one turn, answer each with its own `reply via` line, never all with the last one's. Text goes in the body as text. A card goes in as `[CARD]` followed by the card's JSON. Several questions for one person are one multi-question choice form (`fields`, one entry per question; in a group chat pass `answerers`):
 
   ```bash
-  node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax "<conversationId>" <<'EOF'
+  node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax "<endpoint>" <<'EOF'
   [CARD]{"kind":"automation.reminder_policy","askedOf":"<member id>","answerers":["<member id>"],"title":"调度提醒收敛：3 个问题","summary":"wsb#638 · 方案 v1 · 10/23","fields":[{"key":"timeout","label":"运行卡住多久算超时？","options":[{"label":"2 小时","recommended":true},"6 小时","保持 24 小时"]},{"key":"escalate","label":"运行 Issue 还要升级给 owner 吗？","options":[{"label":"不升级，只在超时暂停时发 1 条","recommended":true},"每天最多 1 次"]},{"key":"scope","label":"哪些自动化先改？","selection_mode":"multiple","options":["日报","巡检","同步"]}]}
   EOF
   ```
@@ -244,12 +244,12 @@ sentence you have to parse and can misread.
   A quick-reply card (`options`) only when there is one question and one tap finishes it, with 2–3 very short answers such as 「是 / 否」 or 「继续 / 先停」:
 
   ```bash
-  node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax "<conversationId>" <<'EOF'
+  node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax "<endpoint>" <<'EOF'
   [CARD]{"kind":"component-upgrade","askedOf":"<member id>","title":"要升级吗","summary":"openmax · 自动检查 05/19 17:11","text":"openmax 2.20.0 → 2.21.0。升级会重启服务。","options":[{"label":"升级","style":"primary"},"先不升"]}
   EOF
   ```
 
-  The JSON fields are exactly `comm.ask`'s, minus `conversationId` (the endpoint already named it). The content picks the card: **`options` asks a quick-reply card, `fields` asks a choice form**; both at once is refused. **`kind` and `askedOf` are required** (a choice form may give `answerers` instead of `askedOf`) — the receipt that comes back names only the card, so an answer with neither is decodable and meaningless. A malformed payload fails the send; it is never downgraded to posting the JSON as chat text.
+  The JSON fields are exactly `comm.ask`'s, minus `conversationId` (the endpoint already named it, and its `|msg:` the message the card answers). The content picks the card: **`options` asks a quick-reply card, `fields` asks a choice form**; both at once is refused. **`kind` and `askedOf` are required** (a choice form may give `answerers` instead of `askedOf`) — the receipt that comes back names only the card, so an answer with neither is decodable and meaningless. A malformed payload fails the send; it is never downgraded to posting the JSON as chat text.
 
   🔴 **Inline JSON, never a path to a file holding it.** The reply path writes the body it sent into the C4 conversation log verbatim, so inline keeps that row self-contained and the question readable from it later. A path would store a pointer, and that is what the existing `[MEDIA:…]` rows have already become — every one of them names a file that is long gone.
 

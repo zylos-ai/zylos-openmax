@@ -883,3 +883,12 @@ test('review R13: timeout -s 32 / 33 exits 125 (glibc-reserved) — never a repl
     }
   }
 });
+
+test('1337: a comm CLI reply naming its source message carries sourceMessageId in signals.replies; a c4-send keeps the endpoint as is', () => {
+  const S = '7300000000000000132';
+  const r = classifyTool('Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV}","content":"x","sourceMessageId":"${S}"}'` });
+  assert.deepEqual(r.signals.replies, [{ channel: 'openmax', conversationId: CONV, sourceMessageId: S }]);
+  assert.equal(r.category, 'reply');
+  const c4 = classifyTool('Bash', { command: `node /x/c4-send.js "openmax" "${CONV}|msg:${S}" "hi"` });
+  assert.deepEqual(c4.signals.replies, [{ channel: 'openmax', endpoint: `${CONV}|msg:${S}` }]);
+});

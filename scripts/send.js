@@ -11,6 +11,9 @@
  *   <conversationId>
  *   <conversationId>|reply:<messageId>
  *   <conversationId>|thread:<threadConvId>|parent:<parentMsgId>
+ *   any of the above + `|msg:<sourceMessageId>`: the inbound message this
+ *   reply answers — selects that message's run for agent_run (OPENM-1337);
+ *   not sent to the server, not a quote
  * The legacy `[COCO TYPE]/<conversationId>...` form is still accepted by
  * parseEndpoint for backward compatibility.
  *
@@ -183,7 +186,7 @@ async function sendText(ep, text) {
   // mentions, type), so a resend that changes any of them never reuses the
   // first attempt's client_msg_id. See semanticBodyHash.
   const plan = bodies.length
-    ? planReplyMetadata({ convId, kind: 'text', bodyHash: () => semanticBodyHash(bodies[0]), newKey: newClientMsgId })
+    ? planReplyMetadata({ convId, sourceMessageId: ep.sourceMessageId, kind: 'text', bodyHash: () => semanticBodyHash(bodies[0]), newKey: newClientMsgId })
     : null;
   const results = [];
   for (let i = 0; i < bodies.length; i++) {
@@ -241,6 +244,7 @@ async function sendMediaMessage(ep, kind, localPath, caption) {
   // uploads again and gets a new one); computed only when a run is found.
   const plan = planReplyMetadata({
     convId,
+    sourceMessageId: ep.sourceMessageId,
     kind: 'media',
     bodyHash: () => semanticBodyHash(semantic, { attachmentDigests: [sha256(fs.readFileSync(localPath))] }),
     newKey: newClientMsgId,
@@ -338,6 +342,7 @@ async function main() {
         // skipped). See attachRunToCardRequest.
         attachRun: (request) => attachRunToCardRequest({
           convId: cardConvId,
+          sourceMessageId: ep.sourceMessageId,
           request,
           clientMsgIdSupplied: card.card?.clientMsgId !== undefined,
         }),

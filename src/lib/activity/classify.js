@@ -115,7 +115,9 @@ export function sanitizeDescription(text) {
  * Fold one execution's scan into the signals:
  *   signals.replies   every c4-send to "openmax" (endpoint per send), and every
  *                     comm CLI reply verb whose top-level conversationId is a
- *                     literal ({channel:'openmax', conversationId}); one whose
+ *                     literal ({channel:'openmax', conversationId}, plus
+ *                     sourceMessageId when the call names one literally,
+ *                     OPENM-1337); one whose
  *                     destination cannot be proven counts as external
  *   signals.external  any send to another channel, or an unparsable send —
  *                     takes precedence over replies, whatever the order
@@ -138,7 +140,12 @@ function applyScan(signals, scan) {
   // never a reply — no run is marked replied or closed on it.
   if (scan.uncertainSends > 0) signals.external = signals.externalUnknown = true;
   for (const c of scan.commSends || []) {
-    if (c.conversationId) (signals.replies || (signals.replies = [])).push({ channel: 'openmax', conversationId: c.conversationId });
+    if (c.conversationId) {
+      (signals.replies || (signals.replies = [])).push({
+        channel: 'openmax', conversationId: c.conversationId,
+        ...(c.sourceMessageId ? { sourceMessageId: c.sourceMessageId } : {}),
+      });
+    }
     // A comm CLI send whose destination cannot be proven may go anywhere:
     // pause attribution (signal ③) until reliable focus evidence returns.
     else signals.external = signals.externalUnknown = true;
@@ -148,7 +155,7 @@ function applyScan(signals, scan) {
 
 /**
  * @returns {{ category: string, title?: string, object?: string, live_preview?: true, waitRef?: string,
- *   signals: { spillC4Ids?: string[], replies?: ({channel, endpoint}|{channel, conversationId})[], external?: true,
+ *   signals: { spillC4Ids?: string[], replies?: ({channel, endpoint}|{channel, conversationId, sourceMessageId?})[], external?: true,
  *     externalSends?: {channel, endpoint}[], externalUnknown?: true } }}
  *   title: the agent's own action description (Bash / Monitor / sub-agent) or
  *   a generic tool's display name; object: search terms, domain, file name,

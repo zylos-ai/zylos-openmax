@@ -82,6 +82,22 @@ export function normEndpoint(endpoint) {
   return [base, ...kept.map(([k, v]) => `${k}:${v}`)].join('|');
 }
 
+/**
+ * The `msg:<id>` segment of a C4 endpoint — the inbound message a reply to it
+ * answers (OPENM-1337) — or null. normEndpoint drops it on purpose (it compares
+ * destinations); this reads it for matching a reply to its run.
+ */
+export function endpointSourceMessageId(endpoint) {
+  const parts = String(endpoint ?? '').split('|').slice(1);
+  for (const seg of parts) {
+    const idx = seg.indexOf(':');
+    if (idx === -1 || seg.slice(0, idx).trim().toLowerCase() !== 'msg') continue;
+    const v = seg.slice(idx + 1).trim();
+    if (v) return v;
+  }
+  return null;
+}
+
 const MESSAGE_CONTEXT_RE = /<message-context conversation-id="([^"]*)"/;
 // The bridge's structural header (message.js); user text cannot forge it
 // (angle brackets in the body are escaped).

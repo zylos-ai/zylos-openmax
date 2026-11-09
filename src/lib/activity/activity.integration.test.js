@@ -11,7 +11,7 @@ import path from 'node:path';
 import { createActivity } from './index.js';
 import { encodeProjectDir } from './collector.js';
 import { createRunStore } from './run-store.js';
-import { planReplyMetadata } from './reply.js';
+import { planReplyMetadata, selectRun } from './reply.js';
 import {
   validateActivityFrame, classifyAgentRun, validateAgentRunV3, validateFrameV3,
 } from './testdata/validators.js';
@@ -992,3 +992,69 @@ for (const [total, lifted] of [[50, true], [51, false]]) {
     activity.stop();
   });
 }
+
+// ── OPENM-1337: two @s merged into one turn, each answered via its own reply via ──
+
+test('1337 end to end: A and B merged, the agent reads B first — A\'s reply carries A\'s run, B\'s carries B\'s; both done', async () => {
+  const h = setup();
+  const { activity, clock, sent, append, runsDir, warns } = h;
+  const SA = '7300000000000000161';
+  const SB = '7300000000000000163';
+  const epA = `${CONV}|msg:${SA}`;
+  const epB = `${CONV}|msg:${SB}`;
+  const regA = activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: SA, endpoint: epA });
+  activity.confirmRun(regA.runId, '{"ok":true,"id":51}\n');
+  clock.advance(300);
+  const regB = activity.registerRun({ orgId: ORG, conversationId: CONV, contextConversationId: CONV, sourceMessageId: SB, endpoint: epB });
+  activity.confirmRun(regB.runId, '{"ok":true,"id":52}\n');
+  await activity.collector.discover();
+  const msgFor = (marker, src, ep) => omMsg(marker)
+    .replace('source-message-id="7383920118271"', `source-message-id="${src}"`)
+    .replace(RV('openmax', CONV), RV('openmax', ep));
+  clock.advance(200);
+  // Both reach the runtime as ONE input (the agent was busy).
+  append({ type: 'user', message: { role: 'user', content: msgFor(regA.marker, SA, epA) + msgFor(regB.marker, SB, epB) } });
+  activity.pollNow();
+  clock.advance(2100);
+  activity.emitter.tick();                              // gate open
+  // The agent reads B's spill file first (signal ①: B focused), then works.
+  append(toolUse('toolu_r', 'Read', { file_path: '/h/zylos/comm-bridge/attachments/conv-52/message.txt' }));
+  append(toolOk('toolu_r'));
+  append(toolUse('toolu_g', 'Grep', { pattern: 'b' }));
+  append(toolOk('toolu_g'));
+  activity.pollNow();
+  clock.advance(2100);
+  activity.emitter.tick();                              // run files written
+  const store = createRunStore({ dir: runsDir });
+  assert.equal(store.readRun(regB.runId).focus, true, 'the incident precondition: B holds the focus');
+  // Without msg (the old endpoint), A's answer would take B's run — the bug.
+  assert.equal(selectRun({ store, active: store.readActive(), convId: CONV, now: clock.now() }).run.run_id, regB.runId);
+
+  // A's answer, via A's reply via.
+  const pA = planReplyMetadata({ convId: CONV, sourceMessageId: SA, kind: 'text', bodyHash: 'hA', newKey: () => 'c_A', now: clock.now(), store });
+  assert.equal(pA.runId, regA.runId);
+  assert.equal(pA.firstAgentRun.source_message_id, SA);
+  assert.deepEqual(pA.firstAgentRun.steps.filter((s) => s.kind === 'tool'), [], 'none of B\'s work on A\'s card');
+  pA.settle('ok');
+  append(toolUse('toolu_sA', 'Bash', { command: `node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${epA}" <<'EOF'\nA\nEOF` }));
+  append(toolOk('toolu_sA'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(states(sent, regA.runId).at(-1), 'done');
+  assert.equal(store.readRun(regB.runId).state === 'closed', false, 'B is not closed by A\'s answer');
+
+  // B's answer, via B's reply via: its own full agent_run with its steps.
+  const pB = planReplyMetadata({ convId: CONV, sourceMessageId: SB, kind: 'text', bodyHash: 'hB', newKey: () => 'c_B', now: clock.now(), store });
+  assert.equal(pB.runId, regB.runId);
+  assert.equal(pB.firstAgentRun.source_message_id, SB);
+  assert.deepEqual(pB.firstAgentRun.steps.filter((s) => s.kind === 'tool').map((s) => s.category), ['read', 'search_files'], 'B\'s own work');
+  pB.settle('ok');
+  append(toolUse('toolu_sB', 'Bash', { command: `node /h/zylos/.claude/skills/comm-bridge/scripts/c4-send.js "openmax" "${epB}" <<'EOF'\nB\nEOF` }));
+  append(toolOk('toolu_sB'));
+  clock.advance(700);
+  activity.pollNow();
+  assert.equal(states(sent, regB.runId).at(-1), 'done');
+  assert.equal(store.readSendStats().agent_run_source_matched, 2);
+  assert.deepEqual(warns, []);
+  activity.stop();
+});

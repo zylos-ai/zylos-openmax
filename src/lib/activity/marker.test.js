@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  newRunId, formatMarker, parseMarker, startsWithOpenmaxTag, normEndpoint,
+  newRunId, formatMarker, parseMarker, startsWithOpenmaxTag, normEndpoint, endpointSourceMessageId,
   parseInputCtx, resolveMarkedRun, MARKER_LENGTH, splitInputSegments,
 } from './marker.js';
 
@@ -68,6 +68,17 @@ test('normEndpoint: equal when only volatile segments / order / spacing / uuid c
   assert.notEqual(normEndpoint(u), normEndpoint(`${u}|thread:019f0000-aaaa-7bbb-8ccc-000000000abc`));
   assert.notEqual(normEndpoint(`${u}|foo:1`), normEndpoint(`${u}|foo:2`));
   assert.equal(normEndpoint('oc_ABC|type:group'), 'oc_ABC|type:group');
+});
+
+test('1337: endpointSourceMessageId reads the msg segment; normEndpoint still drops it (same destination)', () => {
+  const u = CONV;
+  assert.equal(endpointSourceMessageId(`${u}|msg:7300000000000000132`), '7300000000000000132');
+  assert.equal(endpointSourceMessageId(`${u}|thread:019f0000-aaaa-7bbb-8ccc-000000000abc|parent:9| MSG: 42 `), '42');
+  assert.equal(endpointSourceMessageId(`[OPENMAX GROUP]/${u}|msg:7`), '7');
+  for (const ep of [u, `${u}|reply:5`, `${u}|msg:`, `${u}|msg`, '', null, undefined]) {
+    assert.equal(endpointSourceMessageId(ep), null, String(ep));
+  }
+  assert.equal(normEndpoint(`${u}|msg:7300000000000000132`), normEndpoint(`${u}|msg:7300000000000000133`));
 });
 
 test('parseInputCtx pulls message-context, spill path and the last reply-via line', () => {

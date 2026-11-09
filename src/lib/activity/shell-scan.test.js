@@ -44,6 +44,22 @@ test('scanShellSends: a literal noRun send is not a reply send', () => {
   assert.deepEqual(scanShellSends('node src/cli/comm.js comm.send "$(cat /tmp/p.json)"').commSends, [{ command: 'comm.send', conversationId: null }]);
 });
 
+test('1337: scanShellSends carries a literal top-level sourceMessageId (digits) of a comm CLI reply', () => {
+  const B = '019f0000-aaaa-7bbb-8ccc-00000000000b';
+  const S = '7300000000000000132';
+  for (const verb of ['comm.send', 'comm.send_card', 'comm.ask_card', 'comm.ask']) {
+    assert.deepEqual(scanShellSends(`node src/cli/comm.js ${verb} '{"conversationId":"${B}","sourceMessageId":"${S}"}'`).commSends,
+      [{ command: verb, conversationId: B, sourceMessageId: S }], verb);
+  }
+  // Not the CLI's accepted form, nested, or with no provable destination: no source.
+  for (const arg of [`"sourceMessageId":7300000000000000132`, `"sourceMessageId":"abc"`, `"content":{"sourceMessageId":"${S}"}`]) {
+    assert.deepEqual(scanShellSends(`node src/cli/comm.js comm.send '{"conversationId":"${B}",${arg}}'`).commSends,
+      [{ command: 'comm.send', conversationId: B }], arg);
+  }
+  assert.deepEqual(scanShellSends(`node src/cli/comm.js comm.send '{"sourceMessageId":"${S}"}'`).commSends,
+    [{ command: 'comm.send', conversationId: null }]);
+});
+
 test('argvToScript: sh -c script as is; other argv shell-quoted', () => {
   assert.equal(argvToScript(['bash', '-lc', 'node x.js a']), 'node x.js a');
   assert.equal(argvToScript(['node', 'x.js', 'a b', "it's"]), `node x.js 'a b' 'it'\\''s'`);

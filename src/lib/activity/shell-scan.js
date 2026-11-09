@@ -25,7 +25,7 @@
  */
 
 import path from 'path';
-import { CONVERSATION_ID_RE } from './constants.js';
+import { CONVERSATION_ID_RE, SOURCE_MESSAGE_ID_RE } from './constants.js';
 
 // comm.ask covers both of its card types (choice and form): either is a reply.
 export const COMM_REPLY_COMMANDS = new Set(['comm.send', 'comm.send_card', 'comm.ask_card', 'comm.ask']);
@@ -293,17 +293,21 @@ export function splitCommands(t) {
   return commands;
 }
 
+// sourceMessageId (OPENM-1337): the literal message id a comm CLI reply
+// names, as the CLI accepts it (a string of digits), else null.
 function topLevelArgs(json) {
   try {
     const v = JSON.parse(json);
-    if (!v || typeof v !== 'object' || Array.isArray(v)) return { id: null, noRun: false };
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return { id: null, noRun: false, sourceMessageId: null };
     const id = v.conversationId;
+    const src = v.sourceMessageId;
     return {
       id: typeof id === 'string' && CONVERSATION_ID_RE.test(id) ? id : null,
       noRun: v.noRun === true,
+      sourceMessageId: typeof src === 'string' && SOURCE_MESSAGE_ID_RE.test(src) ? src : null,
     };
   } catch {
-    return { id: null, noRun: false };
+    return { id: null, noRun: false, sourceMessageId: null };
   }
 }
 
@@ -744,11 +748,12 @@ function analyze(t, depth, inherited = {}) {
       accountHeredocs(cmd);
       if (!COMM_REPLY_COMMANDS.has(verb.value)) continue;
       const arg = args[0];
-      const { id, noRun } = arg && arg.value !== null && args.length === 1 ? topLevelArgs(arg.value) : { id: null, noRun: false };
+      const { id, noRun, sourceMessageId } = arg && arg.value !== null && args.length === 1
+        ? topLevelArgs(arg.value) : { id: null, noRun: false, sourceMessageId: null };
       // A literal noRun send is a system notice, not a reply: no run is
       // replied or closed on it, and attribution is not paused.
       if (noRun) continue;
-      pushComm({ command: verb.value, conversationId: id });
+      pushComm({ command: verb.value, conversationId: id, ...(id && sourceMessageId ? { sourceMessageId } : {}) });
     }
   }
 
@@ -768,9 +773,10 @@ function analyze(t, depth, inherited = {}) {
 /**
  * Every c4-send and comm CLI send in a shell command line.
  * @returns {{ sends: {channel, endpoint}[], unparsedSends: number, uncertainSends: number,
- *   commSends: { command: string|null, conversationId: string|null }[] }}
+ *   commSends: { command: string|null, conversationId: string|null, sourceMessageId?: string }[] }}
  *   commSends: destination known / reply verb with an unprovable destination
- *   (conversationId null) / a send whose verb cannot be read (command null).
+ *   (conversationId null) / a send whose verb cannot be read (command null);
+ *   sourceMessageId: the literal message id a known-destination reply names.
  *   uncertainSends: sends after a runtime `set -n` (may or may not run).
  */
 export function scanShellSends(text) {

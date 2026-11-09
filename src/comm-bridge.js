@@ -1220,6 +1220,11 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         warn(`receipt [${orgConfig.slug}] msg=${msg.id} reply target ${replyConvId} could not be fetched; framing falls back to ${replyConvType}`);
       }
     }
+    // The message this answer belongs to (OPENM-1337): the run's source and the
+    // endpoint's `|msg:` segment are the same value, so the reply the agent
+    // sends with this `reply via` selects exactly this message's run. A
+    // redirected receipt is answered on its card, so it names the card.
+    const sourceMessageId = String(replyTarget.redirected ? (replyTarget.cardMessageId || msg.id) : msg.id);
     const endpoint = formatEndpoint({
       type: replyConvType,
       conversationId: replyConvId,
@@ -1230,6 +1235,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       // avoid, while every log and the model's own framing said otherwise.
       threadConversationId: replyTarget.redirected ? undefined : (msg.thread_id || undefined),
       parentMessageId: (!replyTarget.redirected && msg.thread_id) ? msg.parent_message_id : undefined,
+      sourceMessageId,
     });
     // smartHint mirrors zylos-feishu: only emitted when the group is in smart
     // mode AND the bot was NOT @-mentioned. When the bot was directly @-ed we
@@ -1346,7 +1352,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         orgId: orgConfig.org_id,
         conversationId: replyTarget.redirected ? replyConvId : msg.conversation_id,
         contextConversationId: replyConvId,
-        sourceMessageId: String(replyTarget.redirected ? (replyTarget.cardMessageId || msg.id) : msg.id),
+        sourceMessageId,
         endpoint,
       })
       : null;
