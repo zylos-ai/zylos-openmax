@@ -230,28 +230,47 @@ function requireActionId(p) {
 // `slug` is OPTIONAL: cws-core generates one from display_name when omitted
 // (#31, end-to-end deployed). An explicit slug is still honored — it stays in the
 // allowlist and is forwarded as-is — but the CLI no longer force-requires it.
+const isBlank = (v) => v === undefined || v === null || v === '';
+
 export function planAppCreate(p) {
   if (!p.display_name) throw bad('display_name is required');
   const kind = p.connector_kind;
   if (kind !== undefined && !CONNECTOR_KINDS.includes(kind)) {
     throw bad(`connector_kind must be one of ${CONNECTOR_KINDS.join(' | ')}`);
   }
+  // `auth_type` is the agent-facing name of the auth model — the same word the
+  // conn.create_card card uses (api_key | oauth2, http connectors only); it is
+  // mapped onto the platform's provider_type and never forwarded itself.
+  // `provider_type` stays accepted. "mcp" is a connector_kind, never an auth
+  // model, under either name.
+  const isMcpWord = (v) => typeof v === 'string' && v.trim().toLowerCase() === 'mcp';
+  const authType = isBlank(p.auth_type) ? undefined : p.auth_type;
+  if (isMcpWord(authType)) {
+    throw bad('auth_type "mcp" is not valid — MCP is a connector kind, not an auth type: send connector_kind:"mcp" with no auth_type (the auth is decided when the user connects it)');
+  }
+  if (kind === 'mcp' && authType !== undefined) {
+    throw bad('auth_type is not accepted for connector_kind "mcp" — an MCP connector\'s auth is decided when the user connects it; omit auth_type');
+  }
+  if (authType !== undefined && !isBlank(p.provider_type) && p.provider_type !== authType) {
+    throw bad('auth_type and provider_type differ — send auth_type only');
+  }
   // provider_type is checked for EVERY connector_kind: the platform stores only
   // oauth2 | api_key (exact, lowercase — DB CHECK) and does not validate it
   // before the insert, so any other value ("OAuth2", "basic", …) 500s.
-  const rawProviderType = p.provider_type;
-  if (typeof rawProviderType === 'string' && rawProviderType.trim().toLowerCase() === 'mcp') {
+  const typeField = authType !== undefined ? 'auth_type' : 'provider_type';
+  const rawProviderType = authType !== undefined ? authType : p.provider_type;
+  if (isMcpWord(rawProviderType)) {
     throw bad('provider_type "mcp" is not valid — MCP is a connector kind, not an auth model: send connector_kind:"mcp" (provider_type may then be omitted; it defaults to api_key)');
   }
   // For an mcp connector provider_type is only a placeholder: the platform
   // decides the auth when the user connects (OAuth discovery upgrades api_key →
   // oauth2, never the reverse). Default it to api_key, as the openmax.com form does.
-  const providerType = (kind === 'mcp' && (rawProviderType === undefined || rawProviderType === null || rawProviderType === ''))
+  const providerType = (kind === 'mcp' && isBlank(rawProviderType))
     ? 'api_key'
     : rawProviderType;
-  if (!providerType) throw bad('provider_type is required (oauth2 | api_key)');
+  if (!providerType) throw bad('auth_type is required for an http connector (api_key | oauth2; provider_type is accepted as an alias)');
   if (!APP_PROVIDER_TYPES.includes(providerType)) {
-    throw bad(`provider_type must be one of ${APP_PROVIDER_TYPES.join(' | ')} (exact, lowercase) — got ${JSON.stringify(providerType)}`);
+    throw bad(`${typeField} must be one of ${APP_PROVIDER_TYPES.join(' | ')} (exact, lowercase) — got ${JSON.stringify(providerType)}`);
   }
   if (kind === 'mcp') {
     for (const f of MCP_CONNECT_TIME_FIELDS) {
@@ -871,9 +890,14 @@ export const CREATE_CARD_LIMITS = Object.freeze({
   action_name: 100,
   action_summary: 200,
 });
-const CREATE_CARD_AUTH_TYPES = ['api_key', 'oauth2', 'mcp'];
+// Same two axes as conn.app_create: connector_kind (http | mcp) and, for an
+// http connector only, auth_type (api_key | oauth2). An mcp card has no
+// auth_type — the auth is decided when the user connects the server.
+const CREATE_CARD_KINDS = ['http', 'mcp'];
+const CREATE_CARD_AUTH_TYPES = ['api_key', 'oauth2'];
 const CREATE_CARD_EFFECTS = ['read', 'write'];
-const CREATE_CARD_AUTH_LABELS = { api_key: 'API Key', oauth2: 'OAuth 2.0', mcp: 'MCP' };
+const CREATE_CARD_KIND_LABELS = { http: 'HTTP', mcp: 'MCP 服务器' };
+const CREATE_CARD_AUTH_LABELS = { api_key: 'API Key', oauth2: 'OAuth 2.0' };
 const CREATE_CARD_EFFECT_LABELS = { read: '读', write: '写' };
 // Same character set cws-connect's slug generator emits (lowercase a-z0-9 runs
 // joined by '-'; '_' also occurs in platform slugs), no leading/trailing
@@ -883,7 +907,7 @@ const CREATE_CARD_TOP_KEYS = new Set([
   'conversationId', 'conversation_id', 'connector', 'actions', 'application_id', 'applicationId',
   'org', 'orgId', 'org_id',
 ]);
-const CREATE_CARD_CONNECTOR_KEYS = new Set(['name', 'slug', 'icon_url', 'description', 'base_url', 'auth_type', 'server_url', 'mcp_server_url']);
+const CREATE_CARD_CONNECTOR_KEYS = new Set(['name', 'slug', 'icon_url', 'description', 'base_url', 'connector_kind', 'auth_type', 'server_url', 'mcp_server_url']);
 const CREATE_CARD_ACTION_KEYS = new Set(['name', 'effect', 'summary']);
 
 // A key that names a secret, compared on its lowercased alphanumerics so
@@ -1103,45 +1127,57 @@ export function parseCreateCardInput(p) {
     throw bad('connector.slug must be lowercase letters/digits joined by "-" or "_" (no leading/trailing separator, max 64), e.g. "acme-crm" — and must be the exact slug you will pass to conn.app_import');
   }
   connector.slug = slug;
-  if (!CREATE_CARD_AUTH_TYPES.includes(c.auth_type)) {
-    throw bad(`connector.auth_type must be one of ${CREATE_CARD_AUTH_TYPES.join(' | ')}`);
+  if (typeof c.auth_type === 'string' && c.auth_type.trim().toLowerCase() === 'mcp') {
+    throw bad('connector.auth_type "mcp" is not valid — MCP is a connector kind, not an auth type: send connector.connector_kind:"mcp" with no auth_type (and the server address in connector.server_url)');
   }
-  connector.auth_type = c.auth_type;
+  if (!CREATE_CARD_KINDS.includes(c.connector_kind)) {
+    throw bad(`connector.connector_kind is required: one of ${CREATE_CARD_KINDS.join(' | ')}`);
+  }
+  connector.connector_kind = c.connector_kind;
+  const isMcp = connector.connector_kind === 'mcp';
+  if (isMcp) {
+    if (c.auth_type !== undefined) {
+      throw bad('connector.auth_type is not used when connector_kind is "mcp" — an MCP connector\'s auth is decided when the user connects it; omit auth_type');
+    }
+  } else {
+    if (!CREATE_CARD_AUTH_TYPES.includes(c.auth_type)) {
+      throw bad(`connector.auth_type must be one of ${CREATE_CARD_AUTH_TYPES.join(' | ')} when connector_kind is "http"`);
+    }
+    connector.auth_type = c.auth_type;
+  }
   const iconUrl = cardUrl(c.icon_url, 'connector.icon_url');
   if (iconUrl !== undefined) connector.icon_url = iconUrl;
   const description = cardString(c.description, 'connector.description', CREATE_CARD_LIMITS.description, { joiners: 'text' });
   if (description !== undefined) connector.description = description;
-  if (connector.auth_type === 'mcp') {
-    // MCP: the card shows the MCP server address the user will enter when they
-    // connect it, and lists no actions (the tools come from the server). The
-    // address rides in `base_url` too — that is what the cws-fe renderer shows
-    // (labelled as the server URL for an mcp card).
+  if (isMcp) {
+    // MCP: the card shows the MCP server address (`server_url`) the user will
+    // enter when they connect it, and lists no actions (the tools come from
+    // the server).
     if (c.server_url !== undefined && c.mcp_server_url !== undefined && c.server_url !== c.mcp_server_url) {
       throw bad('connector.server_url and connector.mcp_server_url differ — send one of them');
     }
     const rawServerUrl = c.server_url ?? c.mcp_server_url;
     const field = c.server_url !== undefined ? 'connector.server_url' : 'connector.mcp_server_url';
     if (rawServerUrl === undefined || rawServerUrl === null || (typeof rawServerUrl === 'string' && rawServerUrl.trim() === '')) {
-      throw bad('connector.server_url (the MCP server address, https) is required when auth_type is "mcp"');
+      throw bad('connector.server_url (the MCP server address, https) is required when connector_kind is "mcp"');
     }
     const serverUrl = cardUrl(rawServerUrl, field);
     if (!serverUrl.startsWith('https:')) throw bad(`${field} must be an https URL`);
-    if (c.base_url !== undefined) throw bad('connector.base_url is not used when auth_type is "mcp" — put the MCP server address in connector.server_url');
+    if (c.base_url !== undefined) throw bad('connector.base_url is not used when connector_kind is "mcp" — put the MCP server address in connector.server_url');
     connector.server_url = serverUrl;
-    connector.base_url = serverUrl;
     if (p.actions !== undefined && !(Array.isArray(p.actions) && p.actions.length === 0)) {
-      throw bad('actions are not listed for auth_type "mcp" — an MCP connector\'s tools come from the MCP server; omit actions (or send [])');
+      throw bad('actions are not listed when connector_kind is "mcp" — an MCP connector\'s tools come from the MCP server; omit actions (or send [])');
     }
   } else {
     if (c.server_url !== undefined || c.mcp_server_url !== undefined) {
-      throw bad('connector.server_url is only for auth_type "mcp" — use connector.base_url for an http connector');
+      throw bad('connector.server_url is only for connector_kind "mcp" — use connector.base_url for an http connector');
     }
     const baseUrl = cardUrl(c.base_url, 'connector.base_url');
     if (baseUrl !== undefined) connector.base_url = baseUrl;
   }
 
-  const rawActions = connector.auth_type === 'mcp' ? [] : p.actions;
-  if (connector.auth_type !== 'mcp' && (!Array.isArray(rawActions) || rawActions.length === 0)) throw bad('actions (non-empty list) is required');
+  const rawActions = isMcp ? [] : p.actions;
+  if (!isMcp && (!Array.isArray(rawActions) || rawActions.length === 0)) throw bad('actions (non-empty list) is required');
   if (rawActions.length > CREATE_CARD_MAX_ACTIONS) throw bad(`at most ${CREATE_CARD_MAX_ACTIONS} actions per card`);
   const seenNames = new Set();
   const actions = rawActions.map((a, i) => {
@@ -1173,10 +1209,11 @@ export function parseCreateCardInput(p) {
 export function buildCreateCardFallbackText({ connector, actions }) {
   const lines = [
     `准备创建自定义连接器「${connector.name}」（${connector.slug}）`,
-    `认证方式：${CREATE_CARD_AUTH_LABELS[connector.auth_type]}`,
+    `类型：${CREATE_CARD_KIND_LABELS[connector.connector_kind]}`,
   ];
+  if (connector.auth_type) lines.push(`认证方式：${CREATE_CARD_AUTH_LABELS[connector.auth_type]}`);
   if (connector.description) lines.push(`说明：${connector.description}`);
-  if (connector.auth_type === 'mcp') {
+  if (connector.connector_kind === 'mcp') {
     lines.push(`MCP 服务器地址：${connector.server_url}`);
     lines.push('工具由 MCP 服务器提供，无需逐个配置动作。');
     lines.push(`回复「确认创建 ${connector.name}」开始创建，或「我要改 ${connector.name}」修改。`);
@@ -1215,7 +1252,8 @@ export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
     connector: {
       name: connector.name,
       slug: connector.slug,
-      auth_type: connector.auth_type,
+      connector_kind: connector.connector_kind,
+      ...(connector.auth_type ? { auth_type: connector.auth_type } : {}),
       ...(connector.icon_url ? { icon_url: connector.icon_url } : {}),
       ...(connector.server_url ? { server_url: connector.server_url } : {}),
     },
@@ -1284,7 +1322,8 @@ export async function runCreateCard(p, { resolveOrg, post, cardId } = {}) {
     connector: {
       name: input.connector.name,
       slug: input.connector.slug,
-      auth_type: input.connector.auth_type,
+      connector_kind: input.connector.connector_kind,
+      ...(input.connector.auth_type ? { auth_type: input.connector.auth_type } : {}),
       ...(input.connector.server_url ? { server_url: input.connector.server_url } : {}),
     },
     actions_total: input.actions.length,
@@ -1408,11 +1447,11 @@ export const COMMANDS = {
   // runs before any request.
   'conn.auth_notice': () => runAuthNotice(params, { resolveOrg: requireOrgId }),
 
-  // conn.create_card {conversationId, connector:{name, slug, auth_type, icon_url?,
-  // description?, base_url?, server_url?}, actions:[{name, effect, summary}],
-  // application_id?} — post the "create this custom connector?" confirmation card
-  // (OPENM-836). auth_type "mcp" requires connector.server_url (https) and lists no
-  // actions. Creates nothing; on the owner's confirmation the Agent runs
+  // conn.create_card {conversationId, connector:{name, slug, connector_kind,
+  // auth_type? (http only), icon_url?, description?, base_url?, server_url?},
+  // actions:[{name, effect, summary}], application_id?} — post the "create this
+  // custom connector?" confirmation card (OPENM-836). connector_kind "mcp" has no
+  // auth_type, requires connector.server_url (https) and lists no actions. Creates nothing; on the owner's confirmation the Agent runs
   // conn.app_import with the same slug + actions (mcp: connector_kind "mcp", no
   // actions). Secret-like keys anywhere → 400, nothing sent.
   'conn.create_card': () => runCreateCard(params, { resolveOrg: requireOrgId }),
@@ -1873,7 +1912,7 @@ Connections
   conn.list           {}                                        # list connections available to this agent (self only)
   conn.check          {app}                                     # read-only: authorized | not_authorized | needs_reauth
   conn.auth_notice    {conversationId, apps:[slug...]}          # post the "go authorize" card into that conversation
-  conn.create_card    {conversationId, connector:{name, slug, auth_type, icon_url?, description?, base_url?, server_url? (required for mcp)}, actions:[{name, effect, summary}] (none for mcp), application_id?}
+  conn.create_card    {conversationId, connector:{name, slug, connector_kind (http|mcp), auth_type (http only: api_key|oauth2), icon_url?, description?, base_url? (http), server_url (mcp, https)}, actions:[{name, effect, summary}] (none for mcp), application_id?}
                                                                  # post the "create this custom connector?" confirmation card (creates nothing; no secrets)
   conn.acquire        {connectionId}                            # acquire the direct access_token for a connection
   conn.actions        {connectionId, cursor?, limit?}           # discover named actions for a connection (paged: next_cursor → cursor)
@@ -1887,7 +1926,7 @@ Applications
   conn.callback       {}                                        # platform OAuth callback URL to register in the provider's OAuth app
 
 Applications (custom connector management)
-  conn.app_create     {display_name, provider_type, connector_kind?, slug?, ...} # create a custom connector application (slug optional — server-generated when omitted; provider_type oauth2|api_key; connector_kind http|mcp — mcp: provider_type optional, defaults to api_key)
+  conn.app_create     {display_name, connector_kind?, auth_type, slug?, ...} # create a custom connector application (slug optional — server-generated when omitted; connector_kind http (default)|mcp; auth_type api_key|oauth2 for http (alias provider_type) — mcp: no auth_type, provider_type defaults to api_key)
   conn.app_update     {applicationId, ...optional}              # update your own custom connector (slug/provider_type immutable; OAuth id/secret/scopes updatable)
   conn.actiondef_list   {applicationId}                         # list an app's HTTP action definitions
   conn.actiondef_create {applicationId, name, method, url_template, description, headers?, encoding?, input_schema?}  # description REQUIRED
