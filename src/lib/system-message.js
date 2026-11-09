@@ -31,6 +31,25 @@ export function isSystemSender(msg) {
   return t === 'SYSTEM';
 }
 
+// sender_type of a human / agent participant → <sender-context kind="…">.
+const MEMBER_KIND = { HUMAN: 'human', AGENT: 'agent' };
+
+/**
+ * The sender of a human / agent message as `{ kind: 'human'|'agent', memberId }`,
+ * for the DM `<sender-context kind="human|agent" member-id="…"/>` element.
+ * Reads `sender_type` / `sender_id` the same two ways as isSystemSender (top
+ * level, then `message.*`); both are filled by cws-comm from the authenticated
+ * principal. SYSTEM (handled by isSystemSender), an unknown or missing
+ * sender_type, or a missing sender_id → `undefined`: no kind is guessed.
+ */
+export function senderMemberFrom(msg) {
+  if (!msg) return undefined;
+  const t = String(msg.sender_type || msg.message?.sender_type || '').toUpperCase();
+  const kind = MEMBER_KIND[t];
+  const memberId = msg.sender_id || msg.message?.sender_id;
+  return kind && memberId ? { kind, memberId } : undefined;
+}
+
 /**
  * c4-receive `--priority` (1=urgent / 2=high / 3=normal) for a system message,
  * read from `metadata.systemEvent.priority` wherever cws-core surfaces it.
