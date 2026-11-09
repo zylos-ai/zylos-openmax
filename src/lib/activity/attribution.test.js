@@ -1911,3 +1911,166 @@ test('1089-② review R3: a skipped send with no smart message pending at its st
   assert.equal(a.ambiguous_reply, true, 'the sender\'s decision still wins for the run');
   assert.deepEqual(got, [], 'no acknowledged message: the guard is not touched');
 });
+
+// ── OPENM-1337: a log reply that names its source message (`|msg:<id>`) ──
+
+const SRC_A = '7300000000000000161';
+const SRC_B = '7300000000000000163';
+/** Two @s A and B of one group merged into one turn, the agent reading B first (B focused). */
+function mergedAB() {
+  const h = harness();
+  const a = h.mkRun('r_0000000a', CONV_A, { c4: 71, endpoint: `${CONV_A}|msg:${SRC_A}` });
+  const b = h.mkRun('r_0000000b', CONV_A, { c4: 72, endpoint: `${CONV_A}|msg:${SRC_B}` });
+  a.source_message_id = SRC_A;
+  b.source_message_id = SRC_B;
+  h.attr.handle(input('user', omBody(a)));
+  h.attr.handle(input('queued_command', omBody(b)));
+  h.attr.handle(toolStart('r1', 'Read', { file_path: SPILL(72) }));
+  assert.equal(h.attr.turn.focus, b, 'the agent is on B');
+  return { ...h, a, b };
+}
+
+test('1337: B answered first (`|msg:B`) marks B replied — A stays open and keeps its later steps', () => {
+  const { attr, a, b, finishes } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_B}`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(b.state, 'closed');
+  assert.deepEqual(finishes, [['r_0000000b', 'done', null]]);
+  assert.equal(a.state, 'active', 'A is not closed by B\'s answer');
+  assert.equal(attr.turn.focus, a);
+  attr.handle(toolStart('t2', 'Grep', { pattern: 'a' }));
+  assert.deepEqual(kinds(a).filter((k) => k.startsWith('tool:')), ['tool:search_files'], 'A\'s work is A\'s');
+  attr.handle(toolStart('s2', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_A}`)));
+  attr.handle(toolEnd('s2', 2));
+  assert.deepEqual(finishes, [['r_0000000b', 'done', null], ['r_0000000a', 'done', null]]);
+});
+
+test('1337: A answered while B is focused (`|msg:A`) marks A, not the focus', () => {
+  const { attr, a, b } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_A}`)));
+  assert.equal(a.state, 'replied');
+  assert.equal(b.state, 'active');
+});
+
+test('1337: no msg → unchanged: the same-endpoint earliest unreplied (A) is marked, even when B was answered', () => {
+  const { attr, a, b } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A)));
+  assert.equal(a.state, 'replied');
+  assert.equal(b.state, 'active');
+});
+
+test('1337: a later reply to an already answered message marks no other run', () => {
+  const { attr, a, b } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_A}`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(a.state, 'closed');
+  attr.handle(toolStart('s2', 'Bash', sendTo('openmax', `${CONV_A}|msg:${SRC_A}`)));
+  assert.equal(b.state, 'active', 'B is left for its own answer');
+});
+
+test('1337: `|msg:` naming an unmarked smart-mode message answers that message, never the run; the guard is acknowledged for it', () => {
+  const { attr, a, finishes, ambiguous } = guardHarness({ skipped: () => null });
+  const item = attr.turn.queue.find((it) => it.foreign);
+  assert.equal(item.msgId, '1');
+  a.source_message_id = '7300000000000000999';
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  assert.deepEqual(ambiguous, [], 'not before the send is known to have gone out');
+  attr.handle(toolEnd('s1', 1));
+  assert.deepEqual(ambiguous, [CONV_A], 'its arrival record is acknowledged (guard lifted for it)');
+  assert.equal(item.answered, true);
+  assert.equal(a.state, 'active');
+  assert.deepEqual(finishes, []);
+  assert.equal(attr.turn.focus, a, 'the queue moved on to the run');
+});
+
+test('1337: a comm CLI reply with a literal sourceMessageId marks exactly that run', () => {
+  const { attr, a, b } = mergedAB();
+  attr.handle(toolStart('s1', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","content":"A","sourceMessageId":"${SRC_A}"}'` }));
+  assert.equal(a.state, 'replied');
+  assert.equal(b.state, 'active');
+  attr.handle(toolStart('s2', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","content":"?","sourceMessageId":"7300000000000000999"}'` }));
+  assert.equal(b.state, 'active', 'a source no run has marks nothing');
+  assert.equal(attr.turn.blocked, false, 'and is no send elsewhere (the conversation is the turn\'s)');
+});
+
+test('1337: a failed `|msg:` send to an unmarked message acknowledges nothing and reopens it', () => {
+  const { attr, ambiguous } = guardHarness({ skipped: () => null });
+  const item = attr.turn.queue.find((it) => it.foreign);
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  attr.handle(toolEnd('s1', 1, true));
+  assert.deepEqual(ambiguous, []);
+  assert.equal(item.answered, false);
+});
+
+test('1337: a msg id copied into another conversation\'s endpoint answers nothing and lifts no guard', () => {
+  const { attr, a, ambiguous } = guardHarness({ skipped: () => null });
+  const item = attr.turn.queue.find((it) => it.foreign);
+  a.source_message_id = '7300000000000000999';
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_B}|msg:1`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, false);
+  assert.deepEqual(ambiguous, []);
+  attr.handle(toolStart('s2', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_B}","content":"x","sourceMessageId":"1"}'` }));
+  attr.handle(toolEnd('s2', 2));
+  assert.equal(item.answered, false);
+  assert.deepEqual(ambiguous, []);
+  // Contrast: the same id in its own conversation's endpoint answers it.
+  attr.handle(toolStart('s3', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  attr.handle(toolEnd('s3', 3));
+  assert.equal(item.answered, true);
+  assert.deepEqual(ambiguous, [CONV_A]);
+});
+
+test('1337: a reply without msg that answers an unmarked message does not acknowledge it (no msg path)', () => {
+  const ambiguous = [];
+  const { attr, mkRun } = harness({ replySkipped: () => null, onAmbiguousReply: (conv, o) => ambiguous.push([conv, o?.msgId ?? null]) });
+  const b = mkRun('r_0000000b', CONV_B);
+  attr.handle(minput('user', omBody(b)));
+  attr.handle(minput('queued_command', omBody(null, { conv: CONV_A })));
+  const item = attr.turn.queue.find((it) => it.foreign);
+  assert.equal(item.msgId, '1');
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', CONV_A)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, true, 'answered by endpoint, as before');
+  assert.deepEqual(ambiguous, [], 'no acknowledgement without msg');
+  assert.equal(b.state, 'active');
+});
+
+const THR = '019f0000-aaaa-7bbb-8ccc-0000000000f1';
+/** A run in CONV_A plus a smart-mode (unmarked) message of a thread under CONV_A, server id 1. */
+function threadGuardHarness() {
+  const acks = [];
+  const h = harness({ replySkipped: () => null, onAmbiguousReply: (conv, o) => acks.push([conv, o?.msgId ?? null]) });
+  const a = h.mkRun('r_0000000a', CONV_A);
+  h.attr.handle(minput('user', omBody(a)));
+  h.attr.handle(minput('queued_command', omBody(null, { conv: CONV_A, endpoint: `${CONV_A}|thread:${THR}|parent:5|msg:1` })));
+  const item = h.attr.turn.queue.find((it) => it.foreign);
+  assert.equal(item.msgId, '1');
+  return { ...h, a, item, acks };
+}
+
+test('1337: a thread message answered with its verbatim endpoint (`|thread:…|msg:`) is acknowledged in the thread', () => {
+  const { attr, item, acks } = threadGuardHarness();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|thread:${THR}|parent:5|msg:1`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, true);
+  assert.deepEqual(acks, [[THR, '1']]);
+});
+
+test('1337: a thread message\'s id sent to the parent conversation (`CONV|msg:`) is not acknowledged', () => {
+  const { attr, item, acks } = threadGuardHarness();
+  attr.handle(toolStart('s1', 'Bash', sendTo('openmax', `${CONV_A}|msg:1`)));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, false);
+  assert.deepEqual(acks, []);
+});
+
+test('1337: a comm CLI send with sourceMessageId to the message\'s own conversation acknowledges it', () => {
+  const { attr, a, ambiguous } = guardHarness({ skipped: () => null });
+  const item = attr.turn.queue.find((it) => it.foreign);
+  attr.handle(toolStart('s1', 'Bash', { command: `node src/cli/comm.js comm.send '{"conversationId":"${CONV_A}","content":"x","sourceMessageId":"1"}'` }));
+  attr.handle(toolEnd('s1', 1));
+  assert.equal(item.answered, true);
+  assert.deepEqual(ambiguous, [CONV_A]);
+  assert.equal(a.state, 'active', 'the run is not answered by it');
+});

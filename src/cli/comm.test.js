@@ -686,6 +686,76 @@ test('comm.send_card / ask_card / ask noRun: no agent_run and no claim, even wit
   }
 });
 
+// ── OPENM-1337: optional sourceMessageId selects that message's run ──
+
+const SRC_A = '7300000000000000132';
+const SRC_B = '7300000000000000133';
+
+/** Two live runs in RUN_CONV (A and B of one merged turn), B focused. */
+async function withMergedRuns(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'om-comm-1337-'));
+  const store = createRunStore({ dir });
+  const t = Date.now();
+  for (const [id, src, i, extra] of [['r_000013a1', SRC_A, 0, {}], ['r_000013b1', SRC_B, 1, { focus: true }]]) {
+    store.writeRun({
+      v: 1, run_id: id, org_id: 'org', conversation_id: RUN_CONV, reply_conversation_id: RUN_CONV, source_message_id: src,
+      created_at: t - 5000 + i, state: 'active', events: [], dropped: 0, next_event: 1, seq: 1, ...extra,
+    });
+  }
+  store.writeActive({ v: 1, by_conversation: { [RUN_CONV]: ['r_000013a1', 'r_000013b1'] }, gate: { org: 'open' } });
+  const prev = process.env.OPENMAX_RUNS_DIR;
+  process.env.OPENMAX_RUNS_DIR = dir;
+  try {
+    return await fn(store);
+  } finally {
+    process.env.OPENMAX_RUNS_DIR = prev;
+  }
+}
+
+test('1337: comm.send / send_card / ask_card / ask with sourceMessageId attach that message\'s run, not the focus; the id is not sent', async () => {
+  const form = {
+    conversationId: RUN_CONV, kind: 'k', askedOf: 'm-owner', title: '两个问题', sourceMessageId: SRC_A,
+    fields: [{ key: 'who', label: '谁来用？', options: ['内部', '外部'] }],
+  };
+  for (const [command, params] of [
+    ['comm.send', { conversationId: RUN_CONV, content: 'A 的答案', sourceMessageId: SRC_A }],
+    ['comm.send_card', plainCard({ sourceMessageId: SRC_A })],
+    ['comm.ask_card', plainCard({ kind: 'k', askedOf: 'm-owner', sourceMessageId: SRC_A })],
+    ['comm.ask', plainCard({ kind: 'k', askedOf: 'm-owner', interactionType: 'choice', sourceMessageId: SRC_A })],
+    ['comm.ask', form],
+  ]) {
+    await withMergedRuns(async (store) => {
+      const { requests } = await runAgainstFlakyServer(command, params, { failures: 0 });
+      const post = requests.find((r) => /\/(messages|interaction-requests)$/.test(r.url));
+      assert.ok(post, command);
+      assert.equal(post.body.agent_run.run_id, 'r_000013a1', command);
+      assert.equal(post.body.agent_run.source_message_id, SRC_A, command);
+      assert.equal(JSON.stringify(post.body).includes('sourceMessageId'), false, command);
+      assert.equal(store.claimExists('r_000013b1'), false, command);
+    });
+  }
+});
+
+test('1337: comm.send with a sourceMessageId no run has → no agent_run, no claim; without one → the focus, as before', async () => {
+  await withMergedRuns(async (store) => {
+    const none = await runAgainstFlakyServer('comm.send', { conversationId: RUN_CONV, content: 'x', sourceMessageId: '7300000000000000160' }, { failures: 0 });
+    assert.equal(none.ok, true);
+    assert.equal('agent_run' in none.requests[0].body, false);
+    assert.equal(store.claimExists('r_000013a1') || store.claimExists('r_000013b1'), false);
+    const dflt = await runAgainstFlakyServer('comm.send', { conversationId: RUN_CONV, content: 'y' }, { failures: 0 });
+    assert.equal(dflt.requests[0].body.agent_run.run_id, 'r_000013b1');
+  });
+});
+
+test('1337: sourceMessageId must be a string of digits — refused before anything is sent', async () => {
+  for (const bad of [7300000000000000132, 'abc', '', true, { id: '1' }]) {
+    const { requests, ok, failure } = await runAgainstFlakyServer('comm.send', { conversationId: RUN_CONV, content: 'x', sourceMessageId: bad }, { failures: 0 });
+    assert.equal(ok, false, JSON.stringify(bad));
+    assert.equal(requests.length, 0);
+    assert.match(JSON.stringify(failure), /sourceMessageId must be/);
+  }
+});
+
 test('noRun must be a boolean', async () => {
   const { requests, ok, failure } = await runAgainstFlakyServer('comm.send', { conversationId: RUN_CONV, content: 'x', noRun: 'yes' }, { failures: 0 });
   assert.equal(ok, false);

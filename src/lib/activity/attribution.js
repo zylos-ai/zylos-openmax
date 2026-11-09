@@ -17,7 +17,13 @@
  *          {"conversationId": …} in the log) → that run is replied; focus is
  *          recomputed by ④. A comm CLI send to a conversation no owner of the
  *          turn replies to counts as ③; one with a literal "noRun": true is
- *          neither a reply nor ③.
+ *          neither a reply nor ③. A reply that names its source message
+ *          (endpoint `|msg:<id>`, or a literal comm CLI "sourceMessageId",
+ *          OPENM-1337) replies only the owner with that source_message_id —
+ *          or answers the merged-in unmarked openmax message with that id
+ *          (once the send succeeds, its arrival record is acknowledged, so the
+ *          group guard is lifted for it) — and never another run (send.js
+ *          selects the same way).
  *       ④ not foreign and every owner in one conversation → the earliest
  *          unreplied owner
  *   - turn end: replied owners → done; the others get 120 s to reply, then
@@ -93,13 +99,24 @@ import { classifyTool } from './classify.js';
 import { isVisibleTool, thinkingBody } from './present.js';
 import { startDetail, endDetail } from './tool-detail.js';
 import { normalizeDetail } from './detail.js';
-import { resolveMarkedRun, normEndpoint, parseMarker, sourceMessageIdFromSpillHead } from './marker.js';
+import { resolveMarkedRun, normEndpoint, parseMarker, sourceMessageIdFromSpillHead, endpointSourceMessageId } from './marker.js';
+import { parseEndpoint } from '../message.js';
 import {
   NO_REPLY_GRACE_MS, ACTIVE_IDLE_TIMEOUT_MS, QUEUED_NO_START_TIMEOUT_MS, REPLY_REF_WINDOW_MS,
   MAX_CONTINUATIONS_PER_TURN,
 } from './constants.js';
 
 const MAX_RUN_EVENTS = 2000;
+
+/** The conversation a reply to `endpoint` goes to (thread wins), as index.js keys the guard. */
+function replyConvOfEndpoint(endpoint) {
+  try {
+    const ep = parseEndpoint(endpoint);
+    return ep.threadConversationId || ep.conversationId;
+  } catch {
+    return null;
+  }
+}
 
 /** A merged-in message that is not a valid openmax run of this host. */
 function foreignItem(seg) {
@@ -520,6 +537,16 @@ export function createAttribution({
       }
     }
     if (!ok) for (const it of entry.items) reopenItem(it);
+    else {
+      // OPENM-1337: a reply that named an unmarked smart-mode message by its id
+      // answered it — acknowledge its arrival record, by identity, as a
+      // guard-deferred reply does (OPENM-1089 ②).
+      for (const it of entry.acks || []) {
+        if (!it.answered) continue;
+        const conv = replyConvOfEndpoint(it.reply?.endpoint);
+        if (conv) try { onAmbiguousReply(conv, { msgId: it.msgId }); } catch {}
+      }
+    }
   }
 
   /** The skip record send.js left for THIS send of `run`, or null. */
@@ -630,26 +657,62 @@ export function createAttribution({
     // foreign message only moves the queue on.
     let unknownExternal = sig.externalUnknown === true;
     const answered = [];
-    const answerItem = (channel, endpoint) => {
+    const answerItem = (channel, endpoint, { idUnknownOnly = false } = {}) => {
       const ne = normEndpoint(endpoint);
       const hits = turn.queue.filter((it) => it.foreign && it.reply
-        && it.reply.channel === channel && normEndpoint(it.reply.endpoint) === ne);
+        && it.reply.channel === channel && normEndpoint(it.reply.endpoint) === ne
+        && !(idUnknownOnly && it.msgId));
       const item = hits.find((it) => !it.answered && !answered.includes(it)) || hits[0];
       if (item && !item.answered && !answered.includes(item)) answered.push(item);
       return !!item;
     };
+    // OPENM-1337: an unmarked openmax message of this turn, by its server id,
+    // in the conversation the reply goes to (an id copied into another
+    // conversation's endpoint answers nothing). The reply named it, so once
+    // the send succeeds its arrival record is acknowledged (the group guard is
+    // lifted for it — see settleSend).
+    const ackedByMsg = [];
+    const sameConv = (a, b) => a != null && b != null && String(a).toLowerCase() === String(b).toLowerCase();
+    const answerItemByMsg = (msgId, destConv) => {
+      const item = turn.queue.find((it) => it.foreign && !it.answered && !answered.includes(it)
+        && it.reply?.channel === 'openmax' && it.msgId === msgId
+        && sameConv(replyConvOfEndpoint(it.reply.endpoint), destConv));
+      if (item) {
+        answered.push(item);
+        ackedByMsg.push(item);
+      }
+      return !!item;
+    };
     const replied = [];
     for (const reply of sig.replies || []) {
+      // The message the reply names (OPENM-1337): exact, never a guess.
+      const src = reply.sourceMessageId || (reply.endpoint ? endpointSourceMessageId(reply.endpoint) : null);
       let match;
       if (reply.endpoint) {
         const ne = normEndpoint(reply.endpoint);
         match = (r) => normEndpoint(r.endpoint) === ne;
       } else if (reply.conversationId) {
         match = (r) => replyConv(r) === reply.conversationId;
-        if (!turn.owners.some(match)) external = unknownExternal = true;
       } else {
         continue;
       }
+      if (src) {
+        const own = (r) => match(r) && r.source_message_id != null && String(r.source_message_id) === src;
+        const run = turn.owners
+          .filter((r) => unreplied(r) && !replied.includes(r) && own(r))
+          .sort((a, b) => a.created_at - b.created_at)[0];
+        if (run) replied.push(run);
+        // A later reply to a message whose run is already answered: nothing
+        // to mark. Otherwise it answers an unmarked (smart-mode) message —
+        // by its id, or one whose id could not be read — and never another
+        // run: send.js attaches no run's card either.
+        else if (turn.owners.some(own)) { /* already replied */ }
+        else if (answerItemByMsg(src, reply.endpoint ? replyConvOfEndpoint(reply.endpoint) : reply.conversationId)) { /* answered by id */ }
+        else if (reply.endpoint) answerItem('openmax', reply.endpoint, { idUnknownOnly: true });
+        else if (!turn.owners.some(match)) external = unknownExternal = true;
+        continue;
+      }
+      if (reply.conversationId && !turn.owners.some(match)) external = unknownExternal = true;
       const run = turn.owners
         .filter((r) => unreplied(r) && !replied.includes(r) && match(r))
         .sort((a, b) => a.created_at - b.created_at)[0];
@@ -697,7 +760,10 @@ export function createAttribution({
         if (it) skipItems[r.run_id] = it;
       }
       sendCalls.set(input.callId, {
-        send: { runIds: replied.map((r) => r.run_id), items: [...marked], skipItems, at: t },
+        send: {
+          runIds: replied.map((r) => r.run_id), items: [...marked], skipItems, at: t,
+          acks: ackedByMsg.filter((it) => marked.includes(it)),
+        },
       });
     }
 

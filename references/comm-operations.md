@@ -78,7 +78,7 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 | Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.send` | Send a message; `content` supports string / markdown / `{text?, attachments}` / a pre-built content object (for images / files) | `{conversationId, content, attachments?, replyTo?, clientMsgId?, mentions?, noRun?}` | `POST /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.send` | Send a message; `content` supports string / markdown / `{text?, attachments}` / a pre-built content object (for images / files) | `{conversationId, content, attachments?, replyTo?, clientMsgId?, mentions?, noRun?, sourceMessageId?}` | `POST /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_messages` | Pull the historical message list (seq-based range) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_message` | Get details of a single message (expands content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
@@ -109,6 +109,8 @@ Attachment rules (enforced client-side; the call fails with an error and nothing
 ⚠️ **Not supported — do not use:** an array of parts (`[{type:"text",...},{type:"image",...}]`) or `{type:"image", body:"<id>"}`. An array `content` is refused with an error (`content cannot be an array`), with or without top-level `attachments`. `{type:"image", body:"<id>"}` is **not** normalized: it is sent as a **text message containing the id** — the call still returns 200, so nothing tells you it went wrong.
 
 `noRun: true` (also accepted by `comm.send_card`, `comm.ask_card` and `comm.ask`) marks a system-originated notice — for example a card a client sends on its own, not in answer to anything. The message carries no `agent_run`, is not attached to any open run, and the run log does not count it as a reply, so an active run is neither closed nor summarized on it. Never use it for an answer to the user. Omitted, the send behaves as before.
+
+`sourceMessageId` (optional, also on `comm.send_card`, `comm.ask_card` and `comm.ask`): when a CLI send does answer a routed message, give that message's `source-message-id` from its `<message-context … source-message-id="…"/>` line, as a string of digits. The activity card attached is then that message's own (no card if it has none) instead of whichever message the plugin would otherwise guess; the id itself is not sent. Answers normally go through the `reply via` command, whose endpoint already names the message (`…|msg:<id>`), so this is only for the rare CLI answer.
 
 `clientMsgId` is used for server-side 5-minute idempotent deduplication; if not provided, `cmsg_<uuid>` is auto-generated. For retries of the same logical message, use the same id.
 
@@ -532,10 +534,11 @@ question turns a redelivered receipt into a no-op instead of a second execution.
 
 `comm.ask_card` is the proactive form. When a message was routed to you, the
 card goes out through the reply command that message printed — the same command
-a text reply uses, with `[CARD]` and the card's JSON as the body:
+a text reply uses, with `[CARD]` and the card's JSON as the body. Copy that
+message's endpoint exactly, `|msg:<id>` included:
 
 ```bash
-node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax '<conv-uuid>' <<'EOF'
+node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax '<endpoint from reply via>' <<'EOF'
 [CARD]{"kind":"component-upgrade","askedOf":"<owner member id>","title":"要升级吗","summary":"openmax · 自动检查 05/19 17:11","text":"openmax 2.20.0 → 2.21.0。升级会重启服务。","options":[{"label":"升级","style":"primary"},"先不升"]}
 EOF
 ```

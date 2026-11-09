@@ -5,6 +5,9 @@
  *   <conversationId>
  *   <conversationId>|reply:<messageId>
  *   <conversationId>|thread:<threadConvId>|parent:<parentMsgId>
+ *   any of the above + `|msg:<sourceMessageId>` (last): the inbound message
+ *   this endpoint answers (OPENM-1337). It is not a quote (`reply:` is): it
+ *   only tells the send path which run the reply belongs to.
  *
  * The conversation type ([OPENMAX DM]/[OPENMAX GROUP]/[OPENMAX THREAD]) is NOT part of
  * the target: send.js routes purely off the conversation id plus the
@@ -52,7 +55,7 @@ export function newClientMsgId() {
  * Parse a C4 endpoint string into structured fields.
  *
  * Accepts two forms:
- *   - minimal (current):  `<conversationId>[|reply:..][|thread:..][|parent:..]`
+ *   - minimal (current):  `<conversationId>[|reply:..][|thread:..][|parent:..][|msg:..]`
  *   - legacy:             `[OPENMAX TYPE]/<conversationId>[|...]` (or older `[COCO TYPE]/`) (prefix stripped)
  *
  * The leading conversation id is whatever precedes the first `|`. The type
@@ -60,8 +63,12 @@ export function newClientMsgId() {
  * the conversation id and the reply/thread/parent suffixes.
  *
  * @param {string} endpoint
+ * `msg:<id>` (OPENM-1337) names the inbound message the reply answers; it
+ * becomes `sourceMessageId` and changes no routing. Unknown keys are ignored.
+ *
  * @returns {{type:string, conversationId:string, replyTo?:string,
- *            threadConversationId?:string, parentMessageId?:string}}
+ *            threadConversationId?:string, parentMessageId?:string,
+ *            sourceMessageId?:string}}
  */
 export function parseEndpoint(endpoint) {
   let rest = (endpoint || '').trim();
@@ -85,6 +92,7 @@ export function parseEndpoint(endpoint) {
     if (k === 'reply')  result.replyTo = v;
     else if (k === 'thread') result.threadConversationId = v;
     else if (k === 'parent') result.parentMessageId = v;
+    else if (k === 'msg' && v.trim()) result.sourceMessageId = v.trim();
   }
   // `type` is retained for callers that inspect it, but is not used for
   // routing. Prefer the legacy hint; otherwise infer from the suffixes.
@@ -95,12 +103,14 @@ export function parseEndpoint(endpoint) {
 /**
  * Build a C4 endpoint string (the `reply via` target) from structured fields.
  *
- * Emits the minimal form — conversation id plus reply/thread/parent suffixes.
+ * Emits the minimal form — conversation id plus reply/thread/parent suffixes,
+ * and `|msg:<sourceMessageId>` last when given (OPENM-1337).
  * The conversation type is intentionally omitted (see parseEndpoint): it was
  * never consulted by the send path. `ep.type` is accepted but ignored.
  *
  * @param {{type?:string, conversationId:string, replyTo?:string,
- *          threadConversationId?:string, parentMessageId?:string}} ep
+ *          threadConversationId?:string, parentMessageId?:string,
+ *          sourceMessageId?:string}} ep
  */
 export function formatEndpoint(ep) {
   if (!ep?.conversationId) throw new Error('formatEndpoint: conversationId required');
@@ -108,6 +118,7 @@ export function formatEndpoint(ep) {
   if (ep.replyTo)              s += `|reply:${ep.replyTo}`;
   if (ep.threadConversationId) s += `|thread:${ep.threadConversationId}`;
   if (ep.parentMessageId)      s += `|parent:${ep.parentMessageId}`;
+  if (ep.sourceMessageId)      s += `|msg:${ep.sourceMessageId}`;
   return s;
 }
 

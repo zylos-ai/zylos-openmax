@@ -380,3 +380,172 @@ test('1089-①: a continuation listed with focus is selected over its closed par
   assert.equal('continues' in p.firstAgentRun, false, 'agent_run shape unchanged (no new field)');
   assert.equal(classifyAgentRun({ raw: p.firstAgentRun }).verdict, 'ok');
 });
+
+// ── OPENM-1337: the reply names its source message (`|msg:<id>`) ──
+// Incident shapes (INT 「神奇3侠」, 11-05): two @s A and B merged into one turn;
+// the agent read B first (B focused), then answered A, then B.
+
+const SRC_A = '7300000000000000132';
+const SRC_B = '7300000000000000133';
+const planSrc = (s, sourceMessageId, body = 'hello', now = T0 + 5000) => planReplyMetadata({
+  convId: CONV, sourceMessageId, kind: 'text', bodyHash: body, newKey: s.newKey, now, store: s.store,
+});
+const mergedAB = (over = {}) => setup({
+  runs: [
+    { run_id: 'r_0000000a', source_message_id: SRC_A, endpoint: `${CONV}|msg:${SRC_A}` },
+    { run_id: 'r_0000000b', source_message_id: SRC_B, endpoint: `${CONV}|msg:${SRC_B}`, focus: true },
+  ],
+  ...over,
+});
+
+test('1337 ①: B focused, the reply names A → A\'s run (not the focus); naming B → B\'s run', () => {
+  const s = mergedAB();
+  const active = s.store.readActive();
+  assert.equal(selectRun({ store: s.store, active, convId: CONV, sourceMessageId: SRC_A }).run.run_id, 'r_0000000a');
+  assert.equal(selectRun({ store: s.store, active, convId: CONV, sourceMessageId: SRC_B }).run.run_id, 'r_0000000b');
+  assert.equal(selectRun({ store: s.store, active, convId: CONV }).run.run_id, 'r_0000000b', 'no msg: focus, as before');
+});
+
+test('1337 ②: A then B answered in turn — each reply claims its own run and carries its own full agent_run', () => {
+  const s = mergedAB();
+  const pa = planSrc(s, SRC_A, 'answer A');
+  assert.equal(pa.runId, 'r_0000000a');
+  assert.equal(pa.firstAgentRun.run_id, 'r_0000000a');
+  assert.equal(pa.firstAgentRun.source_message_id, SRC_A);
+  pa.settle('ok');
+  const pb = planSrc(s, SRC_B, 'answer B', T0 + 6000);
+  assert.equal(pb.runId, 'r_0000000b');
+  assert.equal(pb.firstAgentRun.run_id, 'r_0000000b');
+  assert.equal(pb.firstAgentRun.source_message_id, SRC_B);
+  assert.ok(Array.isArray(pb.firstAgentRun.steps), 'B gets its full card, not a reference');
+  assert.equal(classifyAgentRun({ raw: pb.firstAgentRun }).verdict, 'ok');
+  assert.equal(s.store.readSendStats().agent_run_source_matched, 2);
+  assert.equal(s.store.readSendStats().agent_run_attached, 2);
+});
+
+test('1337 ②: answered in the other order (B, then A) — still each its own run', () => {
+  const s = mergedAB();
+  planSrc(s, SRC_B, 'answer B').settle('ok');
+  const pa = planSrc(s, SRC_A, 'answer A', T0 + 6000);
+  assert.equal(pa.runId, 'r_0000000a');
+  assert.equal(pa.firstAgentRun.source_message_id, SRC_A);
+});
+
+test('1337 ③: smart group, an unregistered input after A\'s run — a reply naming A still gets A\'s card (no guard)', () => {
+  const s = setup({
+    runs: [{ run_id: 'r_0000000a', source_message_id: SRC_A }, { run_id: 'r_0000000b', source_message_id: SRC_B }],
+    unregistered: T0 + 500,
+  });
+  assert.equal(plan(s), null, 'no msg: the guard still skips, as before');
+  assert.equal(s.store.readSkip('r_0000000a')?.unreg, T0 + 500);
+  const sk = setup({
+    runs: [{ run_id: 'r_0000000a', source_message_id: SRC_A }, { run_id: 'r_0000000b', source_message_id: SRC_B }],
+    unregistered: T0 + 500,
+  });
+  const pa = planSrc(sk, SRC_A);
+  assert.equal(pa.firstAgentRun.run_id, 'r_0000000a');
+  assert.ok(pa.firstAgentRun.steps);
+  const pb = planSrc(sk, SRC_B, 'b', T0 + 6000);
+  assert.equal(pb.firstAgentRun.run_id, 'r_0000000b');
+  assert.ok(pb.firstAgentRun.steps);
+  assert.equal(sk.store.readSkip('r_0000000a'), null, 'no skip file: nothing was skipped');
+  assert.equal(sk.store.readSendStats().agent_run_skipped_unregistered, undefined);
+});
+
+test('1337 ④: the reply names a message with no run (unregistered smart message) → no agent_run, no claim, counted; never another run', () => {
+  const s = mergedAB();
+  const UNREG = '7300000000000000160';
+  const sel = selectRun({ store: s.store, active: s.store.readActive(), convId: CONV, sourceMessageId: UNREG });
+  assert.deepEqual(sel, { run: null, skipped: 'agent_run_skipped_no_source_run' });
+  assert.equal(planSrc(s, UNREG), null);
+  assert.equal(s.store.claimExists('r_0000000a'), false);
+  assert.equal(s.store.claimExists('r_0000000b'), false);
+  assert.equal(s.store.readSkip('r_0000000a'), null, 'no skip file');
+  assert.equal(s.store.readSendStats().agent_run_skipped_no_source_run, 1);
+  // The run named, but closed past the window / gone from the list: same.
+  const gone = setup({ runs: [{ run_id: 'r_0000000b', source_message_id: SRC_B, focus: true }] });
+  assert.equal(planSrc(gone, SRC_A), null);
+  assert.equal(gone.store.claimExists('r_0000000b'), false);
+});
+
+test('1337 ⑤: no msg → unchanged (focus first, else earliest unclaimed, else the reference of the latest)', () => {
+  const s = mergedAB();
+  assert.equal(plan(s).runId, 'r_0000000b');
+  const s2 = setup({ runs: [{ run_id: 'r_0000000a', source_message_id: SRC_A }, { run_id: 'r_0000000b', source_message_id: SRC_B }] });
+  plan(s2, 'one').settle('ok');
+  assert.equal(plan(s2, 'two').runId, 'r_0000000b');
+  assert.equal(s2.store.readSendStats().agent_run_source_matched, undefined);
+});
+
+test('1337 ⑥: parent closed on its reply + a focused continuation of the same message → the continuation', () => {
+  const s = setup({
+    runs: [
+      { run_id: 'r_0000000a', source_message_id: SRC_A, state: 'closed', closed_on_reply: true, ended_at: T0 + 2000 },
+      { run_id: 'r_0000000b', source_message_id: SRC_B },
+      { run_id: 'r_0000000c', source_message_id: SRC_A, continues: 'r_0000000a', segment: 2 },
+    ],
+  });
+  s.store.createClaim('r_0000000a', { v: 2, state: 'delivered', client_msg_id: 'c_old' });
+  const p = planSrc(s, SRC_A, 'final', T0 + 6000);
+  assert.equal(p.runId, 'r_0000000c', 'newest unclaimed of A — not B, the earliest unclaimed overall');
+  assert.ok(Array.isArray(p.firstAgentRun.steps));
+  const f = setup({
+    runs: [
+      { run_id: 'r_0000000a', source_message_id: SRC_A, state: 'closed', closed_on_reply: true, ended_at: T0 + 2000 },
+      { run_id: 'r_0000000c', source_message_id: SRC_A, continues: 'r_0000000a', segment: 2, focus: true },
+    ],
+  });
+  f.store.createClaim('r_0000000a', { v: 2, state: 'delivered', client_msg_id: 'c_old' });
+  assert.equal(planSrc(f, SRC_A, 'final', T0 + 6000).runId, 'r_0000000c');
+});
+
+test('1337 ⑦: a second reply to the same message, its run claimed and still in the window → the reference form', () => {
+  const ended = T0 + 4000;
+  const s = setup({
+    runs: [
+      { run_id: 'r_0000000a', source_message_id: SRC_A, state: 'closed', closed_on_reply: true, ended_at: ended },
+      { run_id: 'r_0000000b', source_message_id: SRC_B },
+    ],
+  });
+  s.store.createClaim('r_0000000a', { v: 2, state: 'delivered', client_msg_id: 'c_k0', body_sha256: 'h0', kind: 'text' });
+  const p = planSrc(s, SRC_A, 'more on A', ended + 30_000);
+  assert.deepEqual(p.firstAgentRun, { schema_version: 3, run_id: 'r_0000000a', ref: true });
+  assert.equal(s.store.claimExists('r_0000000b'), false, 'B is left for its own answer');
+});
+
+test('1337: a card and a comm.send body naming the source attach that message\'s run', () => {
+  const s = mergedAB();
+  const req = card();
+  attachRunToCardRequest({ convId: CONV, sourceMessageId: SRC_A, request: req, now: T0 + 5000, store: s.store });
+  assert.equal(req.agent_run.run_id, 'r_0000000a');
+  assert.equal(req.agent_run.source_message_id, SRC_A);
+  const msg = { client_msg_id: 'cm_t', type: 'AGENT_TEXT', content: { content_type: 'text', body: { text: 'hi' }, attachments: [] } };
+  attachRunMetadata({ convId: CONV, sourceMessageId: SRC_B, kind: 'text', body: msg, bodyHash: 'h', now: T0 + 6000, store: s.store });
+  assert.equal(msg.agent_run.run_id, 'r_0000000b');
+  assert.equal(Object.keys(msg).includes('sourceMessageId'), false, 'nothing new on the wire body');
+  const none = card({ client_msg_id: 'cm_x' });
+  attachRunToCardRequest({ convId: CONV, sourceMessageId: '7300000000000000999', request: none, now: T0 + 7000, store: s.store });
+  assert.equal('agent_run' in none, false);
+  const n = mergedAB();
+  noteCardReply({ convId: CONV, sourceMessageId: SRC_A, store: n.store });
+  assert.equal(n.store.formCardExists('r_0000000a'), true);
+  assert.equal(n.store.formCardExists('r_0000000b'), false);
+});
+
+test('1337 rule 1: two unclaimed runs of the same message, none focused → the newest (the continuation), not the oldest', () => {
+  // The parent's earlier reply was refused (claim released), so parent and
+  // continuation are both unclaimed; B, another message, holds the focus.
+  const s = setup({
+    runs: [
+      { run_id: 'r_0000000a', source_message_id: SRC_A, state: 'closed', closed_on_reply: true, ended_at: T0 + 2500 },
+      { run_id: 'r_0000000b', source_message_id: SRC_B, focus: true },
+      { run_id: 'r_0000000c', source_message_id: SRC_A, continues: 'r_0000000a', segment: 2 },
+    ],
+  });
+  const sel = selectRun({ store: s.store, active: s.store.readActive(), convId: CONV, sourceMessageId: SRC_A, now: T0 + 6000 });
+  assert.equal(sel.run.run_id, 'r_0000000c');
+  const p = planSrc(s, SRC_A, 'final', T0 + 6000);
+  assert.equal(p.runId, 'r_0000000c');
+  assert.ok(Array.isArray(p.firstAgentRun.steps));
+  assert.equal(s.store.claimExists('r_0000000a'), false);
+});

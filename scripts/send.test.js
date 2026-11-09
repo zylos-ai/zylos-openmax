@@ -200,3 +200,103 @@ test('agent activity: 422 releases the claim', async () => {
   }
   assert.equal(fs.existsSync(path.join(RUNS_DIR, 'r_0000dddd.reply')), false);
 });
+
+// ── OPENM-1337: the reply via endpoint names the source message (`|msg:<id>`) ──
+
+const SRC_A = '7300000000000000132';
+const SRC_B = '7300000000000000133';
+
+/** Two live runs of one group (A and B merged into a turn), B focused — the incident shape. */
+function writeMergedRuns(conv) {
+  fs.mkdirSync(RUNS_DIR, { recursive: true });
+  for (const f of fs.readdirSync(RUNS_DIR)) fs.rmSync(path.join(RUNS_DIR, f));
+  const t = Date.now();
+  const run = (id, src, i, extra = {}) => fs.writeFileSync(path.join(RUNS_DIR, `${id}.json`), JSON.stringify({
+    v: 1, run_id: id, org_id: 'org-test', conversation_id: conv, reply_conversation_id: conv,
+    source_message_id: src, endpoint: `${conv}|msg:${src}`,
+    created_at: t - 5000 + i, state: 'active', next_event: 1, dropped: 0, events: [], ...extra,
+  }));
+  run('r_000013a0', SRC_A, 0);
+  run('r_000013b0', SRC_B, 1, { focus: true });
+  fs.writeFileSync(path.join(RUNS_DIR, 'active.json'), JSON.stringify({
+    v: 1, by_conversation: { [conv]: ['r_000013a0', 'r_000013b0'] }, gate: { 'org-test': 'open' },
+  }));
+}
+
+test('1337: each reply via its own `|msg:` claims its own run (B focused); the wire body gains no field', async () => {
+  const conv = 'conv-1337-text';
+  writeMergedRuns(conv);
+  const { server, posts, port } = await startScriptedServer();
+  try {
+    for (const [ep, text] of [[`${conv}|msg:${SRC_A}`, 'answer A'], [`${conv}|msg:${SRC_B}`, 'answer B'], [`${conv}|msg:7300000000000000160`, 'smart']]) {
+      const { code, stderr } = await runSend(port, ep, text);
+      assert.equal(code, 0, stderr);
+    }
+  } finally {
+    server.close();
+  }
+  const sends = posts.filter((p) => p.url === `/api/v1/conversations/${conv}/messages`);
+  assert.equal(sends.length, 3, 'the msg segment does not change the target');
+  assert.equal(sends[0].body.agent_run.run_id, 'r_000013a0');
+  assert.equal(sends[0].body.agent_run.source_message_id, SRC_A);
+  assert.equal(sends[1].body.agent_run.run_id, 'r_000013b0');
+  assert.equal(sends[1].body.agent_run.source_message_id, SRC_B);
+  assert.ok(Array.isArray(sends[1].body.agent_run.steps), 'B gets its own full card');
+  assert.equal('agent_run' in sends[2].body, false, 'a message with no run: no card at all');
+  for (const { body } of sends) {
+    assert.deepEqual(Object.keys(body).filter((k) => k !== 'agent_run').sort(), ['client_msg_id', 'content', 'type'], 'no parent_id, no msg field');
+  }
+  const stats = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, 'send-stats.json'), 'utf8'));
+  assert.equal(stats.agent_run_source_matched, 2);
+  assert.equal(stats.agent_run_skipped_no_source_run, 1);
+});
+
+test('1337: [CARD] via `|msg:A` carries A\'s run while B is focused', async () => {
+  const conv = 'conv-1337-card';
+  writeMergedRuns(conv);
+  const card = { kind: 'k', askedOf: 'm-owner', title: '确认?', text: '要继续吗', options: ['是', '否'] };
+  const { server, posts, port } = await startScriptedServer();
+  try {
+    await runSend(port, `${conv}|msg:${SRC_A}`, `[CARD]${JSON.stringify(card)}`);   // the stub returns no action_ids: fails after the POST
+  } finally {
+    server.close();
+  }
+  const post = posts.find((p) => p.url === `/api/v1/conversations/${conv}/interaction-requests`);
+  assert.ok(post, 'the card was posted');
+  assert.equal(post.body.agent_run.run_id, 'r_000013a0');
+  assert.equal(fs.existsSync(path.join(RUNS_DIR, 'r_000013b0.reply')), false);
+});
+
+test('1337: [MEDIA:file] via `|msg:A` carries A\'s run while B is focused', async () => {
+  const conv = 'conv-1337-media';
+  writeMergedRuns(conv);
+  const file = path.join(tmpHome, 'report-1337.txt');
+  fs.writeFileSync(file, 'weekly numbers');
+  const posts = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (d) => { raw += d; });
+    req.on('end', () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.method === 'POST') posts.push({ url: req.url, body });
+      let out = { id: `m${posts.length}` };
+      if (req.url.endsWith('/uploads/prepare')) out = { upload_token: 'tok', instant_upload: true };
+      else if (req.url.endsWith('/uploads/finalize')) out = { media_id: 'med-1', artifact_id: 'art-1' };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(out));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { code, stderr } = await runSend(server.address().port, `${conv}|msg:${SRC_A}`, `[MEDIA:file]${file}`);
+    assert.equal(code, 0, stderr);
+  } finally {
+    server.close();
+  }
+  const send = posts.find((p) => p.url === `/api/v1/conversations/${conv}/messages`);
+  assert.ok(send, 'the media message was posted');
+  assert.equal(send.body.type, 'FILE');
+  assert.equal(send.body.agent_run.run_id, 'r_000013a0');
+  assert.equal(send.body.agent_run.source_message_id, SRC_A);
+  assert.equal(fs.existsSync(path.join(RUNS_DIR, 'r_000013b0.reply')), false, 'B is left for its own answer');
+});
