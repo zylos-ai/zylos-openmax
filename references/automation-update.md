@@ -136,6 +136,13 @@ When the read has `spec.unattached: true`, its `project_id` is the Inbox or the
 Owner's hidden private project: skip the `core.project_members` traversal for
 B; Core validates B against that project at proposal and mutation, and a
 rejection stops the transfer.
+Likewise, when the confirmed spec moves the automation to no project in the
+same handoff (`unattached: true` and no `project_id`, even though the read
+still shows `unattached: false` and the old project), there is no confirmed
+project to traverse: skip the `core.project_members` traversal for B and never
+fall back to the old project. Core no longer requires membership in the
+original project (OPENM-1301) and validates B against the target (Inbox or
+hidden private project) at proposal and mutation; a rejection stops the transfer.
 A rejected or unavailable directory read
 stops before confirmation; do not add project membership, upgrade Agents or change flags.
 Core enforces B's runtime readiness through server-side admission at proposal
@@ -144,7 +151,11 @@ invent a readiness endpoint. A server admission rejection stops the transfer;
 never substitute the requesting Agent's readiness for B's.
 Check `automation.eligibility {org,memberId:<requesting A>,operation:"lead_change",projectId:<confirmed project>}`
 (target named as in [Replacement eligibility](#replacement-eligibility))
-and require `status:"supported"` before proposing the transfer. Ordinary update
+and require `status:"supported"` before proposing the transfer. Known limitation:
+for a confirmed spec with `unattached: true` and `unattached_scope: "private"`,
+Core resolves the hidden private project only for human callers, so this Agent
+eligibility check returns a rejection; stop and tell the Owner to make that
+change in the automation editor instead. Ordinary update
 eligibility is not evidence of Lead-change compatibility. Unknown operation,
 unsupported version, unavailable or stale capability data stops this transfer;
 never fall back to `operation:"update"` to bypass this compatibility check.
