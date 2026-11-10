@@ -78,7 +78,7 @@ Manage group membership **after** creation. cws-core derives the caller from the
 
 | Status | Command | Description | Input | Real Endpoint |
 | --- | --- | --- | --- | --- |
-| ✅ | `comm.send` | Send a message; `content` supports string / markdown / `{text?, attachments}` / a pre-built content object (for images / files) | `{conversationId, content, attachments?, replyTo?, clientMsgId?, mentions?, noRun?, sourceMessageId?}` | `POST /api/v1/conversations/{id}/messages` |
+| ✅ | `comm.send` | Send a message; `content` supports string / markdown / `{text?, attachments}` / a pre-built content object (for images / files) | `{conversationId, content, type?, attachments?, replyTo?, clientMsgId?, mentions?, metadata?, fallback_text?, noRun?, sourceMessageId?}` | `POST /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_messages` | Pull the historical message list (seq-based range) | `{conversationId, afterSeq?, beforeSeq?, limit?}` | `GET /api/v1/conversations/{id}/messages` |
 | ✅ | `comm.get_message` | Get details of a single message (expands content) | `{conversationId, messageId}` | `GET /api/v1/conversations/{id}/messages/{message_id}` |
 
@@ -111,6 +111,23 @@ Attachment rules (enforced client-side; the call fails with an error and nothing
 `noRun: true` (also accepted by `comm.send_card`, `comm.ask_card` and `comm.ask`) marks a system-originated notice — for example a card a client sends on its own, not in answer to anything. The message carries no `agent_run`, is not attached to any open run, and the run log does not count it as a reply, so an active run is neither closed nor summarized on it. Never use it for an answer to the user. Omitted, the send behaves as before.
 
 `sourceMessageId` (optional, also on `comm.send_card`, `comm.ask_card` and `comm.ask`): when a CLI send does answer a routed message, give that message's `source-message-id` from its `<message-context … source-message-id="…"/>` line, as a string of digits. The activity card attached is then that message's own (no card if it has none) instead of whichever message the plugin would otherwise guess; the id itself is not sent. Answers normally go through the `reply via` command, whose endpoint already names the message (`…|msg:<id>`), so this is only for the rare CLI answer.
+
+`metadata` and `fallback_text` (optional, `comm.send` only) are passed to the send-message body unchanged — for example a structured message with its own `content_type` that older clients and the conversation list cannot render:
+
+```bash
+node src/cli/comm.js comm.send '{
+  "conversationId":"<conv-uuid>",
+  "type":"AGENT_STRUCTURED",
+  "content":{"content_type":"<your.content_type>","body":{ ... }},
+  "metadata":{"wf_ref":{"workflow_id":"<id>","run_id":"<id>"}},
+  "fallback_text":"Workflow run finished: 3 steps, all succeeded"
+}'
+```
+
+- `metadata` must be a plain JSON object (an array, `null`, a string or a number is refused). Keys are not filtered, with one exception: **`metadata.context` is reserved** — the platform stamps the message context there — and a send carrying it (any value, `null` included) is refused. The CLI adds no metadata key of its own (`agent_run` is a separate top-level field), so what you pass is what is sent. The platform's metadata governance is about to land; platform-defined keys and the reserved set may change with it, so do not depend on keys you did not put there yourself.
+- `fallback_text` (camel-case alias `fallbackText`) must be a string of at most **8192 UTF-8 bytes** (cws-comm's limit — bytes, not characters: about 2730 Chinese characters). It is the plain-text preview / fallback for clients that do not understand the message type.
+- Each may be given once: top-level, or inside an advanced pre-built `body` — never both. Invalid values are refused before anything is sent. Omitted, the body is exactly what it was before.
+- The card verbs (`comm.send_card`, `comm.ask_card`, `comm.ask`) have neither field — interaction-requests does not take them — and refuse both.
 
 `clientMsgId` is used for server-side 5-minute idempotent deduplication; if not provided, `cmsg_<uuid>` is auto-generated. For retries of the same logical message, use the same id.
 
