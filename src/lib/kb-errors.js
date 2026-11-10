@@ -3,12 +3,15 @@
  * into a deleted or unknown knowledge base for what it is.
  *
  * Since cws-kb !290, creating a page in a knowledge base that does not exist
- * or was deleted (trashed) is refused with NotFound. cws-core answers it on
- * `kb.page_create` as 404 `KB_NOT_FOUND` with `meta.kb_id`; a cws-core without
- * that code answers a plain 404 (`KB_ERROR`). Either way it is an answer about
- * the knowledge base, never "gateway not connected": the Agent must stop
- * writing there and ask the owner to pick or re-create a knowledge base (or
- * update the project's / automation's knowledge base).
+ * or was deleted (trashed) is refused with NotFound; a knowledge base the
+ * caller can no longer see (e.g. access revoked) answers the same. cws-core
+ * answers it on `kb.page_create` as 404 `KB_NOT_FOUND` with `meta.kb_id`; a
+ * cws-core without that code answers a plain 404 (`KB_ERROR`). Either way it is
+ * an answer about the knowledge base, never "gateway not connected": the Agent
+ * must stop writing there and ask the owner to restore its access, pick or
+ * re-create a knowledge base, or update the project's / automation's knowledge
+ * base. A 404 without a cws-core error body is not that answer (it can be a
+ * proxy or a wrong base URL), so it only gets a hint to check with kb.get.
  *
  * Returned fields (all optional, added next to `error` / `status`):
  *   code  — cws-core's stable error code, when the response carried one
@@ -18,24 +21,36 @@
 
 export const KB_NOT_FOUND = 'KB_NOT_FOUND';
 
+const OWNER_OPTIONS = 'ask them to restore your access to it, pick or re-create a knowledge base, or update the project\'s (or automation\'s) knowledge base';
+const RUN_RESULT = 'In an automation run, say this in the run result: the result is the notification, do not send a separate message.';
+
 export function kbGoneHint(kbId) {
   const which = kbId ? `Knowledge base ${kbId}` : 'The knowledge base';
-  return `${which} was deleted or does not exist, so nothing was written. `
+  return `${which} was deleted, does not exist, or you can no longer access it, so nothing was written. `
     + 'This is not "gateway not connected" or a temporary outage: do not retry the same knowledge base and do not switch to another one on your own. '
-    + 'Tell the owner the knowledge base was deleted or does not exist and ask them to pick or re-create a knowledge base, or to update the project\'s (or automation\'s) knowledge base.';
+    + `Tell the owner the knowledge base was deleted, does not exist or is no longer accessible to you, and ${OWNER_OPTIONS}. `
+    + 'If only your access is gone, the documents are still in that knowledge base: restoring your access is the fix, not a new knowledge base. '
+    + RUN_RESULT;
 }
 
 function parentHint(kbId, parentId) {
   const which = kbId ? `knowledge base ${kbId}` : 'the knowledge base';
-  return `Not found: either ${which} was deleted or does not exist, or the parent folder ${parentId} no longer exists. `
-    + 'This is not "gateway not connected". Run kb.get with this kbId: if it is also 404, the knowledge base is gone '
-    + '(tell the owner and ask them to pick or re-create a knowledge base, or to update the project\'s or automation\'s knowledge base; do not retry it or switch to another one on your own); '
+  return `Not found: either ${which} was deleted, does not exist or is no longer accessible to you, or the parent folder ${parentId} no longer exists. `
+    + 'This is not "gateway not connected". Run kb.get with this kbId: if it is also 404, the knowledge base is gone or no longer accessible to you '
+    + `(tell the owner and ${OWNER_OPTIONS}; do not retry it or switch to another one on your own); `
     + 'if it succeeds, the parent folder is gone: re-read the tree and use an existing folder.';
 }
 
-const RESTORE_HINT = 'Not found: the page is no longer in the trash, or the knowledge base it belongs to was deleted '
+const RESTORE_HINT = 'Not found: the page is no longer in the trash, or the knowledge base it belongs to was deleted or is no longer accessible to you '
   + '(a page cannot be restored into a deleted knowledge base). This is not "gateway not connected". '
-  + 'Check kb.pages_trashed; if the knowledge base was deleted, tell the owner instead of retrying.';
+  + 'Check kb.pages_trashed; if the knowledge base was deleted or you lost access to it, tell the owner instead of retrying.';
+
+function noEnvelopeHint(kbId) {
+  const which = kbId ? `knowledge base ${kbId}` : 'the knowledge base';
+  return 'Not found, but the response had no cws-core error body, so it may come from a proxy or a wrong server URL rather than from cws-core. '
+    + `Run kb.get with this kbId: if cws-core answers 404 there, ${which} was deleted, does not exist or is no longer accessible to you (tell the owner and ${OWNER_OPTIONS}); `
+    + 'if kb.get also fails without a cws-core error body, report a connection or configuration problem instead, and do not tell the owner the knowledge base was deleted.';
+}
 
 function str(value) {
   return typeof value === 'string' && value !== '' ? value : undefined;
@@ -54,6 +69,15 @@ export function kbErrorDetails(command, params, err) {
     return out;
   }
   if (err?.status !== 404) return out;
+
+  if (!envelope) {
+    // Not cws-core's answer: only point at the check, never "the KB is gone".
+    if (command === 'kb.page_create' || command === 'kb.page_restore_trash') {
+      if (kbId && command === 'kb.page_create') out.kbId = kbId;
+      out.hint = noEnvelopeHint(command === 'kb.page_create' ? kbId : undefined);
+    }
+    return out;
+  }
 
   if (command === 'kb.page_create') {
     if (kbId) out.kbId = kbId;

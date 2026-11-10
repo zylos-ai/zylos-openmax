@@ -143,13 +143,16 @@ to resolve this uncertainty. Preserve the terminal-run safeguards below.
    not permission to switch to another KB.
    A `kb.page_create` into the recorded KB answered 404 `KB_NOT_FOUND` (or a
    plain 404; the KB CLI adds `kbId` and `hint`) means that knowledge base was
-   deleted or does not exist; the Project can still point to a deleted KB.
+   deleted, does not exist or is no longer accessible to the Agent; the Project
+   can still point to a deleted KB.
    This is that blocker, not "gateway not connected" or a temporary outage: do
    not retry it or write elsewhere. Finish the run truthfully (`failed`, or
    `partial` only under step 4's rules) and say in the result that the knowledge
-   base `<kbId>` was deleted or does not exist and that the Owner should pick or
+   base `<kbId>` was deleted, does not exist or is no longer accessible to the
+   Agent, and that the Owner should restore the Agent's access, pick or
    re-create a knowledge base, or update the automation's or project's
-   knowledge base. See SKILL.md "Writing into a deleted knowledge base".
+   knowledge base. The run result is the notification: do not send a separate
+   message about it. See SKILL.md "Writing into a deleted knowledge base".
    Do not repeat new-Issue intake or KB approval for these runs or their verified
    linked revisions. A missing or inaccessible configured resource is a genuine
    blocker; do not invent a replacement or silently change the binding.

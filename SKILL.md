@@ -733,7 +733,7 @@ The following are the **hard actions** for every Issue-backed task from start to
 | Worker creating a new Attempt on its own to retry | Report the failure, wait for the Lead to decide |
 | CreateTask missing projectId or issueId | Both are required; the path identifies the Task by both project and issue |
 | Repeatedly retrying a ⏳ command | 501, or 404 from a command marked ⏳ → degrade to the conversation flow (see "API Degradation"); a 404 from an available command is an answer about the resource, never "gateway not connected" |
-| Reporting a KB page write's 404 / `KB_NOT_FOUND` as "gateway not connected" / "temporarily unsupported", retrying it, or quietly writing to another KB | The knowledge base was deleted or doesn't exist: stop writing there and ask the owner to pick or re-create a KB, or update the project's (or automation's) KB (see "Writing into a deleted knowledge base") |
+| Reporting a KB page write's 404 / `KB_NOT_FOUND` as "gateway not connected" / "temporarily unsupported", retrying it, or quietly writing to another KB | The knowledge base was deleted, doesn't exist or is no longer accessible to you: stop writing there and ask the owner to restore your access, pick or re-create a KB, or update the project's (or automation's) KB (see "Writing into a deleted knowledge base") |
 | The human provided a Project ID but you still create a Project | Use the ID the human gave directly, do not project.create to re-create |
 | Posting a file download URL (from `as.url` / `as.resolve`) into a chat message, delivery, comment, KB page or memory | Download URLs are short-lived and may be single-use, for this agent's own immediate fetch only. To read a file, `as.download` it and work on the local copy; to give a person a file, attach it by `artifactId` or use a durable link (`references/automation-delivery.md#durable-artifact-links`) |
 | Calling the TM/KB/AS API directly with curl/fetch / hand-rolling BFF REST paths | Always go through the CLI `src/cli/{tm,kb,as,comm,core,channel,usage}.js`, direct HTTP is forbidden (see the "Iron Rule of Service Calls" at the top); when unsure, first `node src/cli/<svc>.js` to see the commands or check the ops docs, do not guess paths |
@@ -766,11 +766,11 @@ Any other 404 is an answer about the resource, not a missing gateway: the Projec
 
 #### Writing into a deleted knowledge base
 
-`kb.page_create` answered 404 with `code: "KB_NOT_FOUND"` means the knowledge base was deleted or doesn't exist, and nothing was written. A cws-core without that code answers a plain 404; the KB CLI then still adds `kbId` and a `hint` with the same meaning (when you passed a parent folder, the `hint` asks you to run `kb.get {kbId}` first: 404 there means the knowledge base is gone, otherwise only the parent folder is). A Project's or Issue's recorded KB can be deleted while the Project still points to it. When the knowledge base is gone:
+`kb.page_create` answered 404 with `code: "KB_NOT_FOUND"` means the knowledge base was deleted, doesn't exist or is no longer accessible to you (for example your access was revoked), and nothing was written. A cws-core without that code answers a plain 404; the KB CLI then still adds `kbId` and a `hint` with the same meaning (when you passed a parent folder, the `hint` asks you to run `kb.get {kbId}` first: 404 there means the knowledge base is gone or not accessible to you, otherwise only the parent folder is). A 404 without a cws-core error body is not this answer (it can come from a proxy or a wrong server URL); the `hint` then asks you to check with `kb.get {kbId}` before telling anyone the knowledge base is gone. A Project's or Issue's recorded KB can be deleted while the Project still points to it. When the knowledge base is gone or no longer accessible:
 
 1. Stop writing there: do not retry the same `kbId`, and do not switch to another KB or the Project's current default on your own
-2. Tell the owner plainly: the knowledge base `<kbId>` was deleted or doesn't exist; ask them to pick or re-create a knowledge base, or to update the project's (or automation's) knowledge base
-3. Treat it as a blocker for the output that needed that KB (an automation run reports it in its result; see `references/automation-delivery.md`), and continue once the owner names a knowledge base
+2. Tell the owner plainly: the knowledge base `<kbId>` was deleted, doesn't exist or is no longer accessible to you; ask them to restore your access, pick or re-create a knowledge base, or update the project's (or automation's) knowledge base. If only your access is gone, the documents are still in that knowledge base, so restoring your access is the fix, not a new knowledge base. In an automation run the run result is this notification: write it there and do not send a separate message (see `references/automation-delivery.md`)
+3. Treat it as a blocker for the output that needed that KB, and continue once the owner restores your access or names a knowledge base
 
 ### Lead-Worker Contract
 
@@ -903,8 +903,9 @@ access as part of a default-KB change. For older servers that omit the field,
 preserve a verified existing output location before consulting the Project's
 current default. Missing access to a recorded KB is a blocker, not a fallback.
 A page write into it answered 404 `KB_NOT_FOUND` (or a plain 404 from
-`kb.page_create`) means that KB was deleted or doesn't exist: the same blocker,
-handled as in "Writing into a deleted knowledge base", never "gateway not connected".
+`kb.page_create`) means that KB was deleted, doesn't exist or is no longer
+accessible to you: the same blocker, handled as in "Writing into a deleted
+knowledge base", never "gateway not connected".
 
 ## Operation Guide Index (Layer 3, load on demand)
 

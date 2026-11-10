@@ -39,7 +39,7 @@ function lastJsonLine(text) {
 
 test('kb.page_create into a deleted knowledge base prints KB_NOT_FOUND, the kbId and the owner guidance', async t => {
   const { run, requests } = await withServer(t, 404, { error: { title: 'Not Found', status: 404, code: 'KB_NOT_FOUND',
-    detail: 'This knowledge base was deleted or does not exist.', meta: { kb_id: KB } }, request_id: 'r1' });
+    detail: 'This knowledge base was deleted, does not exist, or is not visible to you.', meta: { kb_id: KB } }, request_id: 'r1' });
   const result = await run('kb.page_create', { kbId: KB, title: 'Run report', body: '# Report' });
   assert.equal(result.code, 1);
   assert.equal(result.stdout, '');
@@ -47,8 +47,8 @@ test('kb.page_create into a deleted knowledge base prints KB_NOT_FOUND, the kbId
   assert.equal(payload.status, 404);
   assert.equal(payload.code, 'KB_NOT_FOUND');
   assert.equal(payload.kbId, KB);
-  assert.equal(payload.error, 'This knowledge base was deleted or does not exist.');
-  assert.match(payload.hint, /was deleted or does not exist/);
+  assert.equal(payload.error, 'This knowledge base was deleted, does not exist, or is not visible to you.');
+  assert.match(payload.hint, /was deleted, does not exist, or you can no longer access it/);
   assert.match(payload.hint, /not "gateway not connected"/);
   assert.deepEqual(requests, [{ method: 'POST', url: `/api/v1/kbs/${KB}/pages` }]);
 });
@@ -58,7 +58,7 @@ test('kb.page_create answered a plain 404 by an older cws-core still carries the
   const payload = lastJsonLine((await run('kb.page_create', { kbId: KB, title: 'Run report' })).stderr);
   assert.equal(payload.code, 'KB_ERROR');
   assert.equal(payload.kbId, KB);
-  assert.match(payload.hint, new RegExp(`Knowledge base ${KB} was deleted or does not exist`));
+  assert.match(payload.hint, new RegExp(`Knowledge base ${KB} was deleted, does not exist, or you can no longer access it`));
 });
 
 test('other KB failures keep their output, plus the code', async t => {

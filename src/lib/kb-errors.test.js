@@ -12,15 +12,31 @@ function httpError(status, error) {
 }
 
 test('KB_NOT_FOUND is reported as a deleted or missing knowledge base, with its id', () => {
-  const err = httpError(404, { status: 404, code: KB_NOT_FOUND, detail: 'This knowledge base was deleted or does not exist.', meta: { kb_id: KB } });
+  const err = httpError(404, { status: 404, code: KB_NOT_FOUND, detail: 'This knowledge base was deleted, does not exist, or is not visible to you.', meta: { kb_id: KB } });
   const out = kbErrorDetails('kb.page_create', { kbId: 'ignored-param', title: 't' }, err);
   assert.equal(out.code, KB_NOT_FOUND);
   assert.equal(out.kbId, KB, 'meta.kb_id is preferred over the request param');
   assert.equal(out.hint, kbGoneHint(KB));
-  assert.match(out.hint, /was deleted or does not exist/);
+  assert.match(out.hint, /was deleted, does not exist, or you can no longer access it/);
   assert.match(out.hint, /not "gateway not connected"/);
-  assert.match(out.hint, /pick or re-create a knowledge base, or to update the project's \(or automation's\) knowledge base/);
+  assert.match(out.hint, /ask them to restore your access to it, pick or re-create a knowledge base, or update the project's \(or automation's\) knowledge base/);
+  assert.match(out.hint, /If only your access is gone, the documents are still in that knowledge base: restoring your access is the fix/);
   assert.match(out.hint, /do not retry the same knowledge base and do not switch to another one on your own/);
+  assert.match(out.hint, /In an automation run, say this in the run result: the result is the notification/);
+});
+
+test('KB_NOT_FOUND with a parent folder is the knowledge base, not the ambiguous parent hint (current cws-core checked the KB)', () => {
+  for (const params of [{ kbId: KB, parentId: PARENT }, { kbId: KB, parentNodeId: PARENT }]) {
+    const err = httpError(404, { status: 404, code: KB_NOT_FOUND, detail: 'gone', meta: { kb_id: KB } });
+    const out = kbErrorDetails('kb.page_create', params, err);
+    assert.deepEqual(out, { code: KB_NOT_FOUND, kbId: KB, hint: kbGoneHint(KB) });
+    assert.doesNotMatch(out.hint, /parent folder/);
+  }
+});
+
+test('KB_NOT_FOUND on any KB command gets the same knowledge base hint', () => {
+  const err = httpError(404, { status: 404, code: KB_NOT_FOUND, detail: 'gone', meta: { kb_id: KB } });
+  assert.deepEqual(kbErrorDetails('kb.get', { kbId: KB }, err), { code: KB_NOT_FOUND, kbId: KB, hint: kbGoneHint(KB) });
 });
 
 test('KB_NOT_FOUND without meta falls back to the kbId the command was given', () => {
@@ -38,23 +54,34 @@ test('a plain 404 with a parent folder says which two things may be missing and 
   for (const params of [{ kbId: KB, parentId: PARENT }, { kbId: KB, parentNodeId: PARENT }]) {
     const out = kbErrorDetails('kb.page_create', params, httpError(404, { status: 404, code: 'KB_ERROR', detail: 'not found' }));
     assert.equal(out.kbId, KB);
-    assert.match(out.hint, new RegExp(`knowledge base ${KB} was deleted or does not exist, or the parent folder ${PARENT} no longer exists`));
-    assert.match(out.hint, /Run kb\.get with this kbId: if it is also 404, the knowledge base is gone/);
+    assert.match(out.hint, new RegExp(`knowledge base ${KB} was deleted, does not exist or is no longer accessible to you, or the parent folder ${PARENT} no longer exists`));
+    assert.match(out.hint, /Run kb\.get with this kbId: if it is also 404, the knowledge base is gone or no longer accessible to you/);
+    assert.match(out.hint, /ask them to restore your access to it, pick or re-create a knowledge base/);
     assert.match(out.hint, /if it succeeds, the parent folder is gone/);
     assert.match(out.hint, /not "gateway not connected"/);
   }
 });
 
-test('a 404 without any error body still gets the knowledge base context', () => {
-  const out = kbErrorDetails('kb.page_create', { kbId: KB }, httpError(404));
-  assert.deepEqual(out, { kbId: KB, hint: kbGoneHint(KB) });
+test('a 404 without a cws-core error body is not reported as a deleted knowledge base (proxy / wrong URL)', () => {
+  for (const params of [{ kbId: KB }, { kbId: KB, parentId: PARENT }]) {
+    const out = kbErrorDetails('kb.page_create', params, httpError(404));
+    assert.equal(out.kbId, KB);
+    assert.equal(out.code, undefined);
+    assert.notEqual(out.hint, kbGoneHint(KB));
+    assert.match(out.hint, /no cws-core error body, so it may come from a proxy or a wrong server URL/);
+    assert.match(out.hint, /Run kb\.get with this kbId: if cws-core answers 404 there/);
+    assert.match(out.hint, /do not tell the owner the knowledge base was deleted/);
+  }
+  const restore = kbErrorDetails('kb.page_restore_trash', { pageId: 'p1' }, httpError(404));
+  assert.match(restore.hint, /no cws-core error body/);
+  assert.equal(restore.kbId, undefined);
 });
 
 test('restoring a page from the trash: 404 may mean its knowledge base was deleted', () => {
   const out = kbErrorDetails('kb.page_restore_trash', { pageId: 'p1' }, httpError(404, { status: 404, code: 'KB_ERROR', detail: 'not found' }));
   assert.equal(out.code, 'KB_ERROR');
   assert.equal(out.kbId, undefined);
-  assert.match(out.hint, /the knowledge base it belongs to was deleted/);
+  assert.match(out.hint, /the knowledge base it belongs to was deleted or is no longer accessible to you/);
   assert.match(out.hint, /not "gateway not connected"/);
 });
 
