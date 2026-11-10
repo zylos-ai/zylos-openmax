@@ -13,7 +13,25 @@
  * and the inbound text stays exactly as for a plain reply.
  */
 
+import { formatStructuredForModel } from './structured-body.js';
+
 export const MAX_EXCERPT_CODE_POINTS = 1000;
+
+/**
+ * The quoted message's full text: shown in <replying-to> and the text the
+ * excerpt is checked against. A card has no `body.text` and the detail path
+ * nulls `message.content`, so without the structured arm a card quotes only
+ * as its `fallback_text` and an excerpt of any field reads as unverified.
+ * Same expansion as the forward path uses for a received card.
+ */
+export function quotedMessageText(q) {
+  const qStructured = (q?.content && typeof q.content === 'object') ? q.content : {};
+  return qStructured.body?.text
+    || (typeof q?.message?.content === 'string' ? q.message.content : '')
+    || formatStructuredForModel(q)
+    || q?.message?.fallback_text
+    || '';
+}
 
 /**
  * @returns {null | { kind: 'recalled' } | { kind: 'excerpt', text: string }}

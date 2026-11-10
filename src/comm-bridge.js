@@ -40,7 +40,7 @@ import { classifySystemEvent, isSenderlessUpdate, routeImOwnerNotice } from './l
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { preferredConnectorsFrom } from './lib/connector-preference.js';
 import { wfRefFrom } from './lib/wf-context.js';
-import { quoteExcerptFrom } from './lib/quote-excerpt.js';
+import { quoteExcerptFrom, quotedMessageText } from './lib/quote-excerpt.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
@@ -1263,11 +1263,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       const q = await fetchMessageDetail(orgConfig.org_id, msg.conversation_id, quotedMsgId);
       if (q) {
         const qStructured = (q.content && typeof q.content === 'object') ? q.content : {};
-        let qText =
-             qStructured.body?.text
-          || (typeof q.message?.content === 'string' ? q.message.content : '')
-          || q.message?.fallback_text
-          || '';
+        let qText = quotedMessageText(q);
         // Quoted media: a quoted image/file with no caption yields empty text,
         // which would drop the whole quote. Label it ([image]/[file: name]) and
         // download the referenced attachment, appending `---- <kind>: <path>` so
