@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.33.0] - 2026-11-11
+
+Combines PRs #255, #256, #257, #258, #259, #260, #261, #262 and #263.
+
 ### Upgrade notes
 
 - **Connector-creation card now sends `connector_kind` + `auth_type` (breaking, OPENM-1334): ship cws-fe first.** Deploy the cws-fe MR whose card parser reads `connector.connector_kind` (`http` | `mcp`), `auth_type` (`http` only) and `server_url` (`mcp` only) before rolling out this plugin. Until then the front end still requires `auth_type`, so new MCP cards fall back to plain text (no buttons; replying in text still works) while HTTP cards are unaffected. Cards already sent with `auth_type: "mcp"` are not migrated.
