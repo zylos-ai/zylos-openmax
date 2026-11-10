@@ -376,7 +376,78 @@ async function hydrateRoster(params) {
   }
 }
 
-function buildSendBody(params) {
+// cws-comm caps an explicit fallback_text at 8192 UTF-8 bytes (domain
+// MaxFallbackTextBytes), for every message type; cws-core forwards it unchecked.
+// An exception to the "no local cap" rule of interaction-request.js: it mirrors
+// cws-comm's ValidateFallbackTextBytes exactly (same number, same byte
+// semantics), so it can never be stricter, and it fails fast — before the
+// roster lookup — with a clearer error than the server's.
+const MAX_FALLBACK_TEXT_BYTES = 8192;
+
+// `metadata.context` is reserved for the upcoming platform metadata governance
+// (message context), so a caller may not supply it. Neither cws-core nor
+// cws-comm reserves it yet: until the server enforces it, this refusal is a
+// courtesy check, not a security boundary.
+const RESERVED_METADATA_KEYS = ['context'];
+
+/**
+ * Optional `metadata` (a plain JSON object) and `fallback_text` (a string of at
+ * most 8192 UTF-8 bytes) for the send-message body, passed through unchanged.
+ * Used by e.g. AGENT_STRUCTURED senders that set their own content_type and a
+ * plain-text preview. Read from the top-level params and, for an advanced
+ * caller, from a pre-built `params.body` — the same rules hold for both, and
+ * giving one field in both places is refused rather than resolved by
+ * precedence. `fallbackText` is accepted as the camel-case alias.
+ *
+ * The CLI sets no metadata key of its own (agent_run is a top-level field), so
+ * there is nothing for the caller's metadata to clobber or be merged with.
+ * Returns only the fields that were given: absent → `{}`, body unchanged.
+ */
+function readSendExtras(params, verb) {
+  // The same condition buildSendBody uses: a body without content and type is
+  // not a pre-built body and is ignored there, so its fields are ignored here.
+  const advanced = (params.body && params.body.content && params.body.type) ? params.body : {};
+  const pick = (name, sources) => {
+    const given = sources.filter(([, v]) => v !== undefined);
+    if (given.length > 1) {
+      throw new Error(`${verb}: ${name} given both as ${given.map(([k]) => k).join(' and ')} — pass it in one place`);
+    }
+    return given[0]?.[1];
+  };
+  const metadata = pick('metadata', [['metadata', params.metadata], ['body.metadata', advanced.metadata]]);
+  const fallbackText = pick('fallback_text', [
+    ['fallback_text', params.fallback_text],
+    ['fallbackText', params.fallbackText],
+    ['body.fallback_text', advanced.fallback_text],
+  ]);
+  const out = {};
+  if (metadata !== undefined) {
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      throw new Error(`${verb}: metadata must be a plain JSON object, got `
+        + `${Array.isArray(metadata) ? 'an array' : metadata === null ? 'null' : typeof metadata}`);
+    }
+    const reserved = RESERVED_METADATA_KEYS.filter((k) => Object.hasOwn(metadata, k));
+    if (reserved.length) {
+      throw new Error(`${verb}: metadata.${reserved[0]} is reserved for the upcoming platform metadata governance `
+        + '(message context); a sender must not set it. Put your own fields under another key.');
+    }
+    out.metadata = metadata;
+  }
+  if (fallbackText !== undefined) {
+    if (typeof fallbackText !== 'string') {
+      throw new Error(`${verb}: fallback_text must be a string, got `
+        + `${Array.isArray(fallbackText) ? 'an array' : fallbackText === null ? 'null' : typeof fallbackText}`);
+    }
+    const bytes = Buffer.byteLength(fallbackText, 'utf8');
+    if (bytes > MAX_FALLBACK_TEXT_BYTES) {
+      throw new Error(`${verb}: fallback_text is ${bytes} UTF-8 bytes; the limit is ${MAX_FALLBACK_TEXT_BYTES}`);
+    }
+    out.fallback_text = fallbackText;
+  }
+  return out;
+}
+
+function buildSendBody(params, extras = readSendExtras(params, 'comm.send')) {
   // Allow advanced caller to override completely
   if (params.body && params.body.content && params.body.type) {
     // `agent_run` is never the caller's: it is added by this CLI itself
@@ -386,6 +457,7 @@ function buildSendBody(params) {
       client_msg_id: ensureClientMsgId(params.clientMsgId || params.clientMessageId),
       ...advanced,
       ...(params.replyTo ? { parent_id: params.replyTo } : {}),
+      ...extras,
     };
   }
   const c = params.content;
@@ -447,6 +519,7 @@ function buildSendBody(params) {
     content:       { content_type: contentType, body, attachments },
     ...(params.replyTo ? { parent_id: params.replyTo } : {}),
     ...(mentions ? { mentions } : {}),
+    ...extras,
   };
 }
 
@@ -767,9 +840,13 @@ const COMMANDS = {
   })),
 
   // ✅ POST /api/v1/conversations/{id}/messages
-  //   body: {client_msg_id, type, content:{content_type, body, attachments}, parent_id?}
+  //   body: {client_msg_id, type, content:{content_type, body, attachments}, parent_id?,
+  //          mentions?, metadata?, fallback_text?}
   //   See buildSendBody() for the schema details.
   'comm.send': async () => {
+    // metadata / fallback_text are checked first, so a refused value costs no
+    // request at all (not even the roster fetch below).
+    const extras = readSendExtras(params, 'comm.send');
     // Only matters when the caller did NOT pass mentions explicitly — in that
     // case buildSendBody falls back to resolving `@name` against the local
     // registry, which only knows participants observed speaking here. Pull the
@@ -784,7 +861,7 @@ const COMMANDS = {
     }
     const noRun = readNoRun(params, 'comm.send');
     const sourceMessageId = readSourceMessageId(params, 'comm.send');
-    const body = buildSendBody(params);
+    const body = buildSendBody(params, extras);
     // Agent activity: a send into a conversation with a live run is that run's
     // reply, exactly like scripts/send.js — agent_run attached here
     // (never by the caller), claim keyed by this body's client_msg_id.
@@ -1094,7 +1171,15 @@ Conversation members (owner/admin only; pass {org} for multi-org installs)
   comm.leave                {conversationId, newOwnerId?, org?}                     # POST .../leave
 
 Messages
-  comm.send                 {conversationId, content, attachments?, replyTo?, clientMsgId?, mentions?, noRun?, sourceMessageId?}
+  comm.send                 {conversationId, content, type?, attachments?, replyTo?, clientMsgId?, mentions?, metadata?, fallback_text?, noRun?, sourceMessageId?}
+                            # metadata — optional plain JSON object, sent as the message's metadata
+                            #   unchanged. metadata.context is RESERVED (upcoming platform
+                            #   metadata governance) and refused. Platform-defined metadata keys may change
+                            #   once metadata governance lands
+                            # fallback_text (alias fallbackText) — optional string, the plain-text
+                            #   preview / fallback for clients that cannot render the type
+                            #   (e.g. AGENT_STRUCTURED); at most 8192 UTF-8 bytes. Both are
+                            #   comm.send only: cards (send_card / ask_card / ask) have neither field
                             # noRun:true — system-originated notice, not a reply: no agent_run,
                             #   and the run log does not count it as a reply. Also on send_card,
                             #   ask_card and ask. Never for an answer to the user
