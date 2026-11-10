@@ -33,6 +33,7 @@ const required = {
     /cws-core answers 404 with `code: "KB_NOT_FOUND"` and `meta\.kb_id`; a cws-core without that code answers a plain 404 \(`code: "KB_ERROR"`\)/,
     /the CLI's error JSON carries, next to `error` \/ `status`: `code` \(when the response had one\), `kbId` and a `hint`/,
     /A 404 \*\*without\*\* a cws-core error body \(no `code`\) is not an answer about the knowledge base/,
+    /the `hint` then says to run `kb\.get \{kbId\}`: 404 there = the knowledge base is gone or not accessible to you, otherwise only the folder is/,
     /A knowledge base that is gone or no longer accessible is never "gateway not connected" or "temporarily unsupported"/,
     /ask them to restore your access, pick or re-create one, or update the project's \(or automation's\) knowledge base/,
   ],

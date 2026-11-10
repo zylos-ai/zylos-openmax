@@ -45,12 +45,20 @@ const RESTORE_HINT = 'Not found: the page is no longer in the trash, or the know
   + '(a page cannot be restored into a deleted knowledge base). This is not "gateway not connected". '
   + 'Check kb.pages_trashed; if the knowledge base was deleted or you lost access to it, tell the owner instead of retrying.';
 
+const NO_ENVELOPE = 'Not found, but the response had no cws-core error body, so it may come from a proxy or a wrong server URL rather than from cws-core. ';
+const NOT_CORE = 'if that also fails without a cws-core error body, or if it succeeds (the knowledge base is there), the 404 did not come from cws-core: '
+  + 'report a connection or configuration problem instead, do not retry in a loop, and do not tell the owner the knowledge base was deleted.';
+
 function noEnvelopeHint(kbId) {
   const which = kbId ? `knowledge base ${kbId}` : 'the knowledge base';
-  return 'Not found, but the response had no cws-core error body, so it may come from a proxy or a wrong server URL rather than from cws-core. '
+  return NO_ENVELOPE
     + `Run kb.get with this kbId: if cws-core answers 404 there, ${which} was deleted, does not exist or is no longer accessible to you (tell the owner and ${OWNER_OPTIONS}); `
-    + 'if kb.get also fails without a cws-core error body, report a connection or configuration problem instead, and do not tell the owner the knowledge base was deleted.';
+    + NOT_CORE;
 }
+
+const RESTORE_NO_ENVELOPE_HINT = NO_ENVELOPE
+  + 'Check kb.pages_trashed (and kb.get on the knowledge base the page belonged to, if you know it): if cws-core answers there, act on its answer; '
+  + NOT_CORE;
 
 function str(value) {
   return typeof value === 'string' && value !== '' ? value : undefined;
@@ -72,9 +80,11 @@ export function kbErrorDetails(command, params, err) {
 
   if (!envelope) {
     // Not cws-core's answer: only point at the check, never "the KB is gone".
-    if (command === 'kb.page_create' || command === 'kb.page_restore_trash') {
-      if (kbId && command === 'kb.page_create') out.kbId = kbId;
-      out.hint = noEnvelopeHint(command === 'kb.page_create' ? kbId : undefined);
+    if (command === 'kb.page_create') {
+      if (kbId) out.kbId = kbId;
+      out.hint = noEnvelopeHint(kbId);
+    } else if (command === 'kb.page_restore_trash') {
+      out.hint = RESTORE_NO_ENVELOPE_HINT;
     }
     return out;
   }

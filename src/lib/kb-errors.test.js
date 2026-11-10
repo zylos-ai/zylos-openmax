@@ -71,10 +71,15 @@ test('a 404 without a cws-core error body is not reported as a deleted knowledge
     assert.match(out.hint, /no cws-core error body, so it may come from a proxy or a wrong server URL/);
     assert.match(out.hint, /Run kb\.get with this kbId: if cws-core answers 404 there/);
     assert.match(out.hint, /do not tell the owner the knowledge base was deleted/);
+    assert.match(out.hint, /or if it succeeds \(the knowledge base is there\), the 404 did not come from cws-core/);
   }
   const restore = kbErrorDetails('kb.page_restore_trash', { pageId: 'p1' }, httpError(404));
   assert.match(restore.hint, /no cws-core error body/);
   assert.equal(restore.kbId, undefined);
+  // The restore output carries no kbId, so the hint must not ask for "this kbId".
+  assert.doesNotMatch(restore.hint, /this kbId/);
+  assert.match(restore.hint, /Check kb\.pages_trashed \(and kb\.get on the knowledge base the page belonged to, if you know it\)/);
+  assert.match(restore.hint, /do not tell the owner the knowledge base was deleted/);
 });
 
 test('restoring a page from the trash: 404 may mean its knowledge base was deleted', () => {
