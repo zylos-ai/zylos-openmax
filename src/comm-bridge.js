@@ -41,6 +41,7 @@ import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/i
 import { preferredConnectorsFrom } from './lib/connector-preference.js';
 import { wfRefFrom } from './lib/wf-context.js';
 import { quoteExcerptFrom, quotedMessageText } from './lib/quote-excerpt.js';
+import { forwardedFromOf, chatHistoryOf, forwardedLabelOf } from './lib/forwarded.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
@@ -967,6 +968,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         seq: msg.seq != null ? Number(msg.seq) : null,
         parent_id: msg.parent_message_id || msg.message?.parent_id || null,
         type: msgType || 'text',
+        forwarded_label: forwardedLabelOf(msg),
       });
     }
 
@@ -1085,7 +1087,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
           if (!name || name === e.sender_id) {
             name = (await fetchMemberName(orgConfig.org_id, e.sender_id)) || e.sender_id;
           }
-          return { senderName: name, senderId: e.sender_id, content: e.text };
+          return { senderName: name, senderId: e.sender_id, content: e.text, forwardedLabel: e.forwarded_label };
         }));
       } else {
         // API path: ctx is an array of API message objects
@@ -1146,7 +1148,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
           } else if (mIsImage) {
             content = '[image]' + (text ? ' ' + text : '');
           }
-          return { senderName, senderId: m.sender_id, content };
+          return { senderName, senderId: m.sender_id, content, forwardedLabel: forwardedLabelOf(m) };
         }));
       }
       log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${source} count=${recent.length}`);
@@ -1297,7 +1299,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
              q.message?.sender_display_name
           || (await fetchMemberName(orgConfig.org_id, qSenderId))
           || qSenderId;
-        if (qText) quotedContent = { sender: qSender, text: qText };
+        if (qText) quotedContent = { sender: qSender, text: qText, forwardedLabel: forwardedLabelOf(q) };
       }
     }
 
@@ -1327,6 +1329,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       {
         groupName, smartHint, quotedContent,
         quotedExcerpt: quoteExcerptFrom(msg, quotedMsgId),
+        forwardedFrom: forwardedFromOf(msg),
+        chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
         preferredConnectors: preferredConnectorsFrom(msg),
