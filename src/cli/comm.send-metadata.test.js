@@ -139,6 +139,32 @@ test('advanced pre-built body: top-level metadata/fallback_text are added to it'
   assert.deepEqual(posts[0].body, { client_msg_id: 'c-adv', ...prebuilt, metadata: { k: 1 }, fallback_text: 'p' });
 });
 
+// A body without type+content is not a pre-built body: buildSendBody ignores
+// it, so its metadata / fallback_text are ignored too (as before this change).
+test('a body that is not pre-built (no type+content) contributes no metadata / fallback_text', async () => {
+  const { ok, posts, stderr } = await send({
+    conversationId: CONV, clientMsgId: 'c-np', content: 'hi', body: { metadata: { k: 1, context: {} }, fallback_text: 'pv' },
+  });
+  assert.equal(ok, true, stderr);
+  assert.equal(posts[0].raw, JSON.stringify({
+    client_msg_id: 'c-np',
+    type: 'AGENT_TEXT',
+    content: { content_type: 'text', body: { text: 'hi' }, attachments: [] },
+  }));
+  // Half a pre-built body (type only, or content only) is not one either.
+  for (const partial of [{ type: 'AGENT_TEXT' }, { content: { content_type: 'text', body: { text: 'x' } } }]) {
+    // eslint-disable-next-line no-await-in-loop
+    const r = await send({ conversationId: CONV, content: 'hi', body: { ...partial, metadata: { k: 1 }, fallback_text: 'pv' } });
+    assert.equal(r.ok, true, r.stderr);
+    assert.equal('metadata' in r.posts[0].body, false, JSON.stringify(partial));
+    assert.equal('fallback_text' in r.posts[0].body, false, JSON.stringify(partial));
+  }
+  // …and does not clash with the top-level fields either.
+  const both = await send({ conversationId: CONV, content: 'hi', metadata: { a: 1 }, body: { metadata: { b: 2 } } });
+  assert.equal(both.ok, true, both.stderr);
+  assert.deepEqual(both.posts[0].body.metadata, { a: 1 });
+});
+
 // ---- absent → unchanged ---------------------------------------------------
 
 test('🔴 without metadata/fallback_text the wire body is byte-identical to before', async () => {
@@ -231,5 +257,24 @@ test('card verbs refuse metadata / fallback_text (interaction-requests has no su
     assert.equal(ok, false);
     assert.equal(posts.length, 0);
     assert.match(stderr, new RegExp(`${key}: is not supported by interaction-requests`));
+  }
+});
+
+test('comm.ask_card and comm.ask (choice and form) refuse metadata / fallback_text', async () => {
+  const choice = { conversationId: CONV, title: 't', summary: 's', text: 'x', options: ['a', 'b'], kind: 'k', askedOf: 'm-1' };
+  const form = { conversationId: CONV, title: 't', summary: 's', fields: [{ key: 'q', label: 'Q', options: ['a', 'b'] }], kind: 'k', askedOf: 'm-1' };
+  const cases = [
+    ['comm.ask_card', choice, /is not supported by interaction-requests/],
+    ['comm.ask', { ...choice, interactionType: 'choice' }, /is not supported by interaction-requests/],
+    ['comm.ask', { ...form, interactionType: 'form' }, /is not supported on a form card/],
+  ];
+  for (const [verb, base, re] of cases) {
+    for (const [key, value] of [['metadata', { k: 1 }], ['fallback_text', 'p']]) {
+      // eslint-disable-next-line no-await-in-loop
+      const { ok, posts, stderr } = await run(verb, { ...base, [key]: value });
+      assert.equal(ok, false, `${verb} ${base.interactionType || ''} accepted ${key}`);
+      assert.equal(posts.length, 0, `${verb} posted with ${key}`);
+      assert.match(stderr, new RegExp(`${key}: ${re.source}`));
+    }
   }
 });

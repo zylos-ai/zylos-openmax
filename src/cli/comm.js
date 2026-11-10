@@ -378,10 +378,16 @@ async function hydrateRoster(params) {
 
 // cws-comm caps an explicit fallback_text at 8192 UTF-8 bytes (domain
 // MaxFallbackTextBytes), for every message type; cws-core forwards it unchecked.
+// An exception to the "no local cap" rule of interaction-request.js: it mirrors
+// cws-comm's ValidateFallbackTextBytes exactly (same number, same byte
+// semantics), so it can never be stricter, and it fails fast — before the
+// roster lookup — with a clearer error than the server's.
 const MAX_FALLBACK_TEXT_BYTES = 8192;
 
-// `metadata.context` is reserved: the platform stamps the message context
-// there (metadata governance, taskboard #247), so a caller may never supply it.
+// `metadata.context` is reserved for the upcoming platform metadata governance
+// (message context), so a caller may not supply it. Neither cws-core nor
+// cws-comm reserves it yet: until the server enforces it, this refusal is a
+// courtesy check, not a security boundary.
 const RESERVED_METADATA_KEYS = ['context'];
 
 /**
@@ -398,7 +404,9 @@ const RESERVED_METADATA_KEYS = ['context'];
  * Returns only the fields that were given: absent → `{}`, body unchanged.
  */
 function readSendExtras(params, verb) {
-  const advanced = (params.body && typeof params.body === 'object') ? params.body : {};
+  // The same condition buildSendBody uses: a body without content and type is
+  // not a pre-built body and is ignored there, so its fields are ignored here.
+  const advanced = (params.body && params.body.content && params.body.type) ? params.body : {};
   const pick = (name, sources) => {
     const given = sources.filter(([, v]) => v !== undefined);
     if (given.length > 1) {
@@ -420,8 +428,8 @@ function readSendExtras(params, verb) {
     }
     const reserved = RESERVED_METADATA_KEYS.filter((k) => Object.hasOwn(metadata, k));
     if (reserved.length) {
-      throw new Error(`${verb}: metadata.${reserved[0]} is reserved — the platform stamps the message context there; `
-        + 'a sender must not set it. Put your own fields under another key.');
+      throw new Error(`${verb}: metadata.${reserved[0]} is reserved for the upcoming platform metadata governance `
+        + '(message context); a sender must not set it. Put your own fields under another key.');
     }
     out.metadata = metadata;
   }
@@ -1165,8 +1173,8 @@ Conversation members (owner/admin only; pass {org} for multi-org installs)
 Messages
   comm.send                 {conversationId, content, type?, attachments?, replyTo?, clientMsgId?, mentions?, metadata?, fallback_text?, noRun?, sourceMessageId?}
                             # metadata — optional plain JSON object, sent as the message's metadata
-                            #   unchanged. metadata.context is RESERVED (platform-stamped message
-                            #   context) and refused. Platform-defined metadata keys may change
+                            #   unchanged. metadata.context is RESERVED (upcoming platform
+                            #   metadata governance) and refused. Platform-defined metadata keys may change
                             #   once metadata governance lands
                             # fallback_text (alias fallbackText) — optional string, the plain-text
                             #   preview / fallback for clients that cannot render the type
