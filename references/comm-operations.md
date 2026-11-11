@@ -53,7 +53,7 @@ Real-time event push (`message.created`, etc.) goes over WebSocket, handled by `
 | --- | --- | --- | --- | --- |
 | ✅ | `comm.list_conversations` | List all conversations I participate in (paginated) | `{pageSize?, pageToken?}` | `GET /api/v1/conversations` |
 | ✅ | `comm.create_dm` | Open a DM with a single person (returns directly if it already exists, idempotent) | `{participantId}` | `POST /api/v1/conversations/dm` |
-| ✅ | `comm.create_group` | Create a group; self + participantIds form the member list | `{title, participantIds[]}` | `POST /api/v1/conversations/groups` |
+| ✅ | `comm.create_group` | Create a group; self + participantIds form the member list; name ≤200 characters (refused locally, cws-core 422 beyond) | `{title, participantIds[]}` | `POST /api/v1/conversations/groups` |
 | ✅ | `comm.get_conversation` | Get details of a single conversation | `{conversationId, org?}` | `GET /api/v1/conversations/{id}` |
 | ✅ | `comm.update_group` | Rename a group or change its description (group owner/admin only, enforced server-side: 403 otherwise, 404 if not a member or not a group; `name` at most 200 characters — refused locally, the server answers 422 beyond; `description: ""` clears it; at least one of `name` / `description`; never sends metadata) | `{conversationId, name?, description?, org?}` | `PATCH /api/v1/conversations/{id}` |
 

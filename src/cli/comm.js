@@ -790,13 +790,19 @@ const COMMANDS = {
   'comm.create_dm':    () => post(apiPath('/conversations/dm'), {
     peer_member_id: params.peerMemberId || params.participantId || params.peerId,
   }),
-  'comm.create_group': () => post(apiPath('/conversations/groups'), {
-    name:             params.name || params.title,
-    member_ids:       params.memberIds || params.participantIds,
-    description:      params.description,
-    avatar_media_id:  params.avatarMediaId,
-    metadata:         params.metadata,
-  }),
+  'comm.create_group': () => {
+    const name = params.name || params.title;
+    if (typeof name === 'string' && [...name].length > GROUP_NAME_MAX) {
+      throw new Error(`name is too long (max ${GROUP_NAME_MAX} characters)`);
+    }
+    return post(apiPath('/conversations/groups'), {
+      name,
+      member_ids:       params.memberIds || params.participantIds,
+      description:      params.description,
+      avatar_media_id:  params.avatarMediaId,
+      metadata:         params.metadata,
+    });
+  },
 
   // ✅ GET /api/v1/conversations/{id}
   'comm.get_conversation': () => {
@@ -1243,7 +1249,7 @@ Usage: node src/cli/comm.js <command> '<json-params>'
 Conversations
   comm.list_conversations   {cursor?, limit?, includeArchived?}
   comm.create_dm            {peerMemberId}                           # POST /conversations/dm
-  comm.create_group         {name, memberIds, description?}          # POST /conversations/groups
+  comm.create_group         {name, memberIds, description?}          # POST /conversations/groups (name ≤200 characters)
   comm.get_conversation     {conversationId, org?}
   comm.update_group         {conversationId, name?, description?, org?}  # PATCH /conversations/{id} (owner/admin only; name ≤200 characters; description "" clears)
                             # ids in a request path are checked before any request: conversationId

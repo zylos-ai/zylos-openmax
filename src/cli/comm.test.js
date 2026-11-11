@@ -235,6 +235,14 @@ test('update_group: name is at most 200 characters (code points), refused locall
   assert.match((await captureFailure('comm.update_group', { conversationId: CV, name: '群'.repeat(201) })).error, /too long \(max 200 characters\)/);
 });
 
+test('create_group: name is at most 200 characters (code points), refused locally beyond', async () => {
+  const max = '群'.repeat(200);
+  const request = await captureRequest('comm.create_group', { name: max, memberIds: [] });
+  assert.equal(request.body.name, max);
+  assert.match((await captureFailure('comm.create_group', { name: '群'.repeat(201), memberIds: [] })).error, /too long \(max 200 characters\)/);
+  assert.match((await captureFailure('comm.create_group', { title: '群'.repeat(201), memberIds: [] })).error, /too long/);
+});
+
 // Every command that splices conversationId into a request path refuses a value
 // that is not a UUID, before any request (and before resolving an org — the
 // failure helper has no server and no COCO_ORG_ID).
