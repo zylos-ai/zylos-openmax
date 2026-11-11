@@ -211,12 +211,18 @@ const isAppSource = (src) => typeof src === 'string' && /^app:./.test(src);
 /**
  * Whether an agent item may be used at all, given the trust switch.
  *
- * - `forwarded` and `subconversation` can only be written by the platform. A
- *   client can still put them in metadata.context while the server does not
- *   reserve the key, so with the switch off they are ignored (forwarded falls
- *   back to `forwarded_from`, which cws-comm already reserves); with it on they
- *   count only with the stamped source the platform gives them (`platform`;
- *   `platform` or `app:<id>` for a sub-conversation).
+ * - `forwarded` and `subconversation` can only be written by the platform; with
+ *   the switch on they count only with the source the platform stamps
+ *   (`platform`; `platform` or `app:<id>` for a sub-conversation).
+ *   With the switch off a client can still have written them (the server does
+ *   not reserve the key yet):
+ *   - `forwarded` is still used, unverified, but only when the message has no
+ *     `forwarded_from` (forwardedFromOf decides). After cws-comm !618 a
+ *     forwarded copy carries only the item, and dropping it would show the
+ *     original author's words as the forwarder's own.
+ *   - `subconversation` is dropped: it has no old key and nothing is
+ *     misattributed without it, while a forged key would name a workflow
+ *     topic the message is not in and pick the thread root it inherits from.
  * - `workflow` with the switch on counts only from an app (`app:<id>`, the
  *   workflows gateway); with it off it is an unverified hint (and an old
  *   `wf_ref` on the same message is preferred, see contextHeaderItems).
@@ -224,7 +230,7 @@ const isAppSource = (src) => typeof src === 'string' && /^app:./.test(src);
  */
 export function acceptsItem(item, trusted) {
   switch (item?.type) {
-    case 'forwarded': return !!trusted && item.source === 'platform';
+    case 'forwarded': return !trusted || item.source === 'platform';
     case 'subconversation': return !!trusted && (item.source === 'platform' || isAppSource(item.source));
     case 'workflow': return !trusted || isAppSource(item.source);
     default: return !!item;

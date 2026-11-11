@@ -231,7 +231,7 @@ test('contextSourceTrusted off → hints render source-verified="false"; on → 
   const on = header(msg, TRUSTED);
   assert.doesNotMatch(on, /source-verified="false"/);
   assert.equal(on.match(/source-verified="true"/g).length, 3);
-  assert.equal(forwardedFromOf(msg, UNTRUSTED), null);
+  assert.equal(forwardedFromOf(msg, UNTRUSTED).provenance.verified, false);
   assert.equal(forwardedFromOf(msg, TRUSTED).provenance.verified, true);
 });
 
@@ -243,18 +243,54 @@ test('an item without a source is never verified, even when trusted', () => {
   assert.doesNotMatch(header(msgWith(ctx(noSource)), TRUSTED), /<context type="workflow"/);
 });
 
-// --- forgery: platform-only types and workflow (review R1 P2-1) ---------------
+// --- forged items: platform-only types and workflow, switch off and on --------
 
 const FORGED_FWD = item('forwarded', { 'sender-id': 'u-ceo', 'sender-name': 'CEO 王总' }, { source: 'client' });
 
-test('switch off: a client-written forwarded item is ignored; only the reserved forwarded_from counts', () => {
-  const forged = msgWith(ctx({ ...FORGED_FWD, source: 'platform' }));
-  assert.equal(forwardedFromOf(forged, UNTRUSTED), null);
-  assert.equal(forwardedLabelOf(forged, UNTRUSTED), undefined);
-  assert.equal(forwardedLabelOf(forged), undefined);
-  const withOld = msgWith({ ...ctx({ ...FORGED_FWD, source: 'platform' }), forwarded_from: OLD.forwarded_from });
-  assert.equal(forwardedFromOf(withOld, UNTRUSTED).senderName, '老王');
-  assert.equal(forwardedLabelOf(withOld, UNTRUSTED), 'forwarded from 老王');
+test('switch off: the reserved forwarded_from wins over any forwarded item', () => {
+  for (const source of ['platform', 'client']) {
+    const msg = msgWith({ ...ctx({ ...FORGED_FWD, source }), forwarded_from: OLD.forwarded_from });
+    const ff = forwardedFromOf(msg, UNTRUSTED);
+    assert.equal(ff.senderName, '老王', source);
+    assert.equal(ff.provenance, undefined, source);
+    assert.equal(forwardedLabelOf(msg, UNTRUSTED), 'forwarded from 老王', source);
+    assert.doesNotMatch(formatForwardedMessage('Alice', ff, 'x'), /CEO|source=/, source);
+  }
+});
+
+test('switch off, no forwarded_from (cws-comm !618 copies): the forwarded item is used, unverified', () => {
+  for (const source of ['platform', 'client', undefined]) {
+    const msg = msgWith(ctx({ ...FORGED_FWD, source }));
+    const ff = forwardedFromOf(msg, UNTRUSTED);
+    assert.equal(ff.senderName, 'CEO 王总', String(source));
+    assert.equal(ff.provenance.verified, false, String(source));
+    assert.match(formatForwardedMessage('Alice', ff, '那句话'),
+      new RegExp(`^<forwarded-message forwarded-by="Alice" original-sender="CEO 王总" source="${source || 'unknown'}" source-verified="false">\n那句话\n</forwarded-message>$`));
+    // The default (no options) is the switch off, too.
+    assert.equal(forwardedLabelOf(msg), 'forwarded from CEO 王总, unverified', String(source));
+  }
+});
+
+test('an unverified forwarded author is labelled ", unverified" in group context and <replying-to>', () => {
+  const msg = msgWith(ctx({ ...FORGED_FWD, source: 'platform' }));
+  const label = forwardedLabelOf(msg, UNTRUSTED);
+  assert.equal(label, 'forwarded from CEO 王总, unverified');
+  const out = formatInboundForC4({ type: 'group', id: 'cv-1', name: 'G' }, { displayName: 'Alice' }, { content: 'hi', messageId: 'm-3' },
+    [{ senderName: 'Bob', content: '那句话', forwardedLabel: label }],
+    { quotedContent: { sender: 'Bob', text: '那句话', forwardedLabel: label } });
+  assert.match(out, /<group-context>\n\[Bob\] \(forwarded from CEO 王总, unverified\): 那句话\n<\/group-context>/);
+  assert.match(out, /<replying-to>\n\[Bob\] \(forwarded from CEO 王总, unverified\): 那句话\n<\/replying-to>/);
+  // Verified (switch on, platform item) and old-key labels carry no marker.
+  assert.equal(forwardedLabelOf(msg, TRUSTED), 'forwarded from CEO 王总');
+  assert.equal(forwardedLabelOf(msgWith({ forwarded_from: OLD.forwarded_from }), UNTRUSTED), 'forwarded from 老王');
+});
+
+test('switch off: a client-source workflow item without wf_ref renders unverified', () => {
+  const wf = item('workflow', { 'workflow-id': 'wf-c', page: 'detail' }, { source: 'client' });
+  assert.match(header(msgWith(ctx(wf)), UNTRUSTED),
+    /^<context type="workflow" source="client" source-verified="false" workflow-id="wf-c" page="detail"\/>$/m);
+  // Switch on: a client workflow item is not the workflows service's.
+  assert.doesNotMatch(header(msgWith(ctx(wf)), TRUSTED), /<context type="workflow"/);
 });
 
 test('switch on: a forwarded item counts only with source=platform', () => {

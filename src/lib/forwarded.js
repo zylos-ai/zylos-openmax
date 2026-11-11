@@ -54,18 +54,28 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (typeof v === 'string' && v !== '' ? v : undefined);
 
 /**
- * The original author of a one-by-one forwarded copy, context first
- * (OPENM-1351): the `forwarded` item of `metadata.context` (audience=agent;
- * attrs sender-id, sender-type, sender-name, sent-at, source-kind), else the
- * old `forwarded_from` key. A value read from the item carries `provenance`
- * ({ source, verified }).
+ * The original author of a one-by-one forwarded copy (OPENM-1351), from the
+ * `forwarded` item of `metadata.context` (audience=agent; attrs sender-id,
+ * sender-type, sender-name, sent-at, source-kind) or the old `forwarded_from`
+ * key, which cws-comm reserves (clients cannot write it).
+ *
+ *   - contextSourceTrusted on: a `source="platform"` item first, else the old key.
+ *   - off: the old key first; without it the item (any source), shown with
+ *     source-verified="false" and labelled ", unverified" — after cws-comm
+ *     !618 a forwarded copy carries only the item, and ignoring it would
+ *     present the original author's words as the forwarder's.
+ *
+ * A value read from the item carries `provenance` ({ source, verified }).
  *
  * @returns {null | { senderId, senderType?, senderName?, sentAt?, sourceKind?, provenance? }}
  */
 export function forwardedFromOf(msg, { trusted = false } = {}) {
   if (!isObject(msg)) return null;
-  // Platform-only type: used only with contextSourceTrusted on and
-  // source=platform (acceptsItem); otherwise the reserved old key decides.
+  const meta = [msg.metadata, msg.message?.metadata]
+    .find((m) => isObject(m) && 'forwarded_from' in m);
+  const legacy = readForwardedFrom(meta?.forwarded_from, { requireVersion: true });
+  if (!trusted && legacy) return legacy;
+  // acceptsItem: with the switch on only a platform item, off any source.
   const item = usableContextItem(msg, 'forwarded', { trusted });
   const fromItem = item ? readForwardedFrom({
     sender_id: item.attrs['sender-id'],
@@ -75,9 +85,7 @@ export function forwardedFromOf(msg, { trusted = false } = {}) {
     source_kind: item.attrs['source-kind'],
   }, { requireVersion: false }) : null;
   if (fromItem) return { ...fromItem, provenance: provenanceOf(item, trusted) };
-  const meta = [msg.metadata, msg.message?.metadata]
-    .find((m) => isObject(m) && 'forwarded_from' in m);
-  return readForwardedFrom(meta?.forwarded_from, { requireVersion: true });
+  return legacy;
 }
 
 // A record's `forwarded_from` inside a chat_history body is the trimmed
@@ -320,8 +328,8 @@ function fitOrNotice(element, limit) {
  */
 export function forwardedLabelOf(msg, opts) {
   const ff = forwardedFromOf(msg, opts);
-  // An author named by an unverified context item says so (the trust policy
-  // admits none today; kept so a looser policy can never drop the marker).
+  // An author named by an unverified context item (switch off, no
+  // forwarded_from) says so.
   const unverified = ff?.provenance && !ff.provenance.verified ? ', unverified' : '';
   if (ff) return `forwarded from ${ff.senderName || ff.senderId}${unverified}`;
   const type = isObject(msg) ? String(msg.type || msg.message?.type || '').toLowerCase() : '';
