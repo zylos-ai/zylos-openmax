@@ -14,6 +14,7 @@
  */
 
 import { formatStructuredForModel } from './structured-body.js';
+import { agentContextItems } from './message-context.js';
 
 export const MAX_EXCERPT_CODE_POINTS = 1000;
 
@@ -52,11 +53,37 @@ export function quoteExcerptFrom(msg, parentId) {
   if (item.recalled === true) return { kind: 'recalled' };
   if (typeof item.text !== 'string' || !item.text.trim()) return null;
 
-  const chars = [...item.text];
-  const text = chars.length > MAX_EXCERPT_CODE_POINTS
-    ? chars.slice(0, MAX_EXCERPT_CODE_POINTS).join('')
-    : item.text;
-  return { kind: 'excerpt', text };
+  return { kind: 'excerpt', text: capExcerpt(item.text) };
+}
+
+function capExcerpt(text) {
+  const chars = [...text];
+  return chars.length > MAX_EXCERPT_CODE_POINTS ? chars.slice(0, MAX_EXCERPT_CODE_POINTS).join('') : text;
+}
+
+/**
+ * The quoted excerpt of a reply, context first (OPENM-1351): the first `quote`
+ * item of `metadata.context` (audience=agent) whose `attrs.message-id` is the
+ * replied-to message — `attrs.recalled: true` is a tombstone, else
+ * `data.text` is the excerpt — then the old `quote_excerpts` key. Same result
+ * shape as quoteExcerptFrom, so <quoted-excerpt> is the same either way.
+ *
+ * @returns {null | { kind: 'recalled' } | { kind: 'excerpt', text: string }}
+ */
+export function quoteExcerptOf(msg, parentId) {
+  if (parentId === undefined || parentId === null) return null;
+  for (const item of agentContextItems(msg, 'quote')) {
+    // A string id only, like the old key: cws-comm's recall cascade matches
+    // string ids, so a numeric one would never be tombstoned.
+    const id = item.attrs['message-id'];
+    if (typeof id !== 'string' || id !== String(parentId)) continue;
+    // A tombstone may still carry a stale text; it must never be shown.
+    if (item.attrs.recalled === true) return { kind: 'recalled' };
+    const text = item.data?.text;
+    if (typeof text !== 'string' || !text.trim()) continue;
+    return { kind: 'excerpt', text: capExcerpt(text) };
+  }
+  return quoteExcerptFrom(msg, parentId);
 }
 
 function escapeText(s) {

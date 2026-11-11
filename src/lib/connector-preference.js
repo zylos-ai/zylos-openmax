@@ -16,7 +16,12 @@
  * inbound header (next to <message-context>), not inside the user's text. It is
  * a hint for choosing between connections, not an authorization: conn.* never
  * reads it.
+ *
+ * The same list may also arrive as a `connectors` item of `metadata.context`
+ * (see message-context.js); connectorPreferenceOf reads that first.
  */
+
+import { agentContextItem } from './message-context.js';
 
 // The panel has no selection cap (OPENM-915 removed the 5-limit), so this is
 // only a sanity bound on a malformed/abusive payload, far above any real
@@ -41,16 +46,12 @@ function oneLineLabel(raw) {
 }
 
 /**
- * Read `preferred_connectors` from a fetched message (top-level `metadata`, or
- * the nested `message.metadata` envelope). Returns a normalized
- * `[{ connectionId, label }]`, or null when there is nothing usable. Malformed
- * entries are dropped individually; duplicates (by id) keep the first.
+ * Normalize a `[{ connection_id, label }]` list (the old key's value, or the
+ * `data.connections` of a connectors context item) to `[{ connectionId, label }]`,
+ * or null when nothing is usable. Malformed entries are dropped individually;
+ * duplicates (by id) keep the first.
  */
-export function preferredConnectorsFrom(msg) {
-  if (!msg || typeof msg !== 'object') return null;
-  const meta = [msg.metadata, msg.message?.metadata]
-    .find((m) => m && typeof m === 'object' && !Array.isArray(m) && 'preferred_connectors' in m);
-  const raw = meta?.preferred_connectors;
+function normalizeConnectors(raw) {
   if (!Array.isArray(raw) || raw.length === 0) return null;
 
   const out = [];
@@ -66,6 +67,31 @@ export function preferredConnectorsFrom(msg) {
     out.push({ connectionId: id, label });
   }
   return out.length ? out : null;
+}
+
+/**
+ * Read `preferred_connectors` from a fetched message (top-level `metadata`, or
+ * the nested `message.metadata` envelope). Returns a normalized
+ * `[{ connectionId, label }]`, or null when there is nothing usable. Malformed
+ * entries are dropped individually; duplicates (by id) keep the first.
+ */
+export function preferredConnectorsFrom(msg) {
+  if (!msg || typeof msg !== 'object') return null;
+  const meta = [msg.metadata, msg.message?.metadata]
+    .find((m) => m && typeof m === 'object' && !Array.isArray(m) && 'preferred_connectors' in m);
+  return normalizeConnectors(meta?.preferred_connectors);
+}
+
+/**
+ * The connector preference of a message, context first (OPENM-1351): the
+ * `connectors` item of `metadata.context` (audience=agent, `data.connections`,
+ * same `{ connection_id, label }` entries), else the old `preferred_connectors`
+ * key. Same normalized `[{ connectionId, label }]` (or null) as
+ * preferredConnectorsFrom, so the element is the same either way.
+ */
+export function connectorPreferenceOf(msg) {
+  const item = agentContextItem(msg, 'connectors');
+  return (item && normalizeConnectors(item.data?.connections)) || preferredConnectorsFrom(msg);
 }
 
 function escapeText(s) {

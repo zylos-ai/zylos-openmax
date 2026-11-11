@@ -22,6 +22,8 @@
  * nothing in a record can close the element or open a new <record>.
  */
 
+import { agentContextItem } from './message-context.js';
+
 export const MAX_RECORDS = 100;
 export const MAX_RECORD_TEXT_CODE_POINTS = 1000;
 // The whole C4 envelope reaches c4-receive as ONE argv element, which Linux
@@ -52,10 +54,27 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (typeof v === 'string' && v !== '' ? v : undefined);
 
 /**
+ * The original author of a one-by-one forwarded copy, context first
+ * (OPENM-1351): the `forwarded` item of `metadata.context` (audience=agent;
+ * attrs sender-id, sender-type, sender-name, sent-at, source-kind), else the
+ * old `forwarded_from` key. Both go through the same reader, so the element and
+ * the "forwarded from" label are the same either way. cws-comm !618 writes only
+ * the item on a forwarded copy (older copies have only the old key) and drops
+ * a client-supplied item; a client-supplied `forwarded_from` is refused.
+ *
  * @returns {null | { senderId, senderType?, senderName?, sentAt?, sourceKind? }}
  */
 export function forwardedFromOf(msg) {
   if (!isObject(msg)) return null;
+  const item = agentContextItem(msg, 'forwarded');
+  const fromItem = item ? readForwardedFrom({
+    sender_id: item.attrs['sender-id'],
+    sender_type: item.attrs['sender-type'],
+    sender_name: item.attrs['sender-name'],
+    sent_at: item.attrs['sent-at'],
+    source_kind: item.attrs['source-kind'],
+  }, { requireVersion: false }) : null;
+  if (fromItem) return fromItem;
   const meta = [msg.metadata, msg.message?.metadata]
     .find((m) => isObject(m) && 'forwarded_from' in m);
   return readForwardedFrom(meta?.forwarded_from, { requireVersion: true });

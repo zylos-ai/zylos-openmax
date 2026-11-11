@@ -22,7 +22,14 @@
  * through as-is — no allow-list of pages or id formats (the design may still
  * change); only escaping is applied, which is safety, not validation. It is a
  * hint only: the workflows service's own records remain the source of truth.
+ *
+ * The same reference may arrive as a `workflow` item of `metadata.context`
+ * (attrs workflow-id, run-id, page, step-n; OPENM-1351). workflowRefOf reads
+ * that first and the old key as fallback, with the same value rules, so
+ * <wf-context> is the same either way.
  */
+
+import { agentContextItem } from './message-context.js';
 
 // Attribute name ← metadata key. Only these keys are read; anything else in
 // wf_ref is ignored.
@@ -70,6 +77,24 @@ export function wfRefFrom(msg) {
     if (v) out[attr] = v;
   }
   return Object.keys(out).length ? out : null;
+}
+
+/**
+ * The workflow reference of a message, context first (OPENM-1351): the
+ * `workflow` item of `metadata.context` (audience=agent), else `wf_ref`. Same
+ * `{ 'workflow-id'?, 'run-id'?, page?, 'step-n'? }` (or null) as wfRefFrom.
+ */
+export function workflowRefOf(msg) {
+  const item = agentContextItem(msg, 'workflow');
+  if (item) {
+    const out = {};
+    for (const [attr] of WF_REF_ATTRS) {
+      const v = attrText(item.attrs[attr]);
+      if (v) out[attr] = v;
+    }
+    if (Object.keys(out).length) return out;
+  }
+  return wfRefFrom(msg);
 }
 
 function escapeAttr(s) {

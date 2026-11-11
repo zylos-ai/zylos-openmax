@@ -32,15 +32,15 @@ import { createSelfNameHydrator } from './lib/self-name-hydration.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
-import { isSystemSender, senderMemberFrom, systemEventPriority } from './lib/system-message.js';
+import { isSystemSender, senderMemberFrom, inboundPriority } from './lib/system-message.js';
 import {
   handleImOwnerNotice, createDedup, refreshOwnerEndpoint, IM_OWNER_NOTICE_TYPE,
 } from './lib/im-owner-notice.js';
 import { classifySystemEvent, isSenderlessUpdate, routeImOwnerNotice } from './lib/system-event-routing.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
-import { preferredConnectorsFrom } from './lib/connector-preference.js';
-import { wfRefFrom } from './lib/wf-context.js';
-import { quoteExcerptFrom, quotedMessageText } from './lib/quote-excerpt.js';
+import { connectorPreferenceOf } from './lib/connector-preference.js';
+import { workflowRefOf } from './lib/wf-context.js';
+import { quoteExcerptOf, quotedMessageText } from './lib/quote-excerpt.js';
 import { forwardedFromOf, chatHistoryOf, forwardedLabelOf } from './lib/forwarded.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
@@ -1328,13 +1328,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       recent,
       {
         groupName, smartHint, quotedContent,
-        quotedExcerpt: quoteExcerptFrom(msg, quotedMsgId),
+        quotedExcerpt: quoteExcerptOf(msg, quotedMsgId),
         forwardedFrom: forwardedFromOf(msg),
         chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
-        preferredConnectors: preferredConnectorsFrom(msg),
-        wfRef: wfRefFrom(msg),
+        preferredConnectors: connectorPreferenceOf(msg),
+        wfRef: workflowRefOf(msg),
         systemSender: isSystemSender(msg)
           ? { memberId: msg.sender_id || msg.message?.sender_id }
           : undefined,
@@ -1366,7 +1366,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     try {
       registerConvOrg(msg.conversation_id, orgConfig.org_id);
       if (replyConvId !== msg.conversation_id) registerConvOrg(replyConvId, orgConfig.org_id);
-      const c4Out = await forwardToC4(endpoint, run ? run.marker + body : body, systemEventPriority(msg));
+      const c4Out = await forwardToC4(endpoint, run ? run.marker + body : body, inboundPriority(msg));
       if (run) activity.confirmRun(run.runId, c4Out);
       log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}`);
       markRead(orgConfig, msg.conversation_id, msg.seq);

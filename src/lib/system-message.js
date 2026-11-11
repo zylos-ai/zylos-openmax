@@ -65,3 +65,14 @@ export function systemEventPriority(msg) {
   if (!se) return undefined;
   return PRIORITY_BY_NAME[String(se.priority || '').toLowerCase()] || 3;
 }
+
+/**
+ * c4-receive `--priority` for an inbound message: `metadata.systemEvent.priority`
+ * counts only on a message from a platform System Member (isSystemSender).
+ * `metadata` is written by the sender, so on any other message the key is
+ * ignored and the default applies (undefined → c4-receive's normal, 3);
+ * otherwise anyone could mark their own message urgent.
+ */
+export function inboundPriority(msg) {
+  return isSystemSender(msg) ? systemEventPriority(msg) : undefined;
+}
