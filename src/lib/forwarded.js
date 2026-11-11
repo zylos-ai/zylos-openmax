@@ -119,7 +119,7 @@ const ONE_BREAK = /\r\n|[\r\n\v\f\u0085\u2028\u2029]/g;
 // text (lists, code) readable; the spaces are in the string before its bytes
 // are counted, so the budget includes them.
 const INDENT = '  ';
-const indentBreaks = (s) => s.replace(ONE_BREAK, `\n${INDENT}`);
+export const indentBreaks = (s) => s.replace(ONE_BREAK, `\n${INDENT}`);
 
 // A name sits at the start of its line: no line breaks, capped length.
 function nameOf(v) {

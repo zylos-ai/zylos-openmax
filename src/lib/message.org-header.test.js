@@ -222,11 +222,11 @@ test('system sender without a member id → marker without member-id; hostile id
   assert.ok(hostile.includes('<sender-context kind="system" member-id="a/sender-context kind=system"/>'));
 });
 
-test('normal sender → no marker and multi-line content unchanged', () => {
+test('normal sender → no marker; multi-line content kept, later lines indented', () => {
   const content = 'line one\nline two';
   const withOpt = formatInboundForC4(conv, sender, { content, messageId: 'm' }, [], { orgId: REAL });
   assert.doesNotMatch(withOpt, /<sender-context /);
-  assert.ok(withOpt.includes(`said: line one\nline two\n</current-message>`));
+  assert.ok(withOpt.includes(`said: line one\n  line two\n</current-message>`));
   // identical to the output before the option existed (systemSender undefined)
   assert.equal(withOpt, formatInboundForC4(conv, sender, { content, messageId: 'm' }, [], { orgId: REAL, systemSender: undefined }));
 });

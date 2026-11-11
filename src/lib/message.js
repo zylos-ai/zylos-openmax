@@ -38,7 +38,7 @@ import { extractWorkReferences, formatWorkReferenceContext } from './work-refere
 import { formatConnectorPreference } from './connector-preference.js';
 import { formatWfContext } from './wf-context.js';
 import { formatQuotedExcerpt } from './quote-excerpt.js';
-import { formatForwardedChatHistory, chatHistoryBudget } from './forwarded.js';
+import { formatForwardedChatHistory, chatHistoryBudget, indentBreaks } from './forwarded.js';
 
 const TYPE_TAG = { dm: '[OPENMAX DM]', group: '[OPENMAX GROUP]', thread: '[OPENMAX THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
@@ -236,11 +236,13 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // A System Member body is flattened onto one line so all of it follows
   // `<name> said:` — a multi-line platform event otherwise leaves its later
   // lines (e.g. a `ref: event=…` token) bare, where they read as pasted data.
-  // Human / agent content is left exactly as sent.
+  // Human / agent content keeps its lines, but every line after the first is
+  // indented two spaces (as merged-forward records are), so text from the body
+  // can never start a line that reads as another `<name> (<id>) said:`.
   const rawContent = String(current?.content ?? '');
-  const safeContent = escapeXml(
-    systemSender ? rawContent.replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ').trim() : rawContent,
-  );
+  const safeContent = systemSender
+    ? escapeXml(rawContent.replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ').trim())
+    : indentBreaks(escapeXml(rawContent));
 
   const baseTag = TYPE_TAG[type];
   // baseTag is like "[OPENMAX GROUP]" — inject ":<name>" before the closing "]".
