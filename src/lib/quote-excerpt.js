@@ -73,7 +73,10 @@ function capExcerpt(text) {
 export function quoteExcerptOf(msg, parentId) {
   if (parentId === undefined || parentId === null) return null;
   for (const item of agentContextItems(msg, 'quote')) {
-    if (String(item.attrs['message-id'] ?? '') !== String(parentId)) continue;
+    // A string id only, like the old key: cws-comm's recall cascade matches
+    // string ids, so a numeric one would never be tombstoned.
+    const id = item.attrs['message-id'];
+    if (typeof id !== 'string' || id !== String(parentId)) continue;
     // A tombstone may still carry a stale text; it must never be shown.
     if (item.attrs.recalled === true) return { kind: 'recalled' };
     const text = item.data?.text;

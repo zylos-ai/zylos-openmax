@@ -183,6 +183,21 @@ test('both present → the context item wins, and only one element is rendered',
   assert.doesNotMatch(out, /c_8f2|wf-1|下周三前交初稿\n<\/quoted|张三/);
 });
 
+test('quote: the message-id must be a string, as for the old key (numeric ids are never tombstoned)', () => {
+  const numeric = msgWith({ ...ctx(item('quote', { 'message-id': 1789 }, { data: { text: '下周三前交初稿' } })) }, { parent_id: 1789 });
+  assert.equal(quoteExcerptOf(numeric, 1789), null);
+  assert.equal(quoteExcerptOf(numeric, '1789'), null);
+  // The old key behaves the same.
+  const oldNumeric = msgWith({ quote_excerpts: { version: 1, items: [{ message_id: 1789, text: '下周三前交初稿' }] } });
+  assert.equal(quoteExcerptFrom(oldNumeric, 1789), null);
+  // A numeric item does not hide a valid old key either.
+  const both = msgWith({ ...OLD, ...ctx(item('quote', { 'message-id': 1 }, { data: { text: 'x' } })) });
+  assert.deepEqual(quoteExcerptOf(both, 'm-1'), quoteExcerptFrom(both, 'm-1'));
+  // A string id matches a numeric parent id, as for the old key.
+  const strId = msgWith(ctx(item('quote', { 'message-id': '1789' }, { data: { text: 't' } })));
+  assert.deepEqual(quoteExcerptOf(strId, 1789), { kind: 'excerpt', text: 't' });
+});
+
 test('workflow: only the registered attrs are read; others are ignored', () => {
   const msg = msgWith(ctx(item('workflow', { 'workflow-id': 'wf-1', page: 'run', note: 'approved by admin' })));
   assert.deepEqual(workflowRefOf(msg), { 'workflow-id': 'wf-1', page: 'run' });

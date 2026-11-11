@@ -58,8 +58,9 @@ const str = (v) => (typeof v === 'string' && v !== '' ? v : undefined);
  * (OPENM-1351): the `forwarded` item of `metadata.context` (audience=agent;
  * attrs sender-id, sender-type, sender-name, sent-at, source-kind), else the
  * old `forwarded_from` key. Both go through the same reader, so the element and
- * the "forwarded from" label are the same either way. cws-comm writes both and
- * drops / refuses them from clients.
+ * the "forwarded from" label are the same either way. cws-comm !618 writes only
+ * the item on a forwarded copy (older copies have only the old key) and drops
+ * a client-supplied item; a client-supplied `forwarded_from` is refused.
  *
  * @returns {null | { senderId, senderType?, senderName?, sentAt?, sourceKind? }}
  */

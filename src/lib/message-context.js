@@ -27,14 +27,14 @@
  * items (such as forwarded) and stamps `source`.
  */
 
-// Registered phase-1 types (same table as cws-comm's): the encoded size `data`
-// may have (0 = this type takes no data). Unregistered types get 2 KiB.
+// The four types read here (the phase-1 types of cws-comm !618's table): the
+// encoded size `data` may have (0 = this type takes no data). Any other type
+// is never read for the Agent; its data gets the 2 KiB parse limit.
 export const CONTEXT_TYPES = Object.freeze({
   connectors: { dataMaxBytes: 6 * 1024 },
   workflow: { dataMaxBytes: 0 },
   quote: { dataMaxBytes: 6 * 1024 },
   forwarded: { dataMaxBytes: 0 },
-  subconversation: { dataMaxBytes: 1024 },
 });
 
 export const MAX_CONTEXT_ITEMS = 16;
