@@ -667,7 +667,7 @@ test('group context and replying-to mark forwarded lines; ordinary lines are unc
 test('comm-bridge passes forwarded_from and chat_history into formatInboundForC4', () => {
   const bridge = fs.readFileSync(fileURLToPath(new URL('../comm-bridge.js', import.meta.url)), 'utf8');
   assert.match(bridge, /import \{[^}]*forwardedFromOf[^}]*chatHistoryOf[^}]*\} from '\.\/lib\/forwarded\.js'/);
-  assert.match(bridge, /forwardedFrom: forwardedFromOf\(msg\)/);
+  assert.match(bridge, /forwardedFrom: forwardedFromOf\(msg, ctxOpts\)/);
   assert.match(bridge, /chatHistory: chatHistoryOf\(msg\)/);
 });
 

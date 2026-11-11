@@ -14,6 +14,7 @@
  */
 
 import { formatStructuredForModel } from './structured-body.js';
+import { agentContextItemsFrom, provenanceOf, provenanceAttrs } from './message-context.js';
 
 export const MAX_EXCERPT_CODE_POINTS = 1000;
 
@@ -52,11 +53,35 @@ export function quoteExcerptFrom(msg, parentId) {
   if (item.recalled === true) return { kind: 'recalled' };
   if (typeof item.text !== 'string' || !item.text.trim()) return null;
 
-  const chars = [...item.text];
-  const text = chars.length > MAX_EXCERPT_CODE_POINTS
-    ? chars.slice(0, MAX_EXCERPT_CODE_POINTS).join('')
-    : item.text;
-  return { kind: 'excerpt', text };
+  return { kind: 'excerpt', text: capExcerpt(item.text) };
+}
+
+function capExcerpt(text) {
+  const chars = [...text];
+  return chars.length > MAX_EXCERPT_CODE_POINTS ? chars.slice(0, MAX_EXCERPT_CODE_POINTS).join('') : text;
+}
+
+/**
+ * The quoted excerpt of a reply, context first (OPENM-1351): the first `quote`
+ * item of `metadata.context` (audience=agent) whose `attrs.message-id` is the
+ * replied-to message — `attrs.recalled: true` is a tombstone, else
+ * `data.text` is the excerpt — then the old `quote_excerpts` key. An excerpt
+ * read from an item carries `provenance` ({ source, verified }).
+ *
+ * @returns {null | { kind: 'recalled', provenance? } | { kind: 'excerpt', text: string, provenance? }}
+ */
+export function quoteExcerptOf(msg, parentId, { trusted = false } = {}) {
+  if (parentId === undefined || parentId === null) return null;
+  for (const item of agentContextItemsFrom(msg)) {
+    if (item.type !== 'quote' || String(item.attrs['message-id'] ?? '') !== String(parentId)) continue;
+    const provenance = provenanceOf(item, trusted);
+    // A tombstone may still carry a stale text; it must never be shown.
+    if (item.attrs.recalled === true) return { kind: 'recalled', provenance };
+    const text = item.data?.text;
+    if (typeof text !== 'string' || !text.trim()) continue;
+    return { kind: 'excerpt', text: capExcerpt(text), provenance };
+  }
+  return quoteExcerptFrom(msg, parentId);
 }
 
 function escapeText(s) {
@@ -103,5 +128,5 @@ export function formatQuotedExcerpt(sender, excerpt, parentText) {
   const needle = stripMarkers(excerpt.text);
   const verified = needle !== '' && renderedText(parentText ?? '').includes(needle);
   const unverified = verified ? '' : ' unverified="true"';
-  return `<quoted-excerpt from="${escapeAttr(sender || 'unknown')}"${unverified}>\n${escapeText(excerpt.text)}\n</quoted-excerpt>`;
+  return `<quoted-excerpt from="${escapeAttr(sender || 'unknown')}"${unverified}${provenanceAttrs(excerpt.provenance)}>\n${escapeText(excerpt.text)}\n</quoted-excerpt>`;
 }

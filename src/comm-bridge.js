@@ -32,15 +32,16 @@ import { createSelfNameHydrator } from './lib/self-name-hydration.js';
 import { WsClient, createDeduper } from './lib/ws.js';
 import { resolveInboundContent } from './lib/inbound-content.js';
 import { formatInboundForC4, formatEndpoint, newClientMsgId } from './lib/message.js';
-import { isSystemSender, senderMemberFrom, systemEventPriority } from './lib/system-message.js';
+import { isSystemSender, senderMemberFrom, inboundPriority } from './lib/system-message.js';
 import {
   handleImOwnerNotice, createDedup, refreshOwnerEndpoint, IM_OWNER_NOTICE_TYPE,
 } from './lib/im-owner-notice.js';
 import { classifySystemEvent, isSenderlessUpdate, routeImOwnerNotice } from './lib/system-event-routing.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
-import { preferredConnectorsFrom } from './lib/connector-preference.js';
+import { connectorPreferenceOf } from './lib/connector-preference.js';
 import { wfRefFrom } from './lib/wf-context.js';
-import { quoteExcerptFrom, quotedMessageText } from './lib/quote-excerpt.js';
+import { contextHeaderItems, createThreadRootCache } from './lib/message-context.js';
+import { quoteExcerptOf, quotedMessageText } from './lib/quote-excerpt.js';
 import { forwardedFromOf, chatHistoryOf, forwardedLabelOf } from './lib/forwarded.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
@@ -316,6 +317,31 @@ async function fetchMessageDetail(orgId, conversationId, messageId) {
     warn(`fetchMessageDetail conv=${conversationId} msg=${messageId} failed:`, e.message);
     return null;
   }
+}
+
+// Thread roots fetched for message-context inheritance (OPENM-1351), keyed by
+// org + root message id: every message in a thread names the same root, and a
+// message's metadata does not change after it is sent.
+const threadRootCache = createThreadRootCache();
+
+/**
+ * The root message of a thread, for inheriting its metadata.context items.
+ * The root lives in the conversation the thread hangs off: try the message's
+ * own conversation first, then the thread conversation's parent. Cached;
+ * null (not cached) when it cannot be fetched.
+ */
+async function fetchThreadRoot(orgId, conversationIds, rootId) {
+  const key = `${orgId}:${rootId}`;
+  const hit = threadRootCache.get(key);
+  if (hit) return hit;
+  for (const convId of [...new Set(conversationIds.filter(Boolean))]) {
+    const root = await fetchMessageDetail(orgId, convId, rootId);
+    if (root) {
+      threadRootCache.set(key, root);
+      return root;
+    }
+  }
+  return null;
 }
 
 /**
@@ -1260,9 +1286,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     // Fetch the quoted message and surface it as <replying-to>. Threads take
     // precedence (threadContext), so skip for threads.
     let quotedContent;
+    // The replied-to message (or, in a thread, the thread root): its inheritable
+    // metadata.context items are shown with this message (OPENM-1351).
+    let contextParent;
     const quotedMsgId = msg.parent_id || msg.message?.parent_id || msg.parent_message_id;
     if (quotedMsgId && convType !== 'thread') {
       const q = await fetchMessageDetail(orgConfig.org_id, msg.conversation_id, quotedMsgId);
+      contextParent = q || undefined;
       if (q) {
         const qStructured = (q.content && typeof q.content === 'object') ? q.content : {};
         let qText = quotedMessageText(q);
@@ -1302,6 +1332,19 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         if (qText) quotedContent = { sender: qSender, text: qText, forwardedLabel: forwardedLabelOf(q) };
       }
     }
+    // A thread message: inherit from the thread root (fetched once per root).
+    if (!contextParent && msg.parent_message_id && (convType === 'thread' || msg.thread_id)) {
+      contextParent = await fetchThreadRoot(
+        orgConfig.org_id,
+        [msg.conversation_id, conv?.parent_conversation_id],
+        msg.parent_message_id,
+      ) || undefined;
+    }
+    // Message context: metadata.context items first, the old keys as fallback.
+    // `trusted` only decides source-verified (config contextSourceTrusted).
+    const ctxOpts = { trusted: config.contextSourceTrusted === true };
+    const connectorPref = connectorPreferenceOf(msg, ctxOpts);
+    const msgContext = contextHeaderItems(msg, { ...ctxOpts, parent: contextParent });
 
     const isImage = msgType === 'image' || msgType === 'agent_card';
     const isFile = !isImage && mediaItems.length > 0;
@@ -1328,13 +1371,16 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       recent,
       {
         groupName, smartHint, quotedContent,
-        quotedExcerpt: quoteExcerptFrom(msg, quotedMsgId),
-        forwardedFrom: forwardedFromOf(msg),
+        quotedExcerpt: quoteExcerptOf(msg, quotedMsgId, ctxOpts),
+        forwardedFrom: forwardedFromOf(msg, ctxOpts),
         chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
-        preferredConnectors: preferredConnectorsFrom(msg),
-        wfRef: wfRefFrom(msg),
+        preferredConnectors: connectorPref?.connectors,
+        preferredConnectorsSource: connectorPref?.provenance,
+        // A workflow item in metadata.context replaces the old <wf-context>.
+        wfRef: msgContext.hasWorkflow ? null : wfRefFrom(msg),
+        contextItems: msgContext.items,
         systemSender: isSystemSender(msg)
           ? { memberId: msg.sender_id || msg.message?.sender_id }
           : undefined,
@@ -1366,7 +1412,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     try {
       registerConvOrg(msg.conversation_id, orgConfig.org_id);
       if (replyConvId !== msg.conversation_id) registerConvOrg(replyConvId, orgConfig.org_id);
-      const c4Out = await forwardToC4(endpoint, run ? run.marker + body : body, systemEventPriority(msg));
+      const c4Out = await forwardToC4(endpoint, run ? run.marker + body : body, inboundPriority(msg));
       if (run) activity.confirmRun(run.runId, c4Out);
       log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}`);
       markRead(orgConfig, msg.conversation_id, msg.seq);

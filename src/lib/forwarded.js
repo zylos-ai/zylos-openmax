@@ -22,6 +22,8 @@
  * nothing in a record can close the element or open a new <record>.
  */
 
+import { agentContextItem, provenanceOf, provenanceAttrs } from './message-context.js';
+
 export const MAX_RECORDS = 100;
 export const MAX_RECORD_TEXT_CODE_POINTS = 1000;
 // The whole C4 envelope reaches c4-receive as ONE argv element, which Linux
@@ -52,10 +54,25 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (typeof v === 'string' && v !== '' ? v : undefined);
 
 /**
- * @returns {null | { senderId, senderType?, senderName?, sentAt?, sourceKind? }}
+ * The original author of a one-by-one forwarded copy, context first
+ * (OPENM-1351): the `forwarded` item of `metadata.context` (audience=agent;
+ * attrs sender-id, sender-type, sender-name, sent-at, source-kind), else the
+ * old `forwarded_from` key. A value read from the item carries `provenance`
+ * ({ source, verified }).
+ *
+ * @returns {null | { senderId, senderType?, senderName?, sentAt?, sourceKind?, provenance? }}
  */
-export function forwardedFromOf(msg) {
+export function forwardedFromOf(msg, { trusted = false } = {}) {
   if (!isObject(msg)) return null;
+  const item = agentContextItem(msg, 'forwarded');
+  const fromItem = item ? readForwardedFrom({
+    sender_id: item.attrs['sender-id'],
+    sender_type: item.attrs['sender-type'],
+    sender_name: item.attrs['sender-name'],
+    sent_at: item.attrs['sent-at'],
+    source_kind: item.attrs['source-kind'],
+  }, { requireVersion: false }) : null;
+  if (fromItem) return { ...fromItem, provenance: provenanceOf(item, trusted) };
   const meta = [msg.metadata, msg.message?.metadata]
     .find((m) => isObject(m) && 'forwarded_from' in m);
   return readForwardedFrom(meta?.forwarded_from, { requireVersion: true });
@@ -207,7 +224,7 @@ export function formatForwardedMessage(forwarder, ff, content) {
     ...originalSenderAttrs(ff),
     ['source-kind', ff.sourceKind],
   ]);
-  return `<forwarded-message${a}>\n${escapeText(content ?? '')}\n</forwarded-message>`;
+  return `<forwarded-message${a}${provenanceAttrs(ff.provenance)}>\n${escapeText(content ?? '')}\n</forwarded-message>`;
 }
 
 const byteLength = (s) => Buffer.byteLength(s, 'utf8');
@@ -250,7 +267,12 @@ export function chatHistoryBudget(restBytes) {
 export function formatForwardedChatHistory(forwarder, history, ff, budget = MAX_FORWARDED_BLOCK_BYTES) {
   if (!history) return '';
   const limit = Math.min(MAX_FORWARDED_BLOCK_BYTES, budget);
-  const head = [['forwarded-by', forwarder || 'unknown'], ...originalSenderAttrs(ff)];
+  const head = [
+    ['forwarded-by', forwarder || 'unknown'],
+    ...originalSenderAttrs(ff),
+    ['source', ff?.provenance?.source],
+    ['source-verified', ff?.provenance ? String(!!ff.provenance.verified) : undefined],
+  ];
   if (history.detail === 'fallback') {
     const open = `<forwarded-chat-history${attrs([...head, ['detail', 'fallback']])}`;
     const room = limit - byteLength(open) - byteLength(CLOSE) - OMITTED_RESERVE_BYTES;

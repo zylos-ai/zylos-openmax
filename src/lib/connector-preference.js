@@ -16,7 +16,12 @@
  * inbound header (next to <message-context>), not inside the user's text. It is
  * a hint for choosing between connections, not an authorization: conn.* never
  * reads it.
+ *
+ * The same list may also arrive as a `connectors` item of `metadata.context`
+ * (see message-context.js); connectorPreferenceOf reads that first.
  */
+
+import { agentContextItem, provenanceOf, provenanceAttrs } from './message-context.js';
 
 // The panel has no selection cap (OPENM-915 removed the 5-limit), so this is
 // only a sanity bound on a malformed/abusive payload, far above any real
@@ -41,16 +46,12 @@ function oneLineLabel(raw) {
 }
 
 /**
- * Read `preferred_connectors` from a fetched message (top-level `metadata`, or
- * the nested `message.metadata` envelope). Returns a normalized
- * `[{ connectionId, label }]`, or null when there is nothing usable. Malformed
- * entries are dropped individually; duplicates (by id) keep the first.
+ * Normalize a `[{ connection_id, label }]` list (the old key's value, or the
+ * `data.connections` of a connectors context item) to `[{ connectionId, label }]`,
+ * or null when nothing is usable. Malformed entries are dropped individually;
+ * duplicates (by id) keep the first.
  */
-export function preferredConnectorsFrom(msg) {
-  if (!msg || typeof msg !== 'object') return null;
-  const meta = [msg.metadata, msg.message?.metadata]
-    .find((m) => m && typeof m === 'object' && !Array.isArray(m) && 'preferred_connectors' in m);
-  const raw = meta?.preferred_connectors;
+function normalizeConnectors(raw) {
   if (!Array.isArray(raw) || raw.length === 0) return null;
 
   const out = [];
@@ -68,6 +69,34 @@ export function preferredConnectorsFrom(msg) {
   return out.length ? out : null;
 }
 
+/**
+ * Read `preferred_connectors` from a fetched message (top-level `metadata`, or
+ * the nested `message.metadata` envelope). Returns a normalized
+ * `[{ connectionId, label }]`, or null when there is nothing usable. Malformed
+ * entries are dropped individually; duplicates (by id) keep the first.
+ */
+export function preferredConnectorsFrom(msg) {
+  if (!msg || typeof msg !== 'object') return null;
+  const meta = [msg.metadata, msg.message?.metadata]
+    .find((m) => m && typeof m === 'object' && !Array.isArray(m) && 'preferred_connectors' in m);
+  return normalizeConnectors(meta?.preferred_connectors);
+}
+
+/**
+ * The connector preference of a message, context first (OPENM-1351): the
+ * `connectors` item of `metadata.context` (audience=agent, `data.connections`),
+ * else the old `preferred_connectors` key. Returns
+ * `{ connectors, provenance? }` — `provenance` ({ source, verified }) only when
+ * it came from the item — or null when neither is usable.
+ */
+export function connectorPreferenceOf(msg, { trusted = false } = {}) {
+  const item = agentContextItem(msg, 'connectors');
+  const fromItem = item ? normalizeConnectors(item.data?.connections) : null;
+  if (fromItem) return { connectors: fromItem, provenance: provenanceOf(item, trusted) };
+  const legacy = preferredConnectorsFrom(msg);
+  return legacy ? { connectors: legacy } : null;
+}
+
 function escapeText(s) {
   return String(s).replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -75,13 +104,15 @@ function escapeText(s) {
 /**
  * Render the <connector-preference> element: exactly two content lines (the
  * wording agreed with PM). Returns '' when there is nothing to render.
+ * `provenance` (from connectorPreferenceOf) adds `source` / `source-verified`
+ * when the preference came from a context item; the old key renders as before.
  */
-export function formatConnectorPreference(prefs) {
+export function formatConnectorPreference(prefs, provenance) {
   if (!Array.isArray(prefs) || prefs.length === 0) return '';
   const ids = prefs.map((p) => p.connectionId).join(',');
   const list = prefs.map((p) => escapeText(p.label)).join('、');
   return [
-    `<connector-preference connection-ids="${ids}">`,
+    `<connector-preference connection-ids="${ids}"${provenanceAttrs(provenance)}>`,
     `用户在本对话把这些连接器设为优先使用：${list}。相关请求先用它们，不用再问用哪个。`,
     '其他已授权的连接器需要时也可以用，但要在回复里用用户正在用的语言说明这次用了哪个连接器。',
     '</connector-preference>',

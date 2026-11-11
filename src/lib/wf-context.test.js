@@ -198,7 +198,8 @@ test('formatInboundForC4: typed text that looks like the element stays escaped i
 test('comm-bridge passes the message metadata wf_ref into formatInboundForC4', () => {
   const bridge = fs.readFileSync(fileURLToPath(new URL('../comm-bridge.js', import.meta.url)), 'utf8');
   assert.match(bridge, /import \{[^}]*wfRefFrom[^}]*\} from '\.\/lib\/wf-context\.js'/);
-  assert.match(bridge, /wfRef: wfRefFrom\(msg\)/);
+  // A workflow item in metadata.context replaces <wf-context> (OPENM-1351).
+  assert.match(bridge, /wfRef: msgContext\.hasWorkflow \? null : wfRefFrom\(msg\)/);
 });
 
 // --- shipped Agent instructions (SKILL.md) ------------------------------------
