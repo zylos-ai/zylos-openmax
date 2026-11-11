@@ -41,7 +41,7 @@ import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/i
 import { connectorPreferenceOf } from './lib/connector-preference.js';
 import { workflowRefOf } from './lib/wf-context.js';
 import { quoteExcerptOf, quotedMessageText } from './lib/quote-excerpt.js';
-import { forwardedFromOf, chatHistoryOf, forwardedLabelOf } from './lib/forwarded.js';
+import { chatHistoryOf, isChatHistory, FORWARDED_CONVERSATION } from './lib/forwarded.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
 import { recordParticipants } from './lib/mention.js';
@@ -954,6 +954,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       } else if (isImg) {
         histText = '[image]' + (entryText ? ' ' + entryText : '');
       }
+      // A merged forward is one line in context, never its expanded records.
+      if (isChatHistory(msg)) histText = FORWARDED_CONVERSATION;
       ensureReplay(msg.conversation_id);
       const historySenderName = msg.sender_display_name
         || msg.sender?.display_name
@@ -968,7 +970,6 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         seq: msg.seq != null ? Number(msg.seq) : null,
         parent_id: msg.parent_message_id || msg.message?.parent_id || null,
         type: msgType || 'text',
-        forwarded_label: forwardedLabelOf(msg),
       });
     }
 
@@ -1087,7 +1088,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
           if (!name || name === e.sender_id) {
             name = (await fetchMemberName(orgConfig.org_id, e.sender_id)) || e.sender_id;
           }
-          return { senderName: name, senderId: e.sender_id, content: e.text, forwardedLabel: e.forwarded_label };
+          return { senderName: name, senderId: e.sender_id, content: e.text };
         }));
       } else {
         // API path: ctx is an array of API message objects
@@ -1148,7 +1149,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
           } else if (mIsImage) {
             content = '[image]' + (text ? ' ' + text : '');
           }
-          return { senderName, senderId: m.sender_id, content, forwardedLabel: forwardedLabelOf(m) };
+          if (isChatHistory(m)) content = FORWARDED_CONVERSATION;
+          return { senderName, senderId: m.sender_id, content };
         }));
       }
       log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${source} count=${recent.length}`);
@@ -1266,6 +1268,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       if (q) {
         const qStructured = (q.content && typeof q.content === 'object') ? q.content : {};
         let qText = quotedMessageText(q);
+        // A quoted merged forward is one line, as in group context.
+        if (isChatHistory(q)) qText = FORWARDED_CONVERSATION;
         // Quoted media: a quoted image/file with no caption yields empty text,
         // which would drop the whole quote. Label it ([image]/[file: name]) and
         // download the referenced attachment, appending `---- <kind>: <path>` so
@@ -1299,7 +1303,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
              q.message?.sender_display_name
           || (await fetchMemberName(orgConfig.org_id, qSenderId))
           || qSenderId;
-        if (qText) quotedContent = { sender: qSender, text: qText, forwardedLabel: forwardedLabelOf(q) };
+        if (qText) quotedContent = { sender: qSender, text: qText };
       }
     }
 
@@ -1314,7 +1318,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
 
     const body = formatInboundForC4(
       { type: replyConvType, id: replyConvId, name: groupName },
-      { displayName: senderName },
+      { displayName: senderName, id: msg.sender_id || msg.message?.sender_id },
       {
         content: displayContent,
         // <message-context> is the server-issued pair other verbs copy verbatim
@@ -1329,7 +1333,6 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       {
         groupName, smartHint, quotedContent,
         quotedExcerpt: quoteExcerptOf(msg, quotedMsgId),
-        forwardedFrom: forwardedFromOf(msg),
         chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
@@ -1704,7 +1707,7 @@ async function handleSystemEvent(orgConfig, frame) {
   const endpoint = formatEndpoint({ type: convType, conversationId });
   const body = formatInboundForC4(
     { type: convType, id: conversationId, name: convName },
-    { displayName: actorName },
+    { displayName: actorName, id: actorId },
     { content: notice, type: 'text' },
     [],
     { orgId: orgConfig.org_id, orgName: orgConfig.org_name },

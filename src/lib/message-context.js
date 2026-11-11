@@ -19,10 +19,12 @@
  *
  * The envelope does not change: each registered type is read here and handed
  * to the existing reader, context first and the old key as fallback
- * (connector-preference.js, wf-context.js, quote-excerpt.js, forwarded.js),
- * which renders it through its existing element with its existing wording, so
- * the same data renders byte-identically whichever key carried it; the
- * envelope is unchanged. Other types (including subconversation) are ignored.
+ * (connector-preference.js, wf-context.js, quote-excerpt.js), which renders it
+ * through its existing element with its existing wording, so the same data
+ * renders byte-identically whichever key carried it; the envelope is
+ * unchanged. A `forwarded` item, like the old `forwarded_from` key, is not
+ * rendered: a one-by-one forwarded copy reads as an ordinary message. Other
+ * types (including subconversation) are ignored.
  * There is no trust logic here: cws-comm drops client-supplied platform-only
  * items (such as forwarded) and stamps `source`.
  */

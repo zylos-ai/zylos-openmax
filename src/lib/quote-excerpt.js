@@ -10,7 +10,8 @@
  * tombstone `{ message_id, recalled: true }`. `metadata` is an opaque
  * pass-through any client can write, so it is read with the same lenient
  * rules as the FE's `readQuoteExcerpt`: anything unexpected means "no excerpt"
- * and the inbound text stays exactly as for a plain reply.
+ * and the inbound text stays exactly as for a plain reply. A verified excerpt
+ * replaces the quoted text in <replying-to> (see verifiedExcerptText).
  */
 
 import { formatStructuredForModel } from './structured-body.js';
@@ -22,7 +23,8 @@ export const MAX_EXCERPT_CODE_POINTS = 1000;
  * The quoted message's full text: shown in <replying-to> and the text the
  * excerpt is checked against. A card has no `body.text` and the detail path
  * nulls `message.content`, so without the structured arm a card quotes only
- * as its `fallback_text` and an excerpt of any field reads as unverified.
+ * as its `fallback_text` and an excerpt of any field is not found (so
+ * <replying-to> falls back to the full text).
  * Same expansion as the forward path uses for a received card.
  */
 export function quotedMessageText(q) {
@@ -66,7 +68,7 @@ function capExcerpt(text) {
  * item of `metadata.context` (audience=agent) whose `attrs.message-id` is the
  * replied-to message — `attrs.recalled: true` is a tombstone, else
  * `data.text` is the excerpt — then the old `quote_excerpts` key. Same result
- * shape as quoteExcerptFrom, so <quoted-excerpt> is the same either way.
+ * shape as quoteExcerptFrom, so <replying-to> is the same either way.
  *
  * @returns {null | { kind: 'recalled' } | { kind: 'excerpt', text: string }}
  */
@@ -84,14 +86,6 @@ export function quoteExcerptOf(msg, parentId) {
     return { kind: 'excerpt', text: capExcerpt(text) };
   }
   return quoteExcerptFrom(msg, parentId);
-}
-
-function escapeText(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function escapeAttr(s) {
-  return escapeText(s).replace(/"/g, '&quot;').replace(/[\r\n\u2028\u2029]+/g, ' ');
 }
 
 // The FE selects rendered text, so markdown syntax is reduced to what a reader
@@ -118,17 +112,16 @@ function renderedText(markdown) {
 }
 
 /**
- * Render the <quoted-excerpt> element, or '' when there is no usable excerpt
- * (a tombstone renders nothing: the quoted text was recalled).
+ * The excerpt text to show in <replying-to> in place of the quoted message's
+ * full text, or null when there is none to show: no excerpt, a tombstone (the
+ * quoted text was recalled), or an excerpt not found in `parentText`.
  *
  * The excerpt comes from the quoting client, not from the quoted message, yet
- * `from` names the quoted author; `unverified="true"` marks an excerpt not
- * found in `parentText` so it cannot pass as that author's words.
+ * <replying-to> names the quoted author, so only an excerpt that appears in
+ * the quoted text is shown; otherwise the full quoted text is shown instead.
  */
-export function formatQuotedExcerpt(sender, excerpt, parentText) {
-  if (excerpt?.kind !== 'excerpt') return '';
+export function verifiedExcerptText(excerpt, parentText) {
+  if (excerpt?.kind !== 'excerpt') return null;
   const needle = stripMarkers(excerpt.text);
-  const verified = needle !== '' && renderedText(parentText ?? '').includes(needle);
-  const unverified = verified ? '' : ' unverified="true"';
-  return `<quoted-excerpt from="${escapeAttr(sender || 'unknown')}"${unverified}>\n${escapeText(excerpt.text)}\n</quoted-excerpt>`;
+  return needle !== '' && renderedText(parentText ?? '').includes(needle) ? excerpt.text : null;
 }

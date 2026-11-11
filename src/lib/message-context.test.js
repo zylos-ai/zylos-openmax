@@ -9,7 +9,7 @@ import {
 import { connectorPreferenceOf, preferredConnectorsFrom } from './connector-preference.js';
 import { workflowRefOf, wfRefFrom } from './wf-context.js';
 import { quoteExcerptOf, quoteExcerptFrom } from './quote-excerpt.js';
-import { forwardedFromOf, chatHistoryOf, forwardedLabelOf } from './forwarded.js';
+import { chatHistoryOf } from './forwarded.js';
 import { inboundPriority, systemEventPriority } from './system-message.js';
 import { formatInboundForC4 } from './message.js';
 
@@ -46,10 +46,9 @@ function msgWith(metadata, extra = {}) {
 // The whole envelope, built the way comm-bridge builds it (new readers).
 function envelope(msg, { type = 'dm' } = {}) {
   return formatInboundForC4({ type, id: 'cv-1', name: 'G' }, { displayName: 'Alice' }, { content: '这个能提前吗？', messageId: 'm-2' },
-    [{ senderName: 'Bob', content: '那句话', forwardedLabel: forwardedLabelOf(msg) }], {
-      quotedContent: { sender: 'Bob', text: '请在下周三前交初稿，谢谢', forwardedLabel: forwardedLabelOf(msg) },
+    [{ senderName: 'Bob', content: '那句话' }], {
+      quotedContent: { sender: 'Bob', text: '请在下周三前交初稿，谢谢' },
       quotedExcerpt: quoteExcerptOf(msg, 'm-1'),
-      forwardedFrom: forwardedFromOf(msg),
       chatHistory: chatHistoryOf(msg),
       preferredConnectors: connectorPreferenceOf(msg),
       wfRef: workflowRefOf(msg),
@@ -57,20 +56,13 @@ function envelope(msg, { type = 'dm' } = {}) {
     });
 }
 
-// The same envelope with the 2.33.0 readers (old keys only).
+// The same envelope with the 2.33.0 readers (old keys only). A one-by-one
+// forwarded copy is not framed as forwarded, whichever key carries it.
 function envelope233(msg, { type = 'dm' } = {}) {
-  const ff = (() => {
-    const meta = msg.metadata;
-    const f = meta?.forwarded_from;
-    if (!f || f.version !== 1 || !f.sender_id) return null;
-    return forwardedFromOf({ metadata: { forwarded_from: f } });
-  })();
-  const label = ff ? `forwarded from ${ff.senderName || ff.senderId}` : undefined;
   return formatInboundForC4({ type, id: 'cv-1', name: 'G' }, { displayName: 'Alice' }, { content: '这个能提前吗？', messageId: 'm-2' },
-    [{ senderName: 'Bob', content: '那句话', forwardedLabel: label }], {
-      quotedContent: { sender: 'Bob', text: '请在下周三前交初稿，谢谢', forwardedLabel: label },
+    [{ senderName: 'Bob', content: '那句话' }], {
+      quotedContent: { sender: 'Bob', text: '请在下周三前交初稿，谢谢' },
       quotedExcerpt: quoteExcerptFrom(msg, 'm-1'),
-      forwardedFrom: ff,
       chatHistory: chatHistoryOf(msg),
       preferredConnectors: preferredConnectorsFrom(msg),
       wfRef: wfRefFrom(msg),
@@ -90,11 +82,12 @@ test('parity: the four new items render exactly like the four old keys (DM and g
   const out = envelope(msgWith(NEW), { type: 'group' });
   assert.match(out, /^<connector-preference connection-ids="c_8f2,c_91a">$/m);
   assert.match(out, /^<wf-context workflow-id="wf-1" run-id="run-9" page="step" step-n="3"\/>$/m);
-  assert.match(out, /^<quoted-excerpt from="Bob">\n下周三前交初稿\n<\/quoted-excerpt>$/m);
-  assert.match(out, /<forwarded-message forwarded-by="Alice" original-sender="张三" original-sender-kind="human" original-sent-at="2026-11-10T08:00:00.000Z" source-kind="group">/);
-  assert.match(out, /\[Bob\] \(forwarded from 张三\): 那句话/);
+  assert.match(out, /^<replying-to>\n\[Bob\]: 下周三前交初稿\n<\/replying-to>$/m);
+  // Neither forwarded key frames the message as forwarded.
+  assert.doesNotMatch(out, /forwarded|张三/);
+  assert.match(out, /\[Bob\]: 那句话/);
   // No new element or attribute anywhere in the envelope.
-  assert.doesNotMatch(out, /<context|source-verified|source="|<subconversation|unverified/);
+  assert.doesNotMatch(out, /<context|source-verified|source="|<subconversation|unverified|<quoted-excerpt/);
 });
 
 test('parity per type: each new item alone renders like its old key alone', () => {
@@ -111,16 +104,18 @@ test('parity per type: each new item alone renders like its old key alone', () =
   }
 });
 
-test('parity: the quote content check (unverified="true") and the tombstone behave the same', () => {
+test('parity: the quote content check (unverified → full quoted text) and the tombstone behave the same', () => {
   const notInOriginal = { text: '原文里没有这句' };
   const oldQ = { quote_excerpts: { version: 1, items: [{ message_id: 'm-1', ...notInOriginal }] } };
   const newQ = ctx(item('quote', { 'message-id': 'm-1' }, { data: notInOriginal }));
   assert.equal(envelope(msgWith(newQ)), envelope(msgWith(oldQ)));
-  assert.match(envelope(msgWith(newQ)), /<quoted-excerpt from="Bob" unverified="true">/);
+  assert.match(envelope(msgWith(newQ)), /<replying-to>\n\[Bob\]: 请在下周三前交初稿，谢谢\n<\/replying-to>/);
+  assert.doesNotMatch(envelope(msgWith(newQ)), /原文里没有这句|<quoted-excerpt|unverified/);
   const oldT = { quote_excerpts: { version: 1, items: [{ message_id: 'm-1', recalled: true, text: 'stale' }] } };
   const newT = ctx(item('quote', { 'message-id': 'm-1', recalled: true }, { data: { text: 'stale' } }));
   assert.deepEqual(quoteExcerptOf(msgWith(newT), 'm-1'), { kind: 'recalled' });
   assert.equal(envelope(msgWith(newT)), envelope(msgWith(oldT)));
+  assert.match(envelope(msgWith(newT)), /<replying-to>\n\[Bob\]: 请在下周三前交初稿，谢谢\n<\/replying-to>/);
   assert.doesNotMatch(envelope(msgWith(newT)), /<quoted-excerpt|stale/);
 });
 
@@ -147,7 +142,6 @@ test('without context items each reader falls back to its old key (old-key outpu
   assert.deepEqual(connectorPreferenceOf(msg), preferredConnectorsFrom(msg));
   assert.deepEqual(workflowRefOf(msg), wfRefFrom(msg));
   assert.deepEqual(quoteExcerptOf(msg, 'm-1'), quoteExcerptFrom(msg, 'm-1'));
-  assert.deepEqual(forwardedFromOf(msg).senderName, '张三');
   assert.equal(envelope(msg), envelope233(msg));
 });
 
@@ -169,7 +163,7 @@ test('both present → the context item wins, and only one element is rendered',
   const msg = msgWith({ ...OLD, ...ctx(
     item('connectors', {}, { data: { connections: [{ connection_id: 'c_new', label: 'New' }] } }),
     item('workflow', { 'workflow-id': 'wf-new', page: 'run' }),
-    item('quote', { 'message-id': 'm-1' }, { data: { text: '新的引用' } }),
+    item('quote', { 'message-id': 'm-1' }, { data: { text: '谢谢' } }),
     item('forwarded', { 'sender-id': 'u-new', 'sender-name': '新作者' }),
   ) });
   const out = envelope(msg, { type: 'group' });
@@ -177,10 +171,9 @@ test('both present → the context item wins, and only one element is rendered',
   assert.match(out, /connection-ids="c_new"/);
   assert.equal(out.match(/<wf-context/g).length, 1);
   assert.match(out, /<wf-context workflow-id="wf-new" page="run"\/>/);
-  assert.match(out, /<quoted-excerpt from="Bob" unverified="true">\n新的引用\n/);
-  assert.match(out, /original-sender="新作者"/);
-  assert.match(out, /\(forwarded from 新作者\)/);
-  assert.doesNotMatch(out, /c_8f2|wf-1|下周三前交初稿\n<\/quoted|张三/);
+  assert.equal(out.match(/<replying-to>/g).length, 1);
+  assert.match(out, /<replying-to>\n\[Bob\]: 谢谢\n<\/replying-to>/);
+  assert.doesNotMatch(out, /c_8f2|wf-1|下周三前交初稿|张三|新作者|forwarded/);
 });
 
 test('quote: the message-id must be a string, as for the old key (numeric ids are never tombstoned)', () => {
@@ -283,7 +276,7 @@ test('comm-bridge: C4 priority goes through inboundPriority, never systemEventPr
 
 test('comm-bridge: the context-first readers feed the existing opts', () => {
   assert.match(BRIDGE, /quotedExcerpt: quoteExcerptOf\(msg, quotedMsgId\)/);
-  assert.match(BRIDGE, /forwardedFrom: forwardedFromOf\(msg\)/);
+  assert.doesNotMatch(BRIDGE, /forwardedFrom/);
   assert.match(BRIDGE, /preferredConnectors: connectorPreferenceOf\(msg\)/);
   assert.match(BRIDGE, /wfRef: workflowRefOf\(msg\)/);
 });
