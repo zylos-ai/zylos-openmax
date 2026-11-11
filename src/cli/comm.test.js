@@ -170,32 +170,35 @@ test('validation: member_add with neither id, remove without id, batch with empt
   assert.match((await captureFailure('comm.member_remove_batch', { conversationId: 'cv-1', memberIds: [] })).error, /non-empty/);
 });
 
+// a real-shaped conversation id: update_group refuses anything else
+const CV = '01a18277-f26a-7ef9-a08d-5ffc014d7d9e';
+
 test('update_group (name) → PATCH /conversations/{id} {name} + documented auth', async () => {
-  const request = await captureRequest('comm.update_group', { conversationId: 'cv-1', name: '新群名' });
+  const request = await captureRequest('comm.update_group', { conversationId: CV, name: '新群名' });
   assert.equal(request.method, 'PATCH');
-  assert.equal(request.url, '/api/v1/conversations/cv-1');
+  assert.equal(request.url, `/api/v1/conversations/${CV}`);
   assert.equal(request.authorization, 'Bearer cli-contract-token');
   assert.deepEqual(request.body, { name: '新群名' });
 });
 
 test('update_group (description only) sends only description; "" is sent as-is to clear it', async () => {
-  const desc = await captureRequest('comm.update_group', { conversationId: 'cv-1', description: '群说明' });
+  const desc = await captureRequest('comm.update_group', { conversationId: CV, description: '群说明' });
   assert.deepEqual(desc.body, { description: '群说明' });
 
-  const cleared = await captureRequest('comm.update_group', { conversationId: 'cv-1', description: '' });
+  const cleared = await captureRequest('comm.update_group', { conversationId: CV, description: '' });
   assert.deepEqual(cleared.body, { description: '' });
 });
 
 test('update_group (both) sends name and description', async () => {
   const request = await captureRequest('comm.update_group', {
-    conversationId: 'cv-1', name: 'n', description: 'd',
+    conversationId: CV, name: 'n', description: 'd',
   });
   assert.deepEqual(request.body, { name: 'n', description: 'd' });
 });
 
 test('update_group body is a whitelist: metadata / avatar / permissions never go out', async () => {
   const request = await captureRequest('comm.update_group', {
-    conversationId: 'cv-1', name: 'n',
+    conversationId: CV, name: 'n',
     metadata: { description: 'x', agent_config: {} },
     avatarMediaId: 'media-1', avatar_media_id: 'media-1', permissions: { who_can_invite: 'ALL' },
   });
@@ -204,11 +207,15 @@ test('update_group body is a whitelist: metadata / avatar / permissions never go
 
 test('validation: update_group without id, with nothing to update, blank name, non-string description', async () => {
   assert.match((await captureFailure('comm.update_group', { name: 'n' })).error, /conversationId required/);
-  assert.match((await captureFailure('comm.update_group', { conversationId: 'cv-1' })).error, /nothing to update/);
-  assert.match((await captureFailure('comm.update_group', { conversationId: 'cv-1', metadata: { a: 1 } })).error, /nothing to update/);
-  assert.match((await captureFailure('comm.update_group', { conversationId: 'cv-1', name: '  ' })).error, /non-empty/);
-  assert.match((await captureFailure('comm.update_group', { conversationId: 'cv-1', name: 7 })).error, /non-empty/);
-  assert.match((await captureFailure('comm.update_group', { conversationId: 'cv-1', description: 123 })).error, /description must be a string/);
+  assert.match((await captureFailure('comm.update_group', { conversationId: CV })).error, /nothing to update/);
+  assert.match((await captureFailure('comm.update_group', { conversationId: CV, metadata: { a: 1 } })).error, /nothing to update/);
+  assert.match((await captureFailure('comm.update_group', { conversationId: CV, name: '  ' })).error, /non-empty/);
+  assert.match((await captureFailure('comm.update_group', { conversationId: CV, name: 7 })).error, /non-empty/);
+  assert.match((await captureFailure('comm.update_group', { conversationId: CV, description: 123 })).error, /description must be a string/);
+  // the id is spliced into the path: anything but a UUID is refused before a request
+  for (const bad of ['../members', 'a/b?c=1', 'cv-1', `${CV}/members`]) {
+    assert.match((await captureFailure('comm.update_group', { conversationId: bad, name: 'n' })).error, /must be a UUID/);
+  }
 });
 
 test('send_card → POST .../interaction-requests with an interaction_type=choice body', async () => {
@@ -482,12 +489,12 @@ test('🔴 a non-auth refusal is not retried — the skill falls back to text ex
 
 test('update_group passes a server 403 (not owner/admin) through as {error, status} and is not retried', async () => {
   const { requests, ok, failure } = await runAgainstFlakyServer('comm.update_group', {
-    conversationId: 'cv-1', name: 'n',
+    conversationId: CV, name: 'n',
   }, { failures: 100, failStatus: 403 });
   assert.equal(ok, false);
   assert.equal(failure.status, 403);
   assert.equal(requests.length, 1);
-  assert.equal(requests[0].url, '/api/v1/conversations/cv-1');
+  assert.equal(requests[0].url, `/api/v1/conversations/${CV}`);
 });
 
 // ── onboarding.channel guard, end to end through the CLI ───────────────────

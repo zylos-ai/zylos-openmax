@@ -64,6 +64,9 @@ import {
 } from '../lib/activity/reply.js';
 import { SOURCE_MESSAGE_ID_RE } from '../lib/activity/constants.js';
 
+// Canonical 8-4-4-4-12 hex UUID (any version), as cws-core requires for path ids.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
@@ -774,9 +777,15 @@ const COMMANDS = {
   //   non-group). The body is a whitelist: metadata / avatar / permissions are
   //   never forwarded (cws-core's body has no metadata field either). An empty
   //   update is refused locally: the server would still rewrite the metadata
-  //   column and emit ConversationUpdated for nothing.
+  //   column and emit ConversationUpdated for nothing. conversationId must be a
+  //   UUID: it is spliced into the path, and several sibling PATCH routes take
+  //   the same {name, description} body (/me, /projects/{id}, …), so a value
+  //   like "../members" must never leave the CLI.
   'comm.update_group': () => {
     if (!params.conversationId) throw new Error('conversationId required');
+    if (typeof params.conversationId !== 'string' || !UUID_RE.test(params.conversationId)) {
+      throw new Error('conversationId must be a UUID');
+    }
     const body = {};
     if (params.name !== undefined) {
       if (typeof params.name !== 'string' || !params.name.trim()) throw new Error('name must be a non-empty string');
