@@ -61,7 +61,8 @@ test('card quoted: the parent full text is the structured expansion, not fallbac
     '',
     '[options] 只升 dashboard / 全部升级',
   ].join('\n'));
-  const out = render(cardDetail(), '升级期间服务会重启一次');
+  // An excerpt not found in it: <replying-to> keeps the full text.
+  const out = render(cardDetail(), '不在卡片里的一句');
   assert.ok(out.includes(`<replying-to>\n[Bot]: ${esc(text)}\n</replying-to>`), out);
   assert.ok(!out.includes(FALLBACK), out);
 });
@@ -77,17 +78,17 @@ test('card quoted: a single field or a single body paragraph verifies', () => {
     '全部升级',                           // one option
   ]) {
     const out = render(cardDetail(), excerpt);
-    assert.ok(out.includes(`<quoted-excerpt from="Bot">\n${esc(excerpt)}\n</quoted-excerpt>`), `${excerpt}: ${out}`);
+    assert.ok(out.includes(`<replying-to>\n[Bot]: ${esc(excerpt)}\n</replying-to>`), `${excerpt}: ${out}`);
   }
 });
 
-test('card quoted: a selection spanning several fields may stay unverified (accepted)', () => {
+test('card quoted: a selection spanning several fields may stay unverified (accepted) → full text', () => {
   // The expansion lays fields out as `label: value` and wraps the title in 【】,
   // so a selection whose layout differs across fields is not found. This is
   // accepted; the assertion pins today's behaviour, it is not a requirement.
   for (const excerpt of ['dashboard 0.5.4 -> 0.5.5', '要升级哪些组件? 两个组件有新版本']) {
     const out = render(cardDetail(), excerpt);
-    assert.ok(out.includes(`<quoted-excerpt from="Bot" unverified="true">\n${esc(excerpt)}\n</quoted-excerpt>`), `${excerpt}: ${out}`);
+    assert.ok(out.includes(`<replying-to>\n[Bot]: ${esc(quotedMessageText(cardDetail()))}\n</replying-to>`), `${excerpt}: ${out}`);
   }
 });
 
@@ -95,7 +96,7 @@ test('card with no structured content falls back to fallback_text', () => {
   // channel_qr shape: schema-only body, no blocks.
   const q = { message: { id: PARENT, content: null, fallback_text: '扫码连接 lark' }, content: { content_type: 'channel_qr', body: { schema: 'openmax.channel-qr.v1', channel_type: 'lark' } } };
   assert.equal(quotedMessageText(q), '扫码连接 lark');
-  assert.ok(render(q, '扫码连接').includes('<quoted-excerpt from="Bot">\n扫码连接\n</quoted-excerpt>'));
+  assert.ok(render(q, '扫码连接').includes('<replying-to>\n[Bot]: 扫码连接\n</replying-to>'));
 });
 
 test('non-card quoted messages are unchanged', () => {

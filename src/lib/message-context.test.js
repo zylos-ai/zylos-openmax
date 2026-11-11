@@ -82,12 +82,12 @@ test('parity: the four new items render exactly like the four old keys (DM and g
   const out = envelope(msgWith(NEW), { type: 'group' });
   assert.match(out, /^<connector-preference connection-ids="c_8f2,c_91a">$/m);
   assert.match(out, /^<wf-context workflow-id="wf-1" run-id="run-9" page="step" step-n="3"\/>$/m);
-  assert.match(out, /^<quoted-excerpt from="Bob">\n下周三前交初稿\n<\/quoted-excerpt>$/m);
+  assert.match(out, /^<replying-to>\n\[Bob\]: 下周三前交初稿\n<\/replying-to>$/m);
   // Neither forwarded key frames the message as forwarded.
   assert.doesNotMatch(out, /forwarded|张三/);
   assert.match(out, /\[Bob\]: 那句话/);
   // No new element or attribute anywhere in the envelope.
-  assert.doesNotMatch(out, /<context|source-verified|source="|<subconversation|unverified/);
+  assert.doesNotMatch(out, /<context|source-verified|source="|<subconversation|unverified|<quoted-excerpt/);
 });
 
 test('parity per type: each new item alone renders like its old key alone', () => {
@@ -104,16 +104,18 @@ test('parity per type: each new item alone renders like its old key alone', () =
   }
 });
 
-test('parity: the quote content check (unverified="true") and the tombstone behave the same', () => {
+test('parity: the quote content check (unverified → full quoted text) and the tombstone behave the same', () => {
   const notInOriginal = { text: '原文里没有这句' };
   const oldQ = { quote_excerpts: { version: 1, items: [{ message_id: 'm-1', ...notInOriginal }] } };
   const newQ = ctx(item('quote', { 'message-id': 'm-1' }, { data: notInOriginal }));
   assert.equal(envelope(msgWith(newQ)), envelope(msgWith(oldQ)));
-  assert.match(envelope(msgWith(newQ)), /<quoted-excerpt from="Bob" unverified="true">/);
+  assert.match(envelope(msgWith(newQ)), /<replying-to>\n\[Bob\]: 请在下周三前交初稿，谢谢\n<\/replying-to>/);
+  assert.doesNotMatch(envelope(msgWith(newQ)), /原文里没有这句|<quoted-excerpt|unverified/);
   const oldT = { quote_excerpts: { version: 1, items: [{ message_id: 'm-1', recalled: true, text: 'stale' }] } };
   const newT = ctx(item('quote', { 'message-id': 'm-1', recalled: true }, { data: { text: 'stale' } }));
   assert.deepEqual(quoteExcerptOf(msgWith(newT), 'm-1'), { kind: 'recalled' });
   assert.equal(envelope(msgWith(newT)), envelope(msgWith(oldT)));
+  assert.match(envelope(msgWith(newT)), /<replying-to>\n\[Bob\]: 请在下周三前交初稿，谢谢\n<\/replying-to>/);
   assert.doesNotMatch(envelope(msgWith(newT)), /<quoted-excerpt|stale/);
 });
 
@@ -161,7 +163,7 @@ test('both present → the context item wins, and only one element is rendered',
   const msg = msgWith({ ...OLD, ...ctx(
     item('connectors', {}, { data: { connections: [{ connection_id: 'c_new', label: 'New' }] } }),
     item('workflow', { 'workflow-id': 'wf-new', page: 'run' }),
-    item('quote', { 'message-id': 'm-1' }, { data: { text: '新的引用' } }),
+    item('quote', { 'message-id': 'm-1' }, { data: { text: '谢谢' } }),
     item('forwarded', { 'sender-id': 'u-new', 'sender-name': '新作者' }),
   ) });
   const out = envelope(msg, { type: 'group' });
@@ -169,8 +171,9 @@ test('both present → the context item wins, and only one element is rendered',
   assert.match(out, /connection-ids="c_new"/);
   assert.equal(out.match(/<wf-context/g).length, 1);
   assert.match(out, /<wf-context workflow-id="wf-new" page="run"\/>/);
-  assert.match(out, /<quoted-excerpt from="Bob" unverified="true">\n新的引用\n/);
-  assert.doesNotMatch(out, /c_8f2|wf-1|下周三前交初稿\n<\/quoted|张三|新作者|forwarded/);
+  assert.equal(out.match(/<replying-to>/g).length, 1);
+  assert.match(out, /<replying-to>\n\[Bob\]: 谢谢\n<\/replying-to>/);
+  assert.doesNotMatch(out, /c_8f2|wf-1|下周三前交初稿|张三|新作者|forwarded/);
 });
 
 test('quote: the message-id must be a string, as for the old key (numeric ids are never tombstoned)', () => {

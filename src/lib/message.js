@@ -37,7 +37,7 @@ import { randomUUID } from 'crypto';
 import { extractWorkReferences, formatWorkReferenceContext } from './work-reference.js';
 import { formatConnectorPreference } from './connector-preference.js';
 import { formatWfContext } from './wf-context.js';
-import { formatQuotedExcerpt } from './quote-excerpt.js';
+import { verifiedExcerptText } from './quote-excerpt.js';
 import { formatForwardedChatHistory, chatHistoryBudget, indentBreaks } from './forwarded.js';
 
 const TYPE_TAG = { dm: '[OPENMAX DM]', group: '[OPENMAX GROUP]', thread: '[OPENMAX THREAD]' };
@@ -373,14 +373,14 @@ Before handling the current message, invoke the openmax skill and follow it. For
 
   if (quotedContent && !(threadContext && threadContext.length > 0)) {
     const qsender = escapeXml(quotedContent.sender || quotedContent.senderName || 'unknown');
-    const qtext   = escapeXml(quotedContent.text   || quotedContent.content    || '');
+    const fullText = quotedContent.text || quotedContent.content || '';
+    // A quoted excerpt (part of the message) replaces the full text, but only
+    // when it is found in that text: the excerpt is written by the quoting
+    // client, and this line names the quoted author. Later lines are indented
+    // so the excerpt cannot start a line of its own.
+    const excerptText = verifiedExcerptText(quotedExcerpt, fullText);
+    const qtext = excerptText !== null ? indentBreaks(escapeXml(excerptText)) : escapeXml(fullText);
     parts.push(`<replying-to>\n[${qsender}]: ${qtext}\n</replying-to>\n\n`);
-    const excerpt = formatQuotedExcerpt(
-      quotedContent.sender || quotedContent.senderName,
-      quotedExcerpt,
-      quotedContent.text || quotedContent.content,
-    );
-    if (excerpt) parts.push(`${excerpt}\n\n`);
   }
 
   if (smartHint) {
