@@ -64,7 +64,7 @@ async function run(home, params, convType) {
 }
 
 const FORM = {
-  conversationId: 'conv-1', interactionType: 'form', kind: 'q', title: 't', summary: 's',
+  conversationId: '019f0000-aaaa-7bbb-8ccc-000000000303', interactionType: 'form', kind: 'q', title: 't', summary: 's',
   fields: [{ key: 'a', label: '问题？', options: ['甲', '乙'] }],
 };
 const pending = (home) => JSON.parse(fs.readFileSync(path.join(home, 'zylos/components/openmax/runtime/pending-questions.json'), 'utf8'));
@@ -176,7 +176,7 @@ async function runOrg(home, params, { convType = 'dm', hangGet = false } = {}) {
 test('comm.ask with org "beta": the conversation lookup and the POST both carry beta\'s token', async () => {
   const r = await runOrg(twoOrgHome(), { ...FORM, org: 'org-beta', answerers: ['m-ann'] }, { convType: 'dm' });
   assert.equal(r.code, 0, r.err);
-  const get = r.requests.find((q) => q.method === 'GET' && /\/conversations\/conv-1$/.test(q.url));
+  const get = r.requests.find((q) => q.method === 'GET' && /\/conversations\/019f0000-aaaa-7bbb-8ccc-000000000303$/.test(q.url));
   const post = r.requests.find((q) => q.method === 'POST' && q.url.endsWith('/interaction-requests'));
   assert.ok(get, 'the lookup was made');
   assert.equal(get.auth, 'Bearer tok-org-beta', 'lookup must use the selected org');
@@ -188,7 +188,7 @@ test('comm.ask with org "beta": the conversation lookup and the POST both carry 
 test('comm.ask with a conversation GET that never answers: the card is sent after the 2 s deadline, with its answerers', { timeout: 30000 }, async () => {
   const r = await runOrg(twoOrgHome(), { ...FORM, org: 'org-beta', answerers: ['m-ann'] }, { hangGet: true });
   assert.equal(r.code, 0, r.err);
-  const get = r.requests.find((q) => q.method === 'GET' && /\/conversations\/conv-1$/.test(q.url));
+  const get = r.requests.find((q) => q.method === 'GET' && /\/conversations\/019f0000-aaaa-7bbb-8ccc-000000000303$/.test(q.url));
   const post = r.requests.find((q) => q.method === 'POST' && q.url.endsWith('/interaction-requests'));
   assert.ok(post, 'the POST must go out');
   assert.deepEqual(post.body.form.answerers, ['m-ann']);

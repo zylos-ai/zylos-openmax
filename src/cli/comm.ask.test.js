@@ -68,7 +68,7 @@ async function run(home, command, params, response = {}) {
 }
 
 const FORM = {
-  conversationId: 'grp-1',
+  conversationId: '019f0000-aaaa-7bbb-8ccc-000000000301',
   kind: 'sdlc.requirement_intake',
   title: '需求打磨（1/2）',
   summary: '「客户看板」· 答完点一次提交',
@@ -86,7 +86,7 @@ test('comm.ask with interactionType "form" posts the form body and records the q
   // With answerers, the conversation type is read first (answerers are dropped in a DM).
   const posts = r.requests.filter((q) => q.method === 'POST');
   assert.equal(posts.length, 1);
-  assert.equal(posts[0].url, '/api/v1/conversations/grp-1/interaction-requests');
+  assert.equal(posts[0].url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-000000000301/interaction-requests');
   assert.equal(posts[0].body.interaction_type, 'form');
   assert.deepEqual(posts[0].body.form.answerers, ['m-kevin']);
   assert.equal(r.out.recorded, true);
@@ -96,7 +96,7 @@ test('comm.ask with interactionType "form" posts the form body and records the q
 });
 
 test('comm.ask with interactionType "choice" sends exactly what comm.ask_card sends', async () => {
-  const choice = { conversationId: 'dm-1', kind: 'upgrade', askedOf: 'm-owner', title: '要升级吗', text: 'x', options: ['升级', '先不升'], clientMsgId: 'cmsg_same' };
+  const choice = { conversationId: '019f0000-aaaa-7bbb-8ccc-000000000302', kind: 'upgrade', askedOf: 'm-owner', title: '要升级吗', text: 'x', options: ['升级', '先不升'], clientMsgId: 'cmsg_same' };
   const res = { data: { message_id: 'c1', action_ids: ['opt_1', 'opt_2'] } };
   const a = await run(tmpHome(), 'comm.ask', { ...choice, interactionType: 'choice' }, res);
   const b = await run(tmpHome(), 'comm.ask_card', choice, res);
@@ -124,7 +124,7 @@ function seed(home, records) {
 }
 
 const formRec = (over = {}) => ({
-  kind: 'sdlc.requirement_intake', interactionType: 'form', cardMessageId: 'f1', conversationId: 'grp-1',
+  kind: 'sdlc.requirement_intake', interactionType: 'form', cardMessageId: 'f1', conversationId: '019f0000-aaaa-7bbb-8ccc-000000000301',
   askedOf: ['m-kevin', 'm-jessie'], askedAt: new Date().toISOString(),
   fields: { audience: ['opt_1', 'opt_2'], cc: ['opt_3', 'opt_4'] },
   questions: {
@@ -156,7 +156,7 @@ test('comm.answered on a form: someone not asked is not actionable', async () =>
 
 test('comm.answered still reads a choice record written before forms (askedOf a string)', async () => {
   const home = tmpHome();
-  seed(home, [{ kind: 'upgrade', cardMessageId: 'c1', conversationId: 'dm-1', askedOf: 'm-owner', actionIds: ['opt_1', 'opt_2'], askedAt: new Date().toISOString() }]);
+  seed(home, [{ kind: 'upgrade', cardMessageId: 'c1', conversationId: '019f0000-aaaa-7bbb-8ccc-000000000302', askedOf: 'm-owner', actionIds: ['opt_1', 'opt_2'], askedAt: new Date().toISOString() }]);
   const r = await run(home, 'comm.answered', { cardMessageId: 'c1', actionId: 'opt_2', actorMemberId: 'm-owner' });
   assert.equal(r.out.actionable, true);
   assert.equal(r.out.optionIndex, 1);
@@ -184,7 +184,7 @@ test('split cards: wait for the group, remind at most once, then one complete an
   assert.deepEqual(second.out.group.answers.map((a) => a.index), [1, 2]);
   assert.deepEqual(second.out.group.answers[1].answers.cc.labels, ['设计']);
 
-  const cleared = await run(home, 'comm.pending_clear', { conversationId: 'grp-1', groupId: 'sdlc-1024' });
+  const cleared = await run(home, 'comm.pending_clear', { conversationId: '019f0000-aaaa-7bbb-8ccc-000000000301', groupId: 'sdlc-1024' });
   assert.equal(cleared.out.cleared, 2);
 });
 
@@ -342,7 +342,7 @@ test('comm.answered on a form: an empty otherSelected (the header\'s other-selec
 
 test('comm.answered on a choice card still needs no otherSelected', async () => {
   const home = tmpHome();
-  seed(home, [{ kind: 'upgrade', cardMessageId: 'c1', conversationId: 'dm-1', askedOf: 'm-owner', actionIds: ['opt_1', 'opt_2'], askedAt: new Date().toISOString() }]);
+  seed(home, [{ kind: 'upgrade', cardMessageId: 'c1', conversationId: '019f0000-aaaa-7bbb-8ccc-000000000302', askedOf: 'm-owner', actionIds: ['opt_1', 'opt_2'], askedAt: new Date().toISOString() }]);
   const r = await run(home, 'comm.answered', { cardMessageId: 'c1', actionId: 'opt_1', actorMemberId: 'm-owner' });
   assert.equal(r.code, 0, r.err);
   assert.equal(r.out.actionable, true);
@@ -465,7 +465,7 @@ test('comm.ask: an empty askedOf falls back to answerers, as on the [CARD] path'
 });
 
 test('comm.ask: a form in a group chat without answerers is sent, with a warning; with answerers, none', async () => {
-  const conv = (type) => (req) => (req.method === 'GET' ? { data: { id: 'grp-1', type } } : FORM_RES);
+  const conv = (type) => (req) => (req.method === 'GET' ? { data: { id: '019f0000-aaaa-7bbb-8ccc-000000000301', type } } : FORM_RES);
   const bare = await run(tmpHome(), 'comm.ask', { ...FORM, askedOf: 'm-kevin' }, conv('group'));
   assert.equal(bare.code, 0, bare.err);
   assert.equal(bare.out.recorded, true);

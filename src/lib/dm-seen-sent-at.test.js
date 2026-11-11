@@ -75,23 +75,23 @@ async function markerAgainstSlowServer(argsFor) {
 }
 
 test('send.js stamps sent_at before the request, not after the (slow) response', async () => {
-  const { marker, arrivedAt } = await markerAgainstSlowServer(() => [SEND_JS, 'conv-dm', 'hello']);
-  assert.equal(marker.conversation_id, 'conv-dm');
+  const { marker, arrivedAt } = await markerAgainstSlowServer(() => [SEND_JS, '019f0000-aaaa-7bbb-8ccc-000000000402', 'hello']);
+  assert.equal(marker.conversation_id, '019f0000-aaaa-7bbb-8ccc-000000000402');
   assert.ok(marker.sent_at <= arrivedAt, `sent_at ${marker.sent_at} is after the server got the request at ${arrivedAt}`);
 });
 
 test('comm.send stamps sent_at before the request, not after the (slow) response', async () => {
   const { marker, arrivedAt } = await markerAgainstSlowServer(
-    () => [COMM_JS, 'comm.send', JSON.stringify({ conversationId: 'conv-dm', content: 'hello' })],
+    () => [COMM_JS, 'comm.send', JSON.stringify({ conversationId: '019f0000-aaaa-7bbb-8ccc-000000000402', content: 'hello' })],
   );
-  assert.equal(marker.conversation_id, 'conv-dm');
+  assert.equal(marker.conversation_id, '019f0000-aaaa-7bbb-8ccc-000000000402');
   assert.ok(marker.sent_at <= arrivedAt, `sent_at ${marker.sent_at} is after the server got the request at ${arrivedAt}`);
 });
 
 // ── merge of PR #202 with #183 (agent activity): one send carries both ──────
 import { createRunStore } from './activity/run-store.js';
 
-const RUN_CONV = 'conv-dm-run';
+const RUN_CONV = '019f0000-aaaa-7bbb-8ccc-000000000401';
 
 /** POST /messages: `mode(body)` → [status, json]. Records request bodies. */
 function startScriptedServer(mode) {

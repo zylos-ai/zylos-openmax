@@ -60,7 +60,7 @@ async function run(verb, params) {
 }
 const send = (params) => run('comm.send', params);
 
-const CONV = 'cv-meta';
+const CONV = '019f0000-aaaa-7bbb-8ccc-000000000201';
 const STRUCTURED = {
   conversationId: CONV,
   clientMsgId: 'cmsg-wf-1',

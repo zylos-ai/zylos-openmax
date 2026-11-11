@@ -15,6 +15,12 @@ const cliPath = fileURLToPath(new URL('./comm.js', import.meta.url));
 // live runs. Empty dir → no run → no agent_run, exactly the old behaviour.
 process.env.OPENMAX_RUNS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'om-comm-runs-'));
 
+// Hermetic, the same way: an empty HOME keeps the host's org config (and its
+// tokens) out of every spawned CLI, and the request helpers below name the org
+// with COCO_ORG_ID, so no test depends on how this machine is set up.
+process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'om-comm-home-'));
+const TEST_ORG_ID = 'org-test';
+
 /**
  * Run a command against a local stub server and return the request it sent.
  *
@@ -68,6 +74,7 @@ async function captureRequest(command, params, { allowFailure = false } = {}) {
           COCO_API_PREFIX: '/api/v1',
           COCO_AUTH_TOKEN: 'cli-contract-token',
           COCO_USER_TOKEN: '',
+          COCO_ORG_ID: TEST_ORG_ID,
           COCO_RPC_LOG: '0',
         },
       },
@@ -111,63 +118,63 @@ async function captureFailure(command, params) {
 test('member_list → GET .../members (full list, no pagination params) + documented auth', async () => {
   // cws-core ListMembers takes only conversation_id; the CLI must not send
   // cursor/limit (they would be silently ignored — fake pagination).
-  const request = await captureRequest('comm.member_list', { conversationId: 'cv-1', limit: 50 });
+  const request = await captureRequest('comm.member_list', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1', limit: 50 });
   assert.equal(request.method, 'GET');
-  assert.equal(request.url, '/api/v1/conversations/cv-1/members');
+  assert.equal(request.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000d1/members');
   assert.equal(request.authorization, 'Bearer cli-contract-token');
 });
 
 test('member_add (single) → POST .../members {member_id}', async () => {
-  const request = await captureRequest('comm.member_add', { conversationId: 'cv-1', memberId: 'm-1' });
+  const request = await captureRequest('comm.member_add', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1', memberId: '019f0000-aaaa-7bbb-8ccc-000000000101' });
   assert.equal(request.method, 'POST');
-  assert.equal(request.url, '/api/v1/conversations/cv-1/members');
-  assert.deepEqual(request.body, { member_id: 'm-1' });
+  assert.equal(request.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000d1/members');
+  assert.deepEqual(request.body, { member_id: '019f0000-aaaa-7bbb-8ccc-000000000101' });
 });
 
 test('member_add (single, with role) forwards role', async () => {
-  const request = await captureRequest('comm.member_add', { conversationId: 'cv-1', memberId: 'm-1', role: 'ADMIN' });
-  assert.deepEqual(request.body, { member_id: 'm-1', role: 'ADMIN' });
+  const request = await captureRequest('comm.member_add', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1', memberId: '019f0000-aaaa-7bbb-8ccc-000000000101', role: 'ADMIN' });
+  assert.deepEqual(request.body, { member_id: '019f0000-aaaa-7bbb-8ccc-000000000101', role: 'ADMIN' });
 });
 
 test('member_add (batch) → POST .../members:batch-add {member_ids, role}', async () => {
   const request = await captureRequest('comm.member_add', {
-    conversationId: 'cv-1', memberIds: ['m-1', 'm-2'], role: 'MEMBER',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1', memberIds: ['019f0000-aaaa-7bbb-8ccc-000000000101', '019f0000-aaaa-7bbb-8ccc-000000000102'], role: 'MEMBER',
   });
   assert.equal(request.method, 'POST');
-  assert.equal(request.url, '/api/v1/conversations/cv-1/members:batch-add');
-  assert.deepEqual(request.body, { member_ids: ['m-1', 'm-2'], role: 'MEMBER' });
+  assert.equal(request.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000d1/members:batch-add');
+  assert.deepEqual(request.body, { member_ids: ['019f0000-aaaa-7bbb-8ccc-000000000101', '019f0000-aaaa-7bbb-8ccc-000000000102'], role: 'MEMBER' });
 });
 
 test('member_remove → DELETE .../members/{member_id}', async () => {
-  const request = await captureRequest('comm.member_remove', { conversationId: 'cv-1', memberId: 'm-1' });
+  const request = await captureRequest('comm.member_remove', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1', memberId: '019f0000-aaaa-7bbb-8ccc-000000000101' });
   assert.equal(request.method, 'DELETE');
-  assert.equal(request.url, '/api/v1/conversations/cv-1/members/m-1');
+  assert.equal(request.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000d1/members/019f0000-aaaa-7bbb-8ccc-000000000101');
   assert.equal(request.body, undefined);
 });
 
 test('member_remove_batch → POST .../members:batch-remove {member_ids}', async () => {
   const request = await captureRequest('comm.member_remove_batch', {
-    conversationId: 'cv-1', memberIds: ['m-1', 'm-2'],
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1', memberIds: ['019f0000-aaaa-7bbb-8ccc-000000000101', '019f0000-aaaa-7bbb-8ccc-000000000102'],
   });
   assert.equal(request.method, 'POST');
-  assert.equal(request.url, '/api/v1/conversations/cv-1/members:batch-remove');
-  assert.deepEqual(request.body, { member_ids: ['m-1', 'm-2'] });
+  assert.equal(request.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000d1/members:batch-remove');
+  assert.deepEqual(request.body, { member_ids: ['019f0000-aaaa-7bbb-8ccc-000000000101', '019f0000-aaaa-7bbb-8ccc-000000000102'] });
 });
 
 test('leave → POST .../leave, omits new_owner_id unless given', async () => {
-  const plain = await captureRequest('comm.leave', { conversationId: 'cv-1' });
+  const plain = await captureRequest('comm.leave', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1' });
   assert.equal(plain.method, 'POST');
-  assert.equal(plain.url, '/api/v1/conversations/cv-1/leave');
+  assert.equal(plain.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000d1/leave');
   assert.deepEqual(plain.body, {});
 
-  const withOwner = await captureRequest('comm.leave', { conversationId: 'cv-1', newOwnerId: 'h-9' });
-  assert.deepEqual(withOwner.body, { new_owner_id: 'h-9' });
+  const withOwner = await captureRequest('comm.leave', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1', newOwnerId: '019f0000-aaaa-7bbb-8ccc-000000000109' });
+  assert.deepEqual(withOwner.body, { new_owner_id: '019f0000-aaaa-7bbb-8ccc-000000000109' });
 });
 
 test('validation: member_add with neither id, remove without id, batch with empty', async () => {
-  assert.match((await captureFailure('comm.member_add', { conversationId: 'cv-1' })).error, /memberId/);
-  assert.match((await captureFailure('comm.member_remove', { conversationId: 'cv-1' })).error, /memberId required/);
-  assert.match((await captureFailure('comm.member_remove_batch', { conversationId: 'cv-1', memberIds: [] })).error, /non-empty/);
+  assert.match((await captureFailure('comm.member_add', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1' })).error, /memberId/);
+  assert.match((await captureFailure('comm.member_remove', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1' })).error, /memberId required/);
+  assert.match((await captureFailure('comm.member_remove_batch', { conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d1', memberIds: [] })).error, /non-empty/);
 });
 
 // a real-shaped conversation id: update_group refuses anything else
@@ -218,9 +225,95 @@ test('validation: update_group without id, with nothing to update, blank name, n
   }
 });
 
+test('update_group: name is at most 200 characters (code points), refused locally beyond', async () => {
+  const max = '群'.repeat(200);
+  const request = await captureRequest('comm.update_group', { conversationId: CV, name: max });
+  assert.deepEqual(request.body, { name: max });
+  // 200 astral characters are 400 UTF-16 units — still within the limit
+  const astral = '😀'.repeat(200);
+  assert.deepEqual((await captureRequest('comm.update_group', { conversationId: CV, name: astral })).body, { name: astral });
+  assert.match((await captureFailure('comm.update_group', { conversationId: CV, name: '群'.repeat(201) })).error, /too long \(max 200 characters\)/);
+});
+
+test('create_group: name is at most 200 characters (code points), refused locally beyond', async () => {
+  const max = '群'.repeat(200);
+  const request = await captureRequest('comm.create_group', { name: max, memberIds: [] });
+  assert.equal(request.body.name, max);
+  assert.match((await captureFailure('comm.create_group', { name: '群'.repeat(201), memberIds: [] })).error, /too long \(max 200 characters\)/);
+  assert.match((await captureFailure('comm.create_group', { title: '群'.repeat(201), memberIds: [] })).error, /too long/);
+});
+
+// Every command that splices conversationId into a request path refuses a value
+// that is not a UUID, before any request (and before resolving an org — the
+// failure helper has no server and no COCO_ORG_ID).
+const BAD_PATH_IDS = ['../members', 'a/b?c=1', `${CV}/members`, 'cv-1', '', 42];
+const PATH_ID_COMMANDS = [
+  ['comm.get_conversation', {}],
+  ['comm.update_group', { name: 'n' }],
+  ['comm.member_list', {}],
+  ['comm.member_add', { memberId: CV }],
+  ['comm.member_add', { memberIds: [CV] }],
+  ['comm.member_remove', { memberId: CV }],
+  ['comm.member_remove_batch', { memberIds: [CV] }],
+  ['comm.leave', {}],
+  ['comm.get_messages', {}],
+  ['comm.get_message', { messageId: '1790221024242' }],
+  ['comm.unread', {}],
+  ['comm.mark_read', { seq: 1 }],
+  ['comm.send', { content: 'hi' }],
+  ['comm.send_card', { title: 't', summary: 's', text: 'b', options: ['Yes'] }],
+  ['comm.ask_card', { kind: 'k', askedOf: CV, title: 't', summary: 's', text: 'b', options: ['Yes'] }],
+  ['comm.ask', { kind: 'k', askedOf: CV, title: 't', summary: 's', text: 'b', options: ['Yes'] }],
+  // form shape: only comm.ask's own check guards this path (askChoice is not reached)
+  ['comm.ask', { kind: 'k', askedOf: CV, title: 't', summary: 's', fields: [{ key: 'who', label: '谁来用？', options: ['内部', '外部'] }] }],
+];
+
+test('🔴 a conversationId that is not a UUID is refused before any request, on every path-splicing command', async () => {
+  for (const [command, extra] of PATH_ID_COMMANDS) {
+    assert.match((await captureFailure(command, extra)).error, /conversationId required/, `${command} without conversationId`);
+    for (const bad of BAD_PATH_IDS) {
+      const { error } = await captureFailure(command, { ...extra, conversationId: bad });
+      assert.match(error, bad ? /conversationId must be a UUID/ : /conversationId required/, `${command} ${JSON.stringify(bad)}`);
+    }
+  }
+});
+
+test('member_remove: memberId (a path segment) must be a UUID', async () => {
+  for (const bad of ['../leave', 'a/b?c=1', `${CV}/members`, 'm-1', 42]) {
+    const { error } = await captureFailure('comm.member_remove', { conversationId: CV, memberId: bad });
+    assert.match(error, /memberId must be a UUID/, JSON.stringify(bad));
+  }
+});
+
+test('get_message: messageId is the message id (digits), as a string or a safe integer', async () => {
+  const asString = await captureRequest('comm.get_message', { conversationId: CV, messageId: '1790221024242' });
+  assert.equal(asString.method, 'GET');
+  assert.equal(asString.url, `/api/v1/conversations/${CV}/messages/1790221024242`);
+  const asNumber = await captureRequest('comm.get_message', { conversationId: CV, messageId: 1790221024242 });
+  assert.equal(asNumber.url, `/api/v1/conversations/${CV}/messages/1790221024242`);
+  assert.match((await captureFailure('comm.get_message', { conversationId: CV })).error, /messageId required/);
+  for (const bad of ['../members', 'a/b?c=1', '1790221024242/x', CV, '-1', 1.5, 2 ** 63]) {
+    const { error } = await captureFailure('comm.get_message', { conversationId: CV, messageId: bad });
+    assert.match(error, /messageId must be a message id/, JSON.stringify(bad));
+  }
+});
+
+test('the conversation-scoped reads and writes put a valid conversationId in their path unchanged', async () => {
+  for (const [command, extra, method, suffix] of [
+    ['comm.get_conversation', {}, 'GET', ''],
+    ['comm.get_messages', {}, 'GET', '/messages'],
+    ['comm.unread', {}, 'GET', '/unread'],
+    ['comm.mark_read', { seq: 3 }, 'POST', '/read'],
+  ]) {
+    const request = await captureRequest(command, { conversationId: CV, ...extra });
+    assert.equal(request.method, method, command);
+    assert.equal(request.url.split('?')[0], `/api/v1/conversations/${CV}${suffix}`, command);
+  }
+});
+
 test('send_card → POST .../interaction-requests with an interaction_type=choice body', async () => {
   const request = await captureRequest('comm.send_card', {
-    conversationId: 'cv-card-1',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000e1',
     title: 'Confirm',
     summary: 'Continue the deploy?',
     text: 'The deploy is staged and waiting.',
@@ -228,7 +321,7 @@ test('send_card → POST .../interaction-requests with an interaction_type=choic
   });
 
   assert.equal(request.method, 'POST');
-  assert.equal(request.url, '/api/v1/conversations/cv-card-1/interaction-requests');
+  assert.equal(request.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000e1/interaction-requests');
   assert.equal(request.body.interaction_type, 'choice');
   assert.equal(request.body.choice.title, 'Confirm');
   assert.deepEqual(request.body.choice.options, [{ label: 'Yes' }, { label: 'No' }]);
@@ -242,7 +335,7 @@ test('send_card refuses an option id rather than dropping it', async () => {
   // The server generates the ids and returns them as action_ids. A dropped id
   // would leave the caller matching the answer against one the server never saw.
   const failure = await captureFailure('comm.send_card', {
-    conversationId: 'cv-card-3',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000e3',
     title: 't',
     summary: 's',
     text: 'body',
@@ -255,7 +348,7 @@ test('send_card refuses an option id rather than dropping it', async () => {
 test('send_card refuses replyTo and mentions — the endpoint has no field for them', async () => {
   for (const extra of [{ replyTo: 'msg-parent' }, { mentions: ['member-9'] }]) {
     const failure = await captureFailure('comm.send_card', {
-      conversationId: 'cv-card-2', title: 't', summary: 's', text: 'body', options: ['Yes'], ...extra,
+      conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000e2', title: 't', summary: 's', text: 'body', options: ['Yes'], ...extra,
     });
     assert.match(failure.error, /is not supported by interaction-requests/);
     assert.equal(failure.status, undefined, 'no HTTP round trip happened');
@@ -267,7 +360,7 @@ test('🔴 send_card refuses a top-level `fields` instead of posting a card with
   // as top-level `fields`. The card posted successfully carrying only the prose
   // body, the reader never saw the versions, and no error was raised anywhere.
   const failure = await captureFailure('comm.send_card', {
-    conversationId: 'cv-card-5',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000e5',
     title: '确认升级', summary: 'openmax · 自动检查', text: '确认升级以下组件?',
     options: ['升级', '先不升'],
     fields: [{ label: 'core', value: '0.7.1 → 0.8.1' }],
@@ -285,7 +378,7 @@ test('🔴 a fields block inside `blocks` reaches the wire as sent', async () =>
     { type: 'fields', items: [{ label: 'core', value: '0.7.1 → 0.8.1' }] },
   ];
   const request = await captureRequest('comm.send_card', {
-    conversationId: 'cv-card-6', title: '确认升级', summary: 'openmax · 自动检查',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000e6', title: '确认升级', summary: 'openmax · 自动检查',
     blocks, options: ['升级', '先不升'],
   });
   assert.deepEqual(request.body.choice.blocks, blocks);
@@ -297,11 +390,11 @@ test('🔴 ask_card is not broken by the whitelist: kind/askedOf/meta still work
   // without ask_card stripping them first — it would throw on the verb's own
   // required argument, on every call, before any request went out.
   const request = await captureRequest('comm.ask_card', {
-    conversationId: 'cv-card-7', title: '要升级吗', summary: 'openmax · 自动检查',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000e7', title: '要升级吗', summary: 'openmax · 自动检查',
     text: 'openmax 2.20.0 → 2.21.0。', options: [{ label: '升级', style: 'primary' }, '先不升'],
     kind: 'component-upgrade', askedOf: 'm-owner', meta: { component: 'openmax' },
   }, { allowFailure: true });
-  assert.equal(request.url, '/api/v1/conversations/cv-card-7/interaction-requests');
+  assert.equal(request.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000e7/interaction-requests');
   assert.equal(request.body.interaction_type, 'choice');
   // The question's own arguments describe the question, not the card.
   for (const key of ['kind', 'askedOf', 'meta']) assert.equal(key in request.body.choice, false, key);
@@ -309,7 +402,7 @@ test('🔴 ask_card is not broken by the whitelist: kind/askedOf/meta still work
 
 test('send_card refuses a card with no options', async () => {
   const failure = await captureFailure('comm.send_card', {
-    conversationId: 'cv-card-4', title: 't', summary: 's', text: 'body',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000e4', title: 't', summary: 's', text: 'body',
   });
   assert.match(failure.error, /^options: /);
   assert.equal(failure.status, undefined, 'no HTTP round trip happened');
@@ -317,7 +410,7 @@ test('send_card refuses a card with no options', async () => {
 
 test('🔴 send_card carries the onboarding guide-card fields to the wire', async () => {
   const request = await captureRequest('comm.send_card', {
-    conversationId: 'cv-card-g1', title: '选择渠道', summary: '把 agent 接到你常用的地方',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000f1', title: '选择渠道', summary: '把 agent 接到你常用的地方',
     text: '选一个渠道。', cardKind: 'onboarding.channel',
     options: [{ label: '飞书', icon: 'lark' }, { label: '都不用', decline: true }],
   });
@@ -330,7 +423,7 @@ test('🔴 send_card carries the onboarding guide-card fields to the wire', asyn
 
 test('send_card sends a partner card whose only button opens the dialog', async () => {
   const request = await captureRequest('comm.send_card', {
-    conversationId: 'cv-card-g2', title: '找个搭档', summary: '再加一位 agent',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000f2', title: '找个搭档', summary: '再加一位 agent',
     text: '加入一位搭档,分担工作。', cardKind: 'onboarding.partner',
     options: [{ label: '加入一位搭档', behavior: 'open_create_agent' }],
   });
@@ -341,7 +434,7 @@ test('send_card sends a partner card whose only button opens the dialog', async 
 test('🔴 ask_card refuses a card no one can answer, before anything is sent', async () => {
   // It would record a pending question that never receives a receipt.
   const failure = await captureFailure('comm.ask_card', {
-    conversationId: 'cv-card-g3', title: '找个搭档', summary: '再加一位 agent',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000f3', title: '找个搭档', summary: '再加一位 agent',
     text: '加入一位搭档。', cardKind: 'onboarding.partner',
     options: [{ label: '加入一位搭档', behavior: 'open_create_agent' }],
     kind: 'onboarding-partner', askedOf: 'm-owner',
@@ -353,7 +446,7 @@ test('🔴 ask_card refuses a card no one can answer, before anything is sent', 
 
 test('ask_card keeps its own `kind` separate from the card family', async () => {
   const request = await captureRequest('comm.ask_card', {
-    conversationId: 'cv-card-g4', title: '选择渠道', summary: 's', text: 'body',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000f4', title: '选择渠道', summary: 's', text: 'body',
     cardKind: 'onboarding.channel', options: ['飞书', { label: '都不用', decline: true }],
     kind: 'channel-choice', askedOf: 'm-owner',
   }, { allowFailure: true });
@@ -367,7 +460,7 @@ test('🔴 guide-card values keep their JSON type on the wire, through both CLI 
   ]) {
     for (const v of [false, null, '']) {
       const request = await captureRequest(command, {
-        conversationId: 'cv-card-t', title: 't', summary: 's', text: 'b',
+        conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000e0', title: 't', summary: 's', text: 'b',
         cardKind: v, options: [{ label: 'x', behavior: v, icon: v, decline: v }, 'y'], ...extra,
       }, { allowFailure: true });
       const label = `${command} ${JSON.stringify(v)}`;
@@ -413,6 +506,7 @@ async function runAgainstFlakyServer(command, params, { failures, failStatus = 4
             COCO_API_PREFIX: '/api/v1',
             COCO_AUTH_TOKEN: 'cli-contract-token',
             COCO_USER_TOKEN: '',
+            COCO_ORG_ID: TEST_ORG_ID,
             COCO_RPC_LOG: '0',
           },
         },
@@ -430,7 +524,7 @@ async function runAgainstFlakyServer(command, params, { failures, failStatus = 4
 }
 
 const onboardingTaskCard = {
-  conversationId: 'cv-onb', title: '我能帮你做这些', summary: '选一个开始',
+  conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d2', title: '我能帮你做这些', summary: '选一个开始',
   text: '你好,我是你的助理。', cardKind: 'onboarding.task',
   options: [{ label: '任务一' }, { label: '任务二' }, { label: '任务三' }],
 };
@@ -443,7 +537,7 @@ test('🔴 send_card survives a transient 401 burst: the SAME card is re-sent an
   const { requests, ok } = await runAgainstFlakyServer('comm.send_card', onboardingTaskCard, { failures: 3 });
   assert.equal(ok, true);
   assert.equal(requests.length, 4);
-  for (const r of requests) assert.equal(r.url, '/api/v1/conversations/cv-onb/interaction-requests');
+  for (const r of requests) assert.equal(r.url, '/api/v1/conversations/019f0000-aaaa-7bbb-8ccc-0000000000d2/interaction-requests');
   const ids = new Set(requests.map((r) => r.body.client_msg_id));
   assert.equal(ids.size, 1, 'every attempt carries the same client_msg_id, so a retry cannot post twice');
 });
@@ -462,7 +556,7 @@ test('🔴 ask_card re-sends on a 401 before giving up on the card', async () =>
 
 test('🔴 the text fallback (comm.send) gets the same retry, so it cannot die in the same window', async () => {
   const { requests, ok } = await runAgainstFlakyServer('comm.send', {
-    conversationId: 'cv-onb', content: '1. 任务一\n2. 任务二\n3. 任务三',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d2', content: '1. 任务一\n2. 任务二\n3. 任务三',
   }, { failures: 3 });
   assert.equal(ok, true);
   assert.equal(requests.length, 4);
@@ -524,7 +618,7 @@ async function runWithProfileOptions(params, { profileOptions, profileStatus = 2
       execFile(process.execPath, [cliPath, 'comm.ask_card', JSON.stringify(params)], {
         env: {
           ...process.env, COCO_API_URL: `http://127.0.0.1:${port}`, COCO_API_PREFIX: '/api/v1',
-          COCO_AUTH_TOKEN: 'cli-contract-token', COCO_USER_TOKEN: '', COCO_RPC_LOG: '0',
+          COCO_AUTH_TOKEN: 'cli-contract-token', COCO_USER_TOKEN: '', COCO_ORG_ID: TEST_ORG_ID, COCO_RPC_LOG: '0',
           ...env,
         },
       }, (error, stdout, stderr) => resolve({
@@ -541,7 +635,7 @@ async function runWithProfileOptions(params, { profileOptions, profileStatus = 2
 const IM12 = ['企业微信', '个人微信', '飞书', '钉钉', 'Lark', 'WhatsApp', 'Telegram', 'Slack', 'Discord', 'Microsoft Teams', 'LINE', '邮箱']
   .map((label, i) => ({ type: `t${i}`, label, label_zh: label, label_en: label, visible: i < 5 }));
 const imCard = (labels) => ({
-  conversationId: 'cv-im', title: '对了，你日常用哪个办公沟通工具？', text: '可以把我接入。',
+  conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d4', title: '对了，你日常用哪个办公沟通工具？', text: '可以把我接入。',
   cardKind: 'onboarding.channel', kind: 'onboarding-channel', askedOf: 'm-owner',
   meta: { onboarding: 'o1', trigger: 'first' },
   options: [...labels.map((label) => ({ label })), { label: '都不用，就在这儿聊', decline: true }],
@@ -638,7 +732,7 @@ test('comm.send into a conversation with a live run carries the full agent_run, 
 test('comm.send: a caller agent_run in an advanced body is dropped (caller metadata kept); no run → no agent_run', async () => {
   const forged = { agent_run: { schema_version: 3, run_id: 'r_0000dead', ref: true }, metadata: { mine: 1 } };
   const { requests } = await runAgainstFlakyServer('comm.send', {
-    conversationId: 'cv-norun', body: { type: 'AGENT_TEXT', content: { content_type: 'text', body: { text: 'x' }, attachments: [] }, ...forged },
+    conversationId: '019f0000-aaaa-7bbb-8ccc-0000000000d3', body: { type: 'AGENT_TEXT', content: { content_type: 'text', body: { text: 'x' }, attachments: [] }, ...forged },
   }, { failures: 0 });
   assert.equal('agent_run' in requests[0].body, false);
   assert.deepEqual(requests[0].body.metadata, { mine: 1 });
