@@ -55,6 +55,7 @@ Real-time event push (`message.created`, etc.) goes over WebSocket, handled by `
 | ✅ | `comm.create_dm` | Open a DM with a single person (returns directly if it already exists, idempotent) | `{participantId}` | `POST /api/v1/conversations/dm` |
 | ✅ | `comm.create_group` | Create a group; self + participantIds form the member list | `{title, participantIds[]}` | `POST /api/v1/conversations/groups` |
 | ✅ | `comm.get_conversation` | Get details of a single conversation | `{conversationId, org?}` | `GET /api/v1/conversations/{id}` |
+| ✅ | `comm.update_group` | Rename a group or change its description (group owner/admin only, enforced server-side: 403 otherwise, 404 if not a member or not a group; `description: ""` clears it; at least one of `name` / `description`; never sends metadata) | `{conversationId, name?, description?, org?}` | `PATCH /api/v1/conversations/{id}` |
 
 `participantIds` must be a UUID array. DM uses a single `participantId` (no `title`); group uses multiple + `title`.
 

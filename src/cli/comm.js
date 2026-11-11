@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from 'crypto';
-import { getForOrg, postForOrg, delForOrg, apiPath, reacquireToken } from '../lib/client.js';
+import { getForOrg, postForOrg, patchForOrg, delForOrg, apiPath, reacquireToken } from '../lib/client.js';
 import { withAuthRetry } from '../lib/auth-retry.js';
 import { looksLikeMarkdown } from '../lib/message.js';
 import { assertAnswerable, buildChoiceRequest, resolveInteractionType } from '../lib/interaction-request.js';
@@ -63,6 +63,9 @@ import {
   semanticBodyHash,
 } from '../lib/activity/reply.js';
 import { SOURCE_MESSAGE_ID_RE } from '../lib/activity/constants.js';
+
+// Canonical 8-4-4-4-12 hex UUID (any version), as cws-core requires for path ids.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
@@ -199,9 +202,10 @@ function resolveConfiguredOrg(p) {
 function convClient(p) {
   const org = resolveOrgConfig(p);
   return {
-    get:  (path, query, opts) => getForOrg(org.org_id, path, query, opts),
-    post: (path, body)  => postForOrg(org.org_id, path, body),
-    del:  (path)        => delForOrg(org.org_id, path),
+    get:   (path, query, opts) => getForOrg(org.org_id, path, query, opts),
+    post:  (path, body)  => postForOrg(org.org_id, path, body),
+    patch: (path, body)  => patchForOrg(org.org_id, path, body),
+    del:   (path)        => delForOrg(org.org_id, path),
   };
 }
 
@@ -767,6 +771,34 @@ const COMMANDS = {
   // ✅ GET /api/v1/conversations/{id}
   'comm.get_conversation': () => convClient(params).get(apiPath(`/conversations/${params.conversationId}`)),
 
+  // ✅ PATCH /api/v1/conversations/{id}   body {name?, description?}
+  //   Rename a group / change its description. Group owner/admin only — cws-comm
+  //   UpdateGroupSettings enforces it (403 otherwise; 404 for a non-member or a
+  //   non-group). The body is a whitelist: metadata / avatar / permissions are
+  //   never forwarded (cws-core's body has no metadata field either). An empty
+  //   update is refused locally: the server would still rewrite the metadata
+  //   column and emit ConversationUpdated for nothing. conversationId must be a
+  //   UUID: it is spliced into the path, and several sibling PATCH routes take
+  //   the same {name, description} body (/me, /projects/{id}, …), so a value
+  //   like "../members" must never leave the CLI.
+  'comm.update_group': () => {
+    if (!params.conversationId) throw new Error('conversationId required');
+    if (typeof params.conversationId !== 'string' || !UUID_RE.test(params.conversationId)) {
+      throw new Error('conversationId must be a UUID');
+    }
+    const body = {};
+    if (params.name !== undefined) {
+      if (typeof params.name !== 'string' || !params.name.trim()) throw new Error('name must be a non-empty string');
+      body.name = params.name;
+    }
+    if (params.description !== undefined) {
+      if (typeof params.description !== 'string') throw new Error('description must be a string ("" clears it)');
+      body.description = params.description;
+    }
+    if (!Object.keys(body).length) throw new Error('nothing to update: pass name and/or description');
+    return convClient(params).patch(apiPath(`/conversations/${params.conversationId}`), body);
+  },
+
   // ---- Conversation members ---------------------------------------------------
   // Group membership after creation. cws-core derives the caller from the JWT
   // and enforces permissions server-side (only conversation owner/admins may
@@ -1162,6 +1194,7 @@ Conversations
   comm.create_dm            {peerMemberId}                           # POST /conversations/dm
   comm.create_group         {name, memberIds, description?}          # POST /conversations/groups
   comm.get_conversation     {conversationId, org?}
+  comm.update_group         {conversationId, name?, description?, org?}  # PATCH /conversations/{id} (owner/admin only; description "" clears)
 
 Conversation members (owner/admin only; pass {org} for multi-org installs)
   comm.member_list          {conversationId, org?}                                  # GET  .../members (full list; not paginated)
