@@ -236,13 +236,11 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // A System Member body is flattened onto one line so all of it follows
   // `<name> said:` — a multi-line platform event otherwise leaves its later
   // lines (e.g. a `ref: event=…` token) bare, where they read as pasted data.
-  // Human / agent content keeps its lines, but every line after the first is
-  // indented two spaces (as merged-forward records are), so text from the body
-  // can never start a line that reads as another `<name> (<id>) said:`.
+  // Human / agent content is left exactly as sent.
   const rawContent = String(current?.content ?? '');
-  const safeContent = systemSender
-    ? escapeXml(rawContent.replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ').trim())
-    : indentBreaks(escapeXml(rawContent));
+  const safeContent = escapeXml(
+    systemSender ? rawContent.replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ').trim() : rawContent,
+  );
 
   const baseTag = TYPE_TAG[type];
   // baseTag is like "[OPENMAX GROUP]" — inject ":<name>" before the closing "]".
