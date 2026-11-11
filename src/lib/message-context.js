@@ -26,6 +26,15 @@
  * is `source-verified="true"` rendered. Even a verified source only says who
  * attached the item: attrs and data stay hints, never authorization.
  *
+ * Neither cws-comm nor cws-core reserves metadata.context yet (the CLI's
+ * refusal in src/cli/comm.js is a courtesy check), so any member can write
+ * items today. acceptsItem therefore ignores the platform-only types
+ * (forwarded, subconversation) while the switch is off — forwarded falls back
+ * to forwarded_from, which cws-comm does reserve — and with it on accepts them
+ * only with the source the platform stamps; a workflow item is limited to its
+ * registered attrs, loses to an old wf_ref while the switch is off, and with
+ * it on counts only from an app.
+ *
  * Rendering. Four types keep their existing elements and wording
  * (connectors → <connector-preference>, quote → <quoted-excerpt>, forwarded →
  * <forwarded-message>, see the readers in connector-preference.js,
@@ -42,8 +51,9 @@
  * than cut (a truncated id points at the wrong thing).
  *
  * Inheritance. A reply (or a thread message) also shows the inheritable items
- * (workflow, subconversation) of the message it replies to (or of the thread
- * root), with `parent:` put in front of their source; this happens at render
+ * (workflow, subconversation) of the message it replies to (or, in a thread,
+ * of the thread root — see context-parent.js), with `parent:` put in front of
+ * their source; this happens at render
  * time only and is never written back. An item of the same type on the current
  * message wins. A parent that only carries the old `wf_ref` key is inherited
  * as an unverified workflow item.
@@ -187,9 +197,58 @@ export function agentContextItemsFrom(msg) {
   return contextItemsFrom(msg).filter((it) => it.audience === 'agent');
 }
 
-/** The first agent item of `type`, or undefined. */
+/** The first agent item of `type`, or undefined (no trust policy applied). */
 export function agentContextItem(msg, type) {
   return agentContextItemsFrom(msg).find((it) => it.type === type);
+}
+
+// The only attributes a workflow item may carry (the plan's registry): anything
+// else (e.g. note="approved by admin") is not the workflows service's to say.
+const WORKFLOW_ATTRS = ['workflow-id', 'run-id', 'page', 'step-n'];
+
+const isAppSource = (src) => typeof src === 'string' && /^app:./.test(src);
+
+/**
+ * Whether an agent item may be used at all, given the trust switch.
+ *
+ * - `forwarded` and `subconversation` can only be written by the platform. A
+ *   client can still put them in metadata.context while the server does not
+ *   reserve the key, so with the switch off they are ignored (forwarded falls
+ *   back to `forwarded_from`, which cws-comm already reserves); with it on they
+ *   count only with the stamped source the platform gives them (`platform`;
+ *   `platform` or `app:<id>` for a sub-conversation).
+ * - `workflow` with the switch on counts only from an app (`app:<id>`, the
+ *   workflows gateway); with it off it is an unverified hint (and an old
+ *   `wf_ref` on the same message is preferred, see contextHeaderItems).
+ * - Everything else (connectors, quote, unregistered) is a hint either way.
+ */
+export function acceptsItem(item, trusted) {
+  switch (item?.type) {
+    case 'forwarded': return !!trusted && item.source === 'platform';
+    case 'subconversation': return !!trusted && (item.source === 'platform' || isAppSource(item.source));
+    case 'workflow': return !trusted || isAppSource(item.source);
+    default: return !!item;
+  }
+}
+
+function normalizeItem(item) {
+  if (item.type !== 'workflow') return item;
+  const attrs = {};
+  for (const k of WORKFLOW_ATTRS) if (k in item.attrs) attrs[k] = item.attrs[k];
+  return { ...item, attrs };
+}
+
+/**
+ * The agent items the trust policy (acceptsItem) lets through, workflow attrs
+ * reduced to the registered ones. Readers of a single type use this.
+ */
+export function usableContextItems(msg, { trusted = false } = {}) {
+  return agentContextItemsFrom(msg).filter((it) => acceptsItem(it, trusted)).map(normalizeItem);
+}
+
+/** The first usable item of `type`, or undefined. */
+export function usableContextItem(msg, type, opts) {
+  return usableContextItems(msg, opts).find((it) => it.type === type);
 }
 
 /**
@@ -212,26 +271,41 @@ function toRenderItem(item, prov) {
 }
 
 /**
+ * A message's generic items (workflow, subconversation, unregistered), one per
+ * registered type, after the trust policy. With the switch off an old wf_ref
+ * on the same message wins over a workflow item: today the gateway writes
+ * wf_ref, while anyone can write the item.
+ */
+function genericItemsOf(msg, trusted) {
+  const legacyWf = !trusted && wfRefFrom(msg);
+  const out = [];
+  for (const it of usableContextItems(msg, { trusted })) {
+    if (OWN_ELEMENT_TYPES.has(it.type)) continue;
+    if (it.type === 'workflow' && legacyWf) continue;
+    if (CONTEXT_TYPES[it.type] && out.some((x) => x.type === it.type)) continue;
+    out.push(it);
+  }
+  return out;
+}
+
+/**
  * The generic <context> items of a message, ready for formatContextElements:
- * the current message's own agent items whose type has no element of its own
- * (workflow, subconversation, unregistered), then the inheritable items of
- * `parent` (the replied-to message or the thread root) whose type the current
- * message does not carry, with `parent:` in front of their source.
+ * the current message's own usable agent items whose type has no element of
+ * its own (workflow, subconversation, unregistered), then the inheritable
+ * items of `parent` (the replied-to message, or in a thread the thread root)
+ * whose type the current message does not carry, with `parent:` in front of
+ * their source.
  *
- * `hasWorkflow` says the current message has its own workflow item: the bridge
- * then drops the old <wf-context> (the new item replaces it).
+ * `hasWorkflow` says a workflow item of the current message is rendered: the
+ * bridge then drops the old <wf-context> (the item replaces it).
  *
  * @returns {{ items: Array<{type, source, verified, attrs, data?}>, hasWorkflow: boolean }}
  */
 export function contextHeaderItems(msg, { trusted = false, parent } = {}) {
-  const own = agentContextItemsFrom(msg);
   const items = [];
   const ownTypes = new Set();
-  for (const it of own) {
+  for (const it of genericItemsOf(msg, trusted)) {
     ownTypes.add(it.type);
-    if (OWN_ELEMENT_TYPES.has(it.type)) continue;
-    // One item per type, except for unregistered types an app may repeat.
-    if (CONTEXT_TYPES[it.type] && items.some((x) => x.type === it.type)) continue;
     items.push(toRenderItem(it, provenanceOf(it, trusted)));
   }
   const hasWorkflow = ownTypes.has('workflow');
@@ -240,9 +314,8 @@ export function contextHeaderItems(msg, { trusted = false, parent } = {}) {
   if (!hasWorkflow && wfRefFrom(msg)) ownTypes.add('workflow');
 
   if (parent) {
-    const parentItems = agentContextItemsFrom(parent);
     const inherited = new Set();
-    for (const it of parentItems) {
+    for (const it of genericItemsOf(parent, trusted)) {
       if (!CONTEXT_TYPES[it.type]?.inherit || ownTypes.has(it.type) || inherited.has(it.type)) continue;
       inherited.add(it.type);
       const prov = provenanceOf(it, trusted);
@@ -314,18 +387,23 @@ export function formatContextElements(items) {
 }
 
 /**
- * A small cache of fetched thread roots, keyed by root message id. A message's
- * metadata does not change after it is sent (only a quote item is rewritten
- * when its original is recalled, and quotes are not inherited), so a cached
- * root stays correct; the TTL only bounds memory for long-lived threads.
+ * A small cache of fetched thread roots. A message's metadata does not change
+ * after it is sent (only a quote item is rewritten when its original is
+ * recalled, and quotes are not inherited), so a cached root stays correct for
+ * inheritance; the TTL only bounds memory for long-lived threads. A root that
+ * could not be fetched is cached as `null` for `negativeTtlMs`, so a missing
+ * root costs one round of fetches per window, not one per message.
+ * `get` returns undefined on a miss, the value (or null) on a hit.
  */
-export function createThreadRootCache({ ttlMs = 10 * 60 * 1000, max = 200, now = () => Date.now() } = {}) {
+export function createThreadRootCache({
+  ttlMs = 5 * 60 * 1000, negativeTtlMs = 60 * 1000, max = 200, now = () => Date.now(),
+} = {}) {
   const map = new Map();
   return {
     get(key) {
       const hit = map.get(key);
       if (!hit) return undefined;
-      if (now() - hit.at > ttlMs) { map.delete(key); return undefined; }
+      if (now() - hit.at > (hit.value === null ? negativeTtlMs : ttlMs)) { map.delete(key); return undefined; }
       return hit.value;
     },
     set(key, value) {

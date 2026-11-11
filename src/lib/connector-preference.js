@@ -21,7 +21,7 @@
  * (see message-context.js); connectorPreferenceOf reads that first.
  */
 
-import { agentContextItem, provenanceOf, provenanceAttrs } from './message-context.js';
+import { usableContextItem, provenanceOf, provenanceAttrs } from './message-context.js';
 
 // The panel has no selection cap (OPENM-915 removed the 5-limit), so this is
 // only a sanity bound on a malformed/abusive payload, far above any real
@@ -90,7 +90,7 @@ export function preferredConnectorsFrom(msg) {
  * it came from the item — or null when neither is usable.
  */
 export function connectorPreferenceOf(msg, { trusted = false } = {}) {
-  const item = agentContextItem(msg, 'connectors');
+  const item = usableContextItem(msg, 'connectors', { trusted });
   const fromItem = item ? normalizeConnectors(item.data?.connections) : null;
   if (fromItem) return { connectors: fromItem, provenance: provenanceOf(item, trusted) };
   const legacy = preferredConnectorsFrom(msg);

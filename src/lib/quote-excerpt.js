@@ -14,7 +14,7 @@
  */
 
 import { formatStructuredForModel } from './structured-body.js';
-import { agentContextItemsFrom, provenanceOf, provenanceAttrs } from './message-context.js';
+import { usableContextItems, provenanceOf, provenanceAttrs } from './message-context.js';
 
 export const MAX_EXCERPT_CODE_POINTS = 1000;
 
@@ -72,7 +72,7 @@ function capExcerpt(text) {
  */
 export function quoteExcerptOf(msg, parentId, { trusted = false } = {}) {
   if (parentId === undefined || parentId === null) return null;
-  for (const item of agentContextItemsFrom(msg)) {
+  for (const item of usableContextItems(msg, { trusted })) {
     if (item.type !== 'quote' || String(item.attrs['message-id'] ?? '') !== String(parentId)) continue;
     const provenance = provenanceOf(item, trusted);
     // A tombstone may still carry a stale text; it must never be shown.

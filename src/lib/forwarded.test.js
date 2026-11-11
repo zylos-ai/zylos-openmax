@@ -673,8 +673,8 @@ test('comm-bridge passes forwarded_from and chat_history into formatInboundForC4
 
 test('comm-bridge labels forwarded messages in local history, API context and the replied-to message', () => {
   const bridge = fs.readFileSync(fileURLToPath(new URL('../comm-bridge.js', import.meta.url)), 'utf8');
-  assert.match(bridge, /forwarded_label: forwardedLabelOf\(msg\)/);
+  assert.match(bridge, /forwarded_label: forwardedLabelOf\(msg, contextOpts\(\)\)/);
   assert.match(bridge, /forwardedLabel: e\.forwarded_label/);
-  assert.match(bridge, /forwardedLabel: forwardedLabelOf\(m\)/);
-  assert.match(bridge, /forwardedLabel: forwardedLabelOf\(q\)/);
+  assert.match(bridge, /forwardedLabel: forwardedLabelOf\(m, contextOpts\(\)\)/);
+  assert.match(bridge, /forwardedLabel: forwardedLabelOf\(q, ctxOpts\)/);
 });

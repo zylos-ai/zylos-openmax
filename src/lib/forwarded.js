@@ -22,7 +22,7 @@
  * nothing in a record can close the element or open a new <record>.
  */
 
-import { agentContextItem, provenanceOf, provenanceAttrs } from './message-context.js';
+import { usableContextItem, provenanceOf, provenanceAttrs } from './message-context.js';
 
 export const MAX_RECORDS = 100;
 export const MAX_RECORD_TEXT_CODE_POINTS = 1000;
@@ -64,7 +64,9 @@ const str = (v) => (typeof v === 'string' && v !== '' ? v : undefined);
  */
 export function forwardedFromOf(msg, { trusted = false } = {}) {
   if (!isObject(msg)) return null;
-  const item = agentContextItem(msg, 'forwarded');
+  // Platform-only type: used only with contextSourceTrusted on and
+  // source=platform (acceptsItem); otherwise the reserved old key decides.
+  const item = usableContextItem(msg, 'forwarded', { trusted });
   const fromItem = item ? readForwardedFrom({
     sender_id: item.attrs['sender-id'],
     sender_type: item.attrs['sender-type'],
@@ -316,9 +318,12 @@ function fitOrNotice(element, limit) {
  * the message being replied to), so it is not read as the sender's own words:
  * "forwarded from <original author>" or "forwarded chat history".
  */
-export function forwardedLabelOf(msg) {
-  const ff = forwardedFromOf(msg);
-  if (ff) return `forwarded from ${ff.senderName || ff.senderId}`;
+export function forwardedLabelOf(msg, opts) {
+  const ff = forwardedFromOf(msg, opts);
+  // An author named by an unverified context item says so (the trust policy
+  // admits none today; kept so a looser policy can never drop the marker).
+  const unverified = ff?.provenance && !ff.provenance.verified ? ', unverified' : '';
+  if (ff) return `forwarded from ${ff.senderName || ff.senderId}${unverified}`;
   const type = isObject(msg) ? String(msg.type || msg.message?.type || '').toLowerCase() : '';
   return type === 'chat_history' ? 'forwarded chat history' : undefined;
 }
