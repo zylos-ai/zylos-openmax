@@ -19,7 +19,7 @@ Core Start
        └─ 启动 detached watcher
 ```
 
-结构化消息的 content 与 `metadata.openmax_channel_qr` 使用相同展示投影，包含 `channel_type + qr_ref + expires_at`；不包含 `session_handle` 或平台凭据。
+结构化消息的 content 与 `metadata.context` 中的 `channel-qr` item（`audience: "ui"`，其 `data`；message context phase 2 起不再写 `metadata.openmax_channel_qr`）使用相同展示投影，包含 `channel_type + qr_ref + expires_at`；不包含 `session_handle` 或平台凭据。
 
 ## 两阶段 watcher
 

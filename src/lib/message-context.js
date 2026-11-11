@@ -46,6 +46,17 @@ export const MAX_CONTEXT_ATTR_CODE_POINTS = 200;
 export const MAX_DATA_DEPTH = 5;
 export const UNREGISTERED_DATA_MAX_BYTES = 2 * 1024;
 
+/**
+ * Whether `data` fits a context item's data limit: its JSON encoding is at most
+ * `maxBytes` UTF-8 bytes (default: the 2 KiB cws-comm keeps for an unregistered
+ * type). Not encodable → false.
+ */
+export function fitsContextDataLimit(data, maxBytes = UNREGISTERED_DATA_MAX_BYTES) {
+  let json;
+  try { json = JSON.stringify(data); } catch { return false; }
+  return typeof json === 'string' && Buffer.byteLength(json, 'utf8') <= maxBytes;
+}
+
 const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const AUDIENCES = new Set(['agent', 'ui', 'server']);
 
@@ -61,10 +72,7 @@ function readData(raw, type) {
   if (!isObject(raw)) return undefined;
   const max = CONTEXT_TYPES[type]?.dataMaxBytes ?? UNREGISTERED_DATA_MAX_BYTES;
   if (max <= 0 || depthOf(raw) > MAX_DATA_DEPTH) return undefined;
-  let json;
-  try { json = JSON.stringify(raw); } catch { return undefined; }
-  if (typeof json !== 'string' || Buffer.byteLength(json, 'utf8') > max) return undefined;
-  return raw;
+  return fitsContextDataLimit(raw, max) ? raw : undefined;
 }
 
 // Scalars only, strings up to MAX_CONTEXT_ATTR_CODE_POINTS (an over-long value

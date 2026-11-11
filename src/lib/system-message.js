@@ -9,9 +9,10 @@
  * Wire shape (目标环境实测，DM <dm-id> 的 SYSTEM 消息)：
  *   { sender_type: "SYSTEM", type: "TEXT",
  *     content: { content_type: "text", body: { text: "[调度中心] …" } } }
- * 当前部署的系统消息**尚未携带** `metadata.systemEvent`，所以 priority 读取要
- * 容缺省（无 systemEvent → 不带 --priority，c4-receive 默认 normal）。一旦
- * cws-work / cws-core 按设计透出 metadata，这里即可生效，无需再改。
+ * 优先级先读 `metadata.context` 的 `priority` item（message context phase 2，
+ * cws-work 写 `attrs.level`），没有可用 item 时回退旧的
+ * `metadata.systemEvent.priority`；两者都没有 → 不带 --priority，c4-receive
+ * 默认 normal。只对 SYSTEM 发送者生效（见 inboundPriority）。
  *
  * 设计依据：cws-docs/architecture/v0.7-event-delivery-design.md §5 / §6.3。
  */
@@ -58,13 +59,17 @@ export function senderMemberFrom(msg) {
  * Read first from the `priority` item of `metadata.context` (audience=agent,
  * `attrs.level`; message context phase 2), else from
  * `metadata.systemEvent.priority` wherever cws-core surfaces it.
- * Returns `undefined` when the message carries neither (caller then omits the
- * flag and c4-receive applies its default of 3). An unrecognized level on a
- * present item, or priority on a present systemEvent, degrades to 3 (normal).
+ * An item whose `level` is missing or unrecognized is treated as invalid and
+ * falls back to the old `metadata.systemEvent.priority` (message context plan
+ * §1.1: an invalid item falls back to the old logic).
+ * Returns `undefined` when neither gives a priority (caller then omits the
+ * flag and c4-receive applies its default of 3). An unrecognized priority on a
+ * present systemEvent degrades to 3 (normal).
  */
 export function systemEventPriority(msg) {
   const item = agentContextItem(msg, 'priority');
-  if (item) return PRIORITY_BY_NAME[String(item.attrs.level || '').toLowerCase()] || 3;
+  const fromItem = item && PRIORITY_BY_NAME[String(item.attrs.level ?? '').toLowerCase()];
+  if (fromItem) return fromItem;
   const se =
        msg?.content?.metadata?.systemEvent
     || msg?.metadata?.systemEvent

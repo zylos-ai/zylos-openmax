@@ -22,7 +22,7 @@ import {
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
 import { parseEndpoint } from '../lib/message.js';
-import { contextMetadata, UNREGISTERED_DATA_MAX_BYTES } from '../lib/message-context.js';
+import { contextMetadata, fitsContextDataLimit } from '../lib/message-context.js';
 import { invokeDirect, resolveCredential } from '../lib/direct-exec.js';
 import { capabilityHeaders, CAPABILITIES_HEADER_VALUE } from '../lib/request-spec/capabilities.js';
 
@@ -1246,9 +1246,8 @@ export function buildCreateCardFallbackText({ connector, actions }) {
 // left, it is sent as is (the plan's answer for that case is registering this
 // one type at 8 KiB in cws-comm).
 export function fitCreateCardData(meta) {
-  const size = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
   const out = { ...meta, actions: [...meta.actions] };
-  while (out.actions.length > 0 && size(out) > UNREGISTERED_DATA_MAX_BYTES) out.actions.pop();
+  while (out.actions.length > 0 && !fitsContextDataLimit(out)) out.actions.pop();
   return out;
 }
 
