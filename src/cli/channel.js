@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { apiPath, postForOrg } from '../lib/client.js';
 import { resolveDefaultOrgId } from '../lib/config.js';
 import { RUNTIME_DIR } from '../lib/session.js';
+import { contextMetadata } from '../lib/message-context.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
@@ -95,8 +96,11 @@ export function buildChannelQRMessage(channelType, qrRef, expiresAt) {
     },
     // cws-comm deliberately trims structured bodies from the list hot path.
     // Keep the small display projection in metadata so chat history can render
-    // the QR card without issuing one GetMessage request per card.
-    metadata: { openmax_channel_qr: display },
+    // the QR card without issuing one GetMessage request per card: a
+    // `channel-qr` context item (audience=ui), data = that projection
+    // (message context, phase 2; the old `openmax_channel_qr` key is no longer
+    // written).
+    metadata: contextMetadata({ type: 'channel-qr', audience: 'ui', data: { ...display } }),
     fallback_text: `${channel.displayName}授权二维码（请尽快扫码）`,
   };
 }

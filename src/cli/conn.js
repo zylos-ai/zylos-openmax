@@ -22,6 +22,7 @@ import {
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
 import { parseEndpoint } from '../lib/message.js';
+import { contextMetadata, UNREGISTERED_DATA_MAX_BYTES } from '../lib/message-context.js';
 import { invokeDirect, resolveCredential } from '../lib/direct-exec.js';
 import { capabilityHeaders, CAPABILITIES_HEADER_VALUE } from '../lib/request-spec/capabilities.js';
 
@@ -725,7 +726,9 @@ function looksLikeActionOrSchemaError(err) {
 // Shape mirrors the channel.js structured-message builders: AGENT_STRUCTURED +
 // content {content_type, body{schema,...}} + a metadata copy (cws-comm trims
 // structured bodies from the list hot path, and the FE parser falls back to
-// metadata.connector_auth_notice) + a plain-language fallback_text for any
+// it: a `connector-auth-notice` context item, audience=ui, data = the copy;
+// message context phase 2, the old metadata.connector_auth_notice key is no
+// longer written) + a plain-language fallback_text for any
 // client that does not know the schema.
 //
 // The schema string MUST stay byte-identical to cws-fe's
@@ -753,7 +756,11 @@ export function buildConnectorAuthNoticeMessage(connectors) {
     client_msg_id: randomUUID(),
     type: 'AGENT_STRUCTURED',
     content: { content_type: 'connector_auth_notice', body, attachments: [] },
-    metadata: { connector_auth_notice: { ...body, connector_names: [...names], connector_slugs: [...slugs] } },
+    metadata: contextMetadata({
+      type: 'connector-auth-notice',
+      audience: 'ui',
+      data: { ...body, connector_names: [...names], connector_slugs: [...slugs] },
+    }),
     fallback_text: `${names.join('、')} 还没有授权给我。请到「连接」页面（/connections）完成授权，授权后就能用了。`,
   };
 }
@@ -868,8 +875,8 @@ function requireTargetConversationId(p) {
 // conn.actiondef_create) it posts ONE structured card describing exactly what
 // will be created, and waits for the owner's confirmation (OPENM-836). The card
 // creates nothing: the frontend posts an ordinary user message on click
-// ("确认创建 {name}" / "我要改 {name}" with metadata {connector_create_card_id,
-// action, ref_message_id}), and the Agent then runs conn.app_import with the
+// ("确认创建 {name}" / "我要改 {name}"; the Agent goes by that text, not by
+// message metadata), and the Agent then runs conn.app_import with the
 // SAME slug and actions.
 //
 // Shape mirrors conn.auth_notice / channel.js: AGENT_STRUCTURED + content
@@ -1230,6 +1237,21 @@ export function buildCreateCardFallbackText({ connector, actions }) {
   return lines.join('\n');
 }
 
+// The copy rides as a `connector-create-card` context item (audience=ui;
+// message context phase 2, the old metadata.connector_create_card key is no
+// longer written). cws-comm keeps an unregistered type's data only up to
+// 2 KiB (JSON-encoded) and otherwise drops it, leaving the frontend nothing to
+// draw from the list. So actions are dropped from the end until it fits; the
+// full body still has every action. If it is still over with no actions
+// left, it is sent as is (the plan's answer for that case is registering this
+// one type at 8 KiB in cws-comm).
+export function fitCreateCardData(meta) {
+  const size = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
+  const out = { ...meta, actions: [...meta.actions] };
+  while (out.actions.length > 0 && size(out) > UNREGISTERED_DATA_MAX_BYTES) out.actions.pop();
+  return out;
+}
+
 // Pure builder. `input` is the parseCreateCardInput result; `cardId` is
 // injectable for tests (defaults to a fresh UUID).
 export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
@@ -1264,7 +1286,7 @@ export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
     client_msg_id: randomUUID(),
     type: 'AGENT_STRUCTURED',
     content: { content_type: 'connector_create_card', body, attachments: [] },
-    metadata: { connector_create_card: meta },
+    metadata: contextMetadata({ type: 'connector-create-card', audience: 'ui', data: fitCreateCardData(meta) }),
     fallback_text: fallbackText,
   };
 }

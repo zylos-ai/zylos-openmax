@@ -12,6 +12,7 @@ import {
   isSecretLikeKey, assertNoSecretKeys, parseCreateCardInput,
   buildConnectorCreateCardMessage, buildCreateCardFallbackText,
   sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage, looksLikeToken, actionNameKey,
+  fitCreateCardData,
 } from './conn.js';
 
 // conn.create_card (OPENM-836): the "create this custom connector?" card.
@@ -287,7 +288,7 @@ test('parseCreateCardInput: URLs — credentials in any form rejected; normalize
   const m = buildConnectorCreateCardMessage(o, CARD_ID);
   assert.equal(m.content.body.connector.base_url, 'https://evil.example.com/@good.example.com');
   assert.match(m.fallback_text, /服务地址：https:\/\/evil\.example\.com\/@good\.example\.com/);
-  assert.equal(m.metadata.connector_create_card.connector.icon_url, 'https://a.example.com/i.png');
+  assert.equal(m.metadata.context.items[0].data.connector.icon_url, 'https://a.example.com/i.png');
   // a plain fragment is refused too
   rejects400(withConnector({ icon_url: 'https://a.example.com/i.png#x' }), /#fragment/);
   rejects400(withConnector({ base_url: 'https://a.example.com/#section' }), /#fragment/);
@@ -566,10 +567,10 @@ test('mcp card: body + metadata carry the server URL, zero actions; fallback tex
     name: 'Plaud', slug: 'plaud-mcp', connector_kind: 'mcp', description: 'Plaud 录音', server_url: MCP_URL,
   });
   assert.deepEqual(m.content.body.actions, []);
-  assert.deepEqual(m.metadata.connector_create_card.connector, {
+  assert.deepEqual(m.metadata.context.items[0].data.connector, {
     name: 'Plaud', slug: 'plaud-mcp', connector_kind: 'mcp', server_url: MCP_URL,
   });
-  assert.deepEqual(m.metadata.connector_create_card.actions, []);
+  assert.deepEqual(m.metadata.context.items[0].data.actions, []);
   const t = m.fallback_text;
   assert.match(t, /类型：MCP 服务器/);
   assert.doesNotMatch(t, /认证方式/);
@@ -609,7 +610,13 @@ test('buildConnectorCreateCardMessage: exact schema, AGENT_STRUCTURED body + com
   assert.deepEqual(body.actions, input.actions);
   assert.equal(body.application_id, APP_ID);
   assert.equal(body.fallback_text, m.fallback_text);
-  const meta = m.metadata.connector_create_card;
+  assert.deepEqual(Object.keys(m.metadata), ['context'], 'only the context item, no old connector_create_card key');
+  assert.equal(m.metadata.context.items.length, 1);
+  const [item] = m.metadata.context.items;
+  assert.deepEqual(Object.keys(item), ['type', 'audience', 'data'], 'no source, no empty attrs');
+  assert.equal(item.type, 'connector-create-card');
+  assert.equal(item.audience, 'ui');
+  const meta = item.data;
   assert.deepEqual(meta, {
     schema: 'openmax.connector-create.v1',
     card_id: CARD_ID,
@@ -621,15 +628,39 @@ test('buildConnectorCreateCardMessage: exact schema, AGENT_STRUCTURED body + com
   assert.equal(JSON.stringify(m).includes('secret'), false);
 });
 
+test('connector-create-card data over 2 KiB: actions dropped from the end of the copy only', () => {
+  const size = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
+  const actions = Array.from({ length: CREATE_CARD_MAX_ACTIONS }, (_, i) => ({
+    name: `action_${String(i).padStart(2, '0')}`, effect: i % 2 ? 'write' : 'read', summary: `第 ${i} 个动作：${'说明'.repeat(30)}`,
+  }));
+  const input = parseCreateCardInput(valid({ actions }));
+  const m = buildConnectorCreateCardMessage(input, CARD_ID);
+  const data = m.metadata.context.items[0].data;
+  assert.ok(size(data) <= 2048, `data is ${size(data)} bytes`);
+  assert.ok(data.actions.length > 0 && data.actions.length < actions.length);
+  assert.deepEqual(data.actions, input.actions.slice(0, data.actions.length), 'kept actions are the leading ones, unchanged');
+  // one more action would not fit
+  assert.ok(size({ ...data, actions: input.actions.slice(0, data.actions.length + 1) }) > 2048);
+  // the full body keeps every action
+  assert.equal(m.content.body.actions.length, actions.length);
+  // a copy that already fits is untouched
+  const small = buildConnectorCreateCardMessage(parseCreateCardInput(valid()), CARD_ID);
+  assert.deepEqual(small.metadata.context.items[0].data.actions, small.content.body.actions);
+  // still over with no actions left: sent as is, actions empty
+  const huge = { schema: 's', card_id: CARD_ID, connector: { name: 'x'.repeat(3000) }, actions: [{ name: 'a', effect: 'read', summary: 'b' }] };
+  assert.deepEqual(fitCreateCardData(huge).actions, []);
+  assert.equal(huge.actions.length, 1, 'input not mutated');
+});
+
 test('buildConnectorCreateCardMessage: no application_id → omitted; card_id defaults to a fresh uuid', () => {
   const input = parseCreateCardInput(valid());
   const a = buildConnectorCreateCardMessage(input);
   const b = buildConnectorCreateCardMessage(input);
   assert.equal('application_id' in a.content.body, false);
-  assert.equal('application_id' in a.metadata.connector_create_card, false);
+  assert.equal('application_id' in a.metadata.context.items[0].data, false);
   assert.match(a.content.body.card_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.notEqual(a.content.body.card_id, b.content.body.card_id);
-  assert.equal(a.metadata.connector_create_card.card_id, a.content.body.card_id);
+  assert.equal(a.metadata.context.items[0].data.card_id, a.content.body.card_id);
 });
 
 test('fallback_text: name, slug, auth type, every action with 读/写, reply words', () => {
@@ -736,7 +767,7 @@ test('conn.create_card CLI: posts the card and prints card_id + message_id', asy
   assert.equal(posted.length, 1);
   assert.equal(posted[0].content.body.schema, 'openmax.connector-create.v1');
   assert.equal(posted[0].content.body.card_id, out.card_id);
-  assert.equal(posted[0].metadata.connector_create_card.card_id, out.card_id);
+  assert.equal(posted[0].metadata.context.items[0].data.card_id, out.card_id);
 });
 
 test('conn.create_card CLI: secret in input → exit 1, 400, nothing sent', async () => {

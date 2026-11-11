@@ -492,11 +492,13 @@ Keep `card_id` (and the slug / actions) for step 3.
 
 The message is `AGENT_STRUCTURED`, `content_type: "connector_create_card"`, body
 schema `openmax.connector-create.v1` = `{schema, card_id, connector, actions,
-application_id?, fallback_text}`, plus a compact copy in
-`metadata.connector_create_card` (`schema`, `card_id`, `connector{name, slug,
-connector_kind, auth_type? (http), icon_url?, server_url? (mcp)}`, `actions[]`,
-`application_id?`). A client without the renderer shows `fallback_text` (name,
-slug, type HTTP / MCP 服务器, the auth type for `http`, each action with 读/写, and
+application_id?, fallback_text}`, plus a compact copy as the `data` of a
+`connector-create-card` item (audience `ui`) in `metadata.context.items`
+(`schema`, `card_id`, `connector{name, slug, connector_kind, auth_type? (http),
+icon_url?, server_url? (mcp)}`, `actions[]`, `application_id?`; when the copy
+would be over 2 KiB, actions are dropped from the end of the copy only). A
+client without the renderer shows `fallback_text` (name, slug, type HTTP / MCP
+服务器, the auth type for `http`, each action with 读/写, and
 the reply words; for `mcp`: the MCP server address, that the tools come from the
 server, and the next step — connect it on openmax.com with that address and
 authorize). For `mcp` the address is carried only as `connector.server_url`.

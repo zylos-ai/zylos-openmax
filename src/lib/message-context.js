@@ -6,7 +6,8 @@
  *   metadata.context = { items: [{ type, source, audience, attrs, data? }] }
  *
  *   - type     what the item is (connectors, workflow, quote, forwarded, or
- *              another type; only those four are read here);
+ *              another type; only those four are read here, plus phase 2's
+ *              `priority`, read by system-message.js);
  *   - source   who attached it, stamped by cws-comm (not read here);
  *   - audience who it is for (`agent` | `ui` | `server`); only `agent` items
  *              are read for the Agent;
@@ -115,6 +116,18 @@ export function contextItemsFrom(msg) {
     out.push(item);
   }
   return out;
+}
+
+/**
+ * Outbound `metadata` carrying one item (message context, phase 2): only the
+ * item, no old key. `source` is not written (cws-comm stamps it); `attrs` is
+ * left out when empty.
+ */
+export function contextMetadata({ type, audience, attrs, data }) {
+  const item = { type, audience };
+  if (attrs && Object.keys(attrs).length > 0) item.attrs = attrs;
+  if (data !== undefined) item.data = data;
+  return { context: { items: [item] } };
 }
 
 /** The items addressed to the Agent (audience=agent); [] when there are none. */

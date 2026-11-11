@@ -16,7 +16,10 @@
  * 设计依据：cws-docs/architecture/v0.7-event-delivery-design.md §5 / §6.3。
  */
 
-// metadata.systemEvent.priority(urgent|high|normal) → c4-receive --priority(1|2|3)
+import { agentContextItem } from './message-context.js';
+
+// priority item attrs.level, else metadata.systemEvent.priority
+// (urgent|high|normal) → c4-receive --priority(1|2|3)
 const PRIORITY_BY_NAME = { urgent: 1, high: 2, normal: 3 };
 
 /**
@@ -51,13 +54,17 @@ export function senderMemberFrom(msg) {
 }
 
 /**
- * c4-receive `--priority` (1=urgent / 2=high / 3=normal) for a system message,
- * read from `metadata.systemEvent.priority` wherever cws-core surfaces it.
- * Returns `undefined` when the message carries no `systemEvent` (caller then
- * omits the flag and c4-receive applies its default of 3). An unrecognized
- * priority on an otherwise-present systemEvent degrades to 3 (normal).
+ * c4-receive `--priority` (1=urgent / 2=high / 3=normal) for a system message.
+ * Read first from the `priority` item of `metadata.context` (audience=agent,
+ * `attrs.level`; message context phase 2), else from
+ * `metadata.systemEvent.priority` wherever cws-core surfaces it.
+ * Returns `undefined` when the message carries neither (caller then omits the
+ * flag and c4-receive applies its default of 3). An unrecognized level on a
+ * present item, or priority on a present systemEvent, degrades to 3 (normal).
  */
 export function systemEventPriority(msg) {
+  const item = agentContextItem(msg, 'priority');
+  if (item) return PRIORITY_BY_NAME[String(item.attrs.level || '').toLowerCase()] || 3;
   const se =
        msg?.content?.metadata?.systemEvent
     || msg?.metadata?.systemEvent
@@ -67,9 +74,10 @@ export function systemEventPriority(msg) {
 }
 
 /**
- * c4-receive `--priority` for an inbound message: `metadata.systemEvent.priority`
- * counts only on a message from a platform System Member (isSystemSender).
- * `metadata` is written by the sender, so on any other message the key is
+ * c4-receive `--priority` for an inbound message: the `priority` context item
+ * (else `metadata.systemEvent.priority`) counts only on a message from a
+ * platform System Member (isSystemSender); its `source` is not read.
+ * `metadata` is written by the sender, so on any other message both are
  * ignored and the default applies (undefined → c4-receive's normal, 3);
  * otherwise anyone could mark their own message urgent.
  */

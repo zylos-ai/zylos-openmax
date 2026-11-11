@@ -265,6 +265,35 @@ test('systemEvent.priority is honored only on a SYSTEM sender message', () => {
   assert.equal(systemEventPriority(urgent), 1);
 });
 
+// --- priority item (phase 2): context first, old systemEvent as fallback --------
+
+test('priority item: read first, only on a SYSTEM sender, source not read', () => {
+  const pr = (level, extra = {}) => ({ type: 'priority', source: 'platform', audience: 'agent', attrs: { level }, ...extra });
+  const sys = (items, metadata = {}) => ({ sender_type: 'SYSTEM', metadata: { ...metadata, context: { items } } });
+  assert.equal(inboundPriority(sys([pr('urgent')])), 1);
+  assert.equal(inboundPriority(sys([pr('high')])), 2);
+  assert.equal(inboundPriority(sys([pr('normal')])), 3);
+  assert.equal(inboundPriority(sys([pr('URGENT')])), 1);
+  assert.equal(inboundPriority(sys([pr('bogus')])), 3, 'unknown level degrades to normal');
+  // the item wins over the old key on the same message
+  assert.equal(inboundPriority(sys([pr('high')], { systemEvent: { priority: 'urgent' } })), 2);
+  // no (well-formed agent) priority item → the old key, as before
+  assert.equal(inboundPriority(sys([], { systemEvent: { priority: 'urgent' } })), 1);
+  assert.equal(inboundPriority(sys([pr('high', { audience: 'ui' })], { systemEvent: { priority: 'urgent' } })), 1);
+  assert.equal(inboundPriority(sys([pr('high', { audience: 'nope' })])), undefined);
+  assert.equal(inboundPriority(sys([])), undefined);
+  // source is not read: any stamped source on a SYSTEM message counts
+  for (const source of ['client', 'app:x', undefined]) {
+    assert.equal(inboundPriority(sys([pr('urgent', { source })])), 1, String(source));
+  }
+  // nested envelope
+  assert.equal(inboundPriority({ message: { sender_type: 'SYSTEM', metadata: { context: { items: [pr('high')] } } } }), 2);
+  // never from a non-SYSTEM sender, item or old key
+  for (const sender_type of ['HUMAN', 'AGENT', undefined]) {
+    assert.equal(inboundPriority({ sender_type, metadata: { context: { items: [pr('urgent')] }, systemEvent: { priority: 'urgent' } } }), undefined);
+  }
+});
+
 // --- bridge wiring -----------------------------------------------------------
 
 const BRIDGE = fs.readFileSync(fileURLToPath(new URL('../comm-bridge.js', import.meta.url)), 'utf8');
