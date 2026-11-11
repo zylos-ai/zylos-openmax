@@ -22,7 +22,7 @@
  * nothing in a record can close the element or open a new <record>.
  */
 
-import { usableContextItem, provenanceOf, provenanceAttrs } from './message-context.js';
+import { agentContextItem } from './message-context.js';
 
 export const MAX_RECORDS = 100;
 export const MAX_RECORD_TEXT_CODE_POINTS = 1000;
@@ -54,29 +54,18 @@ const isObject = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v) => (typeof v === 'string' && v !== '' ? v : undefined);
 
 /**
- * The original author of a one-by-one forwarded copy (OPENM-1351), from the
- * `forwarded` item of `metadata.context` (audience=agent; attrs sender-id,
- * sender-type, sender-name, sent-at, source-kind) or the old `forwarded_from`
- * key, which cws-comm reserves (clients cannot write it).
+ * The original author of a one-by-one forwarded copy, context first
+ * (OPENM-1351): the `forwarded` item of `metadata.context` (audience=agent;
+ * attrs sender-id, sender-type, sender-name, sent-at, source-kind), else the
+ * old `forwarded_from` key. Both go through the same reader, so the element and
+ * the "forwarded from" label are the same either way. cws-comm writes both and
+ * drops / refuses them from clients.
  *
- *   - contextSourceTrusted on: a `source="platform"` item first, else the old key.
- *   - off: the old key first; without it the item (any source), shown with
- *     source-verified="false" and labelled ", unverified" — after cws-comm
- *     !618 a forwarded copy carries only the item, and ignoring it would
- *     present the original author's words as the forwarder's.
- *
- * A value read from the item carries `provenance` ({ source, verified }).
- *
- * @returns {null | { senderId, senderType?, senderName?, sentAt?, sourceKind?, provenance? }}
+ * @returns {null | { senderId, senderType?, senderName?, sentAt?, sourceKind? }}
  */
-export function forwardedFromOf(msg, { trusted = false } = {}) {
+export function forwardedFromOf(msg) {
   if (!isObject(msg)) return null;
-  const meta = [msg.metadata, msg.message?.metadata]
-    .find((m) => isObject(m) && 'forwarded_from' in m);
-  const legacy = readForwardedFrom(meta?.forwarded_from, { requireVersion: true });
-  if (!trusted && legacy) return legacy;
-  // acceptsItem: with the switch on only a platform item, off any source.
-  const item = usableContextItem(msg, 'forwarded', { trusted });
+  const item = agentContextItem(msg, 'forwarded');
   const fromItem = item ? readForwardedFrom({
     sender_id: item.attrs['sender-id'],
     sender_type: item.attrs['sender-type'],
@@ -84,8 +73,10 @@ export function forwardedFromOf(msg, { trusted = false } = {}) {
     sent_at: item.attrs['sent-at'],
     source_kind: item.attrs['source-kind'],
   }, { requireVersion: false }) : null;
-  if (fromItem) return { ...fromItem, provenance: provenanceOf(item, trusted) };
-  return legacy;
+  if (fromItem) return fromItem;
+  const meta = [msg.metadata, msg.message?.metadata]
+    .find((m) => isObject(m) && 'forwarded_from' in m);
+  return readForwardedFrom(meta?.forwarded_from, { requireVersion: true });
 }
 
 // A record's `forwarded_from` inside a chat_history body is the trimmed
@@ -234,7 +225,7 @@ export function formatForwardedMessage(forwarder, ff, content) {
     ...originalSenderAttrs(ff),
     ['source-kind', ff.sourceKind],
   ]);
-  return `<forwarded-message${a}${provenanceAttrs(ff.provenance)}>\n${escapeText(content ?? '')}\n</forwarded-message>`;
+  return `<forwarded-message${a}>\n${escapeText(content ?? '')}\n</forwarded-message>`;
 }
 
 const byteLength = (s) => Buffer.byteLength(s, 'utf8');
@@ -277,12 +268,7 @@ export function chatHistoryBudget(restBytes) {
 export function formatForwardedChatHistory(forwarder, history, ff, budget = MAX_FORWARDED_BLOCK_BYTES) {
   if (!history) return '';
   const limit = Math.min(MAX_FORWARDED_BLOCK_BYTES, budget);
-  const head = [
-    ['forwarded-by', forwarder || 'unknown'],
-    ...originalSenderAttrs(ff),
-    ['source', ff?.provenance?.source],
-    ['source-verified', ff?.provenance ? String(!!ff.provenance.verified) : undefined],
-  ];
+  const head = [['forwarded-by', forwarder || 'unknown'], ...originalSenderAttrs(ff)];
   if (history.detail === 'fallback') {
     const open = `<forwarded-chat-history${attrs([...head, ['detail', 'fallback']])}`;
     const room = limit - byteLength(open) - byteLength(CLOSE) - OMITTED_RESERVE_BYTES;
@@ -326,12 +312,9 @@ function fitOrNotice(element, limit) {
  * the message being replied to), so it is not read as the sender's own words:
  * "forwarded from <original author>" or "forwarded chat history".
  */
-export function forwardedLabelOf(msg, opts) {
-  const ff = forwardedFromOf(msg, opts);
-  // An author named by an unverified context item (switch off, no
-  // forwarded_from) says so.
-  const unverified = ff?.provenance && !ff.provenance.verified ? ', unverified' : '';
-  if (ff) return `forwarded from ${ff.senderName || ff.senderId}${unverified}`;
+export function forwardedLabelOf(msg) {
+  const ff = forwardedFromOf(msg);
+  if (ff) return `forwarded from ${ff.senderName || ff.senderId}`;
   const type = isObject(msg) ? String(msg.type || msg.message?.type || '').toLowerCase() : '';
   return type === 'chat_history' ? 'forwarded chat history' : undefined;
 }

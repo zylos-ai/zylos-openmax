@@ -160,15 +160,6 @@ export const DEFAULT_CONFIG = {
     enabled: false,
   },
 
-  // Message context (metadata.context, OPENM-1351): whether the `source` of a
-  // context item was stamped by the platform. Off by default: until cws-comm
-  // overwrites client-supplied sources (and the values stored before that are
-  // cleaned up), a source is whatever the sender wrote, so every item renders
-  // with source-verified="false". Turn on per environment only after that
-  // cws-comm release and its cleanup migration are live there; turn it off
-  // again before rolling cws-comm back. Read on every message (hot-reloaded).
-  contextSourceTrusted: false,
-
   // `message.context_messages` / `message.dedup_ttl` / `message.dedup_max_entries`
   // are NOT in DEFAULT_CONFIG. Defaults are hardcoded in src/comm-bridge.js
   // (DEFAULT_CONTEXT_MESSAGES, DEFAULT_DEDUP_TTL_MS, DEFAULT_DEDUP_MAX_ENTRIES) —

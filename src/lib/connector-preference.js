@@ -21,7 +21,7 @@
  * (see message-context.js); connectorPreferenceOf reads that first.
  */
 
-import { usableContextItem, provenanceOf, provenanceAttrs } from './message-context.js';
+import { agentContextItem } from './message-context.js';
 
 // The panel has no selection cap (OPENM-915 removed the 5-limit), so this is
 // only a sanity bound on a malformed/abusive payload, far above any real
@@ -84,17 +84,14 @@ export function preferredConnectorsFrom(msg) {
 
 /**
  * The connector preference of a message, context first (OPENM-1351): the
- * `connectors` item of `metadata.context` (audience=agent, `data.connections`),
- * else the old `preferred_connectors` key. Returns
- * `{ connectors, provenance? }` — `provenance` ({ source, verified }) only when
- * it came from the item — or null when neither is usable.
+ * `connectors` item of `metadata.context` (audience=agent, `data.connections`,
+ * same `{ connection_id, label }` entries), else the old `preferred_connectors`
+ * key. Same normalized `[{ connectionId, label }]` (or null) as
+ * preferredConnectorsFrom, so the element is the same either way.
  */
-export function connectorPreferenceOf(msg, { trusted = false } = {}) {
-  const item = usableContextItem(msg, 'connectors', { trusted });
-  const fromItem = item ? normalizeConnectors(item.data?.connections) : null;
-  if (fromItem) return { connectors: fromItem, provenance: provenanceOf(item, trusted) };
-  const legacy = preferredConnectorsFrom(msg);
-  return legacy ? { connectors: legacy } : null;
+export function connectorPreferenceOf(msg) {
+  const item = agentContextItem(msg, 'connectors');
+  return (item && normalizeConnectors(item.data?.connections)) || preferredConnectorsFrom(msg);
 }
 
 function escapeText(s) {
@@ -104,15 +101,13 @@ function escapeText(s) {
 /**
  * Render the <connector-preference> element: exactly two content lines (the
  * wording agreed with PM). Returns '' when there is nothing to render.
- * `provenance` (from connectorPreferenceOf) adds `source` / `source-verified`
- * when the preference came from a context item; the old key renders as before.
  */
-export function formatConnectorPreference(prefs, provenance) {
+export function formatConnectorPreference(prefs) {
   if (!Array.isArray(prefs) || prefs.length === 0) return '';
   const ids = prefs.map((p) => p.connectionId).join(',');
   const list = prefs.map((p) => escapeText(p.label)).join('、');
   return [
-    `<connector-preference connection-ids="${ids}"${provenanceAttrs(provenance)}>`,
+    `<connector-preference connection-ids="${ids}">`,
     `用户在本对话把这些连接器设为优先使用：${list}。相关请求先用它们，不用再问用哪个。`,
     '其他已授权的连接器需要时也可以用，但要在回复里用用户正在用的语言说明这次用了哪个连接器。',
     '</connector-preference>',

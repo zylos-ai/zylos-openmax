@@ -39,9 +39,7 @@ import {
 import { classifySystemEvent, isSenderlessUpdate, routeImOwnerNotice } from './lib/system-event-routing.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { connectorPreferenceOf } from './lib/connector-preference.js';
-import { wfRefFrom } from './lib/wf-context.js';
-import { contextHeaderItems } from './lib/message-context.js';
-import { createContextRootFetcher, resolveContextParent } from './lib/context-parent.js';
+import { workflowRefOf } from './lib/wf-context.js';
 import { quoteExcerptOf, quotedMessageText } from './lib/quote-excerpt.js';
 import { forwardedFromOf, chatHistoryOf, forwardedLabelOf } from './lib/forwarded.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
@@ -318,17 +316,6 @@ async function fetchMessageDetail(orgId, conversationId, messageId) {
     warn(`fetchMessageDetail conv=${conversationId} msg=${messageId} failed:`, e.message);
     return null;
   }
-}
-
-// Thread roots fetched for message-context inheritance (OPENM-1351): every
-// message of a thread names the same root, so it is fetched once per root (and
-// a missing root once per short window) — see src/lib/context-parent.js.
-const contextRoots = createContextRootFetcher({ fetchMessage: fetchMessageDetail });
-
-// Message-context options for the readers, read per message so a config
-// hot-reload of contextSourceTrusted applies to the next message.
-function contextOpts() {
-  return { trusted: config.contextSourceTrusted === true };
 }
 
 /**
@@ -981,7 +968,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         seq: msg.seq != null ? Number(msg.seq) : null,
         parent_id: msg.parent_message_id || msg.message?.parent_id || null,
         type: msgType || 'text',
-        forwarded_label: forwardedLabelOf(msg, contextOpts()),
+        forwarded_label: forwardedLabelOf(msg),
       });
     }
 
@@ -1161,7 +1148,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
           } else if (mIsImage) {
             content = '[image]' + (text ? ' ' + text : '');
           }
-          return { senderName, senderId: m.sender_id, content, forwardedLabel: forwardedLabelOf(m, contextOpts()) };
+          return { senderName, senderId: m.sender_id, content, forwardedLabel: forwardedLabelOf(m) };
         }));
       }
       log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${source} count=${recent.length}`);
@@ -1273,56 +1260,48 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     // Fetch the quoted message and surface it as <replying-to>. Threads take
     // precedence (threadContext), so skip for threads.
     let quotedContent;
-    // Message context (OPENM-1351): `trusted` decides source-verified and which
-    // platform-only items count (config contextSourceTrusted). The context
-    // parent is the replied-to message, or in a thread the thread root; a
-    // replied-to root shares the root fetch (src/lib/context-parent.js).
-    const ctxOpts = contextOpts();
-    const { quotedMsgId, quoted: q, contextParent } = await resolveContextParent({
-      orgId: orgConfig.org_id, msg, conv, convType, trusted: ctxOpts.trusted,
-      roots: contextRoots, fetchMessage: fetchMessageDetail,
-    });
-    if (q) {
-      const qStructured = (q.content && typeof q.content === 'object') ? q.content : {};
-      let qText = quotedMessageText(q);
-      // Quoted media: a quoted image/file with no caption yields empty text,
-      // which would drop the whole quote. Label it ([image]/[file: name]) and
-      // download the referenced attachment, appending `---- <kind>: <path>` so
-      // the agent can actually READ the quoted media (not just know it exists).
-      const qType = (q.message?.type || '').toLowerCase();
-      const qIsImage = qType === 'image' || qType === 'agent_card';
-      const qAllAtts = Array.isArray(qStructured.attachments) ? qStructured.attachments : [];
-      if (!qAllAtts.length && qStructured.media_id) {
-        qAllAtts.push({ artifact_id: qStructured.media_id, file_name: qStructured.filename });
-      }
-      const qKind = qIsImage ? 'image' : 'file';
-      if (!qText && (qIsImage || qAllAtts.length > 0)) {
-        qText = qAllAtts.map(a => `[${qKind}${a?.file_name ? ': ' + a.file_name : ''}]`).join(' ') || `[${qKind}]`;
-      }
-      for (const qAtt of qAllAtts) {
-        const qMediaId = qAtt?.artifact_id;
-        if (!qMediaId) continue;
-        try {
-          const qOrigName = qAtt?.file_name;
-          const qPath = await downloadInboundAttachment(orgConfig, qMediaId, qOrigName);
-          if (qPath) {
-            qText += ` ---- ${qKind}: ${qPath}`;
-            if (qOrigName) qText += ` name="${qOrigName}"`;
-          }
-        } catch (e) {
-          warn('quoted media fetch failed:', qMediaId, e.message);
+    const quotedMsgId = msg.parent_id || msg.message?.parent_id || msg.parent_message_id;
+    if (quotedMsgId && convType !== 'thread') {
+      const q = await fetchMessageDetail(orgConfig.org_id, msg.conversation_id, quotedMsgId);
+      if (q) {
+        const qStructured = (q.content && typeof q.content === 'object') ? q.content : {};
+        let qText = quotedMessageText(q);
+        // Quoted media: a quoted image/file with no caption yields empty text,
+        // which would drop the whole quote. Label it ([image]/[file: name]) and
+        // download the referenced attachment, appending `---- <kind>: <path>` so
+        // the agent can actually READ the quoted media (not just know it exists).
+        const qType = (q.message?.type || '').toLowerCase();
+        const qIsImage = qType === 'image' || qType === 'agent_card';
+        const qAllAtts = Array.isArray(qStructured.attachments) ? qStructured.attachments : [];
+        if (!qAllAtts.length && qStructured.media_id) {
+          qAllAtts.push({ artifact_id: qStructured.media_id, file_name: qStructured.filename });
         }
+        const qKind = qIsImage ? 'image' : 'file';
+        if (!qText && (qIsImage || qAllAtts.length > 0)) {
+          qText = qAllAtts.map(a => `[${qKind}${a?.file_name ? ': ' + a.file_name : ''}]`).join(' ') || `[${qKind}]`;
+        }
+        for (const qAtt of qAllAtts) {
+          const qMediaId = qAtt?.artifact_id;
+          if (!qMediaId) continue;
+          try {
+            const qOrigName = qAtt?.file_name;
+            const qPath = await downloadInboundAttachment(orgConfig, qMediaId, qOrigName);
+            if (qPath) {
+              qText += ` ---- ${qKind}: ${qPath}`;
+              if (qOrigName) qText += ` name="${qOrigName}"`;
+            }
+          } catch (e) {
+            warn('quoted media fetch failed:', qMediaId, e.message);
+          }
+        }
+        const qSenderId = q.message?.sender_id;
+        const qSender =
+             q.message?.sender_display_name
+          || (await fetchMemberName(orgConfig.org_id, qSenderId))
+          || qSenderId;
+        if (qText) quotedContent = { sender: qSender, text: qText, forwardedLabel: forwardedLabelOf(q) };
       }
-      const qSenderId = q.message?.sender_id;
-      const qSender =
-           q.message?.sender_display_name
-        || (await fetchMemberName(orgConfig.org_id, qSenderId))
-        || qSenderId;
-      if (qText) quotedContent = { sender: qSender, text: qText, forwardedLabel: forwardedLabelOf(q, ctxOpts) };
     }
-    // Message context: metadata.context items first, the old keys as fallback.
-    const connectorPref = connectorPreferenceOf(msg, ctxOpts);
-    const msgContext = contextHeaderItems(msg, { ...ctxOpts, parent: contextParent });
 
     const isImage = msgType === 'image' || msgType === 'agent_card';
     const isFile = !isImage && mediaItems.length > 0;
@@ -1349,16 +1328,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       recent,
       {
         groupName, smartHint, quotedContent,
-        quotedExcerpt: quoteExcerptOf(msg, quotedMsgId, ctxOpts),
-        forwardedFrom: forwardedFromOf(msg, ctxOpts),
+        quotedExcerpt: quoteExcerptOf(msg, quotedMsgId),
+        forwardedFrom: forwardedFromOf(msg),
         chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
-        preferredConnectors: connectorPref?.connectors,
-        preferredConnectorsSource: connectorPref?.provenance,
-        // A workflow item in metadata.context replaces the old <wf-context>.
-        wfRef: msgContext.hasWorkflow ? null : wfRefFrom(msg),
-        contextItems: msgContext.items,
+        preferredConnectors: connectorPreferenceOf(msg),
+        wfRef: workflowRefOf(msg),
         systemSender: isSystemSender(msg)
           ? { memberId: msg.sender_id || msg.message?.sender_id }
           : undefined,

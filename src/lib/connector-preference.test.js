@@ -173,9 +173,7 @@ test('comm-bridge passes the message metadata preference into formatInboundForC4
   const bridge = fs.readFileSync(fileURLToPath(new URL('../comm-bridge.js', import.meta.url)), 'utf8');
   // Context first (metadata.context connectors item), then preferred_connectors.
   assert.match(bridge, /import \{[^}]*connectorPreferenceOf[^}]*\} from '\.\/lib\/connector-preference\.js'/);
-  assert.match(bridge, /const connectorPref = connectorPreferenceOf\(msg, ctxOpts\)/);
-  assert.match(bridge, /preferredConnectors: connectorPref\?\.connectors/);
-  assert.match(bridge, /preferredConnectorsSource: connectorPref\?\.provenance/);
+  assert.match(bridge, /preferredConnectors: connectorPreferenceOf\(msg\)/);
 });
 
 // --- shipped Agent instructions (SKILL.md) ------------------------------------

@@ -37,7 +37,6 @@ import { randomUUID } from 'crypto';
 import { extractWorkReferences, formatWorkReferenceContext } from './work-reference.js';
 import { formatConnectorPreference } from './connector-preference.js';
 import { formatWfContext } from './wf-context.js';
-import { formatContextElements } from './message-context.js';
 import { formatQuotedExcerpt } from './quote-excerpt.js';
 import { formatForwardedMessage, formatForwardedChatHistory, chatHistoryBudget } from './forwarded.js';
 
@@ -204,8 +203,7 @@ export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
  * @param {Array}  [recent] - recent group messages used for `<group-context>`
  * @param {object} [opts]   - { groupName, quotedContent, threadContext,
  *                              threadRootId, smartHint, receipt,
- *                              preferredConnectors, preferredConnectorsSource,
- *                              wfRef, contextItems, quotedExcerpt,
+ *                              preferredConnectors, wfRef, quotedExcerpt,
  *                              forwardedFrom, chatHistory,
  *                              systemSender: { memberId? } | undefined,
  *                              senderMember: { kind:'human'|'agent', memberId } | undefined }
@@ -223,8 +221,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
   const {
     groupName, quotedContent, threadContext, threadRootId, smartHint, orgId, orgName, receipt, systemSender,
-    senderMember, preferredConnectors, preferredConnectorsSource, wfRef, contextItems, quotedExcerpt,
-    forwardedFrom, chatHistory,
+    senderMember, preferredConnectors, wfRef, quotedExcerpt, forwardedFrom, chatHistory,
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
@@ -322,22 +319,14 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // input-box panel, from message metadata. A preference, not a gate — see
   // connector-preference.js. Structural for the same reason as the elements
   // above: typed text cannot produce it.
-  const preference = formatConnectorPreference(preferredConnectors, preferredConnectorsSource);
+  const preference = formatConnectorPreference(preferredConnectors);
   if (preference) header += `${preference}\n`;
   // Workflow context: which workflow / run / page of the workflows page the
   // user sent this from, from message metadata `wf_ref`. A hint only — the
   // workflows records stay authoritative (see wf-context.js). Structural for
-  // the same reason as the elements above. The bridge passes no wfRef when the
-  // message has a workflow item in metadata.context: that one is rendered as a
-  // <context type="workflow"> element below instead.
+  // the same reason as the elements above.
   const wfContext = formatWfContext(wfRef);
   if (wfContext) header += `${wfContext}\n`;
-  // Generic message context (metadata.context, OPENM-1351): workflow,
-  // subconversation and unregistered agent items, plus the items inherited
-  // from the replied-to message / thread root (source "parent:…"). Built by
-  // message-context.js contextHeaderItems; hints only, never authorization.
-  const contextElements = formatContextElements(contextItems);
-  if (contextElements) header += `${contextElements}\n`;
   const parts = [header];
 
   // Forwarded content was written by someone other than the sender of this
