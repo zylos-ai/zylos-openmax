@@ -264,6 +264,8 @@ const PATH_ID_COMMANDS = [
   ['comm.send_card', { title: 't', summary: 's', text: 'b', options: ['Yes'] }],
   ['comm.ask_card', { kind: 'k', askedOf: CV, title: 't', summary: 's', text: 'b', options: ['Yes'] }],
   ['comm.ask', { kind: 'k', askedOf: CV, title: 't', summary: 's', text: 'b', options: ['Yes'] }],
+  // form shape: only comm.ask's own check guards this path (askChoice is not reached)
+  ['comm.ask', { kind: 'k', askedOf: CV, title: 't', summary: 's', fields: [{ key: 'who', label: '谁来用？', options: ['内部', '外部'] }] }],
 ];
 
 test('🔴 a conversationId that is not a UUID is refused before any request, on every path-splicing command', async () => {

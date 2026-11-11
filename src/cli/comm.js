@@ -15,7 +15,7 @@
  *
  * Usage:
  *   node src/cli/comm.js <command> '<json-params>'
- *   node src/cli/comm.js comm.send '{"conversationId":"cv-1","content":"hi"}'
+ *   node src/cli/comm.js comm.send '{"conversationId":"01a18277-f26a-7ef9-a08d-5ffc014d7d9e","content":"hi"}'
  *
  * Status:
  *   ✅  available in cws-core today
