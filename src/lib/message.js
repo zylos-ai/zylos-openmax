@@ -174,6 +174,19 @@ function formatContextLine(m) {
   return `[${name}]: ${text}`;
 }
 
+// The display name on the `<name> (<member id>) said:` line is sender-chosen,
+// so it must not be able to fake that shape: ASCII `(` / `)` become fullwidth
+// `（` / `）` (still readable, but never the id's delimiters, so the only ASCII
+// parenthesized token on the line is the real id), and any line break (CR, LF,
+// CRLF, VT, FF, NEL, U+2028, U+2029) becomes one space, so the name cannot
+// start a new sender line.
+function senderLineName(name) {
+  return String(name)
+    .replace(/\(/g, '\uFF08')
+    .replace(/\)/g, '\uFF09')
+    .replace(/(?:\r\n|[\r\n\v\f\u0085\u2028\u2029])+/g, ' ');
+}
+
 // Shown for an inbound attachment that cannot be fetched (no artifact id, or
 // its download failed), so the message is not rendered as an empty one.
 export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
@@ -219,7 +232,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
-  const safeName = escapeXml(name);
+  const safeName = escapeXml(senderLineName(name));
   // A System Member body is flattened onto one line so all of it follows
   // `<name> said:` — a multi-line platform event otherwise leaves its later
   // lines (e.g. a `ref: event=…` token) bare, where they read as pasted data.

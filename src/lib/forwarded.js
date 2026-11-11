@@ -18,7 +18,8 @@
  *   bob: [image: a.png]
  *
  * `<` and `>` in it are escaped like any message text, so nothing in it can
- * close </current-message>. In context lines (group history, the message
+ * close </current-message>. A line break inside a record continues on a line
+ * indented by two spaces (see INDENT), so a record cannot fake another one. In context lines (group history, the message
  * being replied to) a merged forward is the header alone, as lark shows a
  * quoted merge_forward as one line.
  *
@@ -108,9 +109,21 @@ function escapeText(s) {
   return String(s).replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// Every line break a reader may honour: CR, LF, CRLF, VT, FF, NEL, U+2028, U+2029.
+const LINE_BREAKS = /(?:\r\n|[\r\n\v\f\u0085\u2028\u2029])+/g;
+const ONE_BREAK = /\r\n|[\r\n\v\f\u0085\u2028\u2029]/g;
+// Only the header, a record's own "<name>: " start and the "more" line begin at
+// column 0. Text from the message (a record body past its first line, every
+// fallback_text line) is indented two spaces, so it can never start a line
+// that reads as another record. Indenting rather than joining keeps multi-line
+// text (lists, code) readable; the spaces are in the string before its bytes
+// are counted, so the budget includes them.
+const INDENT = '  ';
+const indentBreaks = (s) => s.replace(ONE_BREAK, `\n${INDENT}`);
+
 // A name sits at the start of its line: no line breaks, capped length.
 function nameOf(v) {
-  const chars = [...String(v).replace(/[\r\n\u2028\u2029]+/g, ' ')];
+  const chars = [...String(v).replace(LINE_BREAKS, ' ')];
   const s = chars.length > MAX_NAME_CODE_POINTS ? `${chars.slice(0, MAX_NAME_CODE_POINTS).join('')}…` : chars.join('');
   return escapeText(s);
 }
@@ -132,7 +145,7 @@ function recordBody(r) {
 }
 
 function recordLine(r) {
-  return `${nameOf(r.senderName || r.senderId || 'unknown')}: ${escapeText(recordBody(r))}`;
+  return `${nameOf(r.senderName || r.senderId || 'unknown')}: ${indentBreaks(escapeText(recordBody(r)))}`;
 }
 
 const byteLength = (s) => Buffer.byteLength(s, 'utf8');
@@ -177,7 +190,7 @@ export function formatForwardedChatHistory(history, budget = MAX_FORWARDED_BLOCK
   if (!history.records) {
     const tail = `…\n${MORE_TEXT_LINE}`;
     const room = limit - byteLength(head) - byteLength(tail);
-    const { text, truncated } = escapedPrefix(history.text, Math.max(0, room));
+    const { text, truncated } = escapedPrefix(INDENT + indentBreaks(history.text), Math.max(0, room));
     return fitOrNotice(`${head}${truncated ? `${text}${tail}` : text}`, limit);
   }
   let room = limit - byteLength(FORWARDED_CONVERSATION) - byteLength(`\n${moreLine(history.recordCount)}`);
