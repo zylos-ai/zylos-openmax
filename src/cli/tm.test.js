@@ -3,8 +3,16 @@ import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const cliPath = fileURLToPath(new URL('./tm.js', import.meta.url));
+
+// Hermetic: every spawned CLI inherits an empty HOME, so the host's org config
+// (and its tokens) never decides a result; captureRequest names the org with
+// COCO_ORG_ID, the other tests pass {org} themselves.
+process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'om-tm-home-'));
 
 const readableProposal = {
   request_id: '01000000-0000-4000-8000-000000000001', source_kind: 'timer', operation: 'create',
@@ -732,6 +740,7 @@ async function captureRequest(command, params) {
           COCO_API_PREFIX: '/api/v1',
           COCO_AUTH_TOKEN: 'cli-contract-token',
           COCO_USER_TOKEN: '',
+          COCO_ORG_ID: 'org-test',
           COCO_RPC_LOG: '0',
         },
       },

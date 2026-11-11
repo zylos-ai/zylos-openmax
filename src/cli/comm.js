@@ -67,6 +67,35 @@ import { SOURCE_MESSAGE_ID_RE } from '../lib/activity/constants.js';
 // Canonical 8-4-4-4-12 hex UUID (any version), as cws-core requires for path ids.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// cws-core's group-name limit (createGroup / updateGroup `maxLength:"200"`,
+// counted in characters, so code points here — a longer name is a 422).
+const GROUP_NAME_MAX = 200;
+
+// Ids from params that are spliced into a request path are checked against the
+// shape cws-core's route takes, before any request: a value like "../members"
+// or "a/b?c=1" would otherwise resolve to a different route (several sibling
+// routes take the same method and body). Conversation and member ids are UUIDs
+// (`format:"uuid"` on every /conversations/{conversation_id}… route and on
+// /members/{member_id}); message ids are cws-comm's int64, a string of digits
+// as in SOURCE_MESSAGE_ID_RE. A JSON number is accepted for a message id only
+// when it is a safe integer (a larger one has already lost digits).
+function requireUuid(params, key) {
+  const v = params[key];
+  if (!v) throw new Error(`${key} required`);
+  if (typeof v !== 'string' || !UUID_RE.test(v)) throw new Error(`${key} must be a UUID`);
+  return v;
+}
+
+function requireMessageId(params, key) {
+  const v = params[key];
+  if (v === undefined || v === null || v === '') throw new Error(`${key} required`);
+  const s = Number.isSafeInteger(v) && v >= 0 ? String(v) : v;
+  if (typeof s !== 'string' || !SOURCE_MESSAGE_ID_RE.test(s)) {
+    throw new Error(`${key} must be a message id (a string of digits)`);
+  }
+  return s;
+}
+
 const [command, ...rest] = process.argv.slice(2);
 const params = rest.length ? JSON.parse(rest.join(' ')) : {};
 
@@ -552,6 +581,7 @@ function readSourceMessageId(params, verb) {
 // verb's own object, shadowing the module-level one so both verbs read what
 // they were given. Messages name the verb that was called.
 async function askChoice(params, verb) {
+  requireUuid(params, 'conversationId');
   if (!params.kind || !params.askedOf) {
     throw new Error(`${verb}: kind and askedOf are required — an answer with neither cannot be acted on`);
   }
@@ -769,7 +799,10 @@ const COMMANDS = {
   }),
 
   // ✅ GET /api/v1/conversations/{id}
-  'comm.get_conversation': () => convClient(params).get(apiPath(`/conversations/${params.conversationId}`)),
+  'comm.get_conversation': () => {
+    const cid = requireUuid(params, 'conversationId');
+    return convClient(params).get(apiPath(`/conversations/${cid}`));
+  },
 
   // ✅ PATCH /api/v1/conversations/{id}   body {name?, description?}
   //   Rename a group / change its description. Group owner/admin only — cws-comm
@@ -780,15 +813,14 @@ const COMMANDS = {
   //   column and emit ConversationUpdated for nothing. conversationId must be a
   //   UUID: it is spliced into the path, and several sibling PATCH routes take
   //   the same {name, description} body (/me, /projects/{id}, …), so a value
-  //   like "../members" must never leave the CLI.
+  //   like "../members" must never leave the CLI. `name` is at most
+  //   GROUP_NAME_MAX characters (cws-core 422 beyond), refused locally too.
   'comm.update_group': () => {
-    if (!params.conversationId) throw new Error('conversationId required');
-    if (typeof params.conversationId !== 'string' || !UUID_RE.test(params.conversationId)) {
-      throw new Error('conversationId must be a UUID');
-    }
+    const cid = requireUuid(params, 'conversationId');
     const body = {};
     if (params.name !== undefined) {
       if (typeof params.name !== 'string' || !params.name.trim()) throw new Error('name must be a non-empty string');
+      if ([...params.name].length > GROUP_NAME_MAX) throw new Error(`name is too long (max ${GROUP_NAME_MAX} characters)`);
       body.name = params.name;
     }
     if (params.description !== undefined) {
@@ -796,7 +828,7 @@ const COMMANDS = {
       body.description = params.description;
     }
     if (!Object.keys(body).length) throw new Error('nothing to update: pass name and/or description');
-    return convClient(params).patch(apiPath(`/conversations/${params.conversationId}`), body);
+    return convClient(params).patch(apiPath(`/conversations/${cid}`), body);
   },
 
   // ---- Conversation members ---------------------------------------------------
@@ -808,27 +840,27 @@ const COMMANDS = {
   //   cws-core's ListMembers takes only conversation_id and returns the full
   //   member list — it is NOT paginated, so do not send cursor/limit (they'd be
   //   silently ignored and mislead callers into fake pagination loops).
-  'comm.member_list': () => convClient(params).get(
-    apiPath(`/conversations/${params.conversationId}/members`),
-  ),
+  'comm.member_list': () => {
+    const cid = requireUuid(params, 'conversationId');
+    return convClient(params).get(apiPath(`/conversations/${cid}/members`));
+  },
 
   // ✅ POST /api/v1/conversations/{id}/members            body {member_id, role?}   (single)
   // ✅ POST /api/v1/conversations/{id}/members:batch-add  body {member_ids, role?}  (many)
   //   Pass {memberId} for one, or {memberIds:[...]} for a batch (partial-success
   //   envelope). role ∈ MEMBER|ADMIN|OWNER|PUBLISHER|SUBSCRIBER (default MEMBER).
   'comm.member_add': () => {
-    const cid = params.conversationId;
-    const c = convClient(params);
+    const cid = requireUuid(params, 'conversationId');
     const many = params.memberIds != null;
     const ids = many ? [].concat(params.memberIds) : [];
     if (many) {
       if (!ids.length) throw new Error('memberIds must be a non-empty array');
-      return c.post(apiPath(`/conversations/${cid}/members:batch-add`), {
+      return convClient(params).post(apiPath(`/conversations/${cid}/members:batch-add`), {
         member_ids: ids, ...(params.role ? { role: params.role } : {}),
       });
     }
     if (!params.memberId) throw new Error('memberId (or memberIds) required');
-    return c.post(apiPath(`/conversations/${cid}/members`), {
+    return convClient(params).post(apiPath(`/conversations/${cid}/members`), {
       member_id: params.memberId, ...(params.role ? { role: params.role } : {}),
     });
   },
@@ -836,20 +868,22 @@ const COMMANDS = {
   // ✅ DELETE /api/v1/conversations/{id}/members/{member_id}
   //   Removing yourself is rejected (400) — use comm.leave instead.
   'comm.member_remove': async () => {
-    if (!params.memberId) throw new Error('memberId required');
+    const cid = requireUuid(params, 'conversationId');
+    const mid = requireUuid(params, 'memberId');
     const r = await convClient(params).del(
-      apiPath(`/conversations/${params.conversationId}/members/${params.memberId}`),
+      apiPath(`/conversations/${cid}/members/${mid}`),
     );
-    return r ?? { removed: params.memberId, conversationId: params.conversationId };
+    return r ?? { removed: mid, conversationId: cid };
   },
 
   // ✅ POST /api/v1/conversations/{id}/members:batch-remove  body {member_ids}
   //   Rejects self-removal (400) — use comm.leave. Returns a partial-success envelope.
   'comm.member_remove_batch': () => {
+    const cid = requireUuid(params, 'conversationId');
     const ids = params.memberIds != null ? [].concat(params.memberIds) : [];
     if (!ids.length) throw new Error('memberIds must be a non-empty array');
     return convClient(params).post(
-      apiPath(`/conversations/${params.conversationId}/members:batch-remove`),
+      apiPath(`/conversations/${cid}/members:batch-remove`),
       { member_ids: ids },
     );
   },
@@ -858,26 +892,33 @@ const COMMANDS = {
   //   Self-removal path. If the leaver is the group owner, cws-core requires a
   //   human successor: pass {newOwnerId}, or omit to let it pick a remaining
   //   human (or delete the group when only agents/nobody remain).
-  'comm.leave': () => convClient(params).post(
-    apiPath(`/conversations/${params.conversationId}/leave`),
-    { ...(params.newOwnerId ? { new_owner_id: params.newOwnerId } : {}) },
-  ),
+  'comm.leave': () => {
+    const cid = requireUuid(params, 'conversationId');
+    return convClient(params).post(
+      apiPath(`/conversations/${cid}/leave`),
+      { ...(params.newOwnerId ? { new_owner_id: params.newOwnerId } : {}) },
+    );
+  },
 
   // ---- Messages ---------------------------------------------------------------
   // ✅ GET /api/v1/conversations/{id}/messages?after_seq=&before_seq=&limit=
-  'comm.get_messages': async () => withLocalMessageTimes(await get(apiPath(`/conversations/${params.conversationId}/messages`), {
-    after_seq:  params.afterSeq,
-    before_seq: params.beforeSeq,
-    limit:      params.limit,
-  })),
+  'comm.get_messages': async () => {
+    const cid = requireUuid(params, 'conversationId');
+    return withLocalMessageTimes(await get(apiPath(`/conversations/${cid}/messages`), {
+      after_seq:  params.afterSeq,
+      before_seq: params.beforeSeq,
+      limit:      params.limit,
+    }));
+  },
 
   // ✅ POST /api/v1/conversations/{id}/messages
   //   body: {client_msg_id, type, content:{content_type, body, attachments}, parent_id?,
   //          mentions?, metadata?, fallback_text?}
   //   See buildSendBody() for the schema details.
   'comm.send': async () => {
-    // metadata / fallback_text are checked first, so a refused value costs no
-    // request at all (not even the roster fetch below).
+    // conversationId, metadata / fallback_text are checked first, so a refused
+    // value costs no request at all (not even the roster fetch below).
+    requireUuid(params, 'conversationId');
     const extras = readSendExtras(params, 'comm.send');
     // Only matters when the caller did NOT pass mentions explicitly — in that
     // case buildSendBody falls back to resolving `@name` against the local
@@ -943,6 +984,7 @@ const COMMANDS = {
   //   Agent activity: the card carries agent_run like a reply
   //   (onboarding cards excluded) — see attachRunToCardRequest.
   'comm.send_card': async () => {
+    requireUuid(params, 'conversationId');
     const noRun = readNoRun(params, 'comm.send_card');
     const sourceMessageId = readSourceMessageId(params, 'comm.send_card');
     const { noRun: _noRun, sourceMessageId: _src, ...cardParams } = params;
@@ -982,6 +1024,7 @@ const COMMANDS = {
   //   `kind`, `askedOf` and `meta` are this verb's own, as under ask_card; a
   //   form may give `answerers` in place of `askedOf`.
   'comm.ask': async () => {
+    requireUuid(params, 'conversationId');
     const { interactionType, ...rest } = params;
     const type = resolveInteractionType(params);
     if (type === 'choice') return askChoice(rest, 'comm.ask');
@@ -1086,15 +1129,23 @@ const COMMANDS = {
   },
 
   // ✅ GET /api/v1/conversations/{id}/messages/{msg_id}
-  'comm.get_message': async () => withLocalTimes(await get(
-    apiPath(`/conversations/${params.conversationId}/messages/${params.messageId}`),
-  )),
+  'comm.get_message': async () => {
+    const cid = requireUuid(params, 'conversationId');
+    const mid = requireMessageId(params, 'messageId');
+    return withLocalTimes(await get(apiPath(`/conversations/${cid}/messages/${mid}`)));
+  },
 
   // ✅ GET /api/v1/conversations/{id}/unread
-  'comm.unread': () => get(apiPath(`/conversations/${params.conversationId}/unread`)),
+  'comm.unread': () => {
+    const cid = requireUuid(params, 'conversationId');
+    return get(apiPath(`/conversations/${cid}/unread`));
+  },
 
   // ✅ POST /api/v1/conversations/{id}/read
-  'comm.mark_read': () => post(apiPath(`/conversations/${params.conversationId}/read`), { read_until_seq: params.seq }),
+  'comm.mark_read': () => {
+    const cid = requireUuid(params, 'conversationId');
+    return post(apiPath(`/conversations/${cid}/read`), { read_until_seq: params.seq });
+  },
 
   // ✅ GET /api/v1/search/pages  — KB page search (only search surface in v5)
   'comm.search': () => get(apiPath('/search/pages'), {
@@ -1194,7 +1245,9 @@ Conversations
   comm.create_dm            {peerMemberId}                           # POST /conversations/dm
   comm.create_group         {name, memberIds, description?}          # POST /conversations/groups
   comm.get_conversation     {conversationId, org?}
-  comm.update_group         {conversationId, name?, description?, org?}  # PATCH /conversations/{id} (owner/admin only; description "" clears)
+  comm.update_group         {conversationId, name?, description?, org?}  # PATCH /conversations/{id} (owner/admin only; name ≤200 characters; description "" clears)
+                            # ids in a request path are checked before any request: conversationId
+                            #   and memberId (member_remove) must be UUIDs, messageId a string of digits
 
 Conversation members (owner/admin only; pass {org} for multi-org installs)
   comm.member_list          {conversationId, org?}                                  # GET  .../members (full list; not paginated)

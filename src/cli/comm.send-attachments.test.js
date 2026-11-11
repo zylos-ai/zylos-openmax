@@ -59,7 +59,7 @@ async function send(params) {
   }
 }
 
-const CONV = 'cv-att';
+const CONV = '019f0000-aaaa-7bbb-8ccc-000000000202';
 const PDF = { artifact_id: 'art-pdf', file_name: 'weekly.pdf', content_type: 'application/pdf', size_bytes: 10 };
 const PNG = { artifact_id: 'art-png', file_name: 'shot.png', content_type: 'image/png', size_bytes: 20 };
 

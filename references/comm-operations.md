@@ -55,9 +55,11 @@ Real-time event push (`message.created`, etc.) goes over WebSocket, handled by `
 | ✅ | `comm.create_dm` | Open a DM with a single person (returns directly if it already exists, idempotent) | `{participantId}` | `POST /api/v1/conversations/dm` |
 | ✅ | `comm.create_group` | Create a group; self + participantIds form the member list | `{title, participantIds[]}` | `POST /api/v1/conversations/groups` |
 | ✅ | `comm.get_conversation` | Get details of a single conversation | `{conversationId, org?}` | `GET /api/v1/conversations/{id}` |
-| ✅ | `comm.update_group` | Rename a group or change its description (group owner/admin only, enforced server-side: 403 otherwise, 404 if not a member or not a group; `description: ""` clears it; at least one of `name` / `description`; never sends metadata) | `{conversationId, name?, description?, org?}` | `PATCH /api/v1/conversations/{id}` |
+| ✅ | `comm.update_group` | Rename a group or change its description (group owner/admin only, enforced server-side: 403 otherwise, 404 if not a member or not a group; `name` at most 200 characters — refused locally, the server answers 422 beyond; `description: ""` clears it; at least one of `name` / `description`; never sends metadata) | `{conversationId, name?, description?, org?}` | `PATCH /api/v1/conversations/{id}` |
 
 `participantIds` must be a UUID array. DM uses a single `participantId` (no `title`); group uses multiple + `title`.
+
+**Ids in a request path are checked before any request.** `conversationId` (every conversation-scoped command: `get_conversation`, `update_group`, the member commands, `leave`, `send`, `send_card`, `ask_card`, `ask`, `get_messages`, `get_message`, `unread`, `mark_read`) and `memberId` in `member_remove` must be UUIDs; `messageId` in `get_message` is a string of digits. Anything else (`"../members"`, `"a/b?c=1"`, `"<uuid>/members"`) is refused with an error and nothing is sent.
 
 ### Conversation members
 

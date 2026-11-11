@@ -66,7 +66,7 @@ async function run(home, command, params, response, { delayMs = 0, answered = []
 
 const choiceRes = (n) => ({ data: { message_id: `c${n}`, action_ids: ['opt_1', 'opt_2'] } });
 const formRes = (n) => ({ data: { message_id: `f${n}`, action_ids: [], form_option_ids: { a: ['opt_1', 'opt_2'] } } });
-const ask = (askedOf, title) => ({ conversationId: 'grp-1', kind: 'q', askedOf, title, summary: 's', text: 'x', options: ['是', '否'] });
+const ask = (askedOf, title) => ({ conversationId: '019f0000-aaaa-7bbb-8ccc-000000000301', kind: 'q', askedOf, title, summary: 's', text: 'x', options: ['是', '否'] });
 
 test('comm.ask_card: the second quick-reply card to the same person carries a warning, and is still sent', async () => {
   const home = tmpHome();
@@ -93,7 +93,7 @@ test('comm.ask (form) after a quick-reply card to the same person carries no war
   const home = tmpHome();
   await run(home, 'comm.ask_card', ask('m-steph', '问题一'), choiceRes);
   const f = await run(home, 'comm.ask', {
-    conversationId: 'grp-1', kind: 'q', askedOf: 'm-steph', answerers: ['m-steph'], title: 't', summary: 's',
+    conversationId: '019f0000-aaaa-7bbb-8ccc-000000000301', kind: 'q', askedOf: 'm-steph', answerers: ['m-steph'], title: 't', summary: 's',
     fields: [{ key: 'a', label: '问题？', options: ['甲', '乙'] }],
   }, formRes);
   assert.equal(f.code, 0, f.err);

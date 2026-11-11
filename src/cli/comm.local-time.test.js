@@ -10,7 +10,7 @@ import test from 'node:test';
 const cliPath = fileURLToPath(new URL('./comm.js', import.meta.url));
 
 // Shaped like cws-core's messageItem: times are UTC RFC3339 with a `Z`.
-const MESSAGE = { id: 'm1', seq: 7, created_at: '2026-07-16T03:36:00.123Z' };
+const MESSAGE = { id: '1790221024242', seq: 7, created_at: '2026-07-16T03:36:00.123Z' };
 
 // The message verbs route by org, so they need a config with one enabled org;
 // a temp HOME keeps the real agent config out of it.
@@ -65,7 +65,7 @@ async function run(command, params, body, env = {}) {
 
 test('get_messages adds created_at_local in the agent TZ, keeps the raw UTC value and pagination', async () => {
   const out = await run(
-    'comm.get_messages', { conversationId: 'cv1' },
+    'comm.get_messages', { conversationId: '019f0000-aaaa-7bbb-8ccc-000000000304' },
     { data: [MESSAGE], pagination: { has_more: true } },
     { TZ: 'Asia/Shanghai' },
   );
@@ -77,7 +77,7 @@ test('get_messages adds created_at_local in the agent TZ, keeps the raw UTC valu
 
 test('get_message annotates the single message', async () => {
   const msg = await run(
-    'comm.get_message', { conversationId: 'cv1', messageId: 'm1' },
+    'comm.get_message', { conversationId: '019f0000-aaaa-7bbb-8ccc-000000000304', messageId: '1790221024242' },
     { data: MESSAGE },
     { TZ: 'Asia/Shanghai' },
   );
