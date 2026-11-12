@@ -177,8 +177,8 @@ node src/cli/conn.js conn.callback '{}'
 Returns `{ callback_url }`. The endpoint is authed (bearer) but **not** org-scoped;
 the CLI still authenticates it with the org's token (harmless — the route ignores
 the org scoping). It is the redirect URI to register at the OAuth provider. When
-you create an OAuth connector **for a user**, the user registers it (the create
-card shows it, copyable) and then enters the Client ID **and** Client Secret
+you create an OAuth connector **for a user**, the user registers it (shown on the create
+card, copyable, where the web client renders it — otherwise give it from here) and then enters the Client ID **and** Client Secret
 together on the connections page — you do not pass `oauth_client_id` or
 `oauth_client_secret` (see "Creating a custom connector for a user", steps 4 and 6).
 
@@ -609,10 +609,11 @@ Secret」 on the card: it opens `/connections?edit=<application_id>`, where they
 fill in the Client ID and Client Secret together. If the card was
 sent before the application existed (no `application_id`), the page finds the
 created app by slug after creation — which is why the slug on the card must equal
-the created slug. The callback URL to register in the provider's OAuth app is
-shown on the card (with a copy button); you can also fetch it with
-`conn.callback` (or read the created app's `oauth_callback_url`) when the user
-asks for it or the card does not render.
+the created slug. Newer web clients show the callback URL to register in the provider's OAuth
+app on the card (with a copy button). When the card does not show it (older web
+client, or the card does not render), or the user asks, fetch it with
+`conn.callback` (or read the created app's `oauth_callback_url`) and give it to
+them.
 
 **7. A secret pasted into chat anyway.** Do not use it, do not repeat it, and do not
 pass it to any command. Tell the user it is now exposed in the conversation and

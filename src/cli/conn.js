@@ -1122,16 +1122,20 @@ function cardUrl(v, field) {
 }
 
 // Default OAuth scopes: an array of non-empty strings (each a cardString, no
-// invisible characters), at most CREATE_CARD_MAX_OAUTH_SCOPES. Absent / null /
-// [] → omitted.
+// invisible characters, no whitespace inside — RFC 6749 §3.3 scope tokens are
+// space-delimited, so "contacts read" would read as two), no duplicates, at most
+// CREATE_CARD_MAX_OAUTH_SCOPES. Absent / null / [] → omitted.
 function cardScopes(v, field) {
   if (v === undefined || v === null) return undefined;
   if (!Array.isArray(v)) throw bad(`${field} must be an array of strings`);
   if (v.length > CREATE_CARD_MAX_OAUTH_SCOPES) throw bad(`${field} has too many items (max ${CREATE_CARD_MAX_OAUTH_SCOPES})`);
   const out = v.map((item, i) => {
     if (typeof item !== 'string') throw bad(`${field}[${i}] must be a string`);
-    return cardString(item, `${field}[${i}]`, CREATE_CARD_LIMITS.oauth_scope, { required: true });
+    const scope = cardString(item, `${field}[${i}]`, CREATE_CARD_LIMITS.oauth_scope, { required: true });
+    if (/\s/.test(scope)) throw bad(`${field}[${i}] must be a single scope (no whitespace)`);
+    return scope;
   });
+  if (new Set(out).size !== out.length) throw bad(`${field} has duplicate items`);
   return out.length ? out : undefined;
 }
 

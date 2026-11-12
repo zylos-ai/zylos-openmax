@@ -734,6 +734,8 @@ test('OAuth fields: refused (400) unless connector_kind http + auth_type oauth2'
   }
   // even an empty value is refused on a non-oauth2 card (the key itself is the mistake)
   rejects400(withConnector({ auth_type: 'api_key', oauth_scopes_default: [] }), /oauth_scopes_default is only allowed/);
+  // null counts as present too: the key itself is the mistake
+  rejects400(withConnector({ auth_type: 'api_key', oauth_token_url: null }), /oauth_token_url is only allowed/);
   // the mcp card itself stays valid without them
   assert.equal(parseCreateCardInput({ conversationId: CONV, connector: MCP_BASE }).connector.server_url, MCP_BASE.server_url);
 });
@@ -767,6 +769,10 @@ test('OAuth scopes: array of non-empty strings, ≤ CREATE_CARD_MAX_OAUTH_SCOPES
   assert.equal(parseCreateCardInput(withConnector({ oauth_scopes_default: many })).connector.oauth_scopes_default.length, 50);
   rejects400(withConnector({ oauth_scopes_default: [...many, 'scope.50'] }), /oauth_scopes_default has too many items \(max 50\)/);
   rejects400(withConnector({ oauth_scopes_default: 'read write' }), /oauth_scopes_default must be an array of strings/);
+  // one scope per item: whitespace inside would read as several scopes (RFC 6749 §3.3)
+  rejects400(withConnector({ oauth_scopes_default: ['contacts read', 'write'] }), /oauth_scopes_default\[0\] must be a single scope \(no whitespace\)/);
+  rejects400(withConnector({ oauth_scopes_default: ['read', 'a\tb'] }), /oauth_scopes_default\[1\]/);
+  rejects400(withConnector({ oauth_scopes_default: ['read', 'write', 'read'] }), /oauth_scopes_default has duplicate items/);
   rejects400(withConnector({ oauth_scopes_default: { a: 1 } }), /must be an array of strings/);
   rejects400(withConnector({ oauth_scopes_default: ['read', 42] }), /oauth_scopes_default\[1\] must be a string/);
   rejects400(withConnector({ oauth_scopes_default: ['read', null] }), /oauth_scopes_default\[1\] must be a string/);
