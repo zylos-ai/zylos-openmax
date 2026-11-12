@@ -13,7 +13,7 @@ import {
   buildConnectorCreateCardMessage, buildCreateCardFallbackText,
   sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage, looksLikeToken, actionNameKey,
   createCardMetadata,
-  CREATE_CARD_DATA_MAX_BYTES,
+  CREATE_CARD_DATA_MAX_BYTES, CREATE_CARD_MAX_OAUTH_SCOPES,
 } from './conn.js';
 
 // conn.create_card (OPENM-836): the "create this custom connector?" card.
@@ -685,6 +685,131 @@ test('fallback_text: name, slug, auth type, every action with 读/写, reply wor
   const k = buildCreateCardFallbackText(parseCreateCardInput(withConnector({ auth_type: 'api_key' })));
   assert.match(k, /认证方式：API Key/);
   assert.doesNotMatch(k, /Client Secret/);
+});
+
+// --- OAuth endpoint fields (wsb#789) ---------------------------------------------
+
+const OAUTH = {
+  oauth_authorize_url: 'https://acme.example.com/oauth/authorize',
+  oauth_token_url: 'https://acme.example.com/oauth/token',
+  oauth_scopes_default: ['contacts.read', 'contacts.write'],
+};
+const MCP_BASE = { name: 'Plaud', slug: 'plaud-mcp', connector_kind: 'mcp', server_url: 'https://mcp.plaud.example.com/mcp' };
+
+test('oauth2 card: authorize / token URL + scopes in parse, body, compact copy and fallback text', () => {
+  const input = parseCreateCardInput(withConnector({ ...OAUTH, oauth_scopes_default: [' contacts.read ', 'contacts.write'] }));
+  assert.equal(input.connector.oauth_authorize_url, OAUTH.oauth_authorize_url);
+  assert.equal(input.connector.oauth_token_url, OAUTH.oauth_token_url);
+  assert.deepEqual(input.connector.oauth_scopes_default, ['contacts.read', 'contacts.write'], 'scopes trimmed');
+  const m = buildConnectorCreateCardMessage(input, CARD_ID);
+  assert.deepEqual(m.content.body.connector, input.connector);
+  const data = m.metadata.context.items[0].data;
+  assert.deepEqual(data.connector, {
+    name: 'Acme CRM', slug: 'acme-crm', connector_kind: 'http', auth_type: 'oauth2',
+    icon_url: 'https://acme.example.com/icon.png', ...OAUTH,
+  });
+  assert.notEqual(data.connector.oauth_scopes_default, input.connector.oauth_scopes_default, 'copy, not shared array');
+  const t = m.fallback_text;
+  assert.match(t, /授权地址：https:\/\/acme\.example\.com\/oauth\/authorize\n/);
+  assert.match(t, /令牌地址：https:\/\/acme\.example\.com\/oauth\/token\n/);
+  assert.match(t, /Scopes：contacts\.read contacts\.write\n/);
+  assert.equal(t, m.content.body.fallback_text);
+  // each field is optional on its own; absent / null / [] → omitted everywhere
+  const one = parseCreateCardInput(withConnector({ oauth_token_url: OAUTH.oauth_token_url, oauth_scopes_default: [] }));
+  assert.equal(one.connector.oauth_token_url, OAUTH.oauth_token_url);
+  assert.equal('oauth_authorize_url' in one.connector, false);
+  assert.equal('oauth_scopes_default' in one.connector, false);
+  const none = buildConnectorCreateCardMessage(parseCreateCardInput(withConnector({ oauth_scopes_default: null })), CARD_ID);
+  for (const k of Object.keys(OAUTH)) {
+    assert.equal(k in none.content.body.connector, false);
+    assert.equal(k in none.metadata.context.items[0].data.connector, false);
+  }
+  assert.doesNotMatch(none.fallback_text, /授权地址|令牌地址|Scopes/);
+});
+
+test('OAuth fields: refused (400) unless connector_kind http + auth_type oauth2', () => {
+  for (const [k, v] of Object.entries(OAUTH)) {
+    rejects400(withConnector({ auth_type: 'api_key', [k]: v }), new RegExp(`connector\\.${k} is only allowed when connector_kind is "http" and auth_type is "oauth2"`));
+    rejects400({ conversationId: CONV, connector: { ...MCP_BASE, [k]: v } }, new RegExp(`connector\\.${k} is only allowed`));
+  }
+  // even an empty value is refused on a non-oauth2 card (the key itself is the mistake)
+  rejects400(withConnector({ auth_type: 'api_key', oauth_scopes_default: [] }), /oauth_scopes_default is only allowed/);
+  // null counts as present too: the key itself is the mistake
+  rejects400(withConnector({ auth_type: 'api_key', oauth_token_url: null }), /oauth_token_url is only allowed/);
+  // the mcp card itself stays valid without them
+  assert.equal(parseCreateCardInput({ conversationId: CONV, connector: MCP_BASE }).connector.server_url, MCP_BASE.server_url);
+});
+
+test('OAuth URLs: same checks as base_url (scheme, credentials, secret query, token values, fragment, length)', () => {
+  for (const k of ['oauth_authorize_url', 'oauth_token_url']) {
+    rejects400(withConnector({ [k]: 'javascript:alert(1)' }), new RegExp(`connector\\.${k} must be an absolute http\\(s\\) URL`));
+    rejects400(withConnector({ [k]: 'not a url' }), new RegExp(k));
+    rejects400(withConnector({ [k]: 42 }), new RegExp(`connector\\.${k} must be a string`));
+    rejects400(withConnector({ [k]: 'https://u:p@acme.example.com/oauth' }), /credentials/);
+    rejects400(withConnector({ [k]: 'https://acme.example.com/oauth#x' }), /fragment/);
+    rejects400(withConnector({ [k]: `https://a.example.com/${'x'.repeat(CREATE_CARD_LIMITS.url)}` }), /too long/);
+    for (const url of [
+      'https://acme.example.com/oauth?client_secret=abc',
+      'https://acme.example.com/oauth?x=1;api_key=abc',
+      'https://acme.example.com/oauth?code=ghp_abcdefghijklmnopqrstuvwxyz0123',
+      'https://acme.example.com/oauth#access_token=abc',
+    ]) {
+      assert.throws(() => parseCreateCardInput(withConnector({ [k]: url })), (e) => e.status === 400 && e.code === 'secret_field_rejected'
+        && e.message.includes(`connector.${k}`) && !e.message.includes('abcdefghijklmnop'), url);
+    }
+    // normalized href echoed; plain query (client_id-less, response_type) allowed
+    assert.equal(parseCreateCardInput(withConnector({ [k]: 'HTTPS://Acme.Example.com/oauth?response_type=code' })).connector[k],
+      'https://acme.example.com/oauth?response_type=code');
+  }
+});
+
+test('OAuth scopes: array of non-empty strings, ≤ CREATE_CARD_MAX_OAUTH_SCOPES, no invisible characters', () => {
+  assert.equal(CREATE_CARD_MAX_OAUTH_SCOPES, 50);
+  const many = Array.from({ length: 50 }, (_, i) => `scope.${i}`);
+  assert.equal(parseCreateCardInput(withConnector({ oauth_scopes_default: many })).connector.oauth_scopes_default.length, 50);
+  rejects400(withConnector({ oauth_scopes_default: [...many, 'scope.50'] }), /oauth_scopes_default has too many items \(max 50\)/);
+  rejects400(withConnector({ oauth_scopes_default: 'read write' }), /oauth_scopes_default must be an array of strings/);
+  // one scope per item: whitespace inside would read as several scopes (RFC 6749 §3.3)
+  rejects400(withConnector({ oauth_scopes_default: ['contacts read', 'write'] }), /oauth_scopes_default\[0\] must be a single scope \(no whitespace\)/);
+  rejects400(withConnector({ oauth_scopes_default: ['read', 'a\tb'] }), /oauth_scopes_default\[1\]/);
+  rejects400(withConnector({ oauth_scopes_default: ['read', 'write', 'read'] }), /oauth_scopes_default has duplicate items/);
+  rejects400(withConnector({ oauth_scopes_default: { a: 1 } }), /must be an array of strings/);
+  rejects400(withConnector({ oauth_scopes_default: ['read', 42] }), /oauth_scopes_default\[1\] must be a string/);
+  rejects400(withConnector({ oauth_scopes_default: ['read', null] }), /oauth_scopes_default\[1\] must be a string/);
+  rejects400(withConnector({ oauth_scopes_default: ['read', '  '] }), /oauth_scopes_default\[1\] is required/);
+  rejects400(withConnector({ oauth_scopes_default: ['re‮ad'] }), /oauth_scopes_default\[0\] must not contain control/);
+  rejects400(withConnector({ oauth_scopes_default: ['a\nb'] }), /control/);
+  const cap = CREATE_CARD_LIMITS.oauth_scope;
+  assert.equal(parseCreateCardInput(withConnector({ oauth_scopes_default: ['s'.repeat(cap)] })).connector.oauth_scopes_default[0].length, cap);
+  rejects400(withConnector({ oauth_scopes_default: ['s'.repeat(cap + 1)] }), /oauth_scopes_default\[0\] is too long/);
+});
+
+test('OAuth fields count toward the 8 KiB compact copy: over the limit → item omitted, never trimmed', () => {
+  const size = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
+  const scopes = Array.from({ length: CREATE_CARD_MAX_OAUTH_SCOPES }, (_, i) => `https://www.example.com/auth/scope_${String(i).padStart(2, '0')}.${'x'.repeat(150)}`);
+  // Without scopes these actions fit; with all 50 long scopes the copy goes over 8 KiB.
+  const actions = Array.from({ length: 10 }, (_, i) => ({ name: `action_${i}`, effect: 'read', summary: `动作 ${i}` }));
+  const small = buildConnectorCreateCardMessage(parseCreateCardInput(valid({ actions, connector: { ...valid().connector, ...OAUTH } })), CARD_ID);
+  assert.ok(small.metadata, 'small oauth card has the copy');
+  const bigInput = parseCreateCardInput(valid({ actions, connector: { ...valid().connector, ...OAUTH, oauth_scopes_default: scopes } }));
+  const big = buildConnectorCreateCardMessage(bigInput, CARD_ID);
+  assert.equal('metadata' in big, false, 'no connector-create-card item');
+  assert.deepEqual(big.content.body.connector.oauth_scopes_default, scopes, 'the body keeps every scope');
+  assert.ok(big.fallback_text.includes(scopes.join(' ')), 'fallback text lists every scope');
+  // the would-be copy is indeed over the limit, and the item is not partially written
+  const wouldBe = { schema: CONNECTOR_CREATE_CARD_SCHEMA, card_id: CARD_ID, connector: { ...bigInput.connector }, actions };
+  delete wouldBe.connector.description; delete wouldBe.connector.base_url;
+  assert.ok(size(wouldBe) > CREATE_CARD_DATA_MAX_BYTES, `copy is ${size(wouldBe)} bytes`);
+  // boundary: the largest scope count whose copy fits is written in full
+  // (every scope); one more scope and the whole item is omitted.
+  const build = (k) => buildConnectorCreateCardMessage(parseCreateCardInput(valid({ actions, connector: { ...valid().connector, ...OAUTH, oauth_scopes_default: scopes.slice(0, k) } })), CARD_ID);
+  let n = scopes.length;
+  while (n > 0 && !build(n).metadata) n -= 1;
+  assert.ok(n > 0 && n < scopes.length, `boundary at ${n} scopes`);
+  const data = build(n).metadata.context.items[0].data;
+  assert.deepEqual(data.connector.oauth_scopes_default, scopes.slice(0, n));
+  assert.ok(size(data) <= CREATE_CARD_DATA_MAX_BYTES && size(data) > CREATE_CARD_DATA_MAX_BYTES - 250, `copy is ${size(data)} bytes`);
+  assert.equal('metadata' in build(n + 1), false);
 });
 
 // --- send path ------------------------------------------------------------------
