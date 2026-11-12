@@ -1840,9 +1840,15 @@ function feParseConnectorAuthNotice(message) {
   if (message.type !== 'AGENT_STRUCTURED' || message.sender_type !== 'AGENT') return null;
   const asRecord = (v) => (v !== null && typeof v === 'object' && !Array.isArray(v) ? v : null);
   const contentBody = asRecord(message.content?.body) || {};
+  // metadata: the `connector-auth-notice` context item first (message context
+  // phase 2), else the old key.
+  const items = asRecord(asRecord(message.metadata)?.context)?.items;
+  const item = Array.isArray(items) ? items.find((it) => asRecord(it)?.type === 'connector-auth-notice') : undefined;
   const body = contentBody.schema === 'prototype.connector-auth-notice.v1'
     ? contentBody
-    : asRecord(asRecord(message.metadata)?.connector_auth_notice);
+    : asRecord(item?.data)?.schema === 'prototype.connector-auth-notice.v1'
+      ? item.data
+      : asRecord(asRecord(message.metadata)?.connector_auth_notice);
   if (!body || body.schema !== 'prototype.connector-auth-notice.v1') return null;
   if (!Array.isArray(body.connector_names)) return null;
   const connectorNames = body.connector_names.filter((n) => typeof n === 'string' && n.trim() !== '');
@@ -1865,8 +1871,8 @@ test('buildConnectorAuthNoticeMessage: exact FE schema + structured shape + meta
     connector_names: ['Notion', 'Jira Cloud', 'Google Drive'],
     connector_slugs: ['notion', 'jira', 'googledrive'],
   });
-  assert.deepEqual(m.metadata.connector_auth_notice, m.content.body);
-  assert.notEqual(m.metadata.connector_auth_notice, m.content.body, 'metadata is a copy, not the same object');
+  assert.deepEqual(m.metadata, { context: { items: [{ type: 'connector-auth-notice', audience: 'ui', data: m.content.body }] } });
+  assert.notEqual(m.metadata.context.items[0].data, m.content.body, 'metadata is a copy, not the same object');
   assert.match(m.fallback_text, /Notion、Jira Cloud、Google Drive/);
   assert.match(m.fallback_text, /\/connections/);
   assert.match(m.fallback_text, /授权/);

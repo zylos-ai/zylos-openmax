@@ -117,7 +117,8 @@ test('buildChannelQRMessage emits one generic structured card for every platform
       qr_ref: 'https://example.test/authorize',
       expires_at: '2026-09-03T12:00:00.000Z',
     });
-    assert.deepEqual(message.metadata.openmax_channel_qr, message.content.body);
+    assert.deepEqual(message.metadata, { context: { items: [{ type: 'channel-qr', audience: 'ui', data: message.content.body }] } });
+    assert.notEqual(message.metadata.context.items[0].data, message.content.body, 'metadata is a copy');
   }
   assert.throws(() => buildChannelQRMessage('feishu', '', new Date().toISOString()), /no QR reference/);
 });

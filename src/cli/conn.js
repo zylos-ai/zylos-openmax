@@ -22,6 +22,7 @@ import {
 } from '../lib/connect-store.js';
 import { acquireCredential } from '../lib/connection-events.js';
 import { parseEndpoint } from '../lib/message.js';
+import { contextMetadata, fitsContextDataLimit } from '../lib/message-context.js';
 import { invokeDirect, resolveCredential } from '../lib/direct-exec.js';
 import { capabilityHeaders, CAPABILITIES_HEADER_VALUE } from '../lib/request-spec/capabilities.js';
 
@@ -725,7 +726,9 @@ function looksLikeActionOrSchemaError(err) {
 // Shape mirrors the channel.js structured-message builders: AGENT_STRUCTURED +
 // content {content_type, body{schema,...}} + a metadata copy (cws-comm trims
 // structured bodies from the list hot path, and the FE parser falls back to
-// metadata.connector_auth_notice) + a plain-language fallback_text for any
+// it: a `connector-auth-notice` context item, audience=ui, data = the copy;
+// message context phase 2, the old metadata.connector_auth_notice key is no
+// longer written) + a plain-language fallback_text for any
 // client that does not know the schema.
 //
 // The schema string MUST stay byte-identical to cws-fe's
@@ -753,7 +756,11 @@ export function buildConnectorAuthNoticeMessage(connectors) {
     client_msg_id: randomUUID(),
     type: 'AGENT_STRUCTURED',
     content: { content_type: 'connector_auth_notice', body, attachments: [] },
-    metadata: { connector_auth_notice: { ...body, connector_names: [...names], connector_slugs: [...slugs] } },
+    metadata: contextMetadata({
+      type: 'connector-auth-notice',
+      audience: 'ui',
+      data: { ...body, connector_names: [...names], connector_slugs: [...slugs] },
+    }),
     fallback_text: `${names.join('、')} 还没有授权给我。请到「连接」页面（/connections）完成授权，授权后就能用了。`,
   };
 }
@@ -868,8 +875,10 @@ function requireTargetConversationId(p) {
 // conn.actiondef_create) it posts ONE structured card describing exactly what
 // will be created, and waits for the owner's confirmation (OPENM-836). The card
 // creates nothing: the frontend posts an ordinary user message on click
-// ("确认创建 {name}" / "我要改 {name}" with metadata {connector_create_card_id,
-// action, ref_message_id}), and the Agent then runs conn.app_import with the
+// ("确认创建 {name}" / "我要改 {name}" with a `card-action` context item,
+// attrs {card-id, action, ref-message-id}; older frontends sent the metadata
+// keys {connector_create_card_id, action, ref_message_id}), and the Agent then
+// runs conn.app_import with the
 // SAME slug and actions.
 //
 // Shape mirrors conn.auth_notice / channel.js: AGENT_STRUCTURED + content
@@ -1230,6 +1239,20 @@ export function buildCreateCardFallbackText({ connector, actions }) {
   return lines.join('\n');
 }
 
+// The copy rides as a `connector-create-card` context item (audience=ui;
+// message context phase 2, the old metadata.connector_create_card key is no
+// longer written). cws-comm registers this type with an 8 KiB data limit
+// (JSON-encoded) and drops data over it. The copy is never cut: when the full
+// copy is over the limit the item is not written at all, and the frontend
+// falls back to fallback_text, which lists every action (the body keeps them
+// all too). A partial action list would misstate what gets created.
+export const CREATE_CARD_DATA_MAX_BYTES = 8 * 1024;
+
+export function createCardMetadata(meta) {
+  if (!fitsContextDataLimit(meta, CREATE_CARD_DATA_MAX_BYTES)) return undefined;
+  return contextMetadata({ type: 'connector-create-card', audience: 'ui', data: meta });
+}
+
 // Pure builder. `input` is the parseCreateCardInput result; `cardId` is
 // injectable for tests (defaults to a fresh UUID).
 export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
@@ -1260,11 +1283,12 @@ export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
     actions: actions.map((a) => ({ name: a.name, effect: a.effect, summary: a.summary })),
     ...(input.application_id ? { application_id: input.application_id } : {}),
   };
+  const metadata = createCardMetadata(meta);
   return {
     client_msg_id: randomUUID(),
     type: 'AGENT_STRUCTURED',
     content: { content_type: 'connector_create_card', body, attachments: [] },
-    metadata: { connector_create_card: meta },
+    ...(metadata ? { metadata } : {}),
     fallback_text: fallbackText,
   };
 }

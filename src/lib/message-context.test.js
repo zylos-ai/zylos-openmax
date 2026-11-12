@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   contextItemsFrom, agentContextItemsFrom, MAX_CONTEXT_ITEMS, MAX_CONTEXT_ATTRS,
+  fitsContextDataLimit, UNREGISTERED_DATA_MAX_BYTES,
 } from './message-context.js';
 import { connectorPreferenceOf, preferredConnectorsFrom } from './connector-preference.js';
 import { workflowRefOf, wfRefFrom } from './wf-context.js';
@@ -263,6 +264,71 @@ test('systemEvent.priority is honored only on a SYSTEM sender message', () => {
   }
   assert.equal(inboundPriority({ content: { metadata: { systemEvent: { priority: 'urgent' } } }, sender_type: 'HUMAN' }), undefined);
   assert.equal(systemEventPriority(urgent), 1);
+});
+
+// --- data size threshold (2 KiB for an unregistered type) ---------------------
+
+test('fitsContextDataLimit: exactly 2048 encoded bytes fits, 2049 does not', () => {
+  assert.equal(UNREGISTERED_DATA_MAX_BYTES, 2048);
+  const ofBytes = (n, ch = 'x') => ({ s: ch.repeat((n - 8) / Buffer.byteLength(ch)) }); // {"s":"…"} = 8 + payload
+  const bytes = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
+  assert.equal(bytes(ofBytes(2048)), 2048);
+  assert.equal(fitsContextDataLimit(ofBytes(2048)), true);
+  assert.equal(bytes(ofBytes(2049)), 2049);
+  assert.equal(fitsContextDataLimit(ofBytes(2049)), false);
+  // UTF-8 bytes, not code units: 680 × 说 (3 bytes) + 8 = 2048, + 1 ASCII = 2049
+  const cjk = ofBytes(2048, '说');
+  assert.equal(cjk.s.length, 680);
+  assert.equal(fitsContextDataLimit(cjk), true);
+  assert.equal(fitsContextDataLimit({ s: `${cjk.s}x` }), false);
+  // explicit limit; unencodable → false
+  assert.equal(fitsContextDataLimit(ofBytes(2049), 2049), true);
+  const cyc = {}; cyc.self = cyc;
+  assert.equal(fitsContextDataLimit(cyc), false);
+  assert.equal(fitsContextDataLimit({ n: 1n }), false);
+  // the reader applies the same threshold to an unregistered type's data
+  const read = (data) => contextItemsFrom({ metadata: { context: { items: [{ type: 'some-card', audience: 'ui', data }] } } })[0];
+  assert.deepEqual(read(ofBytes(2048)).data, ofBytes(2048));
+  assert.equal(read(ofBytes(2049)).data, undefined);
+});
+
+// --- priority item (phase 2): context first, old systemEvent as fallback --------
+
+test('priority item: read first, only on a SYSTEM sender, source not read', () => {
+  const pr = (level, extra = {}) => ({ type: 'priority', source: 'platform', audience: 'agent', attrs: { level }, ...extra });
+  const sys = (items, metadata = {}) => ({ sender_type: 'SYSTEM', metadata: { ...metadata, context: { items } } });
+  assert.equal(inboundPriority(sys([pr('urgent')])), 1);
+  assert.equal(inboundPriority(sys([pr('high')])), 2);
+  assert.equal(inboundPriority(sys([pr('normal')])), 3);
+  assert.equal(inboundPriority(sys([pr('URGENT')])), 1);
+  // an item with a missing / unknown level is invalid → the old key (plan §1.1)
+  assert.equal(inboundPriority(sys([pr('bogus')], { systemEvent: { priority: 'urgent' } })), 1);
+  assert.equal(inboundPriority(sys([pr(undefined)], { systemEvent: { priority: 'high' } })), 2);
+  assert.equal(inboundPriority(sys([pr('')], { systemEvent: { priority: 'urgent' } })), 1);
+  assert.equal(inboundPriority(sys([pr(1)], { systemEvent: { priority: 'urgent' } })), 1);
+  // … and with no old key either, no priority (c4-receive default)
+  assert.equal(inboundPriority(sys([pr('bogus')])), undefined);
+  assert.equal(inboundPriority(sys([pr(undefined)])), undefined);
+  // invalid item + present systemEvent with an unknown priority → 3, as before
+  assert.equal(inboundPriority(sys([pr('bogus')], { systemEvent: { priority: 'nope' } })), 3);
+  // the item wins over the old key on the same message
+  assert.equal(inboundPriority(sys([pr('high')], { systemEvent: { priority: 'urgent' } })), 2);
+  // no (well-formed agent) priority item → the old key, as before
+  assert.equal(inboundPriority(sys([], { systemEvent: { priority: 'urgent' } })), 1);
+  assert.equal(inboundPriority(sys([pr('high', { audience: 'ui' })], { systemEvent: { priority: 'urgent' } })), 1);
+  assert.equal(inboundPriority(sys([pr('high', { audience: 'nope' })])), undefined);
+  assert.equal(inboundPriority(sys([])), undefined);
+  // source is not read: any stamped source on a SYSTEM message counts
+  for (const source of ['client', 'app:x', undefined]) {
+    assert.equal(inboundPriority(sys([pr('urgent', { source })])), 1, String(source));
+  }
+  // nested envelope
+  assert.equal(inboundPriority({ message: { sender_type: 'SYSTEM', metadata: { context: { items: [pr('high')] } } } }), 2);
+  // never from a non-SYSTEM sender, item or old key
+  for (const sender_type of ['HUMAN', 'AGENT', undefined]) {
+    assert.equal(inboundPriority({ sender_type, metadata: { context: { items: [pr('urgent')] }, systemEvent: { priority: 'urgent' } } }), undefined);
+    assert.equal(inboundPriority({ sender_type, metadata: { context: { items: [pr('bogus')] }, systemEvent: { priority: 'urgent' } } }), undefined);
+  }
 });
 
 // --- bridge wiring -----------------------------------------------------------

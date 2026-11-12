@@ -6,7 +6,8 @@
  *   metadata.context = { items: [{ type, source, audience, attrs, data? }] }
  *
  *   - type     what the item is (connectors, workflow, quote, forwarded, or
- *              another type; only those four are read here);
+ *              another type; only those four are read here, plus phase 2's
+ *              `priority`, read by system-message.js);
  *   - source   who attached it, stamped by cws-comm (not read here);
  *   - audience who it is for (`agent` | `ui` | `server`); only `agent` items
  *              are read for the Agent;
@@ -45,6 +46,17 @@ export const MAX_CONTEXT_ATTR_CODE_POINTS = 200;
 export const MAX_DATA_DEPTH = 5;
 export const UNREGISTERED_DATA_MAX_BYTES = 2 * 1024;
 
+/**
+ * Whether `data` fits a context item's data limit: its JSON encoding is at most
+ * `maxBytes` UTF-8 bytes (default: the 2 KiB cws-comm keeps for an unregistered
+ * type). Not encodable → false.
+ */
+export function fitsContextDataLimit(data, maxBytes = UNREGISTERED_DATA_MAX_BYTES) {
+  let json;
+  try { json = JSON.stringify(data); } catch { return false; }
+  return typeof json === 'string' && Buffer.byteLength(json, 'utf8') <= maxBytes;
+}
+
 const NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const AUDIENCES = new Set(['agent', 'ui', 'server']);
 
@@ -60,10 +72,7 @@ function readData(raw, type) {
   if (!isObject(raw)) return undefined;
   const max = CONTEXT_TYPES[type]?.dataMaxBytes ?? UNREGISTERED_DATA_MAX_BYTES;
   if (max <= 0 || depthOf(raw) > MAX_DATA_DEPTH) return undefined;
-  let json;
-  try { json = JSON.stringify(raw); } catch { return undefined; }
-  if (typeof json !== 'string' || Buffer.byteLength(json, 'utf8') > max) return undefined;
-  return raw;
+  return fitsContextDataLimit(raw, max) ? raw : undefined;
 }
 
 // Scalars only, strings up to MAX_CONTEXT_ATTR_CODE_POINTS (an over-long value
@@ -115,6 +124,18 @@ export function contextItemsFrom(msg) {
     out.push(item);
   }
   return out;
+}
+
+/**
+ * Outbound `metadata` carrying one item (message context, phase 2): only the
+ * item, no old key. `source` is not written (cws-comm stamps it); `attrs` is
+ * left out when empty.
+ */
+export function contextMetadata({ type, audience, attrs, data }) {
+  const item = { type, audience };
+  if (attrs && Object.keys(attrs).length > 0) item.attrs = attrs;
+  if (data !== undefined) item.data = data;
+  return { context: { items: [item] } };
 }
 
 /** The items addressed to the Agent (audience=agent); [] when there are none. */

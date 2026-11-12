@@ -320,7 +320,10 @@ delivery for an already completed run.
 
 First identify the delivery, even when the human did not paste an `issue://`
 reference. Fetch the quoted result using
-`comm.get_message {conversationId,messageId}`. Its message metadata contains
+`comm.get_message {conversationId,messageId}` and read the ids from its
+message metadata: first the item with `type: "automation-delivery"` in
+`metadata.context.items`, whose `attrs` has `issue-id`, `delivery-id` and
+`notification-id`; if there is no such item, the old keys
 `automation_issue_id`, `automation_delivery_id`, and
 `automation_notification_id`. The bridge's visible quote may omit these fields,
 so read the actual CLI response. For an unquoted reply, use
