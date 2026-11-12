@@ -300,3 +300,31 @@ test('1337: [MEDIA:file] via `|msg:A` carries A\'s run while B is focused', asyn
   assert.equal(send.body.agent_run.source_message_id, SRC_A);
   assert.equal(fs.existsSync(path.join(RUNS_DIR, 'r_000013b0.reply')), false, 'B is left for its own answer');
 });
+
+// ── cws-comm#373: an archived sub-conversation is reported, never rerouted ──
+
+test('409 COMM_SUBCONVERSATION_ARCHIVED → exit 1 with status 409, one POST to the sub-conversation, no reroute', async () => {
+  const sub = '019f7000-0000-7000-8000-00000000000b';
+  const posts = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (d) => { raw += d; });
+    req.on('end', () => {
+      if (req.method === 'POST') posts.push({ url: req.url, body: raw ? JSON.parse(raw) : {} });
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { title: 'Conflict', status: 409, code: 'COMM_SUBCONVERSATION_ARCHIVED', detail: 'sub-conversation is archived' } }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  let r;
+  try {
+    r = await runSend(server.address().port, `${sub}|msg:7300000000000000999`, 'done');
+  } finally {
+    server.close();
+  }
+  assert.equal(r.code, 1);
+  const err = JSON.parse(r.stderr.trim().split('\n').pop());
+  assert.equal(err.status, 409);
+  assert.equal(posts.length, 1, 'no second POST');
+  assert.equal(posts[0].url, `/api/v1/conversations/${sub}/messages`);
+});

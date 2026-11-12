@@ -650,7 +650,9 @@ test('comm-bridge renders chat_history into current-message and nothing from for
 
 test('comm-bridge collapses a merged forward to one line in local history, API context and the replied-to message', () => {
   const bridge = fs.readFileSync(fileURLToPath(new URL('../comm-bridge.js', import.meta.url)), 'utf8');
+  // The API context lines are built in conversation-context.js.
+  const context = fs.readFileSync(fileURLToPath(new URL('./conversation-context.js', import.meta.url)), 'utf8');
   assert.match(bridge, /if \(isChatHistory\(msg\)\) histText = FORWARDED_CONVERSATION;/);
-  assert.match(bridge, /if \(isChatHistory\(m\)\) content = FORWARDED_CONVERSATION;/);
+  assert.match(context, /if \(isChatHistory\(m\)\) content = FORWARDED_CONVERSATION;/);
   assert.match(bridge, /if \(isChatHistory\(q\)\) qText = FORWARDED_CONVERSATION;/);
 });
