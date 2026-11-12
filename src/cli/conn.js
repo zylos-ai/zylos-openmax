@@ -898,7 +898,14 @@ export const CREATE_CARD_LIMITS = Object.freeze({
   url: 2048,
   action_name: 100,
   action_summary: 200,
+  oauth_scope: 200,
 });
+// OAuth endpoint details an http + oauth2 card may show (wsb#789): the
+// authorize / token URLs and the default scopes the Agent found in the target
+// system's docs. Display only — the card creates nothing; conn.app_import
+// still carries the real values.
+export const CREATE_CARD_MAX_OAUTH_SCOPES = 50;
+const CREATE_CARD_OAUTH_KEYS = ['oauth_authorize_url', 'oauth_token_url', 'oauth_scopes_default'];
 // Same two axes as conn.app_create: connector_kind (http | mcp) and, for an
 // http connector only, auth_type (api_key | oauth2). An mcp card has no
 // auth_type — the auth is decided when the user connects the server.
@@ -916,7 +923,10 @@ const CREATE_CARD_TOP_KEYS = new Set([
   'conversationId', 'conversation_id', 'connector', 'actions', 'application_id', 'applicationId',
   'org', 'orgId', 'org_id',
 ]);
-const CREATE_CARD_CONNECTOR_KEYS = new Set(['name', 'slug', 'icon_url', 'description', 'base_url', 'connector_kind', 'auth_type', 'server_url', 'mcp_server_url']);
+const CREATE_CARD_CONNECTOR_KEYS = new Set([
+  'name', 'slug', 'icon_url', 'description', 'base_url', 'connector_kind', 'auth_type', 'server_url', 'mcp_server_url',
+  ...CREATE_CARD_OAUTH_KEYS,
+]);
 const CREATE_CARD_ACTION_KEYS = new Set(['name', 'effect', 'summary']);
 
 // A key that names a secret, compared on its lowercased alphanumerics so
@@ -1111,6 +1121,20 @@ function cardUrl(v, field) {
   return href;
 }
 
+// Default OAuth scopes: an array of non-empty strings (each a cardString, no
+// invisible characters), at most CREATE_CARD_MAX_OAUTH_SCOPES. Absent / null /
+// [] → omitted.
+function cardScopes(v, field) {
+  if (v === undefined || v === null) return undefined;
+  if (!Array.isArray(v)) throw bad(`${field} must be an array of strings`);
+  if (v.length > CREATE_CARD_MAX_OAUTH_SCOPES) throw bad(`${field} has too many items (max ${CREATE_CARD_MAX_OAUTH_SCOPES})`);
+  const out = v.map((item, i) => {
+    if (typeof item !== 'string') throw bad(`${field}[${i}] must be a string`);
+    return cardString(item, `${field}[${i}]`, CREATE_CARD_LIMITS.oauth_scope, { required: true });
+  });
+  return out.length ? out : undefined;
+}
+
 function rejectUnknownKeys(obj, allowed, where) {
   for (const k of Object.keys(obj)) {
     if (!allowed.has(k)) throw bad(`unknown field "${where}${k}" — allowed: ${[...allowed].join(', ')}`);
@@ -1153,6 +1177,20 @@ export function parseCreateCardInput(p) {
       throw bad(`connector.auth_type must be one of ${CREATE_CARD_AUTH_TYPES.join(' | ')} when connector_kind is "http"`);
     }
     connector.auth_type = c.auth_type;
+  }
+  // OAuth endpoint fields: only on an http + oauth2 card.
+  if (connector.auth_type !== 'oauth2') {
+    const present = CREATE_CARD_OAUTH_KEYS.find((k) => c[k] !== undefined);
+    if (present) {
+      throw bad(`connector.${present} is only allowed when connector_kind is "http" and auth_type is "oauth2"`);
+    }
+  } else {
+    const authorizeUrl = cardUrl(c.oauth_authorize_url, 'connector.oauth_authorize_url');
+    if (authorizeUrl !== undefined) connector.oauth_authorize_url = authorizeUrl;
+    const tokenUrl = cardUrl(c.oauth_token_url, 'connector.oauth_token_url');
+    if (tokenUrl !== undefined) connector.oauth_token_url = tokenUrl;
+    const scopes = cardScopes(c.oauth_scopes_default, 'connector.oauth_scopes_default');
+    if (scopes !== undefined) connector.oauth_scopes_default = scopes;
   }
   const iconUrl = cardUrl(c.icon_url, 'connector.icon_url');
   if (iconUrl !== undefined) connector.icon_url = iconUrl;
@@ -1230,6 +1268,9 @@ export function buildCreateCardFallbackText({ connector, actions }) {
     return lines.join('\n');
   }
   if (connector.base_url) lines.push(`服务地址：${connector.base_url}`);
+  if (connector.oauth_authorize_url) lines.push(`授权地址：${connector.oauth_authorize_url}`);
+  if (connector.oauth_token_url) lines.push(`令牌地址：${connector.oauth_token_url}`);
+  if (connector.oauth_scopes_default) lines.push(`Scopes：${connector.oauth_scopes_default.join(' ')}`);
   lines.push(`动作（${actions.length}）：`);
   for (const a of actions) lines.push(`- [${CREATE_CARD_EFFECT_LABELS[a.effect]}] ${a.name}：${a.summary}`);
   lines.push(`回复「确认创建 ${connector.name}」开始创建，或「我要改 ${connector.name}」修改。`);
@@ -1279,6 +1320,10 @@ export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
       ...(connector.auth_type ? { auth_type: connector.auth_type } : {}),
       ...(connector.icon_url ? { icon_url: connector.icon_url } : {}),
       ...(connector.server_url ? { server_url: connector.server_url } : {}),
+      // OAuth details: the pending card often has only this copy to render.
+      ...(connector.oauth_authorize_url ? { oauth_authorize_url: connector.oauth_authorize_url } : {}),
+      ...(connector.oauth_token_url ? { oauth_token_url: connector.oauth_token_url } : {}),
+      ...(connector.oauth_scopes_default ? { oauth_scopes_default: [...connector.oauth_scopes_default] } : {}),
     },
     actions: actions.map((a) => ({ name: a.name, effect: a.effect, summary: a.summary })),
     ...(input.application_id ? { application_id: input.application_id } : {}),
@@ -1472,7 +1517,8 @@ export const COMMANDS = {
   'conn.auth_notice': () => runAuthNotice(params, { resolveOrg: requireOrgId }),
 
   // conn.create_card {conversationId, connector:{name, slug, connector_kind,
-  // auth_type? (http only), icon_url?, description?, base_url?, server_url?},
+  // auth_type? (http only), icon_url?, description?, base_url?, server_url?,
+  // oauth_authorize_url? / oauth_token_url? / oauth_scopes_default? (http + oauth2 only)},
   // actions:[{name, effect, summary}], application_id?} — post the "create this
   // custom connector?" confirmation card (OPENM-836). connector_kind "mcp" has no
   // auth_type, requires connector.server_url (https) and lists no actions. Creates nothing; on the owner's confirmation the Agent runs
@@ -1936,7 +1982,7 @@ Connections
   conn.list           {}                                        # list connections available to this agent (self only)
   conn.check          {app}                                     # read-only: authorized | not_authorized | needs_reauth
   conn.auth_notice    {conversationId, apps:[slug...]}          # post the "go authorize" card into that conversation
-  conn.create_card    {conversationId, connector:{name, slug, connector_kind (http|mcp), auth_type (http only: api_key|oauth2), icon_url?, description?, base_url? (http), server_url (mcp, https)}, actions:[{name, effect, summary}] (none for mcp), application_id?}
+  conn.create_card    {conversationId, connector:{name, slug, connector_kind (http|mcp), auth_type (http only: api_key|oauth2), icon_url?, description?, base_url? (http), server_url (mcp, https), oauth_authorize_url? / oauth_token_url? / oauth_scopes_default?:[string] (http + oauth2 only)}, actions:[{name, effect, summary}] (none for mcp), application_id?}
                                                                  # post the "create this custom connector?" confirmation card (creates nothing; no secrets)
   conn.acquire        {connectionId}                            # acquire the direct access_token for a connection
   conn.actions        {connectionId, cursor?, limit?}           # discover named actions for a connection (paged: next_cursor → cursor)

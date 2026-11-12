@@ -176,9 +176,11 @@ node src/cli/conn.js conn.callback '{}'
 
 Returns `{ callback_url }`. The endpoint is authed (bearer) but **not** org-scoped;
 the CLI still authenticates it with the org's token (harmless — the route ignores
-the org scoping). Fetch this value first, register it as the redirect URI at your
-OAuth provider, then run `conn.app_create` with the provider's `oauth_client_id` /
-`oauth_client_secret`.
+the org scoping). It is the redirect URI to register at the OAuth provider. When
+you create an OAuth connector **for a user**, the user registers it (the create
+card shows it, copyable) and then enters the Client ID **and** Client Secret
+together on the connections page — you do not pass `oauth_client_id` or
+`oauth_client_secret` (see "Creating a custom connector for a user", steps 4 and 6).
 
 ## Custom connector management (applications + action-defs)
 
@@ -220,8 +222,9 @@ explicit `slug` only when you need a specific value (it is honored as-is). Optio
 `slug`, `description`, `icon_url`, `category`,
 `tags[]`, `default_ttl_seconds`, and the auth-shape fields —
 API-key: `api_key_location` (`header` | `query`), `api_key_header_name`;
-OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id`,
-`oauth_scopes_default[]`, `oauth_pkce` (bool),
+OAuth: `oauth_authorize_url`, `oauth_token_url`, `oauth_client_id` (**leave it
+out when creating a connector for a user** — see step 4 of "Creating a custom
+connector for a user"), `oauth_scopes_default[]`, `oauth_pkce` (bool),
 `oauth_token_auth_method` (`basic` | `post`), `oauth_token_body_format`
 (`form` | `json`). Returns the created `application` item (its `source` is a
 read-only derived `"custom"`; `oauth_callback_url` is returned for you to register).
@@ -404,6 +407,33 @@ non-empty). Each action `name` is just the action segment (e.g. `list_repos`) �
 server prepends the connector slug to form the stored `{slug}/{name}`, so submit the bare
 action name, not `slug/name`.
 
+### Starting from just an address (the user names a system, nothing else)
+
+Often the request is only "connect `crm.acme.com`" (the connections page's
+「问 Agent」 sends exactly that: the system address, maybe a purpose). Work out
+the rest yourself before sending a card:
+
+1. **Research it yourself.** Open the official site and look for its developer /
+   API documentation (developer portal, "API", "Docs", an OpenAPI file, an MCP
+   server page). Do not ask the user for things the docs answer.
+2. **Decide the shape from the docs:**
+   - `connector_kind`: `mcp` when the vendor publishes an MCP server (use its
+     https server address); otherwise `http`.
+   - for `http`, `auth_type`: `oauth2` when the API uses an OAuth authorization
+     code flow (take the authorize URL, token URL and default scopes from the
+     docs — they go on the card, see step 1 below); `api_key` when it uses a
+     static key / token in a header or query.
+   - `base_url` and the actions, each from a documented endpoint (method → read /
+     write as below).
+3. **Ask only for what you cannot determine** — one specific question (e.g. the
+   tenant-specific API host, or which of two documented auth methods their
+   account uses), not a questionnaire, and never for a key, token or secret.
+4. **No public API found → say so plainly** ("I could not find a public API for
+   X"), and ask the user for the API documentation link (or whether their
+   vendor provides one). **Never invent endpoints or actions**, and never guess
+   an auth type to fill the card.
+5. Then follow "Creating a custom connector for a user" below (card first).
+
 ### Creating a custom connector for a user — confirmation card first (`conn.create_card`)
 
 Before you create a **new** custom connector for a user (`conn.app_import`, or
@@ -412,7 +442,11 @@ card. Never create first and ask afterwards.
 
 **1. Prepare the spec.** Connector `name` (display name), an explicit `slug`, the
 `connector_kind` (`http` | `mcp`) and, for `http` only, the `auth_type`
-(`api_key` | `oauth2`), optional `icon_url` / `description` / `base_url`, and the
+(`api_key` | `oauth2`), optional `icon_url` / `description` / `base_url`, for
+`oauth2` also the OAuth details from the provider's docs so the owner sees them
+on the card — `oauth_authorize_url`, `oauth_token_url` and `oauth_scopes_default`
+(array of scope strings; the same values you will pass to `conn.app_import`, but
+**not** `oauth_client_id`, see step 4) — and the
 actions you will import (for `connector_kind: "mcp"` see "MCP connectors" below
 instead — no `auth_type`, a required `server_url`, no `base_url`, no actions): for each one its bare `name` (the
 action segment, e.g. `list_contacts`, no `slug/`), whether it **reads** or
@@ -441,7 +475,7 @@ slug goes to `conn.app_import`, because the card finds the created app by it.
 **2. Send the card (creates nothing).**
 
 ```bash
-node src/cli/conn.js conn.create_card '{"conversationId":"<conversation-id from <message-context>>","connector":{"name":"Acme CRM","slug":"acme-crm","connector_kind":"http","auth_type":"oauth2","description":"Acme 客户管理","base_url":"https://api.acme.example.com/v1"},"actions":[{"name":"list_contacts","effect":"read","summary":"列出联系人"},{"name":"create_contact","effect":"write","summary":"新建联系人"}]}'
+node src/cli/conn.js conn.create_card '{"conversationId":"<conversation-id from <message-context>>","connector":{"name":"Acme CRM","slug":"acme-crm","connector_kind":"http","auth_type":"oauth2","description":"Acme 客户管理","base_url":"https://api.acme.example.com/v1","oauth_authorize_url":"https://acme.example.com/oauth/authorize","oauth_token_url":"https://acme.example.com/oauth/token","oauth_scopes_default":["contacts.read","contacts.write"]},"actions":[{"name":"list_contacts","effect":"read","summary":"列出联系人"},{"name":"create_contact","effect":"write","summary":"新建联系人"}]}'
 ```
 
 Optional `application_id` (UUID) when the application already exists. Strict
@@ -451,8 +485,12 @@ for `http` a required `auth_type` (`api_key` | `oauth2`); for `mcp` **no**
 `auth_type`, a required `server_url` (alias `mcp_server_url`, **https** only,
 same URL checks as below), no `base_url`, and no actions (omit `actions` or send
 `[]`); `auth_type: "mcp"` is refused (MCP is a `connector_kind`, not an auth
-type); `server_url` on an `http` card is refused; `icon_url` and
-`base_url` absolute http(s) URLs (≤2048) with no `user:pass@`, no `#fragment` and
+type); `server_url` on an `http` card is refused; `oauth_authorize_url` /
+`oauth_token_url` / `oauth_scopes_default` (all optional) only on an `http` +
+`oauth2` card (on `api_key` or `mcp` → `400`), the two URLs under the same URL
+checks as `base_url`, `oauth_scopes_default` an array of at most 50 non-empty
+strings (each ≤200, no invisible characters; `[]` = omitted); `icon_url`,
+`base_url`, `oauth_authorize_url` and `oauth_token_url` absolute http(s) URLs (≤2048) with no `user:pass@`, no `#fragment` and
 no secret-named query / fragment parameter (`?api_key=…`, `?x=1;sig=…` — `;`
 counts as a separator too — `?X-Amz-Signature=…`, `?id_token=…`, `#token=…` →
 `400 secret_field_rejected`, naming the parameter, never its value); a path
@@ -495,11 +533,13 @@ schema `openmax.connector-create.v1` = `{schema, card_id, connector, actions,
 application_id?, fallback_text}`, plus a compact copy as the `data` of a
 `connector-create-card` item (audience `ui`) in `metadata.context.items`
 (`schema`, `card_id`, `connector{name, slug, connector_kind, auth_type? (http),
-icon_url?, server_url? (mcp)}`, `actions[]`, `application_id?`; the copy always
-has every action: when it would be over 8 KiB it is not written at all, and the
+icon_url?, server_url? (mcp), oauth_authorize_url? / oauth_token_url? /
+oauth_scopes_default? (oauth2)}`, `actions[]`, `application_id?`; the copy always
+has every action and scope: when it would be over 8 KiB it is not written at all, and the
 client shows `fallback_text`, which lists every action). A
 client without the renderer shows `fallback_text` (name, slug, type HTTP / MCP
-服务器, the auth type for `http`, each action with 读/写, and
+服务器, the auth type for `http`, for `oauth2` the 授权地址 / 令牌地址 / Scopes
+lines when given, each action with 读/写, and
 the reply words; for `mcp`: the MCP server address, that the tools come from the
 server, and the next step — connect it on openmax.com with that address and
 authorize). For `mcp` the address is carried only as `connector.server_url`.
@@ -545,8 +585,14 @@ neither counts the same way, matched by name to your latest card.
 card's slug (exactly), `display_name` = name, `connector_kind` and `auth_type` =
 the card's (`auth_type` exists **on `http` cards only**), plus `icon_url` /
 `description` and the auth-shape fields (`api_key_location`,
-`oauth_authorize_url`, `oauth_client_id`, …), and `actions` = the full
-action-defs for exactly the actions on the card. Never add `oauth_client_secret`.
+`oauth_authorize_url`, `oauth_token_url`, `oauth_scopes_default`, … — the OAuth
+values as shown on the card), and `actions` = the full
+action-defs for exactly the actions on the card. Never add `oauth_client_secret`,
+and for an `oauth2` connector **do not set `oauth_client_id`** either, even if you
+know it: the user enters the Client ID and Client Secret together on the
+connections page, and the page shows the connector as "pending configuration"
+only while it has no Client ID — a Client ID without a Secret would show
+「去连接」 and the authorization would then fail.
 An `mcp` card has no `auth_type` and is never `auth_type` / `provider_type`
 `"mcp"` (refused): create it as described in "MCP connectors" below. Report the result in plain words; if some actions failed (`actions_failed > 0`), name them and offer
 to retry those with `conn.actiondef_create`. Do not send another card for a retry
@@ -559,11 +605,14 @@ one replaces it (「以新卡为准」).
 **6. OAuth Client Secret — never in chat.** For `auth_type: "oauth2"` never ask
 for, accept or forward the Client Secret, and never pass `oauth_client_secret` to
 `conn.app_import` / `conn.app_update`. Tell the user to click 「填写 Client
-Secret」 on the card: it opens `/connections?edit=<application_id>`. If the card was
+Secret」 on the card: it opens `/connections?edit=<application_id>`, where they
+fill in the Client ID and Client Secret together. If the card was
 sent before the application existed (no `application_id`), the page finds the
 created app by slug after creation — which is why the slug on the card must equal
-the created slug. Give them the callback URL to register (`conn.callback`, or the
-created app's `oauth_callback_url`).
+the created slug. The callback URL to register in the provider's OAuth app is
+shown on the card (with a copy button); you can also fetch it with
+`conn.callback` (or read the created app's `oauth_callback_url`) when the user
+asks for it or the card does not render.
 
 **7. A secret pasted into chat anyway.** Do not use it, do not repeat it, and do not
 pass it to any command. Tell the user it is now exposed in the conversation and
