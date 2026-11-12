@@ -235,11 +235,5 @@ test('comm-bridge: local history and context for groups and every sub-conversati
   assert.match(BRIDGE, /if \(fetchesConversationContext\(convType, sub\)\) \{\n\s+const gathered = await gatherRecentContext\(\{/);
   assert.match(BRIDGE, /baseLimit: config\.message\?\.context_messages \?\? DEFAULT_CONTEXT_MESSAGES,/);
   assert.match(BRIDGE, /maxLimit: config\.message\?\.context_max_messages \?\? DEFAULT_CONTEXT_MAX_MESSAGES,/);
-  assert.match(BRIDGE, /if \(sub\?\.rootMessageId\) \{\n\s+recent = await rootMessageFirst\(recent, \{/);
-});
-
-test('comm-bridge: the root is read with the existing single-message read in the parent conversation', () => {
-  assert.match(BRIDGE, /fetchRoot: \(rootId\) => fetchMessageDetail\(orgConfig\.org_id, sub\.parentConversationId, rootId\),/);
-  // A recall / edit event drops a cached root line before anything else.
-  assert.match(BRIDGE, /const messageId = data\.message_id[^\n]*\n[^\n]*\n\s+if \(messageId\) forgetRootMessage\(messageId\);/);
+  assert.doesNotMatch(BRIDGE, /rootMessage|root_message_id/, 'no root-message handling');
 });

@@ -68,7 +68,7 @@ import { createInboxLedger } from './lib/inbox-ledger.js';
 import { seedSessionFromLedger, commitIdentityRebind } from './lib/inbox-rebind.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, ensureReplay, setLimits } from './lib/group-history.js';
-import { gatherRecentContext, rootMessageFirst, forgetRootMessage } from './lib/conversation-context.js';
+import { gatherRecentContext } from './lib/conversation-context.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
@@ -1007,18 +1007,6 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         log,
       });
       recent = gathered.recent;
-      // A sub-conversation's root message (when one is known) goes first: from
-      // the window, else local history, else one read of it in the parent
-      // conversation (cached per sub-conversation; a failed read adds nothing).
-      if (sub?.rootMessageId) {
-        recent = await rootMessageFirst(recent, {
-          conversationId: msg.conversation_id,
-          rootMessageId: sub.rootMessageId,
-          currentMessageId: msg.id,
-          resolveName: (memberId) => fetchMemberName(orgConfig.org_id, memberId),
-          fetchRoot: (rootId) => fetchMessageDetail(orgConfig.org_id, sub.parentConversationId, rootId),
-        });
-      }
       log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${gathered.source} count=${recent.length}${sub ? ` subconversation=${sub.ownerKind}` : ''}`);
     }
 
@@ -1515,8 +1503,6 @@ async function handleSystemEvent(orgConfig, frame) {
     return;
   }
   const messageId = data.message_id || data.id || data.msg_id || '';
-  // A recalled or edited message may be a cached sub-conversation root.
-  if (messageId) forgetRootMessage(messageId);
 
   // Dedup so a reconnect/catch-up replay of the same lifecycle event does not
   // re-inject the notice. Keyed distinctly from message-create ids.

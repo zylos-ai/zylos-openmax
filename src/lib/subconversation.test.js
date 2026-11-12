@@ -8,7 +8,6 @@ import {
   groupScopeConversationId,
   appSubConversationAddressesAgent,
   fetchesConversationContext,
-  pinRootMessage,
 } from './subconversation.js';
 
 // Sub-conversations (cws-comm#373) are recognised from the conversation record
@@ -29,41 +28,13 @@ const topic = (extra = {}) => ({
   ...extra,
 });
 
-test('app sub-conversation → parent id and owner kind, no root message', () => {
+test('app sub-conversation → parent id and owner kind', () => {
   assert.deepEqual(subConversationOf(app()), { parentConversationId: P, ownerKind: 'app' });
 });
 
-test('platform topic → root message id parsed from message:<id>', () => {
-  assert.deepEqual(subConversationOf(topic()), {
-    parentConversationId: P, ownerKind: 'platform', rootMessageId: '1795000000000000001',
-  });
-});
-
-test('platform sub-conversation with another key → no root message', () => {
-  assert.deepEqual(subConversationOf(topic({ context_key: 'digest:weekly' })), { parentConversationId: P, ownerKind: 'platform' });
-  for (const key of ['message:0', 'message:01', 'message:', 'message:12a', 'message:1:2']) {
-    assert.equal(subConversationOf(topic({ context_key: key }))?.rootMessageId, undefined, key);
-  }
-});
-
-test('T5: an app key that reads message:5 is not parsed as a root message', () => {
-  assert.deepEqual(subConversationOf(app({ context_key: 'message:5' })), { parentConversationId: P, ownerKind: 'app' });
-});
-
-test('root_message_id on the record → root for any sub-conversation (app included), before the key', () => {
-  assert.deepEqual(subConversationOf(app({ root_message_id: '1796000000000000007' })), {
-    parentConversationId: P, ownerKind: 'app', rootMessageId: '1796000000000000007',
-  });
-  assert.equal(subConversationOf(app({ root_message_id: 17960 }))?.rootMessageId, '17960', 'safe-integer number');
-  assert.equal(subConversationOf(topic({ root_message_id: '1796000000000000007' }))?.rootMessageId, '1796000000000000007', 'field wins over message:<id>');
-});
-
-test('malformed root_message_id is ignored (topic falls back to its key; app has none)', () => {
-  for (const bad of ['', '0', '-1', '12a', ' 12', 0, -5, 1.5, 2 ** 60, null, {}, ['1']]) {
-    assert.equal(subConversationOf(app({ root_message_id: bad }))?.rootMessageId, undefined, JSON.stringify(bad));
-    assert.equal(subConversationOf(topic({ root_message_id: bad }))?.rootMessageId, '1795000000000000001', JSON.stringify(bad));
-  }
-  assert.equal(subConversationOf({ id: S, parent_conversation_id: P, root_message_id: '5' }), null, 'a root id alone makes no sub-conversation');
+test('platform sub-conversation → parent id and owner kind (nothing read from its key or a root id)', () => {
+  assert.deepEqual(subConversationOf(topic()), { parentConversationId: P, ownerKind: 'platform' });
+  assert.deepEqual(subConversationOf(app({ context_key: 'message:5', root_message_id: '5' })), { parentConversationId: P, ownerKind: 'app' });
 });
 
 test('any key matching the server rule works (generic)', () => {
@@ -136,51 +107,6 @@ test('local history + context: groups and every sub-conversation; never a plain 
   assert.equal(fetchesConversationContext('group', null), true);
   assert.equal(fetchesConversationContext('thread', null), true);
   assert.equal(fetchesConversationContext('group', subConversationOf(topic())), true);
-});
-
-// ── root message first (zylos-lark pinRootMessage), any sub-conversation ──────
-
-const line = (id, name = 'Bob') => ({ senderName: name, senderId: `m-${name}`, content: `text ${id}`, messageId: id });
-const ROOT = '1795000000000000001';
-
-test('root in the middle of the window → first, exactly once', () => {
-  const recent = [line('2'), line(ROOT), line('3')];
-  const out = pinRootMessage(recent, ROOT);
-  assert.deepEqual(out.map((m) => m.messageId), [ROOT, '2', '3']);
-  assert.deepEqual(recent.map((m) => m.messageId), ['2', ROOT, '3'], 'input not mutated');
-});
-
-test('root already first, or a numeric id → unchanged / matched', () => {
-  const recent = [line(ROOT), line('2')];
-  assert.equal(pinRootMessage(recent, ROOT), recent);
-  const numeric = [line('2'), { ...line('x'), messageId: Number('17950') }];
-  assert.deepEqual(pinRootMessage(numeric, '17950').map((m) => String(m.messageId)), ['17950', '2']);
-});
-
-test('root cut from the window but in local history → prepended from local', () => {
-  const recent = [line('2'), line('3')];
-  let asked;
-  const out = pinRootMessage(recent, ROOT, { lookup: (id) => { asked = id; return line(ROOT, 'Root'); } });
-  assert.equal(asked, ROOT);
-  assert.deepEqual(out.map((m) => m.messageId), [ROOT, '2', '3']);
-});
-
-test('root nowhere → lines unchanged', () => {
-  const recent = [line('2'), line('3')];
-  assert.equal(pinRootMessage(recent, ROOT, { lookup: () => null }), recent);
-  assert.equal(pinRootMessage(recent, ROOT), recent);
-});
-
-test('the current message is the root → not pinned (it is in <current-message>)', () => {
-  const recent = [line('2'), line('3')];
-  let asked = false;
-  assert.equal(pinRootMessage(recent, ROOT, { currentMessageId: ROOT, lookup: () => { asked = true; return line(ROOT); } }), recent);
-  assert.equal(asked, false);
-});
-
-test('no root id → lines unchanged', () => {
-  const recent = [line('2')];
-  assert.equal(pinRootMessage(recent, undefined), recent);
 });
 
 // ── T13: generic only ────────────────────────────────────────────────────────

@@ -12,25 +12,23 @@
  * beforeSeq, limit)` returns API message objects ([] on failure);
  * `resolveName(memberId)` returns a display name or null.
  *
- * Each line is `{ senderName, senderId, content, messageId }`; formatContextLine
- * (message.js) reads only the name and content.
+ * Each line is `{ senderName, senderId, content }` (formatContextLine in
+ * message.js renders it).
  */
 
-import { getHistory, findHistoryEntry } from './group-history.js';
-import { pinRootMessage } from './subconversation.js';
+import { getHistory } from './group-history.js';
 import { isChatHistory, FORWARDED_CONVERSATION } from './forwarded.js';
 import { formatStructuredForModel } from './structured-body.js';
-import { quotedMessageText } from './quote-excerpt.js';
 
 /** A local history entry as a context line. */
-export async function localEntryToContext(e, resolveName) {
+async function localEntryToContext(e, resolveName) {
   let name = e.sender_name;
   // Resolve sender names for entries stored with raw IDs (cold-start replay
   // or entries recorded before names were stored).
   if (!name || name === e.sender_id) {
     name = (await resolveName(e.sender_id)) || e.sender_id;
   }
-  return { senderName: name, senderId: e.sender_id, content: e.text, messageId: e.message_id };
+  return { senderName: name, senderId: e.sender_id, content: e.text };
 }
 
 async function apiMessageToContext(m, resolveName) {
@@ -60,7 +58,7 @@ async function apiMessageToContext(m, resolveName) {
     content = '[image]' + (text ? ' ' + text : '');
   }
   if (isChatHistory(m)) content = FORWARDED_CONVERSATION;
-  return { senderName, senderId: m.sender_id, content, messageId: m.id };
+  return { senderName, senderId: m.sender_id, content };
 }
 
 /**
@@ -143,83 +141,4 @@ export async function gatherRecentContext({
   const ctxAsc = [...ctx].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
   const recent = await Promise.all(ctxAsc.map(m => apiMessageToContext(m, resolveName)));
   return { recent, source };
-}
-
-// Root message lines fetched from the parent conversation, per
-// sub-conversation id: { rootMessageId, line } (line null = recalled or
-// deleted, nothing to show). A root does not change; a recall or edit of it
-// drops the entry (forgetRootMessage). A failed fetch is not cached.
-const ROOT_CACHE_MAX = 500;
-const rootLineCache = new Map();
-
-function sameId(a, b) {
-  return a != null && b != null && String(a) === String(b);
-}
-
-/**
- * A single-message read (GET /conversations/{id}/messages/{messageId}, the
- * `{ message, content }` detail) as a context line; null when it was recalled
- * or deleted or has nothing to show.
- */
-export async function messageDetailToContext(detail, resolveName) {
-  const m = detail?.message || {};
-  if (m.recalled_by || m.deleted_at) return null;
-  const structured = (detail?.content && typeof detail.content === 'object') ? detail.content : {};
-  let content = isChatHistory(detail) ? FORWARDED_CONVERSATION : quotedMessageText(detail);
-  const atts = Array.isArray(structured.attachments) ? structured.attachments : [];
-  if (atts.length > 0) {
-    const type = String(m.type || '').toLowerCase();
-    const kind = type === 'image' || type === 'agent_card' ? 'image' : 'file';
-    const labels = atts.map(a => `[${kind}: ${a.artifact_id} | ${a.file_name || 'unknown'}]`);
-    content = labels.join(' ') + (content ? ' ' + content : '');
-  }
-  if (!content) return null;
-  const senderId = m.sender_id;
-  const senderName = m.sender_display_name || (await resolveName(senderId)) || senderId;
-  return { senderName, senderId, content, messageId: m.id ?? null };
-}
-
-/** Drop any cached root line for this message id (it was recalled or edited). */
-export function forgetRootMessage(messageId) {
-  for (const [key, v] of rootLineCache) {
-    if (sameId(v.rootMessageId, messageId)) rootLineCache.delete(key);
-  }
-}
-
-async function fetchedRootLine(conversationId, rootMessageId, fetchRoot, resolveName) {
-  const key = String(conversationId);
-  const hit = rootLineCache.get(key);
-  if (hit && sameId(hit.rootMessageId, rootMessageId)) return hit.line;
-  const detail = await fetchRoot(rootMessageId);
-  if (!detail) return null;   // fetch failed: not cached, tried again next message
-  const line = await messageDetailToContext(detail, resolveName);
-  if (line) line.messageId = String(rootMessageId);
-  rootLineCache.set(key, { rootMessageId: String(rootMessageId), line });
-  if (rootLineCache.size > ROOT_CACHE_MAX) rootLineCache.delete(rootLineCache.keys().next().value);
-  return line;
-}
-
-/**
- * Put a sub-conversation's root message first in `recent` (see pinRootMessage),
- * once: moved when it is in the window; else taken from this conversation's
- * local history; else read with `fetchRoot(rootMessageId)` (the single-message
- * read in the parent conversation, which returns the detail or null on error)
- * and cached per sub-conversation. A failed read, or a recalled / deleted
- * root, adds no line; the other lines are unchanged.
- *
- * @param {Array} recent  gatherRecentContext lines
- * @param {{conversationId:string, rootMessageId:string, currentMessageId?:string,
- *          resolveName:Function, fetchRoot?:Function}} p
- */
-export async function rootMessageFirst(recent, { conversationId, rootMessageId, currentMessageId, resolveName, fetchRoot }) {
-  if (!rootMessageId || sameId(currentMessageId, rootMessageId)) return recent;
-  if (recent.some((m) => sameId(m.messageId, rootMessageId))) {
-    return pinRootMessage(recent, rootMessageId, { currentMessageId });
-  }
-  const entry = findHistoryEntry(conversationId, rootMessageId);
-  let rootLine = entry ? await localEntryToContext(entry, resolveName) : null;
-  if (!rootLine && typeof fetchRoot === 'function') {
-    rootLine = await fetchedRootLine(conversationId, rootMessageId, fetchRoot, resolveName);
-  }
-  return pinRootMessage(recent, rootMessageId, { currentMessageId, lookup: () => rootLine });
 }

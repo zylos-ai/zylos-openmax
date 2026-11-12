@@ -141,18 +141,6 @@ export function getHistory(conversationId, excludeMessageId, limit) {
 }
 
 /**
- * Find one message in a conversation's in-memory history by id (the full
- * kept window, not just the last `limit`), or null. Used to put a
- * sub-conversation's root message first when the context line count cut it off; never
- * falls back to a request.
- */
-export function findHistoryEntry(conversationId, messageId) {
-  const history = chatHistories.get(String(conversationId));
-  if (!history || messageId == null) return null;
-  return history.find(m => sameMessageId(m.message_id, messageId)) || null;
-}
-
-/**
  * Ensure in-memory history is populated for a conversation.
  * On first access after restart, reads tail of the log file.
  */
