@@ -57,7 +57,7 @@ async function run(verb, params) {
     await new Promise((resolve) => server.close(resolve));
   }
 }
-const CONV = 'cv-cardmd';
+const CONV = '00000000-0000-4000-8000-000000000001';
 const choice = { conversationId: CONV, title: 't', options: ['a', 'b'] };
 const form = { conversationId: CONV, title: 't', fields: [{ key: 'q', label: 'Q', options: ['a', 'b'] }] };
 

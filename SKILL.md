@@ -305,14 +305,14 @@ question over Lark, Telegram or WeChat stays plain text exactly as before. See
 
   🔴 **A time in that summary line is written in the agent's configured timezone, with the offset, never raw UTC** (`自动检查 09-24 20:11 (+08)`, not `2026-09-24T12:11Z`). Every clock reachable from code here is UTC, so pasting one puts a time eight hours off under the title and the card says nothing about which zone it is. The zone is the agent's own configuration (`TZ` in `~/zylos/.env`), **not the host's** — the host is usually UTC while the agent is not.
 
-  **Pick the body block by what it carries: plain sentences → `text`; bold, lists or links → `markdown`; key–value rows → `fields`.**
+  **Pick the body block by what it carries: plain sentences (bare URLs included) → `text`; bold, lists or `[label](url)` links → `markdown`; key–value rows → `fields`.**
 
-  - A card's `text` (the `text` shorthand or a `text` block) is shown verbatim, not rendered as Markdown: `**bold**` shows its asterisks. A `text` body with Markdown in it is refused before sending; send it as `{"type": "markdown", "text": "…"}` (https links only; no raw HTML, images or tables).
+  - A card's `text` (the `text` shorthand or a `text` block) is shown verbatim, not rendered as Markdown: `**bold**` shows its asterisks. A `text` body with `**bold**`, a `[label](https://…)` link, a `#` heading or a code fence is refused before sending (a bare URL is fine); send it as `{"type": "markdown", "text": "…"}` (https links only; no raw HTML, images or tables).
   - Structured detail goes in a `fields` block, one row per item, rather than a paragraph. A `fields` block is a BLOCK — it lives inside `blocks`, and a top-level `"fields"` is refused (it used to be dropped in silence, and the card posted without the rows):
 
   ```json
   "blocks": [
-    {"type": "markdown", "text": "确认升级以下组件?**升级会重启服务**，约 30 秒。"},
+    {"type": "markdown", "text": "Upgrade these components? **The service restarts**, about 30 seconds."},
     {"type": "fields",   "items": [
       {"label": "core",    "value": "0.7.1 → 0.8.1"},
       {"label": "openmax", "value": "2.20.0 → 2.21.0"}

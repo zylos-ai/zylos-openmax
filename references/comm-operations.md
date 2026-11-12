@@ -350,7 +350,7 @@ cws-comm's block vocabulary:
 | `type` | Carries | Keys besides `type` |
 |---|---|---|
 | `text` | a plain paragraph, shown verbatim | `text` |
-| `markdown` | a paragraph with inline marks, or a list | `text` |
+| `markdown` | a paragraph with inline marks, or a list; links must be https, no raw HTML, images or tables | `text` |
 | `fields` | label→value rows, one per line | `items[]` of `{label, value, inline?}` |
 | `divider` | a horizontal rule | — |
 | `image` | an image | `artifact_id` \| `url`, `alt`, `width`, `height` |
