@@ -208,10 +208,11 @@ export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
  * @param {object} current  - { content:string, messageId?:string,
  *                              type?:'text'|'image'|'file', mediaLocalPath?:string }
  * @param {Array}  [recent] - recent group messages used for `<group-context>`
+ *                            (`<subconversation-context>` with opts.subConversation)
  * @param {object} [opts]   - { groupName, quotedContent, threadContext,
  *                              threadRootId, smartHint, receipt,
  *                              preferredConnectors, wfRef, quotedExcerpt,
- *                              chatHistory,
+ *                              chatHistory, subConversation,
  *                              systemSender: { memberId? } | undefined,
  *                              senderMember: { kind:'human'|'agent', memberId } | undefined }
  *                            `chatHistory` comes from forwarded.js
@@ -221,6 +222,9 @@ export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
  *                            `senderMember` (from sender_type / sender_id) is
  *                            rendered only in a DM and only when there is no
  *                            systemSender.
+ *                            `subConversation` (boolean, set by the bridge
+ *                            from the conversation record only) renders
+ *                            `recent` as <subconversation-context>, DM or group.
  * @returns {string}
  */
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
@@ -228,7 +232,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
   const {
     groupName, quotedContent, threadContext, threadRootId, smartHint, orgId, orgName, receipt, systemSender,
-    senderMember, preferredConnectors, wfRef, quotedExcerpt, chatHistory,
+    senderMember, preferredConnectors, wfRef, quotedExcerpt, chatHistory, subConversation,
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
@@ -366,7 +370,12 @@ Before handling the current message, invoke the openmax skill and follow it. For
       return line;
     });
     parts.push(`<thread-context>\n${lines.join('\n')}\n</thread-context>\n\n`);
-  } else if (type !== 'dm' && recent && recent.length > 0) {
+  } else if (subConversation && recent && recent.length > 0) {
+    // A sub-conversation's recent messages (DM or group), in place of
+    // <group-context>; same lines, no attributes. Nothing when there are none.
+    const lines = recent.map(formatContextLine);
+    parts.push(`<subconversation-context>\n${lines.join('\n')}\n</subconversation-context>\n\n`);
+  } else if (!subConversation && type !== 'dm' && recent && recent.length > 0) {
     const lines = recent.map(formatContextLine);
     parts.push(`<group-context>\n${lines.join('\n')}\n</group-context>\n\n`);
   }

@@ -2,7 +2,9 @@
  * In-memory + file-backed group message history for openmax.
  *
  * Mirrors zylos-telegram's context.js pattern:
- *   - Every group message (handled or not) is recorded via logAndRecord()
+ *   - Every group message (handled or not) is recorded via logAndRecord(),
+ *     and every sub-conversation message (DM ones too) under the
+ *     sub-conversation's own id; plain DMs are not recorded
  *   - getHistory() reads from memory (fast path)
  *   - ensureReplay() populates memory from log files on cold start
  *   - API fetch is the final fallback (caller's responsibility)
@@ -136,6 +138,18 @@ export function getHistory(conversationId, excludeMessageId, limit) {
     ? history.filter(m => !sameMessageId(m.message_id, excludeMessageId))
     : history;
   return filtered.slice(-effectiveLimit);
+}
+
+/**
+ * Find one message in a conversation's in-memory history by id (the full
+ * kept window, not just the last `limit`), or null. Used to put a
+ * sub-conversation's root message first when the context line count cut it off; never
+ * falls back to a request.
+ */
+export function findHistoryEntry(conversationId, messageId) {
+  const history = chatHistories.get(String(conversationId));
+  if (!history || messageId == null) return null;
+  return history.find(m => sameMessageId(m.message_id, messageId)) || null;
 }
 
 /**

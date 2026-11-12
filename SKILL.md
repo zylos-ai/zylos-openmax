@@ -860,6 +860,7 @@ Each org has an **independent** access policy under `orgs.<slug>` in `config.jso
 **Key points:**
 - `dmPolicy` and `groupPolicy` are fully independent, changing one does not affect the other
 - owner is only exempt from the allowlist / group-list check; `groupPolicy: disabled` blocks even the owner's group messages
+- A group's sub-conversations (topics) are gated by the **parent group's** `access.groups` entry, exactly like messages in the parent group; an entry under a sub-conversation's own conversation_id has no effect. A DM sub-conversation follows dmPolicy like any DM
 - Lists use `member_id`, not the display name; at install time `COCO_OWNER_MEMBER_ID` pre-binds the owner and implies `dmPolicy=owner`
 - Policies are configured per org (each org has an independent `access` block)
 

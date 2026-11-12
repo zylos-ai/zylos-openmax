@@ -10,7 +10,7 @@ import path from 'node:path';
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zom-grouphist-'));
 process.env.HOME = tmpHome;
 const LOGS_DIR = path.join(tmpHome, 'zylos/components/openmax/runtime/group-logs');
-const { logAndRecord, getHistory, ensureReplay, setLimits } = await import('./group-history.js');
+const { logAndRecord, getHistory, ensureReplay, setLimits, findHistoryEntry } = await import('./group-history.js');
 
 setLimits(5, 15);
 
@@ -185,4 +185,36 @@ test('a null exclude id filters nothing out', () => {
   // Falsy excludeMessageId skips the filter entirely; the idless entry must
   // survive rather than matching a null-vs-undefined comparison.
   assert.equal(getHistory(conv, null).length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// findHistoryEntry: one message by id from the kept in-memory window (used to
+// put a platform topic's root message first when the line count cut it off)
+// ---------------------------------------------------------------------------
+
+test('findHistoryEntry finds a message by id across number/string drift, beyond the last-N window', () => {
+  const conv = newConv();
+  for (let i = 1; i <= 8; i++) logAndRecord(conv, entry(String(1786027449970 + i), `t${i}`, { seq: i }));
+  assert.equal(getHistory(conv, null, 5).some(e => e.text === 't2'), false, 'outside the last 5');
+  assert.equal(findHistoryEntry(conv, 1786027449972)?.text, 't2');
+  assert.equal(findHistoryEntry(conv, '1786027449972')?.text, 't2');
+});
+
+test('findHistoryEntry: unknown id, unknown conversation or no id → null (never a request)', () => {
+  const conv = newConv();
+  logAndRecord(conv, entry('1', 'one'));
+  assert.equal(findHistoryEntry(conv, '2'), null);
+  assert.equal(findHistoryEntry('conv-never-seen', '1'), null);
+  assert.equal(findHistoryEntry(conv, null), null);
+  assert.equal(findHistoryEntry(conv, undefined), null);
+});
+
+test('a DM sub-conversation is recorded under its own id, separate from its parent', () => {
+  const parent = newConv();
+  const sub = newConv();
+  logAndRecord(sub, entry('11', 'in the sub-conversation'));
+  assert.equal(getHistory(parent), null);
+  assert.equal(getHistory(sub).length, 1);
+  assert.ok(fs.existsSync(path.join(LOGS_DIR, `${sub}.log`)));
+  assert.equal(fs.existsSync(path.join(LOGS_DIR, `${parent}.log`)), false);
 });

@@ -44,6 +44,8 @@ import { quoteExcerptOf, quotedMessageText } from './lib/quote-excerpt.js';
 import { chatHistoryOf, isChatHistory, FORWARDED_CONVERSATION } from './lib/forwarded.js';
 import { formatStructuredForModel } from './lib/structured-body.js';
 import { isSiblingAgentSender } from './lib/dm-access.js';
+import { decideGroupAccess } from './lib/group-access.js';
+import { subConversationOf, fetchesConversationContext } from './lib/subconversation.js';
 import { recordParticipants } from './lib/mention.js';
 import { downloadInboundAttachment, collectInboundMedia } from './lib/inbound-media.js';
 import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath, getForOrgWithHeaders } from './lib/client.js';
@@ -65,7 +67,8 @@ import { handleConnectionEventSerialized, sendOwnerReauthDm, buildConnectionAuth
 import { createInboxLedger } from './lib/inbox-ledger.js';
 import { seedSessionFromLedger, commitIdentityRebind } from './lib/inbox-rebind.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
-import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
+import { logAndRecord, ensureReplay, setLimits } from './lib/group-history.js';
+import { gatherRecentContext, rootMessageFirst, forgetRootMessage } from './lib/conversation-context.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
@@ -592,12 +595,7 @@ function noticeDmNotAllowed(ownerName) {
   if (ownerName) return `Sorry, I'm not available for private messages. Please contact ${ownerName} to grant you access.`;
   return "Sorry, I'm not available for private messages. Please ask my owner to grant you access.";
 }
-const NOTICE_GROUP_DISABLED =
-  "Sorry, group chat is currently disabled.";
-const NOTICE_GROUP_NOT_ALLOWED =
-  "Sorry, I'm not available in this group.";
-const NOTICE_GROUP_SENDER_NOT_ALLOWED =
-  "Sorry, you don't have permission to interact with me in this group.";
+// The group notices live with the group rules in src/lib/group-access.js.
 
 /**
  * Apply DM / group access policy for a specific org. Returns:
@@ -697,71 +695,25 @@ async function shouldHandleMessage(msg, conv, orgConfig) {
     };
   }
 
-  // group / thread — compute mentioned/owner once up front so all gates and
-  // their userNotice decisions share the same view.
-  const policy = access.groupPolicy || 'allowlist';
-  const convId = msg.conversation_id;
-  const groupCfg = (access.groups || {})[convId];
-
-  // Mention detection has two paths: structured mentions[] from cws-comm, and
-  // a text-based "@<selfName>" fallback for messages where the server returns
-  // the raw text without a structured mentions array.
+  // group / thread / group sub-conversation — compute mentioned/owner once up
+  // front so all gates and their userNotice decisions share the same view. A
+  // sub-conversation is gated by its parent group's config (group-access.js).
+  //
   // Mention detection is by stable member ID only — the message's structured
   // mentions[] (member UUIDs) is the authoritative and only mention source
   // (cws-comm does not parse @names from text). See src/lib/self-mention.js.
   // This is what stops "@luna.coco" from waking a bare "luna" (issue #85 /
   // cws-comm #329); @all/@all_agents are handled for free via id expansion.
   const mentions = extractMentions(msg).map(String);
-  const mentioned = isSelfMentioned({ mentionIds: mentions, selfMemberId });
   const ownerMemberId = orgConfig.owner?.member_id;
-  const senderIsOwner = !!ownerMemberId && String(senderId) === String(ownerMemberId);
-
-  if (policy === 'disabled') {
-    return {
-      handle: false,
-      reason: 'group:disabled',
-      userNotice: mentioned ? NOTICE_GROUP_DISABLED : undefined,
-    };
-  }
-
-  // Owner @-mention bypasses the allowlist gate (mirrors zylos-feishu 1242).
-  if (policy === 'allowlist' && !groupCfg && !(senderIsOwner && mentioned)) {
-    return {
-      handle: false,
-      reason: `group:allowlist (${convId} not in groups{})`,
-      userNotice: mentioned ? NOTICE_GROUP_NOT_ALLOWED : undefined,
-    };
-  }
-
-  // mode: per-group `mode` if present, else default to 'mention'
-  const mode = groupCfg?.mode || 'mention';
-  if (mode === 'mention' && !mentioned) {
-    // No userNotice — this is normal background traffic, replying would spam.
-    return { handle: false, reason: 'group:mention (not @-ed)' };
-  }
-  // mode === 'smart' bypasses the mention requirement
-
-  // allowFrom: ['*'] / [] = all members allowed; otherwise restrict.
-  // Owner is exempt from per-group allowFrom — matches zylos-feishu.
-  const allowFrom = groupCfg?.allowFrom;
-  if (allowFrom && allowFrom.length > 0 && !allowFrom.includes('*') && !senderIsOwner) {
-    if (!allowFrom.map(String).includes(String(senderId))) {
-      return {
-        handle: false,
-        reason: `group:allowFrom (sender ${senderId} not allowed in ${convId})`,
-        userNotice: mentioned ? NOTICE_GROUP_SENDER_NOT_ALLOWED : undefined,
-      };
-    }
-  }
-
-  const ownerTag = (!groupCfg && senderIsOwner && mentioned) ? ' [owner-mention-bypass]' : '';
-  return {
-    handle: true,
-    reason: `group:${policy}/${mode}${ownerTag}`,
-    mode,
-    mentioned,
-    groupCfg,
-  };
+  return decideGroupAccess({
+    access,
+    conversationId: msg.conversation_id,
+    sub: subConversationOf(conv),
+    senderId,
+    mentioned: isSelfMentioned({ mentionIds: mentions, selfMemberId }),
+    senderIsOwner: !!ownerMemberId && String(senderId) === String(ownerMemberId),
+  });
 }
 
 // =============================================================================
@@ -932,12 +884,17 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
 
     const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);
     if (conv) conv.id = conv.id || msg.conversation_id;
+    // A sub-conversation (cws-comm#373), read from the conversation record only;
+    // null for every other conversation (and when the record could not be read).
+    const sub = subConversationOf(conv);
 
-    // Record every group message to local history (memory + file) BEFORE the
-    // policy filter, mirroring zylos-telegram's logAndRecord pattern. This
-    // ensures context is available even for messages the bot doesn't handle.
+    // Record every group and sub-conversation message (a DM sub-conversation
+    // too, under its own id; not a plain DM) to local history (memory + file)
+    // BEFORE the policy filter, mirroring zylos-telegram's logAndRecord pattern
+    // and zylos-lark's thread history. This ensures context is available even
+    // for messages the bot doesn't handle.
     const earlyConvType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
-    if (earlyConvType !== 'dm') {
+    if (fetchesConversationContext(earlyConvType, sub)) {
       const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
       const entryText = structured.body?.text
         || (typeof msg.message?.content === 'string' ? msg.message.content : '')
@@ -1037,123 +994,32 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
 
     let recent = [];
     const convType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
-    if (convType !== 'dm') {
-      const baseLimit = config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES;
-      const maxLimit = config.message?.context_max_messages ?? DEFAULT_CONTEXT_MAX_MESSAGES;
-
-      // Context source priority: memory → file replay → API fallback.
-      // logAndRecord (above) already ensured replay + recorded this message.
-      // If local has data but fewer than baseLimit, fall back to API for a
-      // fuller window (e.g. right after deployment when history is thin).
-      let localCtx = getHistory(msg.conversation_id, msg.id, baseLimit);
-      let ctx;
-      let source;
-      if (localCtx && localCtx.length >= baseLimit) {
-        source = 'local';
-        ctx = localCtx;
-      } else {
-        source = localCtx && localCtx.length > 0 ? 'api+local' : 'api';
-        const apiMsgs = await fetchRecentMessages(
-          orgConfig.org_id,
-          msg.conversation_id,
-          msg.seq,
-          baseLimit,
-        );
-        ctx = apiMsgs;
+    if (fetchesConversationContext(convType, sub)) {
+      const gathered = await gatherRecentContext({
+        conversationId: msg.conversation_id,
+        messageId: msg.id,
+        seq: msg.seq,
+        parentId: msg.parent_message_id || msg.message?.parent_id,
+        baseLimit: config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES,
+        maxLimit: config.message?.context_max_messages ?? DEFAULT_CONTEXT_MAX_MESSAGES,
+        fetchRecent: (convId, beforeSeq, limit) => fetchRecentMessages(orgConfig.org_id, convId, beforeSeq, limit),
+        resolveName: (memberId) => fetchMemberName(orgConfig.org_id, memberId),
+        log,
+      });
+      recent = gathered.recent;
+      // A sub-conversation's root message (when one is known) goes first: from
+      // the window, else local history, else one read of it in the parent
+      // conversation (cached per sub-conversation; a failed read adds nothing).
+      if (sub?.rootMessageId) {
+        recent = await rootMessageFirst(recent, {
+          conversationId: msg.conversation_id,
+          rootMessageId: sub.rootMessageId,
+          currentMessageId: msg.id,
+          resolveName: (memberId) => fetchMemberName(orgConfig.org_id, memberId),
+          fetchRoot: (rootId) => fetchMessageDetail(orgConfig.org_id, sub.parentConversationId, rootId),
+        });
       }
-
-      // Dynamic expansion: if context or the current message reference parent
-      // messages (replies) not in the window, expand to capture the reply chain.
-      if (source === 'local') {
-        const ctxByMsgId = new Set(ctx.map(e => e.message_id));
-        const missingParentIds = new Set();
-        const curParentId = msg.parent_message_id || msg.message?.parent_id;
-        if (curParentId && !ctxByMsgId.has(curParentId)) missingParentIds.add(curParentId);
-        for (const e of ctx) {
-          if (e.parent_id && !ctxByMsgId.has(e.parent_id)) missingParentIds.add(e.parent_id);
-        }
-        if (missingParentIds.size > 0 && ctx.length < maxLimit) {
-          const expanded = getHistory(msg.conversation_id, msg.id, maxLimit);
-          if (expanded && expanded.length > ctx.length) {
-            ctx = expanded;
-            log(`context expanded (local): ${baseLimit} → ${ctx.length} msgs (${missingParentIds.size} missing parent(s))`);
-          }
-        }
-        // Convert local entries to the {senderName, content} format.
-        // Resolve sender names for entries stored with raw IDs (cold-start
-        // replay or entries recorded before this fix).
-        const ctxSorted = [...ctx].sort((a, b) => (a.seq || 0) - (b.seq || 0));
-        recent = await Promise.all(ctxSorted.map(async e => {
-          let name = e.sender_name;
-          if (!name || name === e.sender_id) {
-            name = (await fetchMemberName(orgConfig.org_id, e.sender_id)) || e.sender_id;
-          }
-          return { senderName: name, senderId: e.sender_id, content: e.text };
-        }));
-      } else {
-        // API path: ctx is an array of API message objects
-        const ctxById = new Map(ctx.map(m => [m.id, m]));
-        const missingParentIds = new Set();
-        const curParentId = msg.parent_message_id || msg.message?.parent_id;
-        if (curParentId && !ctxById.has(curParentId)) missingParentIds.add(curParentId);
-        for (const m of ctx) {
-          const pid = m.parent_id || m.parent_message_id;
-          if (pid && !ctxById.has(pid)) missingParentIds.add(pid);
-        }
-        if (missingParentIds.size > 0 && ctx.length < maxLimit) {
-          const expandCount = Math.min(maxLimit, baseLimit * 3) - ctx.length;
-          if (expandCount > 0) {
-            const oldestSeq = ctx.reduce((min, m) => Math.min(min, Number(m.seq) || Infinity), Infinity);
-            if (oldestSeq < Infinity) {
-              const extra = await fetchRecentMessages(
-                orgConfig.org_id,
-                msg.conversation_id,
-                oldestSeq,
-                expandCount,
-              );
-              for (const m of extra) {
-                if (!ctxById.has(m.id)) {
-                  ctxById.set(m.id, m);
-                  ctx.push(m);
-                }
-              }
-              log(`context expanded (api): ${baseLimit} → ${ctx.length} msgs (${missingParentIds.size} missing parent(s))`);
-            }
-          }
-        }
-
-        const ctxAsc = [...ctx].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
-        recent = await Promise.all(ctxAsc.map(async m => {
-          const senderName = m.sender_display_name
-                   || m.senderName
-                   || (await fetchMemberName(orgConfig.org_id, m.sender_id))
-                   || m.sender_id;
-          const mStructured = (m.content && typeof m.content === 'object') ? m.content : {};
-          const text = mStructured.body?.text
-                   || (typeof m.content === 'string' ? m.content : '')
-                   || m.content_text
-                   // Same hole as the forward path: without this a card already in
-                   // history renders as an empty turn in the replayed context.
-                   || formatStructuredForModel(m)
-                   || '';
-          const mType = (m.type || m.message?.type || '').toLowerCase();
-          const mAttachments = Array.isArray(mStructured.attachments) ? mStructured.attachments
-                             : Array.isArray(m.attachments) ? m.attachments : [];
-          const mIsImage = mType === 'image' || mType === 'agent_card';
-          const mIsFile = !mIsImage && (mType === 'file' || mAttachments.length > 0);
-          let content = text;
-          if ((mIsImage || mIsFile) && mAttachments.length > 0) {
-            const kind = mIsImage ? 'image' : 'file';
-            const labels = mAttachments.map(a => `[${kind}: ${a.artifact_id} | ${a.file_name || 'unknown'}]`);
-            content = labels.join(' ') + (text ? ' ' + text : '');
-          } else if (mIsImage) {
-            content = '[image]' + (text ? ' ' + text : '');
-          }
-          if (isChatHistory(m)) content = FORWARDED_CONVERSATION;
-          return { senderName, senderId: m.sender_id, content };
-        }));
-      }
-      log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${source} count=${recent.length}`);
+      log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${gathered.source} count=${recent.length}${sub ? ` subconversation=${sub.ownerKind}` : ''}`);
     }
 
     // After `msg = { ...notification, ...detail }`, where detail is the
@@ -1332,6 +1198,9 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       recent,
       {
         groupName, smartHint, quotedContent,
+        // A sub-conversation's lines render as <subconversation-context>, in
+        // <group-context>'s place.
+        subConversation: !!sub,
         quotedExcerpt: quoteExcerptOf(msg, quotedMsgId),
         chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
@@ -1646,6 +1515,8 @@ async function handleSystemEvent(orgConfig, frame) {
     return;
   }
   const messageId = data.message_id || data.id || data.msg_id || '';
+  // A recalled or edited message may be a cached sub-conversation root.
+  if (messageId) forgetRootMessage(messageId);
 
   // Dedup so a reconnect/catch-up replay of the same lifecycle event does not
   // re-inject the notice. Keyed distinctly from message-create ids.
