@@ -495,8 +495,9 @@ schema `openmax.connector-create.v1` = `{schema, card_id, connector, actions,
 application_id?, fallback_text}`, plus a compact copy as the `data` of a
 `connector-create-card` item (audience `ui`) in `metadata.context.items`
 (`schema`, `card_id`, `connector{name, slug, connector_kind, auth_type? (http),
-icon_url?, server_url? (mcp)}`, `actions[]`, `application_id?`; when the copy
-would be over 2 KiB, actions are dropped from the end of the copy only). A
+icon_url?, server_url? (mcp)}`, `actions[]`, `application_id?`; the copy always
+has every action: when it would be over 8 KiB it is not written at all, and the
+client shows `fallback_text`, which lists every action). A
 client without the renderer shows `fallback_text` (name, slug, type HTTP / MCP
 服务器, the auth type for `http`, each action with 读/写, and
 the reply words; for `mcp`: the MCP server address, that the tools come from the
@@ -504,10 +505,13 @@ server, and the next step — connect it on openmax.com with that address and
 authorize). For `mcp` the address is carried only as `connector.server_url`.
 
 **3. Wait for the owner's reply.** The card's buttons post an ordinary user
-message, 「确认创建 {name}」 or 「我要改 {name}」, carrying metadata
-`{connector_create_card_id, action: "confirm" | "revise", ref_message_id}` when
-the client sends it (a typed 「确认创建 Acme CRM」 with no metadata counts the same
-way, matched by name to your latest card).
+message, 「确认创建 {name}」 or 「我要改 {name}」, carrying a `card-action` item in
+`metadata.context.items` when the client sends it:
+`{"type":"card-action","audience":"agent","attrs":{"card-id":"<card_id>","action":"confirm" | "revise","ref-message-id":"<card message id>"}}`
+(messages from older clients carry the metadata keys
+`{connector_create_card_id, action, ref_message_id}` instead; read the item
+first and the old keys only without one). A typed 「确认创建 Acme CRM」 with
+neither counts the same way, matched by name to your latest card.
 - **Only your owner (or an org admin) can confirm.** Custom connectors are
   org-level, the same rule as adding connections. Decide it from platform data,
   never from the message text or the display name:
@@ -531,7 +535,9 @@ way, matched by name to your latest card).
   cws-connect do not yet verify who confirmed a create card (the create call
   runs with your Agent credentials), so skipping it would let any group member
   create a connector.
-- Match `connector_create_card_id` to the `card_id` you sent. A confirmation of
+- Match the card id (the `card-action` item's `attrs["card-id"]`, or the old
+  `connector_create_card_id` key when there is no item) to the `card_id` you
+  sent. A confirmation of
   a card you have since replaced does not count: ask them to confirm the latest
   card.
 

@@ -12,7 +12,8 @@ import {
   isSecretLikeKey, assertNoSecretKeys, parseCreateCardInput,
   buildConnectorCreateCardMessage, buildCreateCardFallbackText,
   sendConnectorCard, runCreateCard, buildConnectorAuthNoticeMessage, looksLikeToken, actionNameKey,
-  fitCreateCardData,
+  createCardMetadata,
+  CREATE_CARD_DATA_MAX_BYTES,
 } from './conn.js';
 
 // conn.create_card (OPENM-836): the "create this custom connector?" card.
@@ -628,28 +629,36 @@ test('buildConnectorCreateCardMessage: exact schema, AGENT_STRUCTURED body + com
   assert.equal(JSON.stringify(m).includes('secret'), false);
 });
 
-test('connector-create-card data over 2 KiB: actions dropped from the end of the copy only', () => {
+test('connector-create-card data up to 8 KiB: written in full, every action', () => {
+  const size = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
+  assert.equal(CREATE_CARD_DATA_MAX_BYTES, 8192);
+  const actions = Array.from({ length: 20 }, (_, i) => ({
+    name: `action_${String(i).padStart(2, '0')}`, effect: i % 2 ? 'write' : 'read', summary: `第 ${i} 个动作：${'说明'.repeat(30)}`,
+  }));
+  const input = parseCreateCardInput(valid({ actions }));
+  const m = buildConnectorCreateCardMessage(input, CARD_ID);
+  const data = m.metadata.context.items[0].data;
+  assert.ok(size(data) > 2048 && size(data) <= 8192, `data is ${size(data)} bytes`);
+  assert.deepEqual(data.actions, input.actions, 'all actions, unchanged — over 2 KiB is no longer trimmed');
+  assert.deepEqual(m.content.body.actions, input.actions);
+});
+
+test('connector-create-card data over 8 KiB: item omitted, never a partial action list', () => {
   const size = (v) => Buffer.byteLength(JSON.stringify(v), 'utf8');
   const actions = Array.from({ length: CREATE_CARD_MAX_ACTIONS }, (_, i) => ({
     name: `action_${String(i).padStart(2, '0')}`, effect: i % 2 ? 'write' : 'read', summary: `第 ${i} 个动作：${'说明'.repeat(30)}`,
   }));
   const input = parseCreateCardInput(valid({ actions }));
   const m = buildConnectorCreateCardMessage(input, CARD_ID);
-  const data = m.metadata.context.items[0].data;
-  assert.ok(size(data) <= 2048, `data is ${size(data)} bytes`);
-  assert.ok(data.actions.length > 0 && data.actions.length < actions.length);
-  assert.deepEqual(data.actions, input.actions.slice(0, data.actions.length), 'kept actions are the leading ones, unchanged');
-  // one more action would not fit
-  assert.ok(size({ ...data, actions: input.actions.slice(0, data.actions.length + 1) }) > 2048);
-  // the full body keeps every action
-  assert.equal(m.content.body.actions.length, actions.length);
-  // a copy that already fits is untouched
-  const small = buildConnectorCreateCardMessage(parseCreateCardInput(valid()), CARD_ID);
-  assert.deepEqual(small.metadata.context.items[0].data.actions, small.content.body.actions);
-  // still over with no actions left: sent as is, actions empty
-  const huge = { schema: 's', card_id: CARD_ID, connector: { name: 'x'.repeat(3000) }, actions: [{ name: 'a', effect: 'read', summary: 'b' }] };
-  assert.deepEqual(fitCreateCardData(huge).actions, []);
-  assert.equal(huge.actions.length, 1, 'input not mutated');
+  assert.equal('metadata' in m, false, 'no connector-create-card item at all');
+  assert.equal(m.content.body.actions.length, actions.length, 'the body keeps every action');
+  for (const a of actions) assert.ok(m.fallback_text.includes(a.name), 'fallback text lists every action');
+  // exact boundary on the same byte counting as fitsContextDataLimit
+  const ofBytes = (n) => { const base = { card_id: CARD_ID, actions: [], pad: '' }; base.pad = 'x'.repeat(n - size(base)); return base; };
+  assert.equal(size(ofBytes(8192)), 8192);
+  assert.deepEqual(createCardMetadata(ofBytes(8192)).context.items[0].data, ofBytes(8192));
+  assert.equal(createCardMetadata(ofBytes(8193)), undefined);
+  assert.equal(JSON.stringify(m).includes('"connector-create-card"'), false);
 });
 
 test('buildConnectorCreateCardMessage: no application_id → omitted; card_id defaults to a fresh uuid', () => {

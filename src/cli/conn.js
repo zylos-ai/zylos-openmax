@@ -875,8 +875,10 @@ function requireTargetConversationId(p) {
 // conn.actiondef_create) it posts ONE structured card describing exactly what
 // will be created, and waits for the owner's confirmation (OPENM-836). The card
 // creates nothing: the frontend posts an ordinary user message on click
-// ("确认创建 {name}" / "我要改 {name}"; the Agent goes by that text, not by
-// message metadata), and the Agent then runs conn.app_import with the
+// ("确认创建 {name}" / "我要改 {name}" with a `card-action` context item,
+// attrs {card-id, action, ref-message-id}; older frontends sent the metadata
+// keys {connector_create_card_id, action, ref_message_id}), and the Agent then
+// runs conn.app_import with the
 // SAME slug and actions.
 //
 // Shape mirrors conn.auth_notice / channel.js: AGENT_STRUCTURED + content
@@ -1239,16 +1241,16 @@ export function buildCreateCardFallbackText({ connector, actions }) {
 
 // The copy rides as a `connector-create-card` context item (audience=ui;
 // message context phase 2, the old metadata.connector_create_card key is no
-// longer written). cws-comm keeps an unregistered type's data only up to
-// 2 KiB (JSON-encoded) and otherwise drops it, leaving the frontend nothing to
-// draw from the list. So actions are dropped from the end until it fits; the
-// full body still has every action. If it is still over with no actions
-// left, it is sent as is (the plan's answer for that case is registering this
-// one type at 8 KiB in cws-comm).
-export function fitCreateCardData(meta) {
-  const out = { ...meta, actions: [...meta.actions] };
-  while (out.actions.length > 0 && !fitsContextDataLimit(out)) out.actions.pop();
-  return out;
+// longer written). cws-comm registers this type with an 8 KiB data limit
+// (JSON-encoded) and drops data over it. The copy is never cut: when the full
+// copy is over the limit the item is not written at all, and the frontend
+// falls back to fallback_text, which lists every action (the body keeps them
+// all too). A partial action list would misstate what gets created.
+export const CREATE_CARD_DATA_MAX_BYTES = 8 * 1024;
+
+export function createCardMetadata(meta) {
+  if (!fitsContextDataLimit(meta, CREATE_CARD_DATA_MAX_BYTES)) return undefined;
+  return contextMetadata({ type: 'connector-create-card', audience: 'ui', data: meta });
 }
 
 // Pure builder. `input` is the parseCreateCardInput result; `cardId` is
@@ -1281,11 +1283,12 @@ export function buildConnectorCreateCardMessage(input, cardId = randomUUID()) {
     actions: actions.map((a) => ({ name: a.name, effect: a.effect, summary: a.summary })),
     ...(input.application_id ? { application_id: input.application_id } : {}),
   };
+  const metadata = createCardMetadata(meta);
   return {
     client_msg_id: randomUUID(),
     type: 'AGENT_STRUCTURED',
     content: { content_type: 'connector_create_card', body, attachments: [] },
-    metadata: contextMetadata({ type: 'connector-create-card', audience: 'ui', data: fitCreateCardData(meta) }),
+    ...(metadata ? { metadata } : {}),
     fallback_text: fallbackText,
   };
 }
