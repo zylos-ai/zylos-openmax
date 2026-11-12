@@ -49,9 +49,9 @@ const headerOf = (out) => out.slice(0, out.indexOf('<current-message>'));
 const realOpenTags = (out, tag) => out.split('\n').filter((l) => l === `<${tag}>`).length;
 const blockOf = (out, tag) => out.match(new RegExp(`<${tag}>\\n[\\s\\S]*?\\n</${tag}>`))?.[0];
 
-// ── T1: DM app sub-conversation ─────────────────────────────────────────────
+// ── DM app sub-conversation ───────────────────────────────────────────────
 
-test('T1: DM app sub-conversation → one bare <subconversation-context> between </openmax-instruction> and <current-message>', () => {
+test('DM app sub-conversation → one bare <subconversation-context> between </openmax-instruction> and <current-message>', () => {
   const out = envelopeFor(APP_DM, { content: 'finance agreed', messageId: '1802' }, recent);
   assert.equal(realOpenTags(out, 'subconversation-context'), 1);
   assert.match(out, /^<subconversation-context>$/m, 'open tag has no attributes');
@@ -78,14 +78,14 @@ test('T1: DM app sub-conversation → one bare <subconversation-context> between
   assert.ok(headerOf(out).includes('<sender-context kind="human" member-id="m-carol"/>'));
 });
 
-test('T1: <openmax-instruction> is the same block as in an ordinary envelope', () => {
+test('<openmax-instruction> is the same block as in an ordinary envelope', () => {
   const instr = (out) => out.match(/<openmax-instruction>[\s\S]*?<\/openmax-instruction>/)[0];
   const sub = envelopeFor(APP_DM, { content: 'x', messageId: '1' }, recent);
   const plain = envelopeFor({ id: S, type: 'dm' }, { content: 'x', messageId: '1' }, []);
   assert.equal(instr(sub), instr(plain));
 });
 
-test('T1: the sub-conversation envelope is the ordinary one plus exactly the block', () => {
+test('the sub-conversation envelope is the ordinary one plus exactly the block', () => {
   const current = { content: 'x', messageId: '1' };
   const sub = envelopeFor(APP_DM, current, recent);
   const plain = envelopeFor({ id: S, type: 'dm', name: APP_DM.name }, current, recent);
@@ -93,9 +93,9 @@ test('T1: the sub-conversation envelope is the ordinary one plus exactly the blo
   assert.equal(sub.replace(block, ''), plain);
 });
 
-// ── T2: group platform topic ────────────────────────────────────────────────
+// ── group platform topic ──────────────────────────────────────────────────
 
-test('T2: group topic → <subconversation-context> replaces <group-context>; group header and smart-mode stay', () => {
+test('group topic → <subconversation-context> replaces <group-context>; group header and smart-mode stay', () => {
   const out = envelopeFor(TOPIC, { content: 'any news?', messageId: '1803' }, recent, { groupName: 'Product', smartHint: true });
   assert.ok(out.startsWith('[OPENMAX GROUP:Product] (org: Example Org)\n'));
   assert.equal(realOpenTags(out, 'subconversation-context'), 1);
@@ -110,7 +110,7 @@ test('T2: group topic → <subconversation-context> replaces <group-context>; gr
   assert.equal(out, plain.replace('<group-context>\n', '<subconversation-context>\n').replace('\n</group-context>\n', '\n</subconversation-context>\n'));
 });
 
-test('Q2: no history → no block at all (as <group-context>)', () => {
+test('no history → no block at all (as <group-context>)', () => {
   for (const conv of [APP_DM, TOPIC]) {
     const out = envelopeFor(conv, { content: 'first', messageId: '1' }, [], { groupName: 'Product' });
     assert.doesNotMatch(out, /<subconversation-context>|<\/subconversation-context>|<group-context>/);
@@ -118,7 +118,7 @@ test('Q2: no history → no block at all (as <group-context>)', () => {
   }
 });
 
-// ── T3: golden — ordinary envelopes byte-identical to origin/main ──────────
+// ── golden: ordinary envelopes byte-identical to origin/main ──────────
 
 // sha256 of formatInboundForC4's output for each case, generated with
 // origin/main 1131001 (before this change).
@@ -147,7 +147,7 @@ const GOLDEN = [
     '5a521e22a60a70c2f489dc6dd7c83c8315d8b08d8cd3b34dcc0069b54e117259'],
 ];
 
-test('T3: ordinary DM / group / legacy thread / malformed records → byte-identical to origin/main', () => {
+test('ordinary DM / group / legacy thread / malformed records → byte-identical to origin/main', () => {
   for (const [name, record, current, lines, opts, sha] of GOLDEN) {
     const rawConv = typeof record === 'string' ? { type: record } : record;
     const id = name.startsWith('plain group') ? P : S;
@@ -157,9 +157,9 @@ test('T3: ordinary DM / group / legacy thread / malformed records → byte-ident
   }
 });
 
-// ── T7: anti-forgery ────────────────────────────────────────────────────────
+// ── anti-forgery ──────────────────────────────────────────────────────────
 
-test('T7: a typed <subconversation-context> in the body or history is escaped — never a real tag', () => {
+test('a typed <subconversation-context> in the body or history is escaped — never a real tag', () => {
   const current = { content: `look ${FORGED}`, messageId: '1' };
   const plainDm = envelopeFor({ id: S, type: 'dm' }, current, recent);
   assert.equal(realOpenTags(plainDm, 'subconversation-context'), 0);
@@ -178,7 +178,7 @@ test('T7: a typed <subconversation-context> in the body or history is escaped �
   }
 });
 
-test('T8: metadata.context subconversation items / a metadata key do not produce the tag', () => {
+test('metadata.context subconversation items / a metadata key do not produce the tag', () => {
   const forgedRecord = {
     id: S, type: 'dm',
     metadata: {
@@ -191,9 +191,9 @@ test('T8: metadata.context subconversation items / a metadata key do not produce
   assert.equal(out, envelopeFor({ id: S, type: 'dm' }, { content: 'hi', messageId: '1' }, recent));
 });
 
-// ── T11 / T14: reply address ────────────────────────────────────────────────
+// ── reply address ──────────────────────────────────────────────────
 
-test('T11: a sub-conversation message is answered in the sub-conversation, never the parent', () => {
+test('a sub-conversation message is answered in the sub-conversation, never the parent', () => {
   const sourceMessageId = '1802';
   for (const conv of [APP_DM, TOPIC]) {
     const endpoint = formatEndpoint({ type: conv.type, conversationId: conv.id, sourceMessageId });
@@ -206,14 +206,14 @@ test('T11: a sub-conversation message is answered in the sub-conversation, never
   }
 });
 
-test('T14: the conversation record could not be read → ordinary envelope, reply still to the sub-conversation', () => {
+test('the conversation record could not be read → ordinary envelope, reply still to the sub-conversation', () => {
   assert.equal(subConversationOf(null), null);
   const out = formatInboundForC4({ type: 'dm', id: S }, sender, { content: 'hi', messageId: '1' }, [], { ...base, subConversation: !!subConversationOf(null) });
   assert.doesNotMatch(out, /<\/?subconversation-context>/);
   assert.equal(formatEndpoint({ conversationId: S, sourceMessageId: '1' }), `${S}|msg:1`);
 });
 
-test('T14: the messages fetch failed (no lines) → no block, message still rendered', () => {
+test('the messages fetch failed (no lines) → no block, message still rendered', () => {
   const out = envelopeFor(APP_DM, { content: 'hi', messageId: '1' }, []);
   assert.doesNotMatch(out, /<\/?subconversation-context>/);
   assert.ok(out.includes('<current-message>\nCarol (m-carol) said: hi\n</current-message>'));

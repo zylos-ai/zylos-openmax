@@ -6,8 +6,6 @@
  * Everything here is pure, so the bridge's decisions can be unit-tested:
  *   - subConversationOf: is this conversation record a sub-conversation?
  *   - groupScopeConversationId: which conversation's group config gates it;
- *   - appSubConversationAddressesAgent: the one switch for app
- *     sub-conversations in a group (see there);
  *   - fetchesConversationContext: who gets local history and a context block.
  *
  * Only the conversation record (GET /conversations/{id}) is read, never message
@@ -61,24 +59,6 @@ export function subConversationOf(conv) {
  */
 export function groupScopeConversationId(conversationId, sub) {
   return sub ? sub.parentConversationId : conversationId;
-}
-
-// Q1 switch, pending confirmation. false: an app sub-conversation in a group
-// follows the parent group's mode like any other group message (mention mode
-// needs an @; smart mode lets the Agent decide), as platform topics do and as
-// zylos-lark treats thread messages. true: every message of an app
-// sub-conversation in a group counts as addressed to the Agent, without an @
-// (cws-comm design decision 15); it still has to pass the parent group's
-// allowlist and allowFrom.
-const APP_SUBCONVERSATION_IN_GROUP_ADDRESSES_AGENT = false;
-
-/**
- * Whether a group message in this sub-conversation counts as addressed to the
- * Agent without an @ (see the switch above). Only consulted for group
- * sub-conversations; a DM sub-conversation is a DM.
- */
-export function appSubConversationAddressesAgent(sub) {
-  return APP_SUBCONVERSATION_IN_GROUP_ADDRESSES_AGENT && sub?.ownerKind === 'app';
 }
 
 /**

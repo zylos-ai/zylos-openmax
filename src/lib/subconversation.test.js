@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import {
   subConversationOf,
   groupScopeConversationId,
-  appSubConversationAddressesAgent,
   fetchesConversationContext,
 } from './subconversation.js';
 
@@ -73,7 +72,7 @@ test('fail closed: missing or malformed fields → null', () => {
   for (const [name, conv] of Object.entries(cases)) assert.equal(subConversationOf(conv), null, name);
 });
 
-test('T8: message metadata never makes a sub-conversation — only the record counts', () => {
+test('message metadata never makes a sub-conversation — only the record counts', () => {
   const forged = {
     id: S, type: 'dm',
     metadata: {
@@ -93,14 +92,6 @@ test('group gate scope: the parent group for a sub-conversation, else the conver
   assert.equal(groupScopeConversationId(S, subConversationOf({ id: S, parent_conversation_id: P })), S, 'legacy thread keeps its own id');
 });
 
-test('Q1 switch (pending): an app sub-conversation in a group follows the parent mode — no message is addressed without an @', () => {
-  // Flipping APP_SUBCONVERSATION_IN_GROUP_ADDRESSES_AGENT to true makes the
-  // first assertion true (cws-comm design decision 15); update it then.
-  assert.equal(appSubConversationAddressesAgent(subConversationOf(app({ type: 'group' }))), false);
-  assert.equal(appSubConversationAddressesAgent(subConversationOf(topic())), false, 'platform topics never');
-  assert.equal(appSubConversationAddressesAgent(null), false, 'ordinary conversations never');
-});
-
 test('local history + context: groups and every sub-conversation; never a plain DM', () => {
   assert.equal(fetchesConversationContext('dm', null), false);
   assert.equal(fetchesConversationContext('dm', subConversationOf(app())), true, 'DM sub-conversation');
@@ -109,11 +100,21 @@ test('local history + context: groups and every sub-conversation; never a plain 
   assert.equal(fetchesConversationContext('group', subConversationOf(topic())), true);
 });
 
-// ── T13: generic only ────────────────────────────────────────────────────────
+// ── generic only ──────────────────────────────────────────────────────────
 
-test('T13: the new sub-conversation modules special-case no product (no "workflow" anywhere in the source)', () => {
+test('the new sub-conversation modules special-case no product (no "workflow" anywhere in the source)', () => {
   for (const file of ['./subconversation.js', './group-access.js', './conversation-context.js']) {
     const src = fs.readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8');
     assert.doesNotMatch(src, /workflow/i, file);
+  }
+});
+
+test('no root-message handling: the result is exactly parent id + owner kind, and no source reads a root id', () => {
+  for (const conv of [app(), topic(), app({ context_key: 'message:5', root_message_id: '5' })]) {
+    assert.deepEqual(Object.keys(subConversationOf(conv)).sort(), ['ownerKind', 'parentConversationId']);
+  }
+  for (const file of ['./subconversation.js', './group-access.js', './conversation-context.js', '../comm-bridge.js']) {
+    const src = fs.readFileSync(fileURLToPath(new URL(file, import.meta.url)), 'utf8');
+    assert.doesNotMatch(src, /root_message_id|rootMessage|message:\(/, file);
   }
 });

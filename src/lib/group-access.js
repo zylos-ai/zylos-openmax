@@ -3,7 +3,7 @@
 // skipped self-echo, System Member and DM messages, and resolves who was
 // mentioned and whether the sender is the owner.
 
-import { groupScopeConversationId, appSubConversationAddressesAgent } from './subconversation.js';
+import { groupScopeConversationId } from './subconversation.js';
 
 export const NOTICE_GROUP_DISABLED =
   "Sorry, group chat is currently disabled.";
@@ -20,6 +20,8 @@ export const NOTICE_GROUP_SENDER_NOT_ALLOWED =
  * A sub-conversation (`sub`, from subConversationOf) is gated exactly as a
  * message in its parent group: the parent's `groups{}` entry decides the
  * allowlist, mode and allowFrom, and the polite refusals are the parent's.
+ * App and platform sub-conversations alike follow the parent's mode: in a
+ * mention-mode group only an @ addresses the Agent.
  *
  * @param {object} p
  * @param {object} [p.access]          orgConfig.access
@@ -29,13 +31,12 @@ export const NOTICE_GROUP_SENDER_NOT_ALLOWED =
  * @param {boolean} p.mentioned        structurally @-mentions this agent
  * @param {boolean} p.senderIsOwner
  */
-export function decideGroupAccess({ access = {}, conversationId, sub = null, senderId, mentioned: atMentioned, senderIsOwner }) {
+export function decideGroupAccess({ access = {}, conversationId, sub = null, senderId, mentioned, senderIsOwner }) {
   const policy = access.groupPolicy || 'allowlist';
   const convId = groupScopeConversationId(conversationId, sub);
   const groupCfg = (access.groups || {})[convId];
   // Log label: names the parent when a sub-conversation is gated by it.
   const scope = convId === conversationId ? convId : `${convId} (parent of ${conversationId})`;
-  const mentioned = !!atMentioned || appSubConversationAddressesAgent(sub);
 
   if (policy === 'disabled') {
     return {

@@ -53,7 +53,7 @@ async function gather(conv, { seq, messageId, baseLimit = 5, maxLimit = 15, fetc
   });
 }
 
-test('T6: API path → one request with before_seq = msg.seq and limit = context_messages; lines oldest first', async () => {
+test('API path → one request with before_seq = msg.seq and limit = context_messages; lines oldest first', async () => {
   setLimits(5, 15);
   const conv = newConv();
   const pool = Array.from({ length: 20 }, (_, i) => apiMsg(i + 1));
@@ -66,7 +66,7 @@ test('T6: API path → one request with before_seq = msg.seq and limit = context
   assert.deepEqual(recent[0], { senderName: 'Carol', senderId: 'm-carol', content: 'api 16' });
 });
 
-test('T6: the line count follows config (context_messages = 3)', async () => {
+test('the line count follows config (context_messages = 3)', async () => {
   setLimits(3, 15);
   const conv = newConv();
   const fetch = mockFetch(Array.from({ length: 10 }, (_, i) => apiMsg(i + 1)));
@@ -76,7 +76,7 @@ test('T6: the line count follows config (context_messages = 3)', async () => {
   setLimits(5, 15);
 });
 
-test('T10: DM sub-conversation recorded locally → once N entries exist, no request at all', async () => {
+test('DM sub-conversation recorded locally → once N entries exist, no request at all', async () => {
   setLimits(5, 15);
   const conv = newConv();   // the DM sub-conversation's own id
   for (let s = 1; s <= 5; s++) record(conv, s);
@@ -89,7 +89,7 @@ test('T10: DM sub-conversation recorded locally → once N entries exist, no req
   assert.equal(recent.some((l) => l.content === 'local 6'), false, 'current message left out');
 });
 
-test('T10: thin local history (new sub-conversation) → one API page', async () => {
+test('thin local history (new sub-conversation) → one API page', async () => {
   const conv = newConv();
   record(conv, 1);
   record(conv, 2);

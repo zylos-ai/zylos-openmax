@@ -303,7 +303,7 @@ test('1337: [MEDIA:file] via `|msg:A` carries A\'s run while B is focused', asyn
 
 // ── cws-comm#373: an archived sub-conversation is reported, never rerouted ──
 
-test('T12: 409 COMM_SUBCONVERSATION_ARCHIVED → exit 1 with status 409, one POST to the sub-conversation, no reroute', async () => {
+test('409 COMM_SUBCONVERSATION_ARCHIVED → exit 1 with status 409, one POST to the sub-conversation, no reroute', async () => {
   const sub = '019f7000-0000-7000-8000-00000000000b';
   const posts = [];
   const server = http.createServer((req, res) => {

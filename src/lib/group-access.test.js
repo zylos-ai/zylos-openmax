@@ -11,7 +11,7 @@ import {
 } from './group-access.js';
 import { subConversationOf } from './subconversation.js';
 
-// T9: a group sub-conversation / topic is gated exactly as a message in its
+// A group sub-conversation / topic is gated exactly as a message in its
 // parent group (groups[parent]: allowlist, mode, allowFrom, notices). Ordinary
 // groups keep their own entry, as before.
 
@@ -99,12 +99,15 @@ for (const [label, sub] of [['platform topic', TOPIC], ['app sub-conversation', 
   });
 }
 
-test('Q1 (pending): an app sub-conversation in a mention-mode group still needs an @', () => {
-  // Locks the parent-mode choice. If the switch in subconversation.js is
-  // flipped (design decision 15), this message is handled with mentioned=true.
+test('an app sub-conversation in a mention-mode group: a message without an @ is not addressed to the Agent', () => {
   const d = decide({ sub: APP_IN_GROUP, groups: { [P]: { mode: 'mention' } } });
   assert.equal(d.handle, false);
   assert.equal(d.reason, 'group:mention (not @-ed)');
+  assert.equal(d.userNotice, undefined);
+  // In a smart-mode parent it is handled, but still as not @-ed (smart-mode hint).
+  const smart = decide({ sub: APP_IN_GROUP, groups: { [P]: { mode: 'smart' } } });
+  assert.equal(smart.handle, true);
+  assert.equal(smart.mentioned, false);
 });
 
 test('ordinary group: its own entry, unchanged decisions and reasons', () => {
