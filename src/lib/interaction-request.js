@@ -22,6 +22,7 @@
  * caller. The cws-core edge made the same call for the same reason.
  */
 import { newClientMsgId } from './message.js';
+import { plainTextMarkdownProblem } from './card-text-markdown.js';
 
 export class InteractionRequestError extends Error {
   constructor(field, message) {
@@ -29,6 +30,12 @@ export class InteractionRequestError extends Error {
     this.name = 'InteractionRequestError';
     this.field = field;
   }
+}
+
+/** Refuse Markdown in the plain-text body, before anything is posted. */
+function rejectMarkdownInText(text, blocks) {
+  const problem = plainTextMarkdownProblem(text, blocks);
+  if (problem) throw new InteractionRequestError(problem.field, problem.message);
 }
 
 function requireText(value, field) {
@@ -261,6 +268,7 @@ export function buildChoiceRequest(params = {}) {
   } else {
     throw new InteractionRequestError('text', 'is required (or pass `blocks`): the card body is not derived from `summary`, which the client already shows beside the title');
   }
+  rejectMarkdownInText(params.text, blocks);
 
   // Options are required now. A zero-button card is not something this path can
   // produce any more — the protocol has no interaction type for it.
@@ -452,6 +460,7 @@ export function buildFormRequest(params = {}) {
   } else if (params.text !== undefined) {
     blocks = [textBlock(requireText(params.text, 'text'))];
   }
+  rejectMarkdownInText(params.text, blocks);
 
   if (!Array.isArray(params.fields) || params.fields.length === 0) {
     throw new InteractionRequestError('fields', 'must be a non-empty array of questions');

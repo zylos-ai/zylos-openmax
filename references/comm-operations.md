@@ -345,11 +345,14 @@ refused, naming `text`. It used to be resolved by precedence — `blocks` won an
 the `text` was dropped — which left the caller who passed both, and therefore
 believed both were shown, with no way to find out otherwise.
 
+A `text` block is shown verbatim, not as Markdown; for formatting use a
+`markdown` block (which block carries what: SKILL.md, "Writing the card").
+
 cws-comm's block vocabulary:
 
 | `type` | Carries | Keys besides `type` |
 |---|---|---|
-| `text` | a plain paragraph | `text` |
+| `text` | a plain paragraph, shown verbatim | `text` |
 | `markdown` | a paragraph with inline marks, or a list | `text` |
 | `fields` | label→value rows, one per line | `items[]` of `{label, value, inline?}` |
 | `divider` | a horizontal rule | — |
