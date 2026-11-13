@@ -1,6 +1,11 @@
 /**
  * Agent readiness gate for the onboarding trigger.
  *
+ * Core 1.x uses the local Dashboard readiness probe as its availability source.
+ * Platform readiness and onboarding share that snapshot; onboarding alone may
+ * wait for an explicitly unanswerable runtime, subject to the existing cap.
+ * Core 0.x keeps the file/session checks described below unchanged.
+ *
  * WHY: `online-report` is the server-side onboarding trigger (see
  * online-report.js). We fire it from WS `onOpen`, but the WebSocket coming up
  * only proves *this* process is alive — it says nothing about the runtime agent
@@ -11,7 +16,7 @@
  * against an agent that cannot act for minutes, so the first real reply lands
  * long after the server believes onboarding began.
  *
- * WHAT COUNTS AS READY: not simply `state === 'idle'`. The activity monitor
+ * LEGACY CORE READINESS: not simply `state === 'idle'`. The activity monitor
  * defines idle as `activeTools === 0 && inactiveSeconds >= 3`
  * (monitor-orchestrator.js), and when no conversation file exists yet its
  * activity source degrades to `tmux_activity` and then to `default` — so a
@@ -22,7 +27,7 @@
  * agent-status.json.runtime_launch_at` (the hook writes that file; a stale value
  * from a previous launch is rejected by the comparison).
  *
- * CODEX RUNTIME: zylos-core writes foreground-session.json only for a managed
+ * LEGACY CODEX RUNTIME: zylos-core writes foreground-session.json only for a managed
  * Claude process, so on Codex the file is absent or a stale Claude record and
  * the gate would hold forever. When the active runtime is Codex and the record
  * does not belong to this launch, the newest foreground Codex thread (its
@@ -45,6 +50,9 @@ import path from 'node:path';
 import os from 'node:os';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 import { createCodexSessionReader, readZylosRuntime } from './codex-session.js';
+import { readCoreVersion as installedCoreVersion } from './core-version.js';
+import { evaluateDashboardReadiness, readDashboardProbe } from './dashboard-readiness.js';
+import { getDashboardPort } from './dashboard-address.js';
 
 /**
  * Blockers on which the fail-open cap must NOT release the report.
@@ -62,7 +70,7 @@ import { createCodexSessionReader, readZylosRuntime } from './codex-session.js';
  * waiting longer is the only honest behavior. The caller keeps its retry path
  * (WS reconnect / periodic tick), so this defers rather than cancels.
  */
-export const NO_FAIL_OPEN_REASONS = new Set(['no_session', 'session_predates_launch']);
+export const NO_FAIL_OPEN_REASONS = new Set(['no_session', 'session_predates_launch', 'session_not_running']);
 
 /**
  * How far provisioning has provably got, as one monotonic ladder.
@@ -77,6 +85,10 @@ export const NO_FAIL_OPEN_REASONS = new Set(['no_session', 'session_predates_lau
  * module is the only place that sees every input, so it is the only place that
  * can answer honestly. The platform stores what it is told and does not
  * re-interpret it.
+ *
+ * For Core 1.x, Dashboard availability drives the ladder; accompanying runtime
+ * health can defer onboarding without lowering a successful probe's rung.
+ * The legacy Core 0.x mapping is:
  *
  *   runtime_down   agent-status.json missing/stale, or health not ok
  *                  → nothing can be believed yet
@@ -104,6 +116,7 @@ const STAGE_BY_REASON = new Map([
   ['no_session', 'runtime_up'],
   ['session_predates_launch', 'runtime_up'],
   ['runtime_dead', 'runtime_up'],
+  ['session_not_running', 'runtime_up'],
   ['status_missing', 'runtime_down'],
   ['status_stale', 'runtime_down'],
 ]);
@@ -215,6 +228,7 @@ export function normalizeNumericOptions(raw, defaults, aliases = {}, { allowZero
 export function createReadinessGate({
   readStatus, readForeground, readProc, sleep, now, options = () => ({}),
   readRuntime = () => null, readCodexSession = () => null,
+  readCoreVersion = () => '0.0.0', readDashboardReadiness,
 }) {
   function settings() {
     return { ...READINESS_DEFAULTS, ...normalizeReadinessOptions(options()) };
@@ -228,6 +242,10 @@ export function createReadinessGate({
    *   machines we don't have shell access to).
    */
   function evaluate() {
+    const version = readCoreVersion();
+    const major = typeof version === 'string' && /^(\d+)\./.exec(version);
+    if (major && Number(major[1]) >= 1) return readDashboardReadiness();
+    if (!major) return { ready: false, reason: 'core_version_unknown', detail: { core_version: 'unknown' } };
     const cfg = settings();
 
     const status = readStatus();
@@ -319,7 +337,12 @@ export function createReadinessGate({
     let polls = 0;
 
     for (;;) {
-      const v = evaluate();
+      const snapshot = await evaluate();
+      // Availability is reported to the platform unchanged. Onboarding alone
+      // may wait for a runtime that is explicitly unable to answer messages.
+      const v = snapshot.onboardingReason
+        ? { ...snapshot, ready: false, reason: snapshot.onboardingReason }
+        : snapshot;
       const waitedMs = now() - startedAt;
       if (v.ready) return { ...v, waitedMs, timedOut: false, polls };
 
@@ -351,6 +374,8 @@ export function createReadinessGate({
  * Kept next to `evaluate` so the two never drift apart.
  */
 export function formatReadinessDetail(detail = {}) {
+  if (detail.core_version) return `core_version=${detail.core_version}`;
+  if (detail.source === 'dashboard') return `source=dashboard http=${detail.http_status} mode=${detail.session_mode} runtime=${detail.runtime} health_source=${detail.health_source} health=${detail.health}`;
   if (detail.status_file) return `status_file=${detail.status_file}`;
   const parts = [
     `state=${detail.state}`,
@@ -437,14 +462,14 @@ export function createGatedOnlineReporter({ reportAgentOnline, gate, isDisabled 
   };
 }
 
-/** Default wiring against the activity monitor's on-disk state. */
-export function createDefaultReadinessGate({ options } = {}) {
-  const zylosDir = process.env.ZYLOS_DIR || path.join(process.env.HOME || os.homedir(), 'zylos');
+/** Core 1.x reads Dashboard; Core 0.x retains the activity monitor file wiring. */
+export function createDefaultReadinessGate({ options, env = process.env, fetch = globalThis.fetch } = {}) {
+  const zylosDir = env.ZYLOS_DIR || path.join(env.HOME || os.homedir(), 'zylos');
   const monitorDir = path.join(zylosDir, 'activity-monitor');
   const statusFile = path.join(monitorDir, 'agent-status.json');
   const foregroundFile = path.join(monitorDir, 'foreground-session.json');
   const procFile = path.join(monitorDir, 'proc-state.json');
-  const codexHome = process.env.CODEX_HOME || path.join(process.env.HOME || os.homedir(), '.codex');
+  const codexHome = env.CODEX_HOME || path.join(env.HOME || os.homedir(), '.codex');
   const readCodexSession = createCodexSessionReader({ codexHome, zylosDir });
 
   // These files are rewritten atomically every second; a torn read is expected
@@ -459,6 +484,11 @@ export function createDefaultReadinessGate({ options } = {}) {
   };
 
   return createReadinessGate({
+    readCoreVersion: () => installedCoreVersion({ env }),
+    readDashboardReadiness: () => evaluateDashboardReadiness({
+      runtime: readZylosRuntime(zylosDir, { defaultRuntime: 'claude' }),
+      readProbe: () => readDashboardProbe({ fetch, port: getDashboardPort({ zylosDir }) }),
+    }),
     readStatus: () => {
       try {
         if (!existsSync(statusFile)) return null;

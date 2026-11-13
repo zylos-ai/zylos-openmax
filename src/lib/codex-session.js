@@ -54,12 +54,13 @@ const FOREGROUND_SOURCES = new Set(['cli', 'vscode']);
  * `runtime`). `null` when unknown — callers treat that as "not Codex" and keep
  * the original behavior.
  */
-export function readZylosRuntime(zylosDir, { fsImpl = fs } = {}) {
+export function readZylosRuntime(zylosDir, { fsImpl = fs, defaultRuntime = null } = {}) {
   try {
     const cfg = JSON.parse(fsImpl.readFileSync(path.join(zylosDir, '.zylos', 'config.json'), 'utf8'));
-    return typeof cfg?.runtime === 'string' ? cfg.runtime : null;
-  } catch {
-    return null;
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) return null;
+    return typeof cfg.runtime === 'string' ? cfg.runtime : cfg.runtime === undefined ? defaultRuntime : null;
+  } catch (error) {
+    return error?.code === 'ENOENT' ? defaultRuntime : null;
   }
 }
 

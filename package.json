@@ -6,7 +6,7 @@
   "main": "src/comm-bridge.js",
   "scripts": {
     "start": "node src/comm-bridge.js",
-    "test": "node --test"
+    "test": "node --test $(find src scripts hooks -name '*.test.js')"
   },
   "repository": {
     "type": "git",

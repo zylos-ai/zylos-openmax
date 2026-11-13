@@ -558,6 +558,14 @@ test('没有 verdict 时整段省略而不是编造', async () => {
   assert.ok(!('readiness' in h.puts[0].payload), 'readiness 应当整段缺席');
 });
 
+test('an asynchronous readiness source is resolved before building the metrics payload', async () => {
+  const verdict = { ready: true, observable: true, stage: 'ready', reason: 'ready' };
+  const h = makeHarness({ dashboardApiKey: 'zylos_ak_x', evaluateReadiness: async () => verdict });
+  await h.reporter();
+  assert.equal(h.puts.length, 1);
+  assert.deepEqual(h.puts[0].payload.readiness, verdict);
+});
+
 // 默认（未注入）也不能凭空产生这个字段 —— 门禁关闭的部署走的就是这条路。
 test('未注入 evaluateReadiness 时不产生该字段', async () => {
   const h = makeHarness({ dashboardApiKey: 'zylos_ak_x' });
