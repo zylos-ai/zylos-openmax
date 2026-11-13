@@ -57,7 +57,7 @@ import { findPendingQuestion } from './lib/pending-question.js';
 import { createConnectResultQueue, CONNECT_RESULT_RESEND_INTERVAL_MS } from './lib/connect-result-queue.js';
 import { createOnlineReporter } from './lib/online-report.js';
 import { createMarketClientEnsurer } from './lib/market-client-ensure.js';
-import { createDefaultReadinessGate, createGatedOnlineReporter, readinessReport } from './lib/agent-readiness.js';
+import { createDefaultReadinessGate, createGatedOnlineReporter } from './lib/agent-readiness.js';
 import { createReadinessTrigger } from './lib/readiness-trigger.js';
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
@@ -70,7 +70,7 @@ import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, ensureReplay, setLimits } from './lib/group-history.js';
 import { gatherRecentContext } from './lib/conversation-context.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
-import { createMetricsReporter } from './lib/metrics-reporter.js';
+import { createMetricsReporter, createMetricsReadinessEvaluator } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
 import TaskRegistry from './lib/task-registry.js';
 import { startLogRotation } from './lib/log-rotate.js';
@@ -2667,14 +2667,12 @@ if (config.metricsReport?.enabled !== false) {
   const reportMetrics = createMetricsReporter(activeOrgConfigs, {
     log, warn,
     dashboardApiKey: config.metricsReport?.dashboardApiKey || '',
-    // Same gate that holds the online-report, so the platform's chat gate and
-    // our own onboarding trigger can never disagree about whether this agent
-    // is ready. Disabling the gate omits the field rather than reporting a
-    // made-up verdict.
-    evaluateReadiness: () => (
-      loadConfig().agent?.readiness_gate?.enabled === false
-        ? null
-        : readinessReport(readinessGate.evaluate())
+    // Share the availability snapshot with onboarding. Core 1.x onboarding can
+    // additionally wait for runtime authentication without changing this probe
+    // result. Disabling the gate continues to omit the field.
+    evaluateReadiness: createMetricsReadinessEvaluator(
+      readinessGate,
+      () => loadConfig().agent?.readiness_gate?.enabled === false,
     ),
   });
   tasks.register('metrics-report', reportMetrics, METRICS_REPORT_INTERVAL_MS, {

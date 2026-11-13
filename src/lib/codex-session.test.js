@@ -119,6 +119,14 @@ test('readZylosRuntime: 读 .zylos/config.json 的 runtime；缺失/坏文件 �
   assert.equal(readZylosRuntime(h.zylosDir), null);
 });
 
+test('an explicit default runtime applies only to missing or unset configuration', () => {
+  const missing = { readFileSync() { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); } };
+  assert.equal(readZylosRuntime('/isolated', { fsImpl: missing, defaultRuntime: 'claude' }), 'claude');
+  for (const [text, expected] of [['{}', 'claude'], ['{"runtime":"codex"}', 'codex'], ['{"runtime":null}', null], ['null', null], ['broken', null]]) {
+    assert.equal(readZylosRuntime('/isolated', { fsImpl: { readFileSync: () => text }, defaultRuntime: 'claude' }), expected);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Day-folder / file-name pruning and realpath matching.
 // ---------------------------------------------------------------------------

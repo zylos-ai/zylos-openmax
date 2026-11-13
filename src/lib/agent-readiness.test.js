@@ -565,3 +565,43 @@ test('claude runtime: 旧 foreground 记录 ⇒ 仍是 session_predates_launch�
   assert.equal(v.reason, 'session_predates_launch');
   assert.deepEqual(Object.keys(v.detail), ['state', 'idle_seconds', 'health', 'status_age_ms', 'session_observed_at', 'runtime_launch_at', 'session_in_launch', 'proc_alive', 'session_id']);
 });
+
+test('Core 1 readiness uses an async source without consulting any legacy session evidence', async () => {
+  const unavailable = () => { throw new Error('legacy source must not be read'); };
+  const gate = createReadinessGate({
+    readCoreVersion: () => '1.0.0-beta.8',
+    readDashboardReadiness: async () => ({ ready: true, reason: 'ready', detail: {} }),
+    readStatus: unavailable, readForeground: unavailable, readProc: unavailable,
+    readRuntime: unavailable, readCodexSession: unavailable,
+    now: () => NOW, sleep: unavailable,
+  });
+  assert.equal((await gate.evaluate()).ready, true);
+  assert.equal((await gate.waitUntilReady()).timedOut, false);
+});
+
+test('unknown Core version does not fall back to stale legacy files', () => {
+  const gate = createReadinessGate({ readCoreVersion: () => null,
+    readStatus: () => { throw new Error('must not read legacy status'); } });
+  assert.deepEqual(readinessReport(gate.evaluate()), {
+    ready: false, observable: false, stage: 'runtime_down', reason: 'core_version_unknown',
+  });
+});
+
+test('an onboarding blocker delays only onboarding and retains the existing fail-open cap', async () => {
+  let clock = NOW;
+  const gate = createReadinessGate({
+    readCoreVersion: () => '1.0.0',
+    readDashboardReadiness: async () => ({ ready: true, reason: 'ready',
+      onboardingReason: 'health_auth_failed', detail: {} }),
+    now: () => clock, sleep: async ms => { clock += ms; },
+    options: () => ({ maxWaitMs: 5, pollMs: 2 }),
+  });
+  assert.deepEqual(readinessReport(await gate.evaluate()), {
+    ready: true, observable: true, stage: 'ready', reason: 'ready',
+  });
+  const result = await gate.waitUntilReady();
+  assert.equal(result.ready, false);
+  assert.equal(result.reason, 'health_auth_failed');
+  assert.equal(result.timedOut, true);
+  assert.equal(result.failOpenAllowed, true);
+});

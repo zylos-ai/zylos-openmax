@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Core 1.x readiness reporting requires **Core 1.0.0-beta.9 or later**, which provides the Dashboard readiness probe. Do not merge or release this change before that Core version is published; publish Core first, then this component. Core 0.x keeps its legacy file-based checks.
+
+### Fixed
+
+- Read Core 1.x readiness from the local Dashboard probe. A reachable HTTP 200 response without the `ready` field reports `probe_unsupported` at `runtime_down`; connection failures remain `dashboard_unavailable`. The existing onboarding timeout and fail-open policy are unchanged.
+
 ## [2.34.0] - 2026-11-12
 
 ### Upgrade notes

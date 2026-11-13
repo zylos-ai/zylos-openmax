@@ -39,9 +39,15 @@ import { promisify } from 'util';
 import { putForOrg as realPutForOrg, apiPath as realApiPath } from './client.js';
 import { updateConfig } from './config.js';
 import { createCgroupCollector } from './cgroup-resources.js';
+import { getDashboardPort } from './dashboard-address.js';
+import { readinessReport } from './agent-readiness.js';
+
+// Shared service adapter: resolve the gate before projecting its four fields.
+export function createMetricsReadinessEvaluator(gate, isDisabled) {
+  return async () => (isDisabled() ? null : readinessReport(await gate.evaluate()));
+}
 
 const HOME = process.env.HOME;
-const DASHBOARD_CONFIG_PATH = path.join(HOME, 'zylos/components/dashboard/config.json');
 const FETCH_TIMEOUT_MS = 5000;
 
 // openmax's own package version, read once at module load (not per tick). Same
@@ -92,15 +98,6 @@ export function selectPrimaryOrg(activeOrgConfigs) {
   if (!primary) return null;
   const [slug, orgConfig] = primary;
   return { slug, orgConfig, selfMemberId: orgConfig.self?.member_id };
-}
-
-function getDashboardPort() {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(DASHBOARD_CONFIG_PATH, 'utf8'));
-    return cfg.port || 3470;
-  } catch {
-    return 3470;
-  }
 }
 
 // NOTE: `installed_channels` reporting was removed. In the connect/disconnect
@@ -353,7 +350,7 @@ export function createMetricsReporter(activeOrgConfigs, {
       loggedCgroupFallback = true;
       log?.('cgroup unavailable (non-containerized agent) — reporting node-level CPU/memory from dashboard');
     }
-    const payload = buildPayload(dashboard, cg, evaluateReadiness());
+    const payload = buildPayload(dashboard, cg, await evaluateReadiness());
     if (!payload) return;
 
     // Report to the PRIMARY org only (the first enabled org, i.e. the first
