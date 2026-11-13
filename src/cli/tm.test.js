@@ -817,6 +817,46 @@ test('project and organization issue searches forward query', async () => {
   assert.equal(issueRequest.url, '/api/v1/issues?query=beta');
 });
 
+const issueListCommands = [
+  { command: 'issue.list', params: {}, path: '/api/v1/issues' },
+  { command: 'issue.list_in_project', params: { projectId: 'project-1' }, path: '/api/v1/projects/project-1/issues' },
+];
+
+for (const { command, params, path: listPath } of issueListCommands) {
+  test(`${command} sends include_automation=true only when includeAutomation is true`, async () => {
+    const included = await captureRequest(command, { ...params, includeAutomation: true });
+    assert.equal(included.method, 'GET');
+    assert.equal(included.url, `${listPath}?include_automation=true`);
+
+    const absent = await captureRequest(command, params);
+    assert.equal(absent.url, listPath);
+    assert.equal(new URL(absent.url, 'http://cli.test').searchParams.has('include_automation'), false);
+
+    const explicitFalse = await captureRequest(command, { ...params, includeAutomation: false });
+    assert.equal(explicitFalse.url, listPath);
+  });
+
+  test(`${command} combines includeAutomation with archive, status and page params`, async () => {
+    const request = await captureRequest(command, {
+      ...params,
+      includeAutomation: true,
+      includeArchived: true,
+      statuses: 'accepted,terminated',
+      orderBy: 'created_at:desc',
+      pageSize: 100,
+    });
+    const url = new URL(request.url, 'http://cli.test');
+    assert.equal(url.pathname, listPath);
+    assert.deepEqual(Object.fromEntries(url.searchParams), {
+      statuses: 'accepted,terminated',
+      include_archived: 'true',
+      include_automation: 'true',
+      page_size: '100',
+      order_by: 'created_at:desc',
+    });
+  });
+}
+
 test('issue.create preserves backlog presence and requires owner and lead', async () => {
   const backlogRequest = await captureRequest('issue.create', {
     projectId: 'project-1',
