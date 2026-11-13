@@ -836,6 +836,41 @@ for (const { command, params, path: listPath } of issueListCommands) {
     assert.equal(explicitFalse.url, listPath);
   });
 
+  test(`${command} rejects a non-boolean includeAutomation before HTTP`, async () => {
+    let requests = 0;
+    const server = createServer((req, res) => {
+      requests++;
+      req.resume();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [], request_id: 'test-request' }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      for (const invalid of ['true', 1, null, 'false', 0]) {
+        const result = await new Promise(resolve => execFile(process.execPath,
+          [cliPath, command, JSON.stringify({ ...params, includeAutomation: invalid })], {
+            env: {
+              ...process.env,
+              COCO_API_URL: `http://127.0.0.1:${server.address().port}`,
+              COCO_API_PREFIX: '/api/v1',
+              COCO_AUTH_TOKEN: 'cli-contract-token',
+              COCO_USER_TOKEN: '',
+              COCO_ORG_ID: 'org-test',
+              COCO_RPC_LOG: '0',
+            },
+            timeout: 5000,
+          }, (error, stdout, stderr) => resolve({ error, stderr })));
+        assert.ok(result.error, `${JSON.stringify(invalid)} must be rejected`);
+        const { error } = JSON.parse(result.stderr);
+        assert.match(error, new RegExp(`^${command.replace('.', '\\.')} includeAutomation must be true or false`));
+        assert.ok(error.endsWith(`got ${JSON.stringify(invalid)}`), error);
+      }
+      assert.equal(requests, 0);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
   test(`${command} combines includeAutomation with archive, status and page params`, async () => {
     const request = await captureRequest(command, {
       ...params,

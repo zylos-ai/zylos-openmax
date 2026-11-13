@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`issue.list` / `issue.list_in_project` take an optional `includeAutomation`.** The Issue list endpoints leave out automation-run Issues unless the request sets `include_automation=true`, and the CLI never sent it, so an Agent could not list those Issues and could read an empty list as "the automation produced nothing". `includeAutomation: true` now sends `include_automation=true`; without it nothing is sent and the request is unchanged. `references/tm-operations.md` states the default and says to check with `includeAutomation` (or `event-binding.runs`) before concluding a run produced nothing.
+- **`issue.list` / `issue.list_in_project` take an optional `includeAutomation`.** The Issue list endpoints leave out automation-run Issues unless the request sets `include_automation=true`, and the CLI never sent it, so an Agent could not list those Issues and could read an empty list as "the automation produced nothing". `includeAutomation: true` now sends `include_automation=true`; without it (or with `false`) nothing is sent and the request is unchanged. Any other value (such as the string `"true"`, `1` or `null`) is rejected before the request instead of silently returning the default list. `references/tm-operations.md` states the default, notes that the project list still leaves out runs of automations attached to no project, and says to check with `includeAutomation` (or `event-binding.runs`) before concluding a run produced nothing.
 
 ### Fixed
 

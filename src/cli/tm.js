@@ -80,8 +80,13 @@ function cursorParams(p) {
 
 // The Issue list endpoints exclude automation-run Issues unless
 // include_automation=true; send it only when explicitly requested so the
-// default request is unchanged.
+// default request is unchanged. Anything other than a JSON boolean is
+// rejected before the request: silently dropping "true" or 1 would return
+// the default list, which excludes exactly the Issues that were asked for.
 function issueListParams(p) {
+  if (Object.hasOwn(p, 'includeAutomation') && typeof p.includeAutomation !== 'boolean') {
+    throw new Error(`${command} includeAutomation must be true or false (a JSON boolean), got ${JSON.stringify(p.includeAutomation)}`);
+  }
   return {
     status:             p.status,
     statuses:           p.statuses,
@@ -526,7 +531,7 @@ PROJECT  (all ✅ on contract-v2)
 ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{pid}/issues/{id})
   issue.list             {status?, statuses?, priority?, includeArchived?, includeAutomation?, query?, page?, pageSize?, orderBy?}
   issue.list_in_project  {projectId, status?, statuses?, priority?, includeArchived?, includeAutomation?, query?, page?, pageSize?, orderBy?}
-                         # automation-run Issues are excluded unless includeAutomation=true
+                         # automation-run Issues are excluded unless includeAutomation=true; includeAutomation: true|false only
   issue.get              {id}
   issue.create           {projectId, title, leadAgentId,
                           ownerMemberId, priority?,
