@@ -19,9 +19,12 @@ async function fixture(t, respond) {
   const env = { HOME: path.join(root, 'home'), ZYLOS_DIR: path.join(root, 'home/zylos'),
     PM2_HOME: path.join(root, 'pm2'), TMPDIR: path.join(root, 'tmp') };
   let server;
+  const controller = new AbortController(), waits = new Set();
   t.after(async () => {
     try {
+      controller.abort();
       server?.closeAllConnections();
+      await Promise.allSettled([...waits]);
       if (server?.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     } finally { fs.rmSync(root, { recursive: true, force: true }); }
   });
@@ -35,7 +38,7 @@ async function fixture(t, respond) {
   server = http.createServer((request, response) => { requests.push(request.url); respond(request, response); });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  return { port: server.address().port, requests, env, server, root };
+  return { port: server.address().port, requests, env, server, root, controller, waits, testSignal: t.signal };
 }
 
 const payload = (overrides = {}) => ({ ready: true, reason: null, session_mode: 'multi', session_running: null,
@@ -50,7 +53,19 @@ function wireCore(f, version = '1.0.0-beta.8') {
   fs.writeFileSync(path.join(f.env.ZYLOS_DIR, '.zylos/config.json'), JSON.stringify({ runtime: 'claude' }));
   fs.writeFileSync(path.join(f.env.ZYLOS_DIR, 'components/dashboard/config.json'), JSON.stringify({ port: f.port }));
   fs.writeFileSync(path.join(f.env.ZYLOS_DIR, 'activity-monitor/agent-status.json'), JSON.stringify({ state: 'busy', health: 'auth_failed' }));
-  return createDefaultReadinessGate({ env: f.env });
+  // Short injected settings bound a faulty readiness policy too. Teardown
+  // aborts in-flight HTTP, then drains every real wait before removing files.
+  const gate = createDefaultReadinessGate({ env: f.env,
+    options: () => ({ max_wait_ms: 30, poll_ms: 5 }),
+    fetch: (url, init) => fetch(url, { ...init,
+      signal: AbortSignal.any([init.signal, f.controller.signal, f.testSignal]) }),
+  });
+  return { ...gate, waitUntilReady(...args) {
+    const wait = gate.waitUntilReady(...args);
+    f.waits.add(wait);
+    wait.finally(() => f.waits.delete(wait)).catch(() => {});
+    return wait;
+  } };
 }
 
 test('the existing Dashboard configured port serves the unauthenticated readiness request', async t => {
@@ -86,10 +101,13 @@ for (const mode of ['no-headers', 'incomplete-body']) {
   });
 }
 
-test('default Core 1 wiring reports a sessionless multi instance ready and releases onboarding', async t => {
+test('default Core 1 wiring reports a sessionless multi instance ready and releases onboarding', { timeout: 3000 }, async t => {
   const f = await fixture(t, (_request, response) => response.end(JSON.stringify(payload())));
   const gate = wireCore(f);
   assert.deepEqual(readinessReport(await gate.evaluate()), { ready: true, observable: true, stage: 'ready', reason: 'ready' });
+  const result = await gate.waitUntilReady();
+  assert.equal(result.timedOut, false);
+  assert.equal(result.polls, 0, 'onboarding must not enter its wait loop');
   let reports = 0;
   const online = createGatedOnlineReporter({ gate, reportAgentOnline: async () => { reports++; } });
   await online({ slug: 'isolated-org' });
@@ -223,7 +241,7 @@ for (const runtime of [null, 'unknown']) {
 
 for (const source of ['missing', 'unreadable']) {
   // Same isolated HTTP/default-wiring boundary and lifecycle as fixture above.
-  test(`default Core 1 sessionless multi instance releases onboarding with ${source} health`, async t => {
+  test(`default Core 1 sessionless multi instance releases onboarding with ${source} health`, { timeout: 3000 }, async t => {
     const f = await fixture(t, (_request, response) => response.end(JSON.stringify(payload({
       runtime_health: { codex: { source, health: null } },
     }))));
@@ -233,8 +251,44 @@ for (const source of ['missing', 'unreadable']) {
     const result = await gate.waitUntilReady();
     assert.equal(result.ready, true);
     assert.equal(result.timedOut, false);
+    assert.equal(result.polls, 0, 'missing health must release without polling');
     let reports = 0;
     await createGatedOnlineReporter({ gate, reportAgentOnline: async () => { reports++; } })({ slug: 'isolated-org' });
     assert.equal(reports, 1);
   });
 }
+
+// Same default factory/HTTP boundary: exercise an actual blocked policy path
+// with short settings, so cleanup is also covered when readiness does wait.
+test('default Core 1 health waiting uses the bounded fixture budget and drains at teardown', { timeout: 3000 }, async t => {
+  const f = await fixture(t, (_request, response) => response.end(JSON.stringify(payload({
+    runtime_health: { claude: { source: 'record', health: 'auth_failed' } },
+  }))));
+  const gate = wireCore(f), started = performance.now();
+  const result = await gate.waitUntilReady();
+  const elapsed = performance.now() - started;
+  assert.equal(result.timedOut, true);
+  assert.equal(result.reason, 'health_auth_failed');
+  assert.equal(result.failOpenAllowed, true);
+  assert.ok(elapsed < 1000, `blocked default wiring exceeded the test budget: ${elapsed}ms`);
+  assert.equal(f.waits.size, 0);
+  t.diagnostic(`bounded default wait completed in ${elapsed.toFixed(1)}ms`);
+});
+
+// Same HTTP/default-wiring boundary; abort the in-flight request exactly as
+// fixture teardown does on assertion failure or the test timeout.
+test('default Core 1 pending onboarding work settles after fixture cancellation', { timeout: 3000 }, async t => {
+  let entered;
+  const requested = new Promise(resolve => { entered = resolve; });
+  const f = await fixture(t, () => entered());
+  const gate = wireCore(f), started = performance.now();
+  const pending = gate.waitUntilReady();
+  await requested;
+  assert.equal(f.waits.size, 1);
+  f.controller.abort();
+  const result = await pending;
+  assert.equal(result.timedOut, true);
+  assert.equal(result.reason, 'dashboard_unavailable');
+  assert.equal(f.waits.size, 0);
+  assert.ok(performance.now() - started < 1000, 'cancelled wait must settle within the short fixture budget');
+});
