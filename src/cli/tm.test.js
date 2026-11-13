@@ -817,6 +817,81 @@ test('project and organization issue searches forward query', async () => {
   assert.equal(issueRequest.url, '/api/v1/issues?query=beta');
 });
 
+const issueListCommands = [
+  { command: 'issue.list', params: {}, path: '/api/v1/issues' },
+  { command: 'issue.list_in_project', params: { projectId: 'project-1' }, path: '/api/v1/projects/project-1/issues' },
+];
+
+for (const { command, params, path: listPath } of issueListCommands) {
+  test(`${command} sends include_automation=true only when includeAutomation is true`, async () => {
+    const included = await captureRequest(command, { ...params, includeAutomation: true });
+    assert.equal(included.method, 'GET');
+    assert.equal(included.url, `${listPath}?include_automation=true`);
+
+    const absent = await captureRequest(command, params);
+    assert.equal(absent.url, listPath);
+    assert.equal(new URL(absent.url, 'http://cli.test').searchParams.has('include_automation'), false);
+
+    const explicitFalse = await captureRequest(command, { ...params, includeAutomation: false });
+    assert.equal(explicitFalse.url, listPath);
+  });
+
+  test(`${command} rejects a non-boolean includeAutomation before HTTP`, async () => {
+    let requests = 0;
+    const server = createServer((req, res) => {
+      requests++;
+      req.resume();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: [], request_id: 'test-request' }));
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    try {
+      for (const invalid of ['true', 1, null, 'false', 0]) {
+        const result = await new Promise(resolve => execFile(process.execPath,
+          [cliPath, command, JSON.stringify({ ...params, includeAutomation: invalid })], {
+            env: {
+              ...process.env,
+              COCO_API_URL: `http://127.0.0.1:${server.address().port}`,
+              COCO_API_PREFIX: '/api/v1',
+              COCO_AUTH_TOKEN: 'cli-contract-token',
+              COCO_USER_TOKEN: '',
+              COCO_ORG_ID: 'org-test',
+              COCO_RPC_LOG: '0',
+            },
+            timeout: 5000,
+          }, (error, stdout, stderr) => resolve({ error, stderr })));
+        assert.ok(result.error, `${JSON.stringify(invalid)} must be rejected`);
+        const { error } = JSON.parse(result.stderr);
+        assert.match(error, new RegExp(`^${command.replace('.', '\\.')} includeAutomation must be true or false`));
+        assert.ok(error.endsWith(`got ${JSON.stringify(invalid)}`), error);
+      }
+      assert.equal(requests, 0);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
+  });
+
+  test(`${command} combines includeAutomation with archive, status and page params`, async () => {
+    const request = await captureRequest(command, {
+      ...params,
+      includeAutomation: true,
+      includeArchived: true,
+      statuses: 'accepted,terminated',
+      orderBy: 'created_at:desc',
+      pageSize: 100,
+    });
+    const url = new URL(request.url, 'http://cli.test');
+    assert.equal(url.pathname, listPath);
+    assert.deepEqual(Object.fromEntries(url.searchParams), {
+      statuses: 'accepted,terminated',
+      include_archived: 'true',
+      include_automation: 'true',
+      page_size: '100',
+      order_by: 'created_at:desc',
+    });
+  });
+}
+
 test('issue.create preserves backlog presence and requires owner and lead', async () => {
   const backlogRequest = await captureRequest('issue.create', {
     projectId: 'project-1',
