@@ -42,11 +42,13 @@ with no running sessions. HTTP 503 maps `supervisor_unavailable` to
 readiness fields and existing report/trigger intervals are unchanged.
 
 Onboarding additionally waits for the configured runtime's `auth_failed`, `down`
-or `unavailable` health. Missing/unreadable health records or an unknown runtime
-also wait, without asserting that login never occurred. The existing maximum
-wait still permits reporting afterward; `ok`, `rate_limited` and `recovering`
-release onboarding immediately. An explicitly absent single session does not
-fail open. Multi mode needs no session belonging to the current launch. No new
+or `unavailable` health explicitly reported by a health record. All other cases,
+including missing/unreadable records, an unknown runtime, `ok`, `rate_limited`
+and `recovering`, release onboarding immediately. Core writes records only on
+health transitions and treats missing records as ok; absence does not establish
+unhealthy status or login history. The existing maximum wait still permits
+reporting after an explicit health failure. An explicitly absent single session
+does not fail open. Multi mode needs no session belonging to the current launch. No new
 configuration, watcher, cache or persistent state is added.
 
 ## License

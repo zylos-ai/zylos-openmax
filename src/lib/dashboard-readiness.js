@@ -31,11 +31,9 @@ export async function evaluateDashboardReadiness({ readProbe = readDashboardProb
     return unavailable();
   }
   if (probe?.status !== 200 || body?.ready !== true) return unavailable();
-  // Missing/unreadable records do not establish whether login ever occurred.
-  // Defer onboarding on unknown health, but retain the existing fail-open cap.
-  const onboardingReason = health?.source === 'record' && ['ok', 'rate_limited', 'recovering'].includes(health.health)
-    ? null
-    : health?.source === 'record' && ['auth_failed', 'down', 'unavailable'].includes(health.health)
-      ? `health_${health.health}` : 'health_unknown';
+  // Only an explicit current-runtime failure delays onboarding. Core writes
+  // health records on transitions; absent records are normal on new instances.
+  const onboardingReason = health?.source === 'record' && ['auth_failed', 'down', 'unavailable'].includes(health.health)
+    ? `health_${health.health}` : null;
   return { ready: true, reason: 'ready', detail, ...(onboardingReason ? { onboardingReason } : {}) };
 }

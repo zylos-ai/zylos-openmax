@@ -147,13 +147,13 @@ for (const runtime of ['claude', 'codex']) for (const health of ['ok', 'auth_fai
 }
 
 for (const source of ['missing', 'unreadable']) {
-  test(`${source} health stays unknown without inventing login history`, async () => {
+  test(`${source} health releases onboarding without inventing login history`, async () => {
     const v = await evaluateDashboardReadiness({ runtime: 'claude',
       readProbe: async () => ({ status: 200, body: payload({ runtime_health: { claude: { source, health: null } } }) }) });
     assert.equal(v.ready, true);
     assert.equal(v.detail.health, null);
     assert.equal(v.detail.health_source, source);
-    assert.equal(v.onboardingReason, 'health_unknown');
+    assert.equal(v.onboardingReason, undefined);
   });
 }
 
@@ -167,11 +167,11 @@ for (const probe of [null, { status: 500, body: {} }, { status: 200, body: {} },
 }
 
 for (const [body, status, failOpen] of [
-  [payload({ runtime_health: { claude: { source: 'record', health: 'down' } } }), 200, true],
-  [payload({ runtime_health: { claude: { source: 'missing', health: null } } }), 200, true],
+  ...['auth_failed', 'down', 'unavailable'].map(health =>
+    [payload({ runtime_health: { claude: { source: 'record', health } } }), 200, true]),
   [payload({ ready: false, reason: 'session_not_running', session_mode: 'single', session_running: false }), 503, false],
 ]) {
-  test(`onboarding cap preserves ${failOpen ? 'fail-open for runtime health' : 'the single missing-session hold'} (${body.runtime_health.claude.source})`, async () => {
+  test(`onboarding cap preserves ${failOpen ? 'fail-open for runtime health' : 'the single missing-session hold'} (${body.runtime_health.claude.health})`, async () => {
     let now = 0, reports = 0;
     const gate = createReadinessGate({ readCoreVersion: () => '1.0.0',
       readDashboardReadiness: () => evaluateDashboardReadiness({ runtime: 'claude', readProbe: async () => ({ status, body }) }),
@@ -179,8 +179,62 @@ for (const [body, status, failOpen] of [
     const result = await gate.waitUntilReady();
     assert.equal(result.timedOut, true);
     assert.equal(result.failOpenAllowed, failOpen);
+    assert.equal(result.waitedMs, 4, 'existing cap stops before the next 2ms poll would exceed 5ms');
+    if (failOpen) assert.equal(result.reason, `health_${body.runtime_health.claude.health}`);
     const online = createGatedOnlineReporter({ gate, reportAgentOnline: async () => { reports++; } });
     await online({ slug: 'isolated-org' });
     assert.equal(reports, failOpen ? 1 : 0);
+  });
+}
+
+// Policy boundary: exercise the actual wait loop and online callback, with a
+// deterministic clock. Only explicit current-runtime failure may consume time.
+for (const runtime of ['claude', 'codex', null, 'unknown']) {
+  for (const health of [
+    { source: 'missing', health: null }, { source: 'unreadable', health: null },
+    ...['ok', 'rate_limited', 'recovering', 'unknown'].map(health => ({ source: 'record', health })),
+  ]) {
+    test(`onboarding immediately releases ${runtime ?? 'unset'} with ${health.source}/${health.health}`, async () => {
+      let now = 0, reports = 0, sleeps = 0;
+      const data = payload({ runtime_health: { claude: health, codex: health } });
+      const gate = createReadinessGate({ readCoreVersion: () => '1.0.0',
+        readDashboardReadiness: () => evaluateDashboardReadiness({ runtime, readProbe: async () => ({ status: 200, body: data }) }),
+        now: () => now, sleep: async ms => { sleeps++; now += ms; }, options: () => ({ maxWaitMs: 5, pollMs: 2 }) });
+      const result = await gate.waitUntilReady();
+      assert.equal(result.ready, true);
+      assert.equal(result.timedOut, false);
+      assert.equal(result.waitedMs, 0);
+      await createGatedOnlineReporter({ gate, reportAgentOnline: async () => { reports++; } })({ slug: 'isolated-org' });
+      assert.equal(reports, 1);
+      assert.equal(sleeps, 0);
+    });
+  }
+}
+
+for (const runtime of [null, 'unknown']) {
+  test(`an unrecognized runtime ${runtime} does not wait on another runtime's explicit failures`, async () => {
+    const v = await evaluateDashboardReadiness({ runtime, readProbe: async () => ({ status: 200, body: payload({
+      runtime_health: { claude: { source: 'record', health: 'auth_failed' }, codex: { source: 'record', health: 'down' } },
+    }) }) });
+    assert.equal(v.ready, true);
+    assert.equal(v.onboardingReason, undefined);
+  });
+}
+
+for (const source of ['missing', 'unreadable']) {
+  // Same isolated HTTP/default-wiring boundary and lifecycle as fixture above.
+  test(`default Core 1 sessionless multi instance releases onboarding with ${source} health`, async t => {
+    const f = await fixture(t, (_request, response) => response.end(JSON.stringify(payload({
+      runtime_health: { codex: { source, health: null } },
+    }))));
+    const gate = wireCore(f);
+    fs.writeFileSync(path.join(f.env.ZYLOS_DIR, '.zylos/config.json'), JSON.stringify({ runtime: 'codex' }));
+    assert.equal(fs.existsSync(path.join(f.env.ZYLOS_DIR, 'activity-monitor/foreground-session.json')), false);
+    const result = await gate.waitUntilReady();
+    assert.equal(result.ready, true);
+    assert.equal(result.timedOut, false);
+    let reports = 0;
+    await createGatedOnlineReporter({ gate, reportAgentOnline: async () => { reports++; } })({ slug: 'isolated-org' });
+    assert.equal(reports, 1);
   });
 }
