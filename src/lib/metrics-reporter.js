@@ -40,6 +40,12 @@ import { putForOrg as realPutForOrg, apiPath as realApiPath } from './client.js'
 import { updateConfig } from './config.js';
 import { createCgroupCollector } from './cgroup-resources.js';
 import { getDashboardPort } from './dashboard-address.js';
+import { readinessReport } from './agent-readiness.js';
+
+// Shared service adapter: resolve the gate before projecting its four fields.
+export function createMetricsReadinessEvaluator(gate, isDisabled) {
+  return async () => (isDisabled() ? null : readinessReport(await gate.evaluate()));
+}
 
 const HOME = process.env.HOME;
 const FETCH_TIMEOUT_MS = 5000;
