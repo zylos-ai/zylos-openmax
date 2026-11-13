@@ -306,3 +306,13 @@ test('default Core 1 identifies an unsupported readiness probe without disabling
   assert.equal(result.timedOut, true);
   assert.equal(result.failOpenAllowed, true);
 });
+
+for (const [status, body] of [[200, { ready: false }], [500, { status: 'error' }]]) {
+  test(`HTTP ${status} with ${JSON.stringify(body)} remains a Dashboard availability failure`, async () => {
+    const result = await evaluateDashboardReadiness({ readProbe: async () => ({ status, body }) });
+    assert.equal(result.reason, 'dashboard_unavailable');
+    assert.deepEqual(readinessReport(result), {
+      ready: false, observable: false, stage: 'runtime_down', reason: 'dashboard_unavailable',
+    });
+  });
+}
