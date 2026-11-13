@@ -30,6 +30,9 @@ export async function evaluateDashboardReadiness({ readProbe = readDashboardProb
     if (body.reason === 'session_not_running' && body.session_mode === 'single') return { ready: false, reason: body.reason, detail };
     return unavailable();
   }
+  if (probe?.status === 200 && body && typeof body === 'object' && !Array.isArray(body) && !Object.hasOwn(body, 'ready')) {
+    return { ready: false, reason: 'probe_unsupported', detail };
+  }
   if (probe?.status !== 200 || body?.ready !== true) return unavailable();
   // Only an explicit current-runtime failure delays onboarding. Core writes
   // health records on transitions; absent records are normal on new instances.

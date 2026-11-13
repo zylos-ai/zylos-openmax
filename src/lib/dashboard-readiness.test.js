@@ -44,7 +44,7 @@ async function fixture(t, respond) {
 const payload = (overrides = {}) => ({ ready: true, reason: null, session_mode: 'multi', session_running: null,
   runtime_health: { claude: { source: 'record', health: 'ok' }, codex: { source: 'missing', health: null } }, ...overrides });
 
-function wireCore(f, version = '1.0.0-beta.8') {
+function wireCore(f, version = '1.0.0-beta.9') {
   const core = path.join(f.root, 'core');
   fs.mkdirSync(core);
   fs.writeFileSync(path.join(core, 'package.json'), JSON.stringify({ name: 'zylos', version }));
@@ -291,4 +291,18 @@ test('default Core 1 pending onboarding work settles after fixture cancellation'
   assert.equal(result.reason, 'dashboard_unavailable');
   assert.equal(f.waits.size, 0);
   assert.ok(performance.now() - started < 1000, 'cancelled wait must settle within the short fixture budget');
+});
+
+// Same isolated default factory and HTTP boundary; a reachable old Dashboard
+// has no ready field, distinct from an actual connection failure above.
+test('default Core 1 identifies an unsupported readiness probe without disabling fail-open', { timeout: 3000 }, async t => {
+  const f = await fixture(t, (_request, response) => response.end(JSON.stringify({ status: 'ok', uptime: 100 })));
+  const gate = wireCore(f, '1.0.0-beta.8');
+  assert.deepEqual(readinessReport(await gate.evaluate()), {
+    ready: false, observable: false, stage: 'runtime_down', reason: 'probe_unsupported',
+  });
+  const result = await gate.waitUntilReady();
+  assert.equal(result.reason, 'probe_unsupported');
+  assert.equal(result.timedOut, true);
+  assert.equal(result.failOpenAllowed, true);
 });

@@ -28,13 +28,15 @@ Requires Node.js 20+.
 
 ## Readiness
 
-Core 1.x readiness comes from the unauthenticated local Dashboard endpoint
+Core 1.x readiness requires **Core 1.0.0-beta.9 or later** and comes from the
+unauthenticated local Dashboard endpoint
 `GET /api/health?probe=ready`. The port comes from the existing Dashboard
 `components/dashboard/config.json` (default 3470). Core's installed package
 version selects this source; Core 0.x retains the original monitor/session-file
 checks. Unknown versions and unavailable/invalid probes report not ready instead
 of falling back to obsolete files. Requests, including the response body, have
-a five-second timeout.
+a five-second timeout. A reachable HTTP 200 response without `ready` reports
+`probe_unsupported`; transport failures remain `dashboard_unavailable`.
 
 HTTP 200 reports the existing `ready` stage, including multi-session instances
 with no running sessions. HTTP 503 maps `supervisor_unavailable` to
