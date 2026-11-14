@@ -37,6 +37,8 @@ function cardDetail(bodyOver = {}) {
 }
 
 const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// Later lines of the quoted text continue indented by two spaces.
+const quoted = (s) => esc(s).replace(/\n/g, '\n  ');
 
 function render(q, excerptText) {
   const msg = {
@@ -61,9 +63,9 @@ test('card quoted: the parent full text is the structured expansion, not fallbac
     '',
     '[options] 只升 dashboard / 全部升级',
   ].join('\n'));
-  // An excerpt not found in it: <replying-to> keeps the full text.
+  // An excerpt not found in it: <replying-to> keeps the full text, later lines indented.
   const out = render(cardDetail(), '不在卡片里的一句');
-  assert.ok(out.includes(`<replying-to>\n[Bot]: ${esc(text)}\n</replying-to>`), out);
+  assert.ok(out.includes(`<replying-to>\n[Bot]: ${quoted(text)}\n</replying-to>`), out);
   assert.ok(!out.includes(FALLBACK), out);
 });
 
@@ -88,7 +90,7 @@ test('card quoted: a selection spanning several fields may stay unverified (acce
   // accepted; the assertion pins today's behaviour, it is not a requirement.
   for (const excerpt of ['dashboard 0.5.4 -> 0.5.5', '要升级哪些组件? 两个组件有新版本']) {
     const out = render(cardDetail(), excerpt);
-    assert.ok(out.includes(`<replying-to>\n[Bot]: ${esc(quotedMessageText(cardDetail()))}\n</replying-to>`), `${excerpt}: ${out}`);
+    assert.ok(out.includes(`<replying-to>\n[Bot]: ${quoted(quotedMessageText(cardDetail()))}\n</replying-to>`), `${excerpt}: ${out}`);
   }
 });
 

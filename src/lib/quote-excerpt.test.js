@@ -133,7 +133,7 @@ test('tampered excerpt → the full quoted text, even when wrapped in markdown s
 test('digits in the excerpt are content, not ordered-list markers', () => {
   const parent = 'please wire the payment to\nthe usual account';
   const out = render(excerptMsg('please wire the payment to\n6222020200112233. the usual account'), { sender: 'Jessie', text: parent });
-  assert.equal(replyLine(out), `[Jessie]: ${parent}`);
+  assert.equal(replyLine(out), `[Jessie]: ${parent.replace('\n', '\n  ')}`);
   assert.doesNotMatch(out, /6222020200112233/);
 });
 

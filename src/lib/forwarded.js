@@ -28,6 +28,8 @@
  * record that was such a copy is likewise said by the record's sender.
  */
 
+import { INDENT, indentBreaks, flattenBreaks } from './line-breaks.js';
+
 export const MAX_RECORDS = 100;
 export const MAX_RECORD_TEXT_CODE_POINTS = 1000;
 // The whole C4 envelope reaches c4-receive as ONE argv element, which Linux
@@ -109,21 +111,17 @@ function escapeText(s) {
   return String(s).replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Every line break a reader may honour: CR, LF, CRLF, VT, FF, NEL, U+2028, U+2029.
-const LINE_BREAKS = /(?:\r\n|[\r\n\v\f\u0085\u2028\u2029])+/g;
-const ONE_BREAK = /\r\n|[\r\n\v\f\u0085\u2028\u2029]/g;
 // Only the header, a record's own "<name>: " start and the "more" line begin at
 // column 0. Text from the message (a record body past its first line, every
 // fallback_text line) is indented two spaces, so it can never start a line
 // that reads as another record. Indenting rather than joining keeps multi-line
 // text (lists, code) readable; the spaces are in the string before its bytes
-// are counted, so the budget includes them.
-const INDENT = '  ';
-export const indentBreaks = (s) => s.replace(ONE_BREAK, `\n${INDENT}`);
+// are counted, so the budget includes them. The break set and both helpers
+// are shared with message.js (line-breaks.js).
 
 // A name sits at the start of its line: no line breaks, capped length.
 function nameOf(v) {
-  const chars = [...String(v).replace(LINE_BREAKS, ' ')];
+  const chars = [...flattenBreaks(v)];
   const s = chars.length > MAX_NAME_CODE_POINTS ? `${chars.slice(0, MAX_NAME_CODE_POINTS).join('')}…` : chars.join('');
   return escapeText(s);
 }

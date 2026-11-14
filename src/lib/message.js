@@ -38,7 +38,8 @@ import { extractWorkReferences, formatWorkReferenceContext } from './work-refere
 import { formatConnectorPreference } from './connector-preference.js';
 import { formatWfContext } from './wf-context.js';
 import { verifiedExcerptText } from './quote-excerpt.js';
-import { formatForwardedChatHistory, chatHistoryBudget, indentBreaks } from './forwarded.js';
+import { formatForwardedChatHistory, chatHistoryBudget } from './forwarded.js';
+import { indentBreaks, flattenBreaks, joinLines } from './line-breaks.js';
 
 const TYPE_TAG = { dm: '[OPENMAX DM]', group: '[OPENMAX GROUP]', thread: '[OPENMAX THREAD]' };
 const VALID_TYPES = new Set(['dm', 'group', 'thread']);
@@ -162,15 +163,18 @@ function attrValue(v) {
   return String(v).replace(/[<>"\r\n\u2028\u2029]/g, '').trim();
 }
 
+// A group / thread context line, `[<name>]: <text>`: the name is sanitized
+// like the sender line's and later lines of the text are indented, so neither
+// can start a line that reads as another context line or a sender line.
 function formatContextLine(m) {
-  const name = escapeXml(
+  const name = escapeXml(senderLineName(
        m.senderName
     || m.sender_display_name
     || m.user_name
     || m.sender_id
     || 'unknown',
-  );
-  const text = escapeXml(m.content ?? m.text ?? m.content_text ?? '');
+  ));
+  const text = indentBreaks(escapeXml(m.content ?? m.text ?? m.content_text ?? ''));
   return `[${name}]: ${text}`;
 }
 
@@ -179,13 +183,17 @@ function formatContextLine(m) {
 // `（` / `）` (still readable, but never the id's delimiters, so the only ASCII
 // parenthesized token on the line is the real id), and any line break (CR, LF,
 // CRLF, VT, FF, NEL, U+2028, U+2029) becomes one space, so the name cannot
-// start a new sender line.
+// start a new sender line. Also used for the names on context lines and in
+// <replying-to>.
 function senderLineName(name) {
-  return String(name)
+  return flattenBreaks(String(name)
     .replace(/\(/g, '\uFF08')
-    .replace(/\)/g, '\uFF09')
-    .replace(/(?:\r\n|[\r\n\v\f\u0085\u2028\u2029])+/g, ' ');
+    .replace(/\)/g, '\uFF09'));
 }
+
+// A one-line value in the attachment tail after </current-message> (path,
+// artifact id, file name, content type): escaped, line breaks become a space.
+const tailValue = (v) => escapeXml(flattenBreaks(v));
 
 // Shown for an inbound attachment that cannot be fetched (no artifact id, or
 // its download failed), so the message is not rendered as an empty one.
@@ -240,18 +248,15 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // A System Member body is flattened onto one line so all of it follows
   // `<name> said:` — a multi-line platform event otherwise leaves its later
   // lines (e.g. a `ref: event=…` token) bare, where they read as pasted data.
-  // Human / agent content keeps its lines, but every line after the first is
-  // indented two spaces (as merged-forward records are), so text from the body
-  // can never start a line that reads as another `<name> (<id>) said:`.
+  // Every line break counts (line-breaks.js). Human / agent content is left
+  // exactly as sent.
   const rawContent = String(current?.content ?? '');
-  const safeContent = systemSender
-    ? escapeXml(rawContent.replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ').trim())
-    : indentBreaks(escapeXml(rawContent));
+  const safeContent = escapeXml(systemSender ? joinLines(rawContent) : rawContent);
 
   const baseTag = TYPE_TAG[type];
   // baseTag is like "[OPENMAX GROUP]" — inject ":<name>" before the closing "]".
   const tag = (type === 'group' || type === 'thread')
-    ? `${baseTag.slice(0, -1)}:${escapeXml(groupName || conv?.name || 'unknown')}]`
+    ? `${baseTag.slice(0, -1)}:${escapeXml(flattenBreaks(groupName || conv?.name || 'unknown'))}]`
     : baseTag;
 
   // Tag on its own line; the `<name> said: ...` attribution now lives inside
@@ -260,7 +265,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // Org header. The org NAME is UNTRUSTED display data; the org_id is the
   // AUTHORITATIVE routing key. Keep them apart so a malicious name can't forge
   // a competing id (see SKILL.md hard rule):
-  //   - display text carries the NAME ONLY, escapeXml'd AND with CR/LF
+  //   - display text carries the NAME ONLY, escapeXml'd AND with line breaks
   //     neutralized so it cannot break out of its line;
   //   - the org_id is emitted as a dedicated self-closing <org-context>
   //     element on its own line. Because escapeXml turns the name's `<`/`>`
@@ -269,7 +274,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // When org_id is absent, no <org-context> element is emitted and the display
   // falls back to name-or-id as before.
   const displayLabel = orgName
-    ? escapeXml(orgName).replace(/[\r\n]/g, ' ')
+    ? escapeXml(flattenBreaks(orgName))
     : (orgId ? escapeXml(orgId) : '');
   const orgSuffix = displayLabel ? ` (org: ${displayLabel})` : '';
   let header = `${tag}${orgSuffix}\n`;
@@ -381,14 +386,15 @@ Before handling the current message, invoke the openmax skill and follow it. For
   }
 
   if (quotedContent && !(threadContext && threadContext.length > 0)) {
-    const qsender = escapeXml(quotedContent.sender || quotedContent.senderName || 'unknown');
+    const qsender = escapeXml(senderLineName(quotedContent.sender || quotedContent.senderName || 'unknown'));
     const fullText = quotedContent.text || quotedContent.content || '';
     // A quoted excerpt (part of the message) replaces the full text, but only
     // when it is found in that text: the excerpt is written by the quoting
-    // client, and this line names the quoted author. Later lines are indented
-    // so the excerpt cannot start a line of its own.
+    // client, and this line names the quoted author. Later lines of either are
+    // indented and the name is sanitized like the sender line's, so the quote
+    // cannot start a line of its own.
     const excerptText = verifiedExcerptText(quotedExcerpt, fullText);
-    const qtext = excerptText !== null ? indentBreaks(escapeXml(excerptText)) : escapeXml(fullText);
+    const qtext = indentBreaks(escapeXml(excerptText ?? fullText));
     parts.push(`<replying-to>\n[${qsender}]: ${qtext}\n</replying-to>\n\n`);
   }
 
@@ -430,25 +436,25 @@ When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
   if (Array.isArray(current?.mediaItems) && current.mediaItems.length > 0) {
     for (const item of current.mediaItems) {
       if (item.localPath) {
-        line += ` ---- ${kind}: ${escapeXml(item.localPath)}`;
-        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
+        line += ` ---- ${kind}: ${tailValue(item.localPath)}`;
+        if (item.fileName) line += ` name="${tailValue(item.fileName)}"`;
       } else if (item.id) {
-        line += ` ---- artifact_id: ${escapeXml(item.id)}`;
-        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
+        line += ` ---- artifact_id: ${tailValue(item.id)}`;
+        if (item.fileName) line += ` name="${tailValue(item.fileName)}"`;
         if (item.downloadFailed) line += ` ${UNAVAILABLE_ATTACHMENT}`;
       } else {
         // No artifact id to fetch it by: say so, so the message is never blank.
         line += ` ---- ${UNAVAILABLE_ATTACHMENT}`;
-        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
-        if (item.contentType) line += ` content_type="${escapeXml(item.contentType)}"`;
+        if (item.fileName) line += ` name="${tailValue(item.fileName)}"`;
+        if (item.contentType) line += ` content_type="${tailValue(item.contentType)}"`;
       }
     }
   } else if (current?.mediaLocalPath) {
-    line += ` ---- ${kind}: ${escapeXml(current.mediaLocalPath)}`;
-    if (current.mediaFileName) line += ` name="${escapeXml(current.mediaFileName)}"`;
+    line += ` ---- ${kind}: ${tailValue(current.mediaLocalPath)}`;
+    if (current.mediaFileName) line += ` name="${tailValue(current.mediaFileName)}"`;
   } else if (current?.mediaId) {
-    line += ` ---- artifact_id: ${escapeXml(current.mediaId)}`;
-    if (current.mediaFileName) line += ` name="${escapeXml(current.mediaFileName)}"`;
+    line += ` ---- artifact_id: ${tailValue(current.mediaId)}`;
+    if (current.mediaFileName) line += ` name="${tailValue(current.mediaFileName)}"`;
   }
   if (chatHistory) {
     const before = parts.slice(0, historySlot).join('');
