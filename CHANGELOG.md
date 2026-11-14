@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The owner is DMed again when a connection needs re-authorization (#189).** `sendOwnerReauthDm` read the opened DM's id as `id` / `conversation_id`, but `POST /api/v1/conversations/dm` returns `{ conversation: { id, … }, created }`, so the id was always missing: the DM was never posted and the bridge only logged `reauth owner DM not sent (no-conversation)`. It now reads `conversation.id`, the same field the auto-upgrade owner notices read from that endpoint. The unit test's mock returns the real shape, and a new test checks that the old top-level shapes post nothing.
 - Read Core 1.x readiness from the local Dashboard probe. A reachable HTTP 200 response without the `ready` field reports `probe_unsupported` at `runtime_down`; connection failures remain `dashboard_unavailable`. The existing onboarding timeout and fail-open policy are unchanged.
 
 ## [2.34.0] - 2026-11-12

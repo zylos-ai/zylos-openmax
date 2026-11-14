@@ -306,7 +306,8 @@ test('sendOwnerReauthDm: opens the owner DM then posts a reauth message (create_
   const calls = [];
   const post = async (orgId, urlPath, body) => {
     calls.push({ orgId, path: urlPath, body });
-    if (urlPath.endsWith('/conversations/dm')) return { id: 'cv-owner-1' };
+    // The real POST /conversations/dm payload (after postForOrg unwraps `data`).
+    if (urlPath.endsWith('/conversations/dm')) return { conversation: { id: 'cv-owner-1' }, created: false };
     return { id: 'msg-1' };
   };
   const orgConfig = { slug: 'acme', org_id: 'org-1', owner: { member_id: 'owner-9' } };
@@ -323,6 +324,22 @@ test('sendOwnerReauthDm: opens the owner DM then posts a reauth message (create_
   assert.equal(calls[1].path, '/api/v1/conversations/cv-owner-1/messages');
   assert.ok(calls[1].body.content.body.text.includes('github'), 'message must name the app');
   assert.ok(calls[1].body.content.body.text.includes('重新授权'), 'message must prompt re-authorization');
+});
+
+test('sendOwnerReauthDm: reads the DM id only from `conversation.id` (#189)', async () => {
+  const orgConfig = { slug: 'acme', org_id: 'org-1', owner: { member_id: 'owner-9' } };
+  // Shapes the create-DM endpoint does not return: a top-level id was the old
+  // read, which left every reauth DM unsent. None may be mistaken for the DM.
+  for (const dmResponse of [{ id: 'cv-owner-1' }, { conversation_id: 'cv-owner-1' }, { conversation: {} }, null]) {
+    const calls = [];
+    const post = async (orgId, urlPath, body) => {
+      calls.push({ orgId, path: urlPath, body });
+      return urlPath.endsWith('/conversations/dm') ? dmResponse : { id: 'msg-1' };
+    };
+    const r = await sendOwnerReauthDm(orgConfig, { connectionId: 'conn-r', provider: 'github' }, { post });
+    assert.deepEqual(r, { sent: false, reason: 'no-conversation' }, JSON.stringify(dmResponse));
+    assert.equal(calls.length, 1, 'no message may be posted without a conversation id');
+  }
 });
 
 test('sendOwnerReauthDm: no owner bound → no DM sent, no HTTP calls', async () => {
