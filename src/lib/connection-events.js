@@ -547,9 +547,11 @@ export async function sendOwnerReauthDm(orgConfig, info = {}, { post = postForOr
   const orgId = orgConfig.org_id;
   const app = info.provider || info.applicationId || 'a connection';
   // Open (or fetch the existing) owner DM. cws-core derives caller + org from the
-  // JWT, so only peer_member_id is sent.
-  const conv = await post(orgId, apiPath('/conversations/dm'), { peer_member_id: ownerId });
-  const conversationId = conv?.id || conv?.conversation_id;
+  // JWT, so only peer_member_id is sent. postForOrg has already unwrapped the
+  // `data` envelope; the payload is `{ conversation: { id, ... }, created }`
+  // (the same read as the owner notices in auto-upgrade.js).
+  const res = await post(orgId, apiPath('/conversations/dm'), { peer_member_id: ownerId });
+  const conversationId = res?.conversation?.id;
   if (!conversationId) return { sent: false, reason: 'no-conversation' };
   const text = `你的 ${app} 连接已失效，需要重新授权，请到连接页点「重新授权」。`;
   await post(orgId, apiPath(`/conversations/${conversationId}/messages`), {
