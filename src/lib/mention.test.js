@@ -141,6 +141,44 @@ test('a name match at the very end of the string (no trailing character at all) 
   assert.deepEqual(buildMentions('ping @luna.coco', CONV), [{ type: 'member', member_id: LUNA_ID }]);
 });
 
+// #149: `.` / `_` / `-` only continue a name when a letter or digit follows
+// them. A trailing one (the sentence-final period of "cc @Ann.") ended in a
+// silently missing mention, and the text was judged unresolvable on every send.
+test('a name followed by a trailing "." / "_" / "-" still mentions (sentence-final punctuation)', () => {
+  const conv = 'conv-trailing-sep';
+  const ANN_ID = '019f0000-0000-0000-0000-0000000000a1';
+  recordParticipants(conv, { name: 'Ann', memberId: ANN_ID });
+  const ann = [{ type: 'member', member_id: ANN_ID }];
+  for (const text of ['hi @Ann.', 'hi @Ann-', 'hi @Ann_', 'cc @Ann. thanks', '@Ann.', 'see @Ann...', 'hi @Ann.\nnext line', 'hi @Ann._']) {
+    assert.deepEqual(buildMentions(text, conv), ann, text);
+    assert.equal(needsRosterHydration(text, conv), false, text);
+  }
+  // Canonicalized like any other bounded match; the trailing "." is kept.
+  assert.equal(resolveMentions('cc @ann.', conv), 'cc @Ann.');
+});
+
+test('a trailing separator does not weaken the prefix rule: a separator followed by a letter/digit still continues the name', () => {
+  const conv = 'conv-trailing-sep-prefix';
+  recordParticipants(conv, { name: 'luna', memberId: LUNA_ID });
+  // ".coco" / "-2" / "_x" continue the name, so a bare "luna" is not mentioned,
+  // also when the longer name itself ends a sentence.
+  for (const text of ['@luna.coco.', '@luna-2 hi', '@luna_x', 'cc @luna.coco. thanks']) {
+    assert.equal(buildMentions(text, conv), undefined, text);
+    assert.equal(resolveMentions(text, conv), text, text);
+  }
+  const conv2 = 'conv-trailing-sep-prefix-2';
+  recordParticipants(conv2, { name: 'luna.coco', memberId: LUNA_ID });
+  assert.equal(buildMentions('@luna.cocoa.', conv2), undefined);
+  assert.deepEqual(buildMentions('ping @luna.coco.', conv2), [{ type: 'member', member_id: LUNA_ID }]);
+});
+
+test('the broadcast sentinels also fire before a trailing "." / "-"', () => {
+  assert.deepEqual(buildMentions('cc @Everyone.', CONV), [{ type: 'all' }]);
+  assert.deepEqual(buildMentions('cc @所有人.', CONV), [{ type: 'all' }]);
+  assert.deepEqual(buildMentions('cc @All agents-', CONV), [{ type: 'all_agents' }]);
+  assert.equal(buildMentions('cc @Everyone.else', CONV), undefined);
+});
+
 test('buildMentions recognizes the @所有人/@Everyone broadcast sentinel (type: all)', () => {
   assert.deepEqual(buildMentions('@所有人 请查收', CONV), [{ type: 'all' }]);
   assert.deepEqual(buildMentions('@Everyone please check', CONV), [{ type: 'all' }]);

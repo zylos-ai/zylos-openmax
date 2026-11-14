@@ -161,14 +161,21 @@ const AT = '[@＠]';
 // prefix of a longer identifier — otherwise a registry containing only
 // "luna" would spuriously fire on "@luna.coco please check" (the ".coco"
 // continuation makes it a different, longer name, not "luna" plus trailing
-// punctuation). Require whatever follows the match to NOT be a
-// letter/digit/./_/- (i.e. not something that could still be part of the
-// same identifier); anything else (whitespace, most punctuation, end of
-// string) is a valid boundary. \p{L}/\p{N} (Unicode letter/number, `u`
-// flag) so this holds for CJK display names too, not just ASCII ones.
+// punctuation). So whatever follows the match must not continue the same
+// identifier: not a letter/digit, and not a `.` / `_` / `-` that is itself
+// followed by a letter/digit. A separator with nothing name-like after it
+// ends the name — "cc @luna.coco." (a sentence-final period), "@luna-" or
+// "@luna_" still mention, "@luna.cocoa" still does not mention "luna.coco"
+// (#149). Anything else (whitespace, most punctuation, end of string) is a
+// valid boundary. \p{L}/\p{N} (Unicode letter/number, `u` flag) so this
+// holds for CJK display names too, not just ASCII ones. Shared by every
+// matcher below, so resolution, canonicalization, the broadcast sentinels and
+// the roster-hydration check all agree on where a name ends.
+const NAME_END = '(?![\\p{L}\\p{N}]|[._-][\\p{L}\\p{N}])';
+
 function nameMatches(name, text) {
   const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(AT + esc + '(?![\\p{L}\\p{N}._-])', 'iu').test(text);
+  return new RegExp(AT + esc + NAME_END, 'iu').test(text);
 }
 
 // Shared "match known registered names, longest-first, against `@name`
@@ -204,7 +211,7 @@ export function resolveMentions(text, conversationId) {
     // canonicalized "luna.coco" would also rewrite the "@luna.coco" prefix
     // embedded inside an unrelated longer word (e.g. "@luna.cocoa"). Also
     // normalizes a fullwidth "＠" trigger to the plain ASCII "@" here.
-    out = out.replace(new RegExp(AT + esc + '(?![\\p{L}\\p{N}._-])', 'giu'), '@' + name);
+    out = out.replace(new RegExp(AT + esc + NAME_END, 'giu'), '@' + name);
   }
   return out;
 }
@@ -220,8 +227,8 @@ export function resolveMentions(text, conversationId) {
 // "@EveryoneElse", "@All agentship", "@所有agent123", "@所有人类" would all
 // wrongly upgrade to a real broadcast wake. Also accepts the fullwidth "＠"
 // trigger (see AT above) alongside the ASCII "@".
-const ALL_AGENTS_RE = new RegExp(AT + '(?:所有agent|all agents)(?![\\p{L}\\p{N}._-])', 'iu');
-const ALL_RE = new RegExp(AT + '(?:所有人|everyone)(?![\\p{L}\\p{N}._-])', 'iu');
+const ALL_AGENTS_RE = new RegExp(AT + '(?:所有agent|all agents)' + NAME_END, 'iu');
+const ALL_RE = new RegExp(AT + '(?:所有人|everyone)' + NAME_END, 'iu');
 
 /**
  * Build the structured `mentions` array (cws-core MentionInput[] shape:
@@ -301,7 +308,7 @@ export function needsRosterHydration(text, conversationId) {
   let remaining = s.replace(ALL_AGENTS_RE_G, ' ').replace(ALL_RE_G, ' ');
   for (const { name } of matchedEntries(s, conversationId).filter((e) => e.memberId)) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    remaining = remaining.replace(new RegExp(AT + esc + '(?![\\p{L}\\p{N}._-])', 'giu'), ' ');
+    remaining = remaining.replace(new RegExp(AT + esc + NAME_END, 'giu'), ' ');
   }
   // A fresh (non-global) matcher so lingering lastIndex state can't skew test().
   return new RegExp(AT + '[\\p{L}\\p{N}._-]+', 'u').test(remaining);
