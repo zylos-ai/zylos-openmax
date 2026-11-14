@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`COCO_RPC_LOG=0` now also silences the `[token]` lines on stdout (#264).** The token manager printed `[token] exchange …`, `refresh …`, `ws-ticket …` and `auto-filled orgs.<slug>.self.member_id …` with an unconditional `console.log`, so a CLI call whose token was refreshed during the call (within 60 s of expiry, about once per token lifetime) wrote them on stdout before its JSON result, and a caller parsing that output as JSON failed even with `COCO_RPC_LOG=0`. They now follow the `[rpc]` switches: stdout only when `COCO_RPC_LOG` is not `0` (the default, so the comm-bridge log is unchanged), and appended to `COCO_RPC_LOG_FILE` when it is set. Failures (`refresh … failed`, `writeDisk … failed`) still go to stderr.
 - Read Core 1.x readiness from the local Dashboard probe. A reachable HTTP 200 response without the `ready` field reports `probe_unsupported` at `runtime_down`; connection failures remain `dashboard_unavailable`. The existing onboarding timeout and fail-open policy are unchanged.
 
 ## [2.34.0] - 2026-11-12
