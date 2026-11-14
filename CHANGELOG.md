@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An outbound `@name` followed by `.`, `_` or `-` mentions again (#149).** The name matcher treated any `.` / `_` / `-` after a name as part of a longer name (so a registered `luna` is not woken by `@luna.coco`), which also caught a sentence-final period: `cc @Ann.` was sent with no `mentions` entry, nobody was notified, and the text was judged unresolvable on every send (a roster fetch per `ROSTER_FETCH_TTL_MS` that could never resolve it). A separator now continues a name only when a letter or digit follows it: `@Ann.`, `@Ann-`, `@Ann_` and `@Ann...` mention Ann, while `@luna.coco`, `@luna-2` and `@luna_x` still do not mention a bare `luna`. The same boundary applies to text canonicalization, the `@所有人` / `@Everyone` / `@所有Agent` / `@All agents` sentinels and the roster-hydration check.
 - Read Core 1.x readiness from the local Dashboard probe. A reachable HTTP 200 response without the `ready` field reports `probe_unsupported` at `runtime_down`; connection failures remain `dashboard_unavailable`. The existing onboarding timeout and fail-open policy are unchanged.
 
 ## [2.34.0] - 2026-11-12
