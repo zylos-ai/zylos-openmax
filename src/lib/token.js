@@ -115,6 +115,16 @@ function appendRpcLine(line) {
   } catch { /* best-effort */ }
 }
 
+// `[token]` progress lines (exchange / refresh / ws-ticket / member_id
+// auto-fill) go through the same two sinks as the `[rpc]` lines. A CLI verb
+// that refreshes its token mid-call would otherwise print them on stdout ahead
+// of its JSON result, even with COCO_RPC_LOG=0, and break callers that parse
+// that output (#264). Failures are not routed here: they stay on console.warn.
+function tokenLog(line) {
+  if (rpcLogStdoutEnabled()) console.log(line);
+  appendRpcLine(line);
+}
+
 async function corePost(endpoint, body, bearerToken) {
   const url = `${resolveCoreUrl()}${endpoint}`;
   const headers = {
@@ -204,7 +214,7 @@ function writeBackMemberId(orgId, jwt) {
       if (!o.self) o.self = { member_id: '', name: '' };
       if (!o.self.member_id) {
         o.self.member_id = memberId;
-        console.log(`${LOG} auto-filled orgs.${slug}.self.member_id from JWT claims: ${memberId}`);
+        tokenLog(`${LOG} auto-filled orgs.${slug}.self.member_id from JWT claims: ${memberId}`);
       }
     });
     return;
@@ -255,7 +265,7 @@ export async function exchange(orgIdArg) {
     const apiKey = resolveApiKey();
     if (!apiKey) throw new Error('token.exchange: config.agent.api_key not set');
     const body = oid ? { org_id: oid } : {};
-    console.log(`${LOG} exchange org=${oid || '(identity-only)'}`);
+    tokenLog(`${LOG} exchange org=${oid || '(identity-only)'}`);
     const raw = await corePost('/auth/agent/token', body, apiKey);
     const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
     const state = {
@@ -267,7 +277,7 @@ export async function exchange(orgIdArg) {
     _stateByOrg.set(oid, state);
     writeDisk(oid, state);
     if (oid) writeBackMemberId(oid, state.access_token);
-    console.log(`${LOG} exchange ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
+    tokenLog(`${LOG} exchange ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
     return state.access_token;
   });
 }
@@ -283,7 +293,7 @@ export async function refresh(orgIdArg) {
     try {
       const body = oid ? { refresh_token: s.refresh_token, org_id: oid }
                        : { refresh_token: s.refresh_token };
-      console.log(`${LOG} refresh org=${oid || '(identity-only)'}`);
+      tokenLog(`${LOG} refresh org=${oid || '(identity-only)'}`);
       const raw = await corePost('/auth/refresh', body, s.access_token);
       const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
       const state = {
@@ -295,7 +305,7 @@ export async function refresh(orgIdArg) {
       _stateByOrg.set(oid, state);
       writeDisk(oid, state);
       if (oid) writeBackMemberId(oid, state.access_token);
-      console.log(`${LOG} refresh ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
+      tokenLog(`${LOG} refresh ok org=${oid || '(identity-only)'} exp=${new Date(state.access_token_expires_at).toISOString()}`);
       return state.access_token;
     } catch (err) {
       console.warn(`${LOG} refresh(${oid || '_identity'}) failed, re-exchanging with api_key:`, err.message);
@@ -336,11 +346,11 @@ export async function getWsTicket(orgIdArg) {
   const oid = resolveOrgId(orgIdArg);
   if (!oid) throw new Error('token.getWsTicket: org_id required (no default org configured)');
   const accessToken = await getAccessToken(oid);
-  console.log(`${LOG} ws-ticket org=${oid}`);
+  tokenLog(`${LOG} ws-ticket org=${oid}`);
   const raw = await corePost('/auth/ws-ticket', { org_id: oid }, accessToken);
   const d = (raw && typeof raw === 'object' && raw.data) ? raw.data : raw;
   if (!d.ticket) throw new Error('token.getWsTicket: server returned no ticket');
-  console.log(`${LOG} ws-ticket ok org=${oid}`);
+  tokenLog(`${LOG} ws-ticket ok org=${oid}`);
   return d.ticket;
 }
 
