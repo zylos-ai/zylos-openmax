@@ -117,6 +117,7 @@ test('🔴 can_mention_all false refuses the send with a clear error — nothing
   assert.equal(posts.length, 0);
   assert.equal(failure.status, 403);
   assert.match(failure.error, /broadcast mention \(\{type:"all_agents"\}\) is not allowed/);
+  assert.equal(failure.code, 'mention_all_not_allowed');
   assert.match(failure.error, /can_mention_all is false/);
   assert.match(failure.error, /Nothing was sent/);
 });
@@ -132,6 +133,7 @@ test('🔴 server ErrMentionAllNotAllowed (403) surfaces as the same clear error
   assert.deepEqual(posts[0].body.mentions, [{ type: 'all' }]);
   assert.equal(failure.status, 403);
   assert.match(failure.error, /broadcast mention \(\{type:"all"\}\) is not allowed/);
+  assert.equal(failure.code, 'mention_all_not_allowed');
   assert.match(failure.error, /the server refused it \(mention all not allowed\)/);
 });
 
@@ -143,6 +145,7 @@ test('an unrelated 403 on a broadcast send is passed through as-is', async () =>
   assert.equal(ok, false);
   assert.equal(failure.status, 403);
   assert.equal(failure.error, 'observer cannot send');
+  assert.equal('code' in failure, false);
 });
 
 test('a failed can_mention_all lookup warns and sends — the server still decides', async () => {
@@ -152,6 +155,16 @@ test('a failed can_mention_all lookup warns and sends — the server still decid
   );
   assert.equal(ok, true, stderr);
   assert.match(stderr, /could not check can_mention_all/);
+  assert.deepEqual(posts[0].body.mentions, [{ type: 'all' }]);
+});
+
+test('a conversation without can_mention_all warns and sends — the server still decides', async () => {
+  const { ok, posts, stderr } = await send(
+    { content: '请查收', mentions: [{ type: 'all' }] },
+    { conversation: { status: 200, body: { id: CONV, type: 'group' } } },
+  );
+  assert.equal(ok, true, stderr);
+  assert.match(stderr, /did not report can_mention_all/);
   assert.deepEqual(posts[0].body.mentions, [{ type: 'all' }]);
 });
 

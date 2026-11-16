@@ -457,6 +457,9 @@ async function assertMayBroadcast(params, mentions, verb) {
     throw mentionAllNotAllowedError(verb, params.conversationId, types,
       'can_mention_all is false (only a group allows it, and its @all policy may limit it to the owner/admins)');
   }
+  if (typeof conv?.can_mention_all !== 'boolean') {
+    console.warn(`[${verb}] conversation ${params.conversationId} did not report can_mention_all; sending, the server decides`);
+  }
 }
 
 function rethrowMentionAllNotAllowed(err, params, mentions, verb) {
@@ -1523,6 +1526,7 @@ async function main() {
   } catch (err) {
     const payload = { error: err.message };
     if (err.status) payload.status = err.status;
+    if (err.code) payload.code = err.code;
     const fieldErrors = err.body?.error?.errors;
     if (Array.isArray(fieldErrors) && fieldErrors.length > 0) payload.errors = fieldErrors;
     console.error(JSON.stringify(payload));
