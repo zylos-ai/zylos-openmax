@@ -289,7 +289,9 @@ async function fetchSelfMember(org) {
  * required for a mention to actually wake its target; cws-comm does not
  * parse @-mentions out of text itself. Pass `params.mentions` explicitly
  * (array of `{type, member_id}`, or plain member_id strings) to override
- * auto-detection.
+ * auto-detection. A broadcast (`{type:"all"}` / `{type:"all_agents"}`) is
+ * only ever sent from an explicit `params.mentions` — body text such as
+ * "@所有人" is plain text.
  *
  * Caller can pass:
  *   - string                                            → text/markdown auto-detect
@@ -407,6 +409,62 @@ async function hydrateRoster(params) {
   } catch {
     /* best-effort: fall back to whatever the registry already knew */
   }
+}
+
+// A broadcast — MentionInput {type:"all"} (every human) / {type:"all_agents"}
+// (every Agent) — is sent ONLY when the caller passes it in `mentions`; body
+// text such as "@所有人" never becomes one (see buildMentions). cws-comm refuses
+// a broadcast the sender may not use with ErrMentionAllNotAllowed (HTTP 403,
+// detail "mention all not allowed"): only a group conversation (a
+// sub-conversation follows its parent group), with the org flag on and the
+// sender's role allowed by the group's mention_all_policy. GET
+// /conversations/{id} returns that same caller-perspective answer as
+// can_mention_all, so it is checked first and a refusal says why. Never
+// downgraded: the mention is not dropped and the message is not sent without it.
+const BROADCAST_MENTION_TYPES = new Set(['all', 'all_agents']);
+const MENTION_ALL_NOT_ALLOWED_RE = /mention all not allowed/i;
+
+function broadcastMentionTypes(mentions) {
+  return Array.isArray(mentions)
+    ? mentions.map((m) => m?.type).filter((t) => BROADCAST_MENTION_TYPES.has(t))
+    : [];
+}
+
+function mentionAllNotAllowedError(verb, conversationId, types, why) {
+  return Object.assign(
+    new Error(`${verb}: broadcast mention (${types.map((t) => `{type:"${t}"}`).join(', ')}) is not allowed in conversation `
+      + `${conversationId} — ${why}. Nothing was sent. Remove the broadcast from mentions, or mention the `
+      + 'members you need individually ({type:"member", member_id}).'),
+    { status: 403, code: 'mention_all_not_allowed' },
+  );
+}
+
+// Refuse before sending when the conversation says this sender may not
+// broadcast. A failed lookup, or a backend without can_mention_all, warns and
+// lets the send go: cws-comm still enforces the rule, and its refusal is turned
+// into the same error by rethrowMentionAllNotAllowed below.
+async function assertMayBroadcast(params, mentions, verb) {
+  const types = broadcastMentionTypes(mentions);
+  if (!types.length) return;
+  let conv;
+  try {
+    conv = await get(apiPath(`/conversations/${params.conversationId}`));
+  } catch (e) {
+    console.warn(`[${verb}] could not check can_mention_all for conversation ${params.conversationId} (${e.message}); sending, the server decides`);
+    return;
+  }
+  if (conv?.can_mention_all === false) {
+    throw mentionAllNotAllowedError(verb, params.conversationId, types,
+      'can_mention_all is false (only a group allows it, and its @all policy may limit it to the owner/admins)');
+  }
+}
+
+function rethrowMentionAllNotAllowed(err, params, mentions, verb) {
+  const types = broadcastMentionTypes(mentions);
+  if (types.length && err?.status === 403 && MENTION_ALL_NOT_ALLOWED_RE.test(err.message)) {
+    throw mentionAllNotAllowedError(verb, params.conversationId, types, `the server refused it (${err.message})`);
+  }
+  throw err;
 }
 
 // cws-comm caps an explicit fallback_text at 8192 UTF-8 bytes (domain
@@ -941,6 +999,9 @@ const COMMANDS = {
     const noRun = readNoRun(params, 'comm.send');
     const sourceMessageId = readSourceMessageId(params, 'comm.send');
     const body = buildSendBody(params, extras);
+    // An explicit broadcast is checked against can_mention_all before any run
+    // claim or send (see assertMayBroadcast).
+    await assertMayBroadcast(params, body.mentions, 'comm.send');
     // Agent activity: a send into a conversation with a live run is that run's
     // reply, exactly like scripts/send.js — agent_run attached here
     // (never by the caller), claim keyed by this body's client_msg_id.
@@ -963,7 +1024,7 @@ const COMMANDS = {
       apiPath(`/conversations/${params.conversationId}/messages`),
       body,
       plan,
-    );
+    ).catch((e) => rethrowMentionAllNotAllowed(e, params, body.mentions, 'comm.send'));
     writeSentMarker(SENT_DIR, {
       conversationId: params.conversationId,
       messageId: sentMessageId(res),
@@ -1286,6 +1347,10 @@ Messages
                             #   one or a camel-case key is refused. Array content is refused.
                             #   All image/* → IMAGE message, otherwise FILE. Empty message refused.
                             # mentions auto-resolved from @name in text if omitted (array of member_id or {type,member_id})
+                            # broadcast ONLY via explicit mentions [{type:"all"}] (every human) / [{type:"all_agents"}]
+                            #   (every Agent); "@所有人"/"@所有Agent" in the text is plain text and wakes nobody.
+                            #   Checked against the conversation's can_mention_all first; refused (exit 1) when
+                            #   not allowed — never silently dropped
   comm.ask                  {conversationId, interactionType?, kind, askedOf?, meta?, noRun?, sourceMessageId?, ...card}
                             # THE entry for a question you intend to act on.
                             #   interactionType "form"   — choice form (select, then submit once):

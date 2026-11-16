@@ -10,9 +10,9 @@
  * the lark skill's sendText, which assembles mentions before splitMessage for
  * the same reason.
  *
- * Consequence: a broadcast sentinel (`@所有人` / `@所有Agent`) anywhere in the
- * text now applies to every chunk, and every chunk carries a mention of each
- * mentioned member.
+ * Consequence: every chunk carries a mention of each mentioned member. Body
+ * text such as `@所有人` / `@所有Agent` is never turned into a broadcast here
+ * (see buildMentions) — this reply path has no way to send one.
  */
 
 import { splitMessage } from './message.js';
@@ -33,7 +33,6 @@ export const MAX_MENTIONS_PER_MESSAGE = 200;
 export function planOutboundChunks(text, conversationId, maxLen) {
   let mentions = buildMentions(text, conversationId);
   if (mentions && mentions.length > MAX_MENTIONS_PER_MESSAGE) {
-    // Broadcast sentinels come first in buildMentions' output, so they survive.
     console.warn(`[send] ${mentions.length} mentions exceed the cws-comm limit of ${MAX_MENTIONS_PER_MESSAGE}; dropping the rest`);
     mentions = mentions.slice(0, MAX_MENTIONS_PER_MESSAGE);
   }

@@ -141,49 +141,33 @@ test('a name match at the very end of the string (no trailing character at all) 
   assert.deepEqual(buildMentions('ping @luna.coco', CONV), [{ type: 'member', member_id: LUNA_ID }]);
 });
 
-test('buildMentions recognizes the @所有人/@Everyone broadcast sentinel (type: all)', () => {
-  assert.deepEqual(buildMentions('@所有人 请查收', CONV), [{ type: 'all' }]);
-  assert.deepEqual(buildMentions('@Everyone please check', CONV), [{ type: 'all' }]);
+// Broadcast is explicit only: body text that reads like a broadcast label is
+// plain text and never yields {type:'all'} / {type:'all_agents'} — the same
+// contract as cws-fe (mentions come from composer chips, never from body text)
+// and cws-comm (never parses the body). A broadcast must be passed in
+// comm.send's `mentions` (see comm.send-broadcast.test.js).
+test('buildMentions never turns @所有人/@Everyone/@所有Agent/@All agents body text into a broadcast', () => {
+  for (const text of [
+    '@所有人 请查收', '@Everyone please check', 'cc @所有人', 'cc @Everyone!',
+    '@所有agent 请查收', '@所有Agent 请查收', '@All agents please check', 'cc @所有Agent,谢谢',
+    '＠所有人 请查收', '＠所有Agent 请查收', '＠Everyone please check',
+  ]) {
+    assert.equal(buildMentions(text, CONV), undefined, text);
+  }
 });
 
-test('buildMentions recognizes the @所有Agent/@All agents broadcast sentinel (type: all_agents)', () => {
-  assert.deepEqual(buildMentions('@所有agent 请查收', CONV), [{ type: 'all_agents' }]);
-  assert.deepEqual(buildMentions('@所有Agent 请查收', CONV), [{ type: 'all_agents' }]);
-  assert.deepEqual(buildMentions('@All agents please check', CONV), [{ type: 'all_agents' }]);
-});
-
-test('both broadcast sentinels can coexist on one message, and combine with a real member mention', () => {
+test('broadcast-looking body text next to a real member mention yields only the member', () => {
   recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
-  const result = buildMentions('@所有人 @所有agent also @luna.coco', CONV);
-  assert.deepEqual(result, [
-    { type: 'all' },
-    { type: 'all_agents' },
+  assert.deepEqual(buildMentions('@所有人 @所有agent also @luna.coco', CONV), [
+    { type: 'member', member_id: LUNA_ID },
+  ]);
+  assert.deepEqual(buildMentions('＠所有人 @luna.coco ＠所有Agent', CONV), [
     { type: 'member', member_id: LUNA_ID },
   ]);
 });
 
-test('ordinary text containing the plain English word "all" does not spuriously trigger a broadcast', () => {
+test('ordinary text containing the plain English word "all" yields no mention', () => {
   assert.equal(buildMentions('thanks all, that covers all the cases', CONV), undefined);
-});
-
-// Regression (P2, re-review): the broadcast sentinels need the same
-// post-label boundary as individual name matching — a longer word or an
-// ordinary suffix that merely starts with the sentinel label must not
-// upgrade to a real all/all_agents wake.
-test('a longer word starting with the sentinel label does not trigger a broadcast (ASCII)', () => {
-  assert.equal(buildMentions('@EveryoneElse should ignore this', CONV), undefined);
-  assert.equal(buildMentions('@All agentship is a real word apparently', CONV), undefined);
-});
-
-test('a longer word starting with the sentinel label does not trigger a broadcast (CJK)', () => {
-  assert.equal(buildMentions('@所有agent123 is not a real broadcast', CONV), undefined);
-  assert.equal(buildMentions('@所有人类的智慧', CONV), undefined); // "所有人" + "类" (a CJK letter char) continues the word
-});
-
-test('the broadcast sentinels still fire correctly right before end-of-string / punctuation, not just before a space', () => {
-  assert.deepEqual(buildMentions('cc @所有人', CONV), [{ type: 'all' }]);
-  assert.deepEqual(buildMentions('cc @Everyone!', CONV), [{ type: 'all' }]);
-  assert.deepEqual(buildMentions('cc @所有Agent,谢谢', CONV), [{ type: 'all_agents' }]);
 });
 
 // Regression: a fullwidth "＠" (U+FF20) is a common CJK-input-method typo
@@ -194,31 +178,14 @@ test('a fullwidth "＠" mentions an individual just like the ASCII "@"', () => {
   assert.deepEqual(buildMentions('＠luna.coco ping', CONV), [{ type: 'member', member_id: LUNA_ID }]);
 });
 
-test('a fullwidth "＠" triggers the broadcast sentinels just like the ASCII "@"', () => {
-  assert.deepEqual(buildMentions('＠所有人 请查收', CONV), [{ type: 'all' }]);
-  assert.deepEqual(buildMentions('＠所有Agent 请查收', CONV), [{ type: 'all_agents' }]);
-  assert.deepEqual(buildMentions('＠Everyone please check', CONV), [{ type: 'all' }]);
-});
-
 test('the fullwidth trigger keeps the same boundary-awareness as the ASCII one', () => {
   recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
   assert.equal(buildMentions('＠luna.cocoa is not luna.coco', CONV), undefined);
-  assert.equal(buildMentions('＠EveryoneElse should not broadcast', CONV), undefined);
 });
 
 test('resolveMentions canonicalizes a fullwidth "＠" trigger to the plain ASCII "@" in the output text', () => {
   recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
   assert.equal(resolveMentions('＠luna.coco hi', CONV), '@luna.coco hi');
-});
-
-test('individual and broadcast mentions can mix ASCII and fullwidth triggers on the same message', () => {
-  recordParticipants(CONV, { name: 'luna.coco', memberId: LUNA_ID });
-  const result = buildMentions('＠所有人 @luna.coco ＠所有Agent', CONV);
-  assert.deepEqual(result, [
-    { type: 'all' },
-    { type: 'all_agents' },
-    { type: 'member', member_id: LUNA_ID },
-  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -250,16 +217,16 @@ test('needsRosterHydration is quiet when there is no mention at all', () => {
   assert.equal(needsRosterHydration('just a plain message', conv), false);
 });
 
-test('needsRosterHydration ignores broadcast sentinels (they need no registry)', () => {
+test('needsRosterHydration ignores broadcast labels (plain text, not a member name)', () => {
   const conv = nextConv();
-  // A roster fetch for @所有Agent would be pure waste: the broadcast resolves
-  // by literal label, with no member_id lookup involved.
+  // A roster fetch for @所有Agent would be pure waste: it is no member's name,
+  // and body text never becomes a broadcast (no "unresolvable" warning either).
   assert.equal(needsRosterHydration('@所有Agent 集合', conv), false);
   assert.equal(needsRosterHydration('@所有人 集合', conv), false);
   assert.equal(needsRosterHydration('＠所有Agent 集合', conv), false);
 });
 
-test('needsRosterHydration still fires for a real name alongside a broadcast', () => {
+test('needsRosterHydration still fires for a real name alongside a broadcast label', () => {
   const conv = nextConv();
   assert.equal(needsRosterHydration('@所有Agent 另外 @newcomer 你也看下', conv), true);
 });
