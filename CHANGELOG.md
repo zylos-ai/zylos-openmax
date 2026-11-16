@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.34.1] - 2026-11-16
+
+### Fixed
+
+- **`@所有人` / `@所有Agent` in a message's text no longer wakes the whole conversation.** The plugin turned the body labels `@所有人` / `@Everyone` into a `{type:"all"}` mention and `@所有Agent` / `@All agents` into `{type:"all_agents"}`, so ordinary text (a quote, an example, a reply mentioning the label) broadcast to everyone. A broadcast is now sent only when passed explicitly in `comm.send`'s `mentions` (`[{"type":"all"}]` / `[{"type":"all_agents"}]`), as the web composer does (mentions come from its chips, never the text) and as cws-comm expects (it never parses the body). The label text stays plain text, with no roster fetch and no stderr hint. Individual `@name` resolution is unchanged. The plain `c4-send.js` reply path can no longer broadcast (it has no `mentions` slot).
+- **An explicit broadcast the sender may not use fails clearly instead of a bare 403.** Before sending a broadcast, `comm.send` reads the conversation's `can_mention_all` (`GET /conversations/{id}`); when it is false (not a group, or the group's @all policy excludes the sender), the send fails with `broadcast mention (...) is not allowed in conversation ...` (exit 1, `status: 403`) and nothing is sent. cws-comm's own refusal (`mention all not allowed`, 403) is reported the same way. The broadcast is never dropped to let the message through. If the lookup fails, the CLI warns and sends, and the server decides. `references/comm-operations.md` and SKILL.md updated.
+
 ## [2.34.0] - 2026-11-12
 
 ### Upgrade notes

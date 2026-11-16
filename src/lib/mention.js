@@ -209,40 +209,38 @@ export function resolveMentions(text, conversationId) {
   return out;
 }
 
-// Broadcast @所有人 / @所有Agent sentinels (cws-core MentionInput type="all" /
-// "all_agents" — "all" sweeps every HUMAN member, "all_agents" every AGENT
-// member; both may coexist on one message). Matched against the exact same
-// literal labels cws-fe's own composer recognizes (see cws-fe
-// chat-area/mentions.ts BROADCAST_MENTION_DISPLAY_NAMES) — deliberately NOT
-// a bare "@all"/"@all_agents" ASCII shorthand, which would false-positive on
-// any ordinary text containing the common word "all". Same post-label
-// boundary as nameMatches() (not just a substring test) — otherwise
-// "@EveryoneElse", "@All agentship", "@所有agent123", "@所有人类" would all
-// wrongly upgrade to a real broadcast wake. Also accepts the fullwidth "＠"
-// trigger (see AT above) alongside the ASCII "@".
-const ALL_AGENTS_RE = new RegExp(AT + '(?:所有agent|all agents)(?![\\p{L}\\p{N}._-])', 'iu');
-const ALL_RE = new RegExp(AT + '(?:所有人|everyone)(?![\\p{L}\\p{N}._-])', 'iu');
+// Broadcast @所有人 / @所有Agent labels — the exact literal labels cws-fe's
+// own composer shows on a broadcast chip (see cws-fe chat-area/mentions.ts
+// BROADCAST_MENTION_DISPLAY_NAMES), with the same post-label boundary as
+// nameMatches() and the fullwidth "＠" trigger (see AT above).
+//
+// These are NOT used to build a broadcast. A broadcast (cws-comm MentionInput
+// type "all" / "all_agents") is sent ONLY when the caller passes it explicitly
+// in `mentions` — the same contract as cws-fe, whose composer sends mentions
+// from chips and never from body text, and as cws-comm, which never parses the
+// body (message.proto MentionInput). Body text such as "@所有人" is plain text
+// and never wakes the whole conversation. The labels are kept only so
+// needsRosterHydration() can strip them (global: replace() only) and not treat
+// them as an unresolved @name.
+const ALL_AGENTS_RE_G = new RegExp(AT + '(?:所有agent|all agents)(?![\\p{L}\\p{N}._-])', 'giu');
+const ALL_RE_G = new RegExp(AT + '(?:所有人|everyone)(?![\\p{L}\\p{N}._-])', 'giu');
 
 /**
  * Build the structured `mentions` array (cws-core MentionInput[] shape:
- * `{type:'member', member_id}` for an individual, or `{type:'all'}` /
- * `{type:'all_agents'}` for a broadcast) for the outbound text: any `@name`
- * token that matches a known participant with a recorded member_id, plus
- * either broadcast sentinel if its exact literal label appears. Mirrors
- * cws-fe's `collectMentionInputs` contract: returns `undefined` — not an
- * empty array — when there's nothing to mention, so a no-mention send omits
- * the field entirely.
+ * `{type:'member', member_id}`) for the outbound text: any `@name` token that
+ * matches a known participant with a recorded member_id. Never yields a
+ * broadcast (`{type:'all'}` / `{type:'all_agents'}`): body text like "@所有人"
+ * stays plain text, and a broadcast must be passed explicitly in `mentions`.
+ * Mirrors cws-fe's `collectMentionInputs` contract: returns
+ * `undefined` — not an empty array — when there's nothing to mention, so a
+ * no-mention send omits the field entirely.
  *
  * @param {string} text
  * @param {string} conversationId
- * @returns {Array<{type:string, member_id?:string}>|undefined}
+ * @returns {Array<{type:string, member_id:string}>|undefined}
  */
 export function buildMentions(text, conversationId) {
   const out = [];
-  const s = String(text ?? '');
-  if (ALL_RE.test(s)) out.push({ type: 'all' });
-  if (ALL_AGENTS_RE.test(s)) out.push({ type: 'all_agents' });
-
   const seen = new Set();
   for (const { name, memberId } of matchedEntries(text, conversationId)) {
     if (!memberId || seen.has(memberId)) continue;
@@ -251,13 +249,6 @@ export function buildMentions(text, conversationId) {
   }
   return out.length ? out : undefined;
 }
-
-// Global twins of the broadcast matchers, for stripping every sentinel from a
-// string rather than just the first (the originals are single-shot `test()`
-// matchers, so they deliberately aren't global — a global regex carries
-// lastIndex state that would make repeated test() calls alternate).
-const ALL_AGENTS_RE_G = new RegExp(ALL_AGENTS_RE.source, 'giu');
-const ALL_RE_G = new RegExp(ALL_RE.source, 'giu');
 
 // A conservative `@token` scanner, used ONLY to decide whether the registry
 // looks incomplete — never to resolve anybody. Display names may contain
@@ -277,8 +268,10 @@ const MENTION_TOKEN_RE = new RegExp(AT + '([\\p{L}\\p{N}._-]+)', 'giu');
  * silently produces no mention at all. This predicate is the trigger for
  * filling that gap from the conversation roster — see recordRoster().
  *
- * Broadcast sentinels are stripped first: `@所有人` / `@所有Agent` resolve
- * without the registry, so they must never trigger a roster fetch.
+ * Broadcast labels are stripped first: `@所有人` / `@所有Agent` in the text is
+ * plain text (a broadcast is only ever sent explicitly), not a member
+ * name the roster could resolve, so it must never trigger a roster fetch or an
+ * "unresolvable @mention" warning.
  *
  * @param {string} text
  * @param {string} conversationId
@@ -295,7 +288,7 @@ export function needsRosterHydration(text, conversationId) {
   // a different member who has never spoken) — that prefix collision was a
   // false-negative that left "@test" silently unresolved forever. Stripping the
   // "@test11" span leaves "@test" standing, so it correctly triggers a fetch.
-  //   - broadcast sentinels (@所有人/@所有Agent) resolve without the registry;
+  //   - broadcast labels (@所有人/@所有Agent) are plain text, never a member;
   //   - any @name matchedEntries can already resolve to a member_id will become
   //     a real mention as-is.
   let remaining = s.replace(ALL_AGENTS_RE_G, ' ').replace(ALL_RE_G, ' ');

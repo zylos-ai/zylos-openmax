@@ -40,10 +40,10 @@ test('mentions spread across chunks are unioned onto every chunk', () => {
   }
 });
 
-test('a broadcast sentinel anywhere in the text applies to every chunk', () => {
-  const chunks = planOutboundChunks(`@所有人 请查收\n\n${'a'.repeat(80)}`, 'conv-350-all', 50);
+test('@所有人 / @所有Agent body text is plain text: no chunk carries a broadcast', () => {
+  const chunks = planOutboundChunks(`@所有人 @所有Agent 请查收\n\n${'a'.repeat(80)}`, 'conv-350-all', 50);
   assert.ok(chunks.length > 1);
-  for (const c of chunks) assert.deepEqual(c.mentions, [{ type: 'all' }]);
+  for (const c of chunks) assert.equal(c.mentions, undefined);
 });
 
 test('mentions stay undefined (not []) on every chunk when nothing resolves', () => {
@@ -60,7 +60,7 @@ test('a short message is one chunk with its mentions, text unchanged', () => {
   ]);
 });
 
-test('the mention set is capped at the cws-comm limit, broadcast sentinel kept', () => {
+test('the mention set is capped at the cws-comm limit; @所有人 text adds no broadcast', () => {
   const conv = 'conv-350-cap';
   const n = MAX_MENTIONS_PER_MESSAGE; // the registry itself keeps at most 200 names per conversation
   const names = [];
@@ -72,5 +72,6 @@ test('the mention set is capped at the cws-comm limit, broadcast sentinel kept',
   const text = `@所有人 ${names.map((x) => `@${x}`).join(' ')}`;
   const [chunk] = planOutboundChunks(text, conv, 100000);
   assert.equal(chunk.mentions.length, MAX_MENTIONS_PER_MESSAGE);
-  assert.deepEqual(chunk.mentions[0], { type: 'all' });
+  assert.equal(chunk.mentions.some((m) => m.type !== 'member'), false);
+  assert.deepEqual(chunk.mentions[0], { type: 'member', member_id: '00000000-0000-7000-8000-000000000000' });
 });
