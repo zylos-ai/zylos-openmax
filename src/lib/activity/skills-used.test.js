@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-  registerSkillTurn, buildSkillIdMap, scanTurnRecords, computeSkillsUsed, skillsUsedItem,
+  withSelectedCheck, registerSkillTurn, buildSkillIdMap, scanTurnRecords, computeSkillsUsed, skillsUsedItem,
   planSkillsUsed, withSkillsUsed, MAX_SKILLS_USED_IDS,
 } from './skills-used.js';
 import { encodeProjectDir } from './collector.js';
@@ -242,7 +242,7 @@ test('planSkillsUsed: nothing for a message that carried no skills item (not reg
 test('TC-U-08: only the first reply carries the item; a rejected first send releases it; a same-body retry gets the same item', () => {
   const host = makeHost();
   writeLog(host, [userRec(inbound()), skillRec('weekly-report')]);
-  registerSkillTurn({ sourceMessageId: S, conversationId: CONV, dir: host.stateDir });
+  registerSkillTurn({ sourceMessageId: S, conversationId: CONV, selectedSkillIds: ['local:weekly-report'], dir: host.stateDir });
   const deps = { dir: host.stateDir, homeDir: host.home, zylosDir: host.zylosDir, runStore: createRunStore({ dir: host.runsDir }) };
 
   // Another conversation's reply never takes it.
@@ -265,7 +265,7 @@ test('TC-U-08: only the first reply carries the item; a rejected first send rele
 
 test('planSkillsUsed on Codex: the item is still sent, complete=false and no data', () => {
   const host = makeHost({ runtime: 'codex' });
-  registerSkillTurn({ sourceMessageId: S, conversationId: CONV, dir: host.stateDir });
+  registerSkillTurn({ sourceMessageId: S, conversationId: CONV, selectedSkillIds: ['local:weekly-report'], dir: host.stateDir });
   const p = planSkillsUsed({ sourceMessageId: S, convId: CONV, bodyHash: 'h', dir: host.stateDir, homeDir: host.home, zylosDir: host.zylosDir });
   assert.deepEqual(p.item, { type: 'skills-used', audience: 'ui', attrs: { 'reply-to': S, complete: false } });
 });
@@ -294,4 +294,46 @@ test('a log not written since the message was registered is not read', () => {
   fs.utimesSync(p, old, old);
   assert.deepEqual(compute(host, { since: Date.now() }).reasons, ['inbound_not_found']);
   assert.equal(compute(host, { since: Date.now() - 120_000 }).complete, true);
+});
+
+// --- P2 (review R1): an early ack must not report a selected skill as unused ---
+
+function firstReply(host, selected) {
+  registerSkillTurn({ sourceMessageId: S, conversationId: CONV, selectedSkillIds: selected, dir: host.stateDir });
+  return planSkillsUsed({
+    sourceMessageId: S, convId: CONV, bodyHash: 'h', dir: host.stateDir, homeDir: host.home, zylosDir: host.zylosDir,
+    runStore: createRunStore({ dir: host.runsDir }),
+  });
+}
+
+test('R1-P2: ack before the selected skill is called → complete:false, no data (not 「没用到」)', () => {
+  const host = makeHost();
+  // The agent loads openmax, then replies "收到" before calling weekly-report.
+  writeLog(host, [userRec(inbound()), skillRec('openmax')]);
+  const p = firstReply(host, ['local:weekly-report']);
+  assert.deepEqual(p.item, { type: 'skills-used', audience: 'ui', attrs: { 'reply-to': S, complete: false } });
+});
+
+test('R1-P2: every selected skill called before the first reply → complete:true with the full list', () => {
+  const host = makeHost();
+  writeLog(host, [userRec(inbound()), skillRec('openmax'), skillRec('price-grab'), skillRec('weekly-report')]);
+  const p = firstReply(host, ['sk_mkt_1', 'local:weekly-report']);
+  assert.deepEqual(p.item.attrs, { 'reply-to': S, complete: true });
+  assert.deepEqual(p.item.data, { skill_ids: ['local:openmax', 'sk_mkt_1', 'local:weekly-report'] });
+});
+
+test('R1-P2: only some of the selected skills called → complete:false', () => {
+  const host = makeHost();
+  writeLog(host, [userRec(inbound()), skillRec('price-grab')]);
+  assert.equal(firstReply(host, ['sk_mkt_1', 'local:weekly-report']).item.attrs.complete, false);
+});
+
+test('R1-P2: withSelectedCheck — no selection list is never complete; an incomplete result stays incomplete', () => {
+  const ok = { complete: true, skillIds: ['a'], reasons: [] };
+  assert.deepEqual(withSelectedCheck(ok, ['a']), ok);
+  assert.deepEqual(withSelectedCheck(ok, ['a', 'b']).reasons, ['selected_not_called']);
+  assert.deepEqual(withSelectedCheck(ok, []).reasons, ['selection_unknown']);
+  assert.deepEqual(withSelectedCheck(ok, undefined).reasons, ['selection_unknown']);
+  const bad = { complete: false, skillIds: [], reasons: ['delegated'] };
+  assert.deepEqual(withSelectedCheck(bad, ['a']), bad);
 });

@@ -32,7 +32,10 @@
  *   - a tool input reads a skills/<dir>/SKILL.md directly, or the turn
  *     delegates to a subagent (whose log is not read);
  *   - the activity run of this message is status_only or merged;
- *   - more than 50 distinct skills, or data over 4 KiB.
+ *   - more than 50 distinct skills, or data over 4 KiB;
+ *   - a skill the user SELECTED has not been called yet when the first reply
+ *     claims the item (an early "收到" before the work): the list would show
+ *     it as 「没用到」 when it may well be used after the ack.
  *
  * skill_id: a market-installed skill lives in skills/market--<slug>/ with a
  * `.market-managed` file naming its skill_id (cws-marketplace
@@ -40,9 +43,10 @@
  * `local:<dir>` (the C-16 location_id). kb-type skills
  * (openmax-product-faq, …) are skills like any other here.
  *
- * Known limit: the item rides on the turn's FIRST reply (text, media or
- * [STRUCTURED]; a card reply does not carry it and leaves it to the next).
- * Skills invoked after that reply are not on it.
+ * The item rides on the turn's FIRST reply (text, media or [STRUCTURED]; a
+ * card reply does not carry it and leaves it to the next). Skills invoked
+ * after that reply are not on it — which is why the list is complete only
+ * when every selected skill was already called by then (see above).
  *
  * Never throws into the send path.
  */
@@ -82,14 +86,17 @@ const validSourceId = (id) => typeof id === 'string' && SOURCE_MESSAGE_ID_RE.tes
  * Writes <dir>/<id>.json; removes registrations older than a day. Returns
  * false (nothing written) for an id that is not a message id. Never throws.
  */
-export function registerSkillTurn({ sourceMessageId, conversationId, dir = SKILLS_USED_DIR, now = Date.now() }) {
+export function registerSkillTurn({ sourceMessageId, conversationId, selectedSkillIds = [], dir = SKILLS_USED_DIR, now = Date.now() }) {
   try {
     const id = sourceMessageId == null ? '' : String(sourceMessageId);
     if (!validSourceId(id) || typeof conversationId !== 'string' || !conversationId) return false;
     fs.mkdirSync(dir, { recursive: true });
     cleanup(dir, now);
     fs.writeFileSync(path.join(dir, `${id}.json`),
-      JSON.stringify({ v: 1, source_message_id: id, conversation_id: conversationId, registered_at: now }), { mode: 0o600 });
+      JSON.stringify({
+        v: 1, source_message_id: id, conversation_id: conversationId, registered_at: now,
+        selected_skill_ids: Array.isArray(selectedSkillIds) ? selectedSkillIds.filter((s) => typeof s === 'string' && s) : [],
+      }), { mode: 0o600 });
     return true;
   } catch {
     return false;
@@ -317,6 +324,21 @@ export function computeSkillsUsed({
   }
 }
 
+/**
+ * A list is complete only when every skill the user selected for the turn was
+ * already called: the item rides on the first reply, and an early ack
+ * ("收到") comes before the work. A registration without a selection list
+ * is never complete.
+ */
+export function withSelectedCheck(result, selectedSkillIds) {
+  if (!result.complete) return result;
+  if (!Array.isArray(selectedSkillIds) || selectedSkillIds.length === 0) {
+    return { ...result, complete: false, reasons: [...result.reasons, 'selection_unknown'] };
+  }
+  if (selectedSkillIds.every((s) => result.skillIds.includes(s))) return result;
+  return { ...result, complete: false, reasons: [...result.reasons, 'selected_not_called'] };
+}
+
 /** The context item; complete=false never carries data. */
 export function skillsUsedItem({ sourceMessageId, complete, skillIds = [] }) {
   const item = { type: 'skills-used', audience: 'ui', attrs: { 'reply-to': String(sourceMessageId), complete: complete === true } };
@@ -349,7 +371,7 @@ export function planSkillsUsed({ sourceMessageId, convId, bodyHash, dir = SKILLS
 
     let claim = readJson(claimPath);
     if (!claim) {
-      const r = computeSkillsUsed({ sourceMessageId: id, convId, since: reg.registered_at, ...deps });
+      const r = withSelectedCheck(computeSkillsUsed({ sourceMessageId: id, convId, since: reg.registered_at, ...deps }), reg.selected_skill_ids);
       claim = { v: 1, state: 'pending', body_sha256: hash, item: skillsUsedItem({ sourceMessageId: id, ...r }), reasons: r.reasons, claimed_at: now };
       let fd;
       try {

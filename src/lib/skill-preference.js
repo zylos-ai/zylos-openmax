@@ -54,8 +54,9 @@ export function skillPreferenceOf(msg) {
     if (!it || typeof it !== 'object' || Array.isArray(it)) continue;
     const id = it.skill_id;
     if (typeof id !== 'string' || !SKILL_ID_RE.test(id) || seen.has(id)) continue;
-    const name = oneLineName(it.name);
-    if (!name) continue;
+    // `name` is optional in the cws-comm !643 contract: a missing or blank
+    // name falls back to the id, so the pick is never dropped.
+    const name = oneLineName(it.name) || id;
     seen.add(id);
     out.push({ skillId: id, name });
   }
