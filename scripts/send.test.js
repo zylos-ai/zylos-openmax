@@ -470,3 +470,44 @@ test('T11: a legacy thread endpoint is sent to its leading conversation, no pare
     assert.match(stderr, /legacy thread endpoint/);
   }
 });
+
+// ── OPENM-1396: skills-used on the turn's first reply ─────────────────────────
+
+test('1396: a reply to a message that carried skills — first chunk carries skills-used, later chunks and later replies do not', async () => {
+  const conv = 'conv-skills-1396';
+  const src = '7300000000000001396';
+  const zylosDir = path.join(tmpHome, 'zylos');
+  const skillDir = path.join(zylosDir, '.claude/skills/weekly-report');
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: weekly-report\n---\n');
+  const proj = path.join(tmpHome, '.claude/projects', fs.realpathSync(zylosDir).replace(/[^A-Za-z0-9]/g, '-'));
+  fs.mkdirSync(proj, { recursive: true });
+  const at = (s) => new Date(Date.parse('2026-11-19T10:00:00Z') + s * 1000).toISOString();
+  const inbound = `[OPENMAX DM]\n<message-context conversation-id="${conv}" source-message-id="${src}"/>\nhi\n---- reply via: node c4-send.js "openmax" "${conv}|msg:${src}"`;
+  fs.writeFileSync(path.join(proj, 's1.jsonl'), [
+    { type: 'user', timestamp: at(1), uuid: 'u1', message: { content: inbound } },
+    { type: 'assistant', timestamp: at(2), uuid: 'a1', message: { content: [{ type: 'tool_use', id: 't1', name: 'Skill', input: { skill: 'weekly-report' } }] } },
+  ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const stateDir = path.join(tmpHome, 'zylos/components/openmax/runtime/skills-used');
+  fs.mkdirSync(stateDir, { recursive: true });
+  fs.writeFileSync(path.join(stateDir, `${src}.json`), JSON.stringify({ v: 1, source_message_id: src, conversation_id: conv, registered_at: Date.now() }));
+
+  const { server, posts, port } = await startCaptureServer();
+  try {
+    let r = await runSend(port, `${conv}|msg:${src}`, `${'a'.repeat(4500)}\n\n${'b'.repeat(4500)}`);
+    assert.equal(r.code, 0, r.stderr);
+    r = await runSend(port, `${conv}|msg:${src}`, 'second reply');
+    assert.equal(r.code, 0, r.stderr);
+    // A reply to a message without skills: unchanged body.
+    r = await runSend(port, `${conv}|msg:7300000000000000001`, 'other');
+    assert.equal(r.code, 0, r.stderr);
+  } finally {
+    server.close();
+  }
+  const sends = posts.filter((p) => p.url === `/api/v1/conversations/${conv}/messages`);
+  assert.ok(sends.length >= 4, `expected a split first reply, got ${sends.length}`);
+  assert.deepEqual(sends[0].body.metadata, { context: { items: [{
+    type: 'skills-used', audience: 'ui', attrs: { 'reply-to': src, complete: true }, data: { skill_ids: ['local:weekly-report'] },
+  }] } });
+  for (const { body } of sends.slice(1)) assert.equal('metadata' in body, false);
+});

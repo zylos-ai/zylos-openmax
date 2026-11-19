@@ -5,9 +5,9 @@
  *
  *   metadata.context = { items: [{ type, source, audience, attrs, data? }] }
  *
- *   - type     what the item is (connectors, workflow, quote, forwarded, or
- *              another type; only those four are read here, plus phase 2's
- *              `priority`, read by system-message.js);
+ *   - type     what the item is (connectors, workflow, quote, forwarded,
+ *              skills, or another type; only those five are read here, plus
+ *              phase 2's `priority`, read by system-message.js);
  *   - source   who attached it, stamped by cws-comm (not read here);
  *   - audience who it is for (`agent` | `ui` | `server`); only `agent` items
  *              are read for the Agent;
@@ -30,14 +30,17 @@
  * items (such as forwarded) and stamps `source`.
  */
 
-// The four types read here (the phase-1 types of cws-comm !618's table): the
-// encoded size `data` may have (0 = this type takes no data). Any other type
-// is never read for the Agent; its data gets the 2 KiB parse limit.
+// The types read here (the phase-1 types of cws-comm !618's table, plus
+// `skills`, OPENM-1396 / cws-comm !643): the encoded size `data` may have
+// (0 = this type takes no data). Any other type is never read for the Agent;
+// its data gets the 2 KiB parse limit. `skills` has no old key: it is read
+// only from here (skill-preference.js) and has no parity rendering.
 export const CONTEXT_TYPES = Object.freeze({
   connectors: { dataMaxBytes: 6 * 1024 },
   workflow: { dataMaxBytes: 0 },
   quote: { dataMaxBytes: 6 * 1024 },
   forwarded: { dataMaxBytes: 0 },
+  skills: { dataMaxBytes: 8 * 1024 },
 });
 
 export const MAX_CONTEXT_ITEMS = 16;
