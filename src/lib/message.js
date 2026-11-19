@@ -38,6 +38,7 @@
 import { randomUUID } from 'crypto';
 import { extractWorkReferences, formatWorkReferenceContext } from './work-reference.js';
 import { formatConnectorPreference } from './connector-preference.js';
+import { formatSkillPreference } from './skill-preference.js';
 import { formatWfContext } from './wf-context.js';
 import { verifiedExcerptText } from './quote-excerpt.js';
 import { formatForwardedChatHistory, chatHistoryBudget, indentBreaks } from './forwarded.js';
@@ -212,7 +213,7 @@ export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
  * @param {Array}  [recent] - recent group messages used for `<group-context>`
  *                            (`<subconversation-context>` with opts.subConversation)
  * @param {object} [opts]   - { groupName, quotedContent, smartHint, receipt,
- *                              preferredConnectors, wfRef, quotedExcerpt,
+ *                              preferredConnectors, preferredSkills, wfRef, quotedExcerpt,
  *                              chatHistory, subConversation,
  *                              systemSender: { memberId? } | undefined,
  *                              senderMember: { kind:'human'|'agent', memberId } | undefined }
@@ -233,7 +234,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const type = VALID_TYPES.has(rawType) ? rawType : 'dm';
   const {
     groupName, quotedContent, smartHint, orgId, orgName, receipt, systemSender,
-    senderMember, preferredConnectors, wfRef, quotedExcerpt, chatHistory, subConversation,
+    senderMember, preferredConnectors, preferredSkills, wfRef, quotedExcerpt, chatHistory, subConversation,
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
@@ -335,6 +336,11 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   // above: typed text cannot produce it.
   const preference = formatConnectorPreference(preferredConnectors);
   if (preference) header += `${preference}\n`;
+  // Skill preference (OPENM-1396): the skills the user picked in the input
+  // box, from the `skills` context item. A preference, not a gate — see
+  // skill-preference.js. Structural for the same reason as above.
+  const skillPreference = formatSkillPreference(preferredSkills);
+  if (skillPreference) header += `${skillPreference}\n`;
   // Workflow context: which workflow / run / page of the workflows page the
   // user sent this from, from message metadata `wf_ref`. A hint only — the
   // workflows records stay authoritative (see wf-context.js). Structural for

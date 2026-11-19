@@ -62,3 +62,38 @@ test('T9: sendStructuredMessage posts once to the endpoint conversation, quote f
   assert.equal('agent_run' in posts[0].body, false, 'no run registered → no agent_run');
   assert.deepEqual(out, { ok: true, structured: true, message_id: '7300000000000000201' });
 });
+
+test('OPENM-1396: [STRUCTURED] carries the skills-used item of the turn\'s first reply next to the caller metadata', async () => {
+  const item = { type: 'skills-used', audience: 'ui', attrs: { 'reply-to': '7300000000000000199', complete: true }, data: { skill_ids: ['local:weekly-report'] } };
+  const settled = [];
+  const asked = [];
+  const planSkillsUsed = (args) => { asked.push({ ...args, hash: args.bodyHash() }); return { item, settle: (o) => settled.push(o) }; };
+  const posts = [];
+  const deps = {
+    apiPath: (p) => `/api/v1${p}`,
+    sourceMessageId: '7300000000000000199',
+    runStore: createRunStore({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'om-structured-runs-')) }),
+    planSkillsUsed,
+  };
+  await sendStructuredMessage('conv-s', parseStructuredMessage(structured({ content: 'x', metadata: { mine: 1 } })), {
+    ...deps, post: async (p, body) => { posts.push(body); return { id: '1' }; },
+  });
+  assert.deepEqual(posts[0].metadata, { mine: 1, context: { items: [item] } });
+  assert.equal(asked[0].sourceMessageId, '7300000000000000199');
+  assert.equal(asked[0].convId, 'conv-s');
+  assert.deepEqual(settled, ['ok']);
+
+  // A certain rejection releases it for the next reply.
+  const err = Object.assign(new Error('bad'), { status: 400 });
+  await assert.rejects(sendStructuredMessage('conv-s', parseStructuredMessage(structured({ content: 'x' })), {
+    ...deps, post: async () => { throw err; },
+  }), /bad/);
+  assert.deepEqual(settled, ['ok', 'rejected']);
+
+  // No plan → body exactly as before (no metadata key).
+  const bare = [];
+  await sendStructuredMessage('conv-s', parseStructuredMessage(structured({ content: 'x' })), {
+    ...deps, planSkillsUsed: () => null, post: async (p, body) => { bare.push(body); return { id: '2' }; },
+  });
+  assert.equal('metadata' in bare[0], false);
+});
