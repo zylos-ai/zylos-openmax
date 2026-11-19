@@ -77,13 +77,25 @@ test('malformed entries dropped one by one; duplicates keep the first; order kep
     { skill_id: 'sk_1', name: '重复' },
     { skill_id: 'bad"id', name: '引号' },
     { skill_id: 'sk 2', name: '空格' },
-    { skill_id: 'sk_3' },
-    { skill_id: 'sk_4', name: '   ' },
     null,
     'sk_5',
     { skill_id: 'sk_6', name: '六' },
   ])]));
   assert.deepEqual(prefs, [{ skillId: 'sk_1', name: '一' }, { skillId: 'sk_6', name: '六' }]);
+});
+
+test('R1-P3: name is optional (cws-comm !643) — a missing or blank name falls back to the skill_id', () => {
+  const prefs = skillPreferenceOf(msgWith([skillsItem([
+    { skill_id: 'sk_3' },
+    { skill_id: 'local:weekly-report', name: '   ' },
+    { skill_id: 'sk_5', name: 42 },
+  ])]));
+  assert.deepEqual(prefs, [
+    { skillId: 'sk_3', name: 'sk_3' },
+    { skillId: 'local:weekly-report', name: 'local:weekly-report' },
+    { skillId: 'sk_5', name: 'sk_5' },
+  ]);
+  assert.match(formatSkillPreference(prefs), /优先用这些技能：sk_3、local:weekly-report、sk_5。/);
 });
 
 test('names are flattened to one line and capped; at most MAX_PREFERRED_SKILLS', () => {

@@ -1232,7 +1232,9 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     // report which skills it used (skills-used item, see
     // activity/skills-used.js). Independent of the activity feature.
     const preferredSkills = skillPreferenceOf(msg);
-    if (preferredSkills) registerSkillTurn({ sourceMessageId, conversationId: replyConvId });
+    if (preferredSkills) {
+      registerSkillTurn({ sourceMessageId, conversationId: replyConvId, selectedSkillIds: preferredSkills.map((p) => p.skillId) });
+    }
 
     const body = formatInboundForC4(
       { type: replyConvType, id: replyConvId, name: groupName },
