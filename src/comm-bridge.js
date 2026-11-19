@@ -43,6 +43,8 @@ import {
 import { classifySystemEvent, isSenderlessUpdate, routeImOwnerNotice } from './lib/system-event-routing.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { connectorPreferenceOf } from './lib/connector-preference.js';
+import { skillPreferenceOf } from './lib/skill-preference.js';
+import { registerSkillTurn } from './lib/activity/skills-used.js';
 import { workflowRefOf } from './lib/wf-context.js';
 import { quoteExcerptOf, quotedMessageText } from './lib/quote-excerpt.js';
 import { chatHistoryOf, isChatHistory, FORWARDED_CONVERSATION } from './lib/forwarded.js';
@@ -1225,6 +1227,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       displayContent = labels.join(' ') + (text ? ' ' + text : '');
     }
 
+    // Skills picked in the input box (OPENM-1396): rendered as
+    // <skill-preference>, and the turn is registered so the first reply can
+    // report which skills it used (skills-used item, see
+    // activity/skills-used.js). Independent of the activity feature.
+    const preferredSkills = skillPreferenceOf(msg);
+    if (preferredSkills) registerSkillTurn({ sourceMessageId, conversationId: replyConvId });
+
     const body = formatInboundForC4(
       { type: replyConvType, id: replyConvId, name: groupName },
       { displayName: senderName, id: msg.sender_id || msg.message?.sender_id },
@@ -1249,6 +1258,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
         preferredConnectors: connectorPreferenceOf(msg),
+        preferredSkills,
         wfRef: workflowRefOf(msg),
         systemSender: isSystemSender(msg)
           ? { memberId: msg.sender_id || msg.message?.sender_id }
