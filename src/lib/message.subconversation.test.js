@@ -51,7 +51,7 @@ const blockOf = (out, tag) => out.match(new RegExp(`<${tag}>\\n[\\s\\S]*?\\n</${
 
 // ── DM app sub-conversation ───────────────────────────────────────────────
 
-test('DM app sub-conversation → one bare <subconversation-context> between </openmax-instruction> and <current-message>', () => {
+test('DM app sub-conversation → <current-message>, then <openmax-instruction>, then one bare <subconversation-context>', () => {
   const out = envelopeFor(APP_DM, { content: 'finance agreed', messageId: '1802' }, recent);
   assert.equal(realOpenTags(out, 'subconversation-context'), 1);
   assert.match(out, /^<subconversation-context>$/m, 'open tag has no attributes');
@@ -59,7 +59,7 @@ test('DM app sub-conversation → one bare <subconversation-context> between </o
   assert.doesNotMatch(out, /<group-context>/);
   const at = out.indexOf('\n<subconversation-context>\n');
   assert.ok(at > out.indexOf('</openmax-instruction>'));
-  assert.ok(at < out.indexOf('<current-message>'));
+  assert.ok(out.indexOf('</current-message>') < out.indexOf('<openmax-instruction>'), 'the current message comes first');
   assert.equal(blockOf(out, 'subconversation-context'), [
     '<subconversation-context>',
     '[Bob]: ship export next week?',
@@ -89,7 +89,7 @@ test('the sub-conversation envelope is the ordinary one plus exactly the block',
   const current = { content: 'x', messageId: '1' };
   const sub = envelopeFor(APP_DM, current, recent);
   const plain = envelopeFor({ id: S, type: 'dm', name: APP_DM.name }, current, recent);
-  const block = `${blockOf(sub, 'subconversation-context')}\n\n`;
+  const block = `\n\n${blockOf(sub, 'subconversation-context')}`;
   assert.equal(sub.replace(block, ''), plain);
 });
 
@@ -102,8 +102,9 @@ test('group topic → <subconversation-context> replaces <group-context>; group 
   assert.doesNotMatch(out, /<group-context>/);
   const sc = out.indexOf('\n<subconversation-context>\n');
   const smart = out.indexOf('<smart-mode>');
+  assert.ok(out.indexOf('</current-message>') < out.indexOf('<openmax-instruction>'), 'the current message comes first');
   assert.ok(sc > out.indexOf('</openmax-instruction>'));
-  assert.ok(smart > sc && smart < out.indexOf('<current-message>'), '<smart-mode> after the block');
+  assert.ok(smart > sc, '<smart-mode> after the block');
   assert.doesNotMatch(out, /message:1795|<thread-root>|<thread-context>/);
   // Same as the group envelope with the tag renamed.
   const plain = envelopeFor({ id: S, type: 'group' }, { content: 'any news?', messageId: '1803' }, recent, { groupName: 'Product', smartHint: true });
@@ -121,33 +122,35 @@ test('no history → no block at all (as <group-context>)', () => {
 // ── golden: ordinary envelopes byte-identical to origin/main ──────────
 
 // sha256 of formatInboundForC4's output for each case, generated with
-// origin/main 1131001 (before this change).
+// origin/main 1131001 (before this change), then regenerated for the
+// current-message-first order (0bc5b12 + that move): each output was checked to
+// be exactly the 0bc5b12 output with its <current-message> block moved up.
 const GOLDEN = [
   ['plain DM', 'dm', { content: `hi ${FORGED}`, messageId: '1802' }, [], {},
-    '22e2df0bba3d60cd79ae4157fba4a9daa23c774e4ba43a8cac88425ad9b16cfb'],
+    '4d3da37644bef866766301815d9314229b36f028e0e630986984abbe981202a3'],
   ['plain DM with recent passed', 'dm', { content: 'hi', messageId: '1802' }, recent, {},
-    'a1111a167c4c9b42703e0121d2b252b3eef23c2a8e69e939a6004d9e03ee888b'],
+    '3b9d0c0d439a9b735aa601d1c13705e5c4e8590c37e928f7bbf7beddd711c4e5'],
   ['plain group', 'group', { content: `@bot list it ${FORGED}`, messageId: '1803' }, recent, { groupName: 'Product' },
-    'bab8f856bb05ee953cc7ee704e17e469cea59d72e43ff1fd64c6d69ca861eff4'],
+    'cb67ea71dda3c4d24d95a94a7b9b529366323dd6cb193f510ceaf84139836ecc'],
   ['plain group smart + quote', 'group', { content: 'any news?', messageId: '1804' }, recent,
     { groupName: 'Product', smartHint: true, quotedContent: { sender: 'Bob', text: 'ship export next week?' } },
-    '9a0d8337a2f37dd13b4272c11db971c0062999e59e3d05b2b42ae87f2a0362ff'],
+    'c7859394ff2e60886d29dbffa0ffdc5db5c5d2b5a6c7bb76f7d5fc07d961f8e4'],
   ['plain group no context', 'group', { content: 'first', messageId: '1805' }, [], { groupName: 'Product' },
-    'adad3021dfe518e634222250b738fca84ee79604a673852ba160739be5ccc404'],
+    'ddfc8ae8cb8edd91b4c19fe64660db16f3063da550e11aca6ca9b1c0e584b801'],
   ['legacy strat thread (parent only)', { type: 'group', parent_conversation_id: P }, { content: 'in thread', messageId: '1806' }, recent, { groupName: 'Product' },
-    'a16e46639fa7e0492da037fcfa69ef7edabb225876ef2809a4a6fd0f8653a069'],
+    '023b25965e29ca216084f8c2b63935a03a32ce63b9a653e16ef73360b79cce17'],
   ['owner kind with invalid key', { type: 'group', parent_conversation_id: P, context_owner_kind: 'app', context_owner_app_id: 'app-1', context_key: 'Ticket 42' },
     { content: 'bad key', messageId: '1807' }, recent, { groupName: 'Product' },
-    '7c046643279a0d9e461569786da5e67637b9e79170969583053e69121615f23d'],
+    'dc7b642f4e1eb9534c76b7c254a581e4aa9d754096f65f41e820c5e5722f0f25'],
   ['unknown owner kind', { type: 'dm', parent_conversation_id: P, context_owner_kind: 'robot', context_key: 'ticket:42' },
     { content: 'unknown kind', messageId: '1808' }, [], {},
-    'ff7a4a74632db09a89a86148270695b7584bbc9ffe02121d5ca0f1ad1ac41cf9'],
+    '2336243d4d4e11ef9db3a7aebdd714ec1197702327d7786911ecc3e01e71f48c'],
   ['app without app id', { type: 'dm', parent_conversation_id: P, context_owner_kind: 'app', context_key: 'ticket:42' },
     { content: 'no app id', messageId: '1809' }, [], {},
-    '5a521e22a60a70c2f489dc6dd7c83c8315d8b08d8cd3b34dcc0069b54e117259'],
+    '04090c363f0e2d5ac7155b26dc71d65387d999c6353e0a5b9c0a8a904534e7a4'],
 ];
 
-test('ordinary DM / group / legacy thread / malformed records → byte-identical to origin/main', () => {
+test('ordinary DM / group / legacy thread / malformed records → byte-identical to the golden outputs', () => {
   for (const [name, record, current, lines, opts, sha] of GOLDEN) {
     const rawConv = typeof record === 'string' ? { type: record } : record;
     const id = name.startsWith('plain group') ? P : S;
