@@ -75,7 +75,9 @@ import { createInboxLedger } from './lib/inbox-ledger.js';
 import { seedSessionFromLedger, commitIdentityRebind } from './lib/inbox-rebind.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, ensureReplay, setLimits } from './lib/group-history.js';
-import { gatherRecentContext, historyEntryOf, createSentReplyRecorder, createContextDelivery } from './lib/conversation-context.js';
+import {
+  gatherRecentContext, historyEntryOf, createSentReplyRecorder, createContextDelivery, omittedContext, SUB_CONTEXT_ALWAYS_RECENT,
+} from './lib/conversation-context.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter, createMetricsReadinessEvaluator } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
@@ -1004,6 +1006,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     }
 
     let recent = [];
+    let subContextOmitted = null;
     const convType = convTypeOf(conv, msg.conversation_id);
     if (fetchesConversationContext(convType, sub)) {
       await sentReplies.settle(msg.conversation_id);
@@ -1018,7 +1021,8 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         resolveName: (memberId) => fetchMemberName(orgConfig.org_id, memberId),
         log,
       });
-      recent = sub ? subContextDelivery.unseen(msg.conversation_id, gathered.recent) : gathered.recent;
+      recent = sub ? subContextDelivery.unseen(msg.conversation_id, gathered.recent, SUB_CONTEXT_ALWAYS_RECENT) : gathered.recent;
+      if (sub) subContextOmitted = omittedContext(msg.conversation_id, gathered.recent, recent, msg.seq);
       const skipped = gathered.recent.length - recent.length;
       log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${gathered.source} count=${recent.length}${skipped ? ` already-delivered=${skipped}` : ''}${sub ? ` subconversation=${sub.ownerKind}` : ''}`);
     }
@@ -1210,6 +1214,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         // A sub-conversation's lines render as <subconversation-context>, in
         // <group-context>'s place.
         subConversation: !!sub,
+        subContextOmitted,
         quotedExcerpt: quoteExcerptOf(msg, quotedMsgId),
         chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,

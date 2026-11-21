@@ -179,6 +179,20 @@ function formatContextLine(m) {
   return `[${name}]: ${text}`;
 }
 
+/**
+ * The <subconversation-context> note for lines left out because the Agent was
+ * already given them: how many, and the comm.get_messages call that returns
+ * them. Ids and numbers only, all from the bridge.
+ */
+function formatOmissionNote(omitted) {
+  if (!omitted) return '';
+  const args = { conversationId: attrValue(omitted.conversationId) };
+  if (Number.isFinite(omitted.beforeSeq)) args.beforeSeq = omitted.beforeSeq;
+  if (Number.isFinite(omitted.limit)) args.limit = omitted.limit;
+  return `(${omitted.count} earlier message${omitted.count === 1 ? '' : 's'} of this conversation omitted: already given to you in earlier turns. `
+    + `To read them: node ~/zylos/.claude/skills/openmax/src/cli/comm.js comm.get_messages '${JSON.stringify(args)}')`;
+}
+
 // The display name on the `<name> (<member id>) said:` line is sender-chosen,
 // so it must not be able to fake that shape: ASCII `(` / `)` become fullwidth
 // `（` / `）` (still readable, but never the id's delimiters, so the only ASCII
@@ -229,6 +243,9 @@ export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
  *                            `subConversation` (boolean, set by the bridge
  *                            from the conversation record only) renders
  *                            `recent` as <subconversation-context>, DM or group.
+ *                            `subContextOmitted` ({ conversationId, count,
+ *                            beforeSeq, limit }, from omittedContext) adds the
+ *                            note on lines left out as already delivered.
  * @returns {string}
  */
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
@@ -237,6 +254,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const {
     groupName, quotedContent, smartHint, orgId, orgName, receipt, systemSender,
     senderMember, preferredConnectors, wfRef, quotedExcerpt, chatHistory, subConversation,
+    subContextOmitted,
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
@@ -403,7 +421,11 @@ Before handling the current message, invoke the openmax skill and follow it. For
   if (subConversation && recent && recent.length > 0) {
     // A sub-conversation's recent messages (DM or group), in place of
     // <group-context>; same lines, no attributes. Nothing when there are none.
+    // Lines left out as already delivered are announced first, with the
+    // command that reads them back.
     const lines = recent.map(formatContextLine);
+    const omissionNote = formatOmissionNote(subContextOmitted);
+    if (omissionNote) lines.unshift(omissionNote);
     parts.push(`<subconversation-context>\n${lines.join('\n')}\n</subconversation-context>\n\n`);
   } else if (!subConversation && type !== 'dm' && recent && recent.length > 0) {
     const lines = recent.map(formatContextLine);

@@ -119,6 +119,51 @@ test('no history → no block at all (as <group-context>)', () => {
   }
 });
 
+// ── incremental context: recent N + omission note (owner decision) ─────
+
+const { createContextDelivery, omittedContext, SUB_CONTEXT_ALWAYS_RECENT } = await import('./conversation-context.js');
+
+/** Five context lines of a sub-conversation, seq 11..15. */
+const windowOf = () => [11, 12, 13, 14, 15].map((seq) => ({
+  senderName: seq % 2 ? 'Bob' : 'Nova', senderId: seq % 2 ? 'm-bob' : 'm-agent', content: `line ${seq}`, messageId: `17950000000000000${seq}`, seq,
+}));
+
+/** What the bridge does for one inbound message of a sub-conversation. */
+function bridgeEnvelope(delivery, window, current) {
+  const kept = delivery.unseen(S, window, SUB_CONTEXT_ALWAYS_RECENT);
+  const omitted = omittedContext(S, window, kept, current.seq);
+  return envelopeFor(APP_DM, current, kept, { subContextOmitted: omitted });
+}
+
+test('agent session replaced, bridge not restarted: the envelope has the recent 3 lines and an omission line with count and command', () => {
+  const delivery = createContextDelivery();
+  const window = windowOf();
+  // Earlier turns delivered every line of the window (the old session saw them).
+  delivery.remember(S, window.map((l) => l.messageId));
+  // The runtime started a new session; the bridge did not restart.
+  const out = bridgeEnvelope(delivery, window, { content: 'what did we decide?', messageId: '1795000000000000016', seq: 16 });
+  assert.equal(blockOf(out, 'subconversation-context'), [
+    '<subconversation-context>',
+    `(2 earlier messages of this conversation omitted: already given to you in earlier turns. To read them: node ~/zylos/.claude/skills/openmax/src/cli/comm.js comm.get_messages '{"conversationId":"${S}","beforeSeq":13,"limit":2}')`,
+    '[Bob]: line 13',
+    '[Nova]: line 14',
+    '[Bob]: line 15',
+    '</subconversation-context>',
+  ].join('\n'));
+});
+
+test('nothing omitted → no omission line (first message, or only new lines)', () => {
+  const window = windowOf();
+  const fresh = bridgeEnvelope(createContextDelivery(), window, { content: 'hi', messageId: '1795000000000000016', seq: 16 });
+  assert.doesNotMatch(fresh, /omitted|comm\.get_messages/);
+  assert.equal(blockOf(fresh, 'subconversation-context').split('\n').length, 7, 'all 5 lines');
+  // Only the recent 3 were delivered before: nothing beyond them is left out.
+  const delivery = createContextDelivery();
+  delivery.remember(S, window.slice(2).map((l) => l.messageId));
+  const out = bridgeEnvelope(delivery, window, { content: 'hi', messageId: '1795000000000000016', seq: 16 });
+  assert.doesNotMatch(out, /omitted|comm\.get_messages/);
+});
+
 // ── golden: ordinary envelopes byte-identical to origin/main ──────────
 
 // sha256 of formatInboundForC4's output for each case, generated with
@@ -241,7 +286,9 @@ test('comm-bridge: local history and context for groups and every sub-conversati
   assert.match(BRIDGE, /if \(fetchesConversationContext\(convType, sub\)\) \{\n\s+await sentReplies\.settle\(msg\.conversation_id\);\n\s+const gathered = await gatherRecentContext\(\{/);
   // Incremental <subconversation-context>: only lines not yet delivered, and a
   // forwarded message remembers what it delivered (only for a sub-conversation).
-  assert.match(BRIDGE, /recent = sub \? subContextDelivery\.unseen\(msg\.conversation_id, gathered\.recent\) : gathered\.recent;/);
+  assert.match(BRIDGE, /recent = sub \? subContextDelivery\.unseen\(msg\.conversation_id, gathered\.recent, SUB_CONTEXT_ALWAYS_RECENT\) : gathered\.recent;/);
+  assert.match(BRIDGE, /if \(sub\) subContextOmitted = omittedContext\(msg\.conversation_id, gathered\.recent, recent, msg\.seq\);/);
+  assert.match(BRIDGE, /subConversation: !!sub,\n\s+subContextOmitted,/);
   assert.match(BRIDGE, /if \(result\.outcome === 'sent' \|\| result\.outcome === 'stored'\) \{[\s\S]*?if \(sub\) subContextDelivery\.remember\(msg\.conversation_id, \[\.\.\.recent\.map\(l => l\.messageId\), msg\.id\]\);[\s\S]*?markRead/);
   // The Agent's own replies (never echoed back) go into local history from the sent markers.
   assert.match(BRIDGE, /const sentReplies = createSentReplyRecorder\(\{\n\s+drainMarkers: \(\) => drainSentMarkers\(SENT_DIR\),[\s\S]*?fetchDetail: fetchMessageDetail,/);

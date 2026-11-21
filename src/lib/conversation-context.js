@@ -12,8 +12,8 @@
  * beforeSeq, limit)` returns API message objects ([] on failure);
  * `resolveName(memberId)` returns a display name or null.
  *
- * Each line is `{ senderName, senderId, content, messageId }` (formatContextLine
- * in message.js renders it).
+ * Each line is `{ senderName, senderId, content, messageId, seq }`
+ * (formatContextLine in message.js renders it).
  *
  * cws-comm does not echo a sender's own messages back to it, so the Agent's own
  * replies never arrive as inbound frames. recordSentMessage puts them into local
@@ -33,11 +33,16 @@ async function localEntryToContext(e, resolveName) {
   if (!name || name === e.sender_id) {
     name = (await resolveName(e.sender_id)) || e.sender_id;
   }
-  return { senderName: name, senderId: e.sender_id, content: e.text, messageId: idString(e.message_id) };
+  return { senderName: name, senderId: e.sender_id, content: e.text, messageId: idString(e.message_id), seq: seqNumber(e.seq) };
 }
 
 function idString(id) {
   return id == null || id === '' ? null : String(id);
+}
+
+function seqNumber(seq) {
+  const n = Number(seq);
+  return seq == null || seq === '' || !Number.isFinite(n) ? null : n;
 }
 
 async function apiMessageToContext(m, resolveName) {
@@ -67,7 +72,7 @@ async function apiMessageToContext(m, resolveName) {
     content = '[image]' + (text ? ' ' + text : '');
   }
   if (isChatHistory(m)) content = FORWARDED_CONVERSATION;
-  return { senderName, senderId: m.sender_id, content, messageId: idString(m.id) };
+  return { senderName, senderId: m.sender_id, content, messageId: idString(m.id), seq: seqNumber(m.seq) };
 }
 
 /**
@@ -119,11 +124,21 @@ export function createSentReplyRecorder({
 }
 
 /**
+ * Lines of <subconversation-context> that are always sent, even when the Agent
+ * was already given them: the last exchange (typically a question, the Agent's
+ * answer and the follow-up) stays in view even if the Agent's runtime started
+ * a new session while the bridge kept running. Below the default window
+ * (context_messages = 5), so the incremental saving remains.
+ */
+export const SUB_CONTEXT_ALWAYS_RECENT = 3;
+
+/**
  * What a sub-conversation's context has already given the Agent, so
  * <subconversation-context> carries only the lines it has not seen: each
  * message forwarded (as the current message or as a context line) is
- * remembered by id per conversation, and `unseen` leaves those lines out.
- * A line without an id is always kept. In memory only: after a bridge restart
+ * remembered by id per conversation, and `unseen` leaves those lines out,
+ * except the last `keepRecent` lines, which are always kept (see
+ * SUB_CONTEXT_ALWAYS_RECENT). A line without an id is always kept. In memory only: after a bridge restart
  * the next context is whole again. Bounded: the newest `maxIds` ids per
  * conversation, the `maxConversations` most recently used conversations.
  */
@@ -131,10 +146,11 @@ export function createContextDelivery({ maxIds = 200, maxConversations = 1000 } 
   const delivered = new Map();   // conversationId -> Set<messageId>, oldest first
 
   return {
-    unseen(conversationId, lines) {
+    unseen(conversationId, lines, keepRecent = 0) {
       const seen = delivered.get(String(conversationId));
       if (!seen) return lines;
-      return lines.filter((l) => !l.messageId || !seen.has(String(l.messageId)));
+      const firstKept = lines.length - keepRecent;
+      return lines.filter((l, i) => i >= firstKept || !l.messageId || !seen.has(String(l.messageId)));
     },
     remember(conversationId, ids) {
       const key = String(conversationId);
@@ -149,6 +165,29 @@ export function createContextDelivery({ maxIds = 200, maxConversations = 1000 } 
       delivered.set(key, seen);
       while (delivered.size > maxConversations) delivered.delete(delivered.keys().next().value);
     },
+  };
+}
+
+/**
+ * What `unseen` left out of a context window (`window` = the gathered lines,
+ * `kept` = what is sent), for the omission note: how many lines, and the
+ * comm.get_messages range that returns them (`beforeSeq` just past the newest
+ * omitted line, `limit` = the window lines up to it). Without seqs the range
+ * falls back to the whole window before the current message. null when
+ * nothing was left out.
+ */
+export function omittedContext(conversationId, window, kept, currentSeq) {
+  const keptSet = new Set(kept);
+  const omittedAt = window.map((l, i) => (keptSet.has(l) ? -1 : i)).filter((i) => i >= 0);
+  if (omittedAt.length === 0) return null;
+  const last = omittedAt.at(-1);
+  const lastSeq = window[last].seq;
+  const ranged = Number.isFinite(lastSeq);
+  return {
+    conversationId: String(conversationId),
+    count: omittedAt.length,
+    beforeSeq: ranged ? lastSeq + 1 : seqNumber(currentSeq),
+    limit: ranged ? last + 1 : window.length,
   };
 }
 

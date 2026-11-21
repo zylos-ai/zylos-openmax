@@ -8,7 +8,9 @@ import path from 'node:path';
 // before importing anything that loads it.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zom-convctx-'));
 process.env.HOME = tmpHome;
-const { gatherRecentContext, recordSentMessage, historyEntryOf, createContextDelivery, createSentReplyRecorder } = await import('./conversation-context.js');
+const {
+  gatherRecentContext, recordSentMessage, historyEntryOf, createContextDelivery, createSentReplyRecorder, omittedContext, SUB_CONTEXT_ALWAYS_RECENT,
+} = await import('./conversation-context.js');
 const { logAndRecord, ensureReplay, setLimits, getHistory } = await import('./group-history.js');
 
 // The context lines for <group-context> / <subconversation-context>: local
@@ -63,7 +65,7 @@ test('API path → one request with before_seq = msg.seq and limit = context_mes
   assert.deepEqual(fetch.calls, [{ conversationId: conv, beforeSeq: 21, limit: 5 }]);
   assert.equal(recent.length, 5);
   assert.deepEqual(recent.map((l) => l.content), ['api 16', 'api 17', 'api 18', 'api 19', 'api 20']);
-  assert.deepEqual(recent[0], { senderName: 'Carol', senderId: 'm-carol', content: 'api 16', messageId: idOf(16) });
+  assert.deepEqual(recent[0], { senderName: 'Carol', senderId: 'm-carol', content: 'api 16', messageId: idOf(16), seq: 16 });
 });
 
 test('the line count follows config (context_messages = 3)', async () => {
@@ -152,7 +154,7 @@ test('local history: the Agent\'s own latest reply is in the next message\'s con
   const { recent, source } = await gather(conv, { seq: 7, fetch: mockFetch() });
   assert.equal(source, 'local');
   assert.deepEqual(recent.map((l) => l.content), ['local 2', 'local 3', 'local 4', 'local 5', 'agent 6']);
-  assert.deepEqual(recent.at(-1), { senderName: 'Nova', senderId: 'm-agent', content: 'agent 6', messageId: idOf(6) });
+  assert.deepEqual(recent.at(-1), { senderName: 'Nova', senderId: 'm-agent', content: 'agent 6', messageId: idOf(6), seq: 6 });
 });
 
 test('a reply recorded after the next inbound message still sorts by seq', async () => {
@@ -326,4 +328,30 @@ test('a reply recorded before this process read the conversation\'s log file is 
   const { recent, source } = await gather(conv, { seq: 8, fetch: mockFetch() });
   assert.equal(source, 'local');
   assert.deepEqual(recent.map((l) => l.content), ['local 3', 'local 4', 'local 5', 'agent 6', 'local 7']);
+});
+
+// ── owner decision on the incremental context: always the recent N + an omission note ──
+
+test('incremental: the last SUB_CONTEXT_ALWAYS_RECENT (3) lines are kept even when already delivered', () => {
+  assert.equal(SUB_CONTEXT_ALWAYS_RECENT, 3);
+  const d = createContextDelivery();
+  const conv = newConv();
+  d.remember(conv, ['1', '2', '3', '4', '5']);
+  const window = ['1', '2', '3', '4', '5'].map((id) => line(id));
+  assert.deepEqual(d.unseen(conv, window, SUB_CONTEXT_ALWAYS_RECENT).map((l) => l.messageId), ['3', '4', '5']);
+  // A new line in the middle is kept as well.
+  d.remember(conv, ['6']);
+  const mixed = [line('2'), line('3'), line('9'), line('4'), line('5'), line('6')];
+  assert.deepEqual(d.unseen(conv, mixed, SUB_CONTEXT_ALWAYS_RECENT).map((l) => l.messageId), ['9', '4', '5', '6']);
+});
+
+test('omittedContext: count and the comm.get_messages range of what was left out; null when nothing was', () => {
+  const window = [1, 2, 3, 4, 5].map((s) => ({ ...line(String(s)), seq: s }));
+  assert.deepEqual(omittedContext('c-1', window, window.slice(2), 6), { conversationId: 'c-1', count: 2, beforeSeq: 3, limit: 2 });
+  // A new line between omitted ones: the range covers up to the newest omitted line.
+  assert.deepEqual(omittedContext('c-1', window, [window[1], window[3], window[4]], 6), { conversationId: 'c-1', count: 2, beforeSeq: 4, limit: 3 });
+  assert.equal(omittedContext('c-1', window, window, 6), null);
+  // No seqs → the whole window before the current message.
+  const noSeq = window.map(({ seq, ...l }) => l);
+  assert.deepEqual(omittedContext('c-1', noSeq, noSeq.slice(3), 6), { conversationId: 'c-1', count: 3, beforeSeq: 6, limit: 5 });
 });
