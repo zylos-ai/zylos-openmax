@@ -71,6 +71,54 @@ async function apiMessageToContext(m, resolveName) {
 }
 
 /**
+ * The bridge side of the sent markers for local history: `poll()` drains the
+ * markers (`drainMarkers()`, each `{conversationId, messageIds, orgId, ...}`),
+ * hands each to `onMarker` (the DM seen-watch) and records every chunk of each
+ * sent message (recordSentMessage); `settle(conversationId)` is called before a
+ * context is built: it polls once more and waits for that conversation's
+ * pending recordings, so a reply sent just before the next message is in it.
+ * `fetchDetail(orgId, conversationId, messageId)` / `resolveName(orgId,
+ * memberId)` / `lookupOrg(conversationId)` are the bridge's I/O.
+ */
+export function createSentReplyRecorder({
+  drainMarkers, onMarker = () => {}, fetchDetail, resolveName, lookupOrg = () => '', warn = () => {},
+}) {
+  const pending = new Map();   // conversationId -> Promise of its recordings
+
+  function record(entry) {
+    const { conversationId } = entry;
+    const orgId = entry.orgId || lookupOrg(conversationId);
+    if (!orgId) return;
+    const ids = entry.messageIds?.length ? entry.messageIds : [entry.messageId];
+    const recordings = ids.map((messageId) => recordSentMessage({
+      conversationId,
+      messageId,
+      fetchDetail: () => fetchDetail(orgId, conversationId, messageId),
+      resolveName: (memberId) => resolveName(orgId, memberId),
+    }).catch((e) => warn(`record sent msg=${messageId} conv=${conversationId} failed: ${e.message}`)));
+    const all = Promise.all([pending.get(conversationId), ...recordings]);
+    pending.set(conversationId, all);
+    all.finally(() => {
+      if (pending.get(conversationId) === all) pending.delete(conversationId);
+    });
+  }
+
+  function poll() {
+    for (const entry of drainMarkers()) {
+      onMarker(entry);
+      record(entry);
+    }
+  }
+
+  async function settle(conversationId) {
+    poll();
+    await pending.get(conversationId);
+  }
+
+  return { poll, settle };
+}
+
+/**
  * What a sub-conversation's context has already given the Agent, so
  * <subconversation-context> carries only the lines it has not seen: each
  * message forwarded (as the current message or as a context line) is
@@ -111,9 +159,13 @@ export function createContextDelivery({ maxIds = 200, maxConversations = 1000 } 
  */
 export function historyEntryOf(msg, senderName, timestamp = new Date().toISOString()) {
   const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
+  // Same text chain as the API context lines (apiMessageToContext), so a card
+  // or another structured body reads the same from local history.
   const entryText = structured.body?.text
     || (typeof msg.message?.content === 'string' ? msg.message.content : '')
     || (typeof msg.content === 'string' ? msg.content : '')
+    || msg.content_text
+    || formatStructuredForModel(msg)
     || '';
   const msgType = (msg.type || msg.message?.type || '').toLowerCase();
   const atts = Array.isArray(structured.attachments) ? structured.attachments : [];

@@ -75,7 +75,7 @@ import { createInboxLedger } from './lib/inbox-ledger.js';
 import { seedSessionFromLedger, commitIdentityRebind } from './lib/inbox-rebind.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, ensureReplay, setLimits } from './lib/group-history.js';
-import { gatherRecentContext, historyEntryOf, recordSentMessage, createContextDelivery } from './lib/conversation-context.js';
+import { gatherRecentContext, historyEntryOf, createSentReplyRecorder, createContextDelivery } from './lib/conversation-context.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter, createMetricsReadinessEvaluator } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
@@ -543,37 +543,18 @@ const subContextDelivery = createContextDelivery();
 
 // The same markers put this Agent's own replies into local history: cws-comm
 // does not echo them back, so a context built from local history would miss
-// them (see recordSentMessage). Pending recordings, by conversation.
-const sentRecordings = new Map();
-
-function recordSent(entry) {
-  const conversationId = entry.conversationId;
-  const orgId = entry.orgId || lookupConvOrg(conversationId);
-  if (!orgId) return;
-  const recording = recordSentMessage({
-    conversationId,
-    messageId: entry.messageId,
-    fetchDetail: () => fetchMessageDetail(orgId, conversationId, entry.messageId),
-    resolveName: (memberId) => fetchMemberName(orgId, memberId),
-  }).catch(e => warn(`record sent msg=${entry.messageId} conv=${conversationId} failed: ${e.message}`));
-  const pending = Promise.all([sentRecordings.get(conversationId), recording]);
-  sentRecordings.set(conversationId, pending);
-  pending.finally(() => {
-    if (sentRecordings.get(conversationId) === pending) sentRecordings.delete(conversationId);
-  });
-}
+// them (see createSentReplyRecorder).
+const sentReplies = createSentReplyRecorder({
+  drainMarkers: () => drainSentMarkers(SENT_DIR),
+  onMarker: (entry) => dmSeenWatch.watch(entry).catch(e => warn(`dm-seen-watch: watch msg=${entry.messageId} failed: ${e.message}`)),
+  fetchDetail: fetchMessageDetail,
+  resolveName: fetchMemberName,
+  lookupOrg: lookupConvOrg,
+  warn,
+});
 
 function pollDmSent() {
-  for (const entry of drainSentMarkers(SENT_DIR)) {
-    dmSeenWatch.watch(entry).catch(e => warn(`dm-seen-watch: watch msg=${entry.messageId} failed: ${e.message}`));
-    recordSent(entry);
-  }
-}
-
-/** Before a context is built: take in the replies sent so far and wait for this conversation's. */
-async function settleSentReplies(conversationId) {
-  pollDmSent();
-  await sentRecordings.get(conversationId);
+  sentReplies.poll();
 }
 tasks.register('dm-seen-poll', pollDmSent, TYPING_POLL_MS);
 tasks.start('dm-seen-poll');
@@ -1025,7 +1006,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     let recent = [];
     const convType = convTypeOf(conv, msg.conversation_id);
     if (fetchesConversationContext(convType, sub)) {
-      await settleSentReplies(msg.conversation_id);
+      await sentReplies.settle(msg.conversation_id);
       const gathered = await gatherRecentContext({
         conversationId: msg.conversation_id,
         messageId: msg.id,

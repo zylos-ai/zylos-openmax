@@ -8,7 +8,7 @@ import path from 'node:path';
 // before importing anything that loads it.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zom-convctx-'));
 process.env.HOME = tmpHome;
-const { gatherRecentContext, recordSentMessage, historyEntryOf, createContextDelivery } = await import('./conversation-context.js');
+const { gatherRecentContext, recordSentMessage, historyEntryOf, createContextDelivery, createSentReplyRecorder } = await import('./conversation-context.js');
 const { logAndRecord, ensureReplay, setLimits, getHistory } = await import('./group-history.js');
 
 // The context lines for <group-context> / <subconversation-context>: local
@@ -246,4 +246,84 @@ test('incremental: bounded — oldest ids and least recently used conversations 
   d.remember(c, ['y']);          // b forgotten
   assert.deepEqual(d.unseen(b, [line('x')]).map((l) => l.messageId), ['x']);
   assert.deepEqual(d.unseen(a, [line('4')]), []);
+});
+
+// ── review P3s: cards, split replies, the timing before a context is built ──
+
+test('a card the Agent sent reads the same from local history as from the API page', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  const card = {
+    id: idOf(6), seq: 6, sender_id: 'm-agent', sender_display_name: 'Nova', type: 'agent_card',
+    content: { content_type: 'card', body: { title: '审批', blocks: [{ text: '请选择' }], actions: [{ label: '同意' }, { label: '拒绝' }] }, attachments: [] },
+  };
+  const detail = { message: { id: idOf(6), seq: 6, sender_id: 'm-agent', type: 'agent_card' }, content: card.content };
+  await recordSent(conv, 6, { detail });
+  record(conv, 7);
+  const local = (await gather(conv, { seq: 7, fetch: mockFetch() })).recent.at(-1);
+  const api = (await gather(newConv(), { seq: 7, fetch: mockFetch([card]) })).recent.at(-1);
+  assert.equal(local.content, '[image] 【审批】\n\n请选择\n\n[options] 同意 / 拒绝');
+  assert.equal(local.content, api.content);
+});
+
+/** A recorder over an in-memory marker queue; fetchDetail answers via `answer(seq)`. */
+function recorderFor({ delayMs = 0 } = {}) {
+  const queue = [];
+  const fetched = [];
+  const rec = createSentReplyRecorder({
+    drainMarkers: () => queue.splice(0),
+    fetchDetail: async (orgId, conversationId, messageId) => {
+      fetched.push(messageId);
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      const seq = Number(String(messageId).slice(-4));
+      return sentDetail(seq);
+    },
+    resolveName: async (orgId, id) => (id === 'm-agent' ? 'Nova' : null),
+  });
+  const mark = (conv, seqs) => queue.push({ conversationId: conv, messageId: idOf(seqs.at(-1)), messageIds: seqs.map(idOf), orgId: 'org-1' });
+  return { rec, mark, fetched };
+}
+
+test('a split reply: every chunk is recorded and in the next context', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  const { rec, mark, fetched } = recorderFor();
+  mark(conv, [6, 7, 8]);
+  record(conv, 9);
+  await rec.settle(conv);
+  assert.deepEqual(fetched, [idOf(6), idOf(7), idOf(8)]);
+  const { recent } = await gather(conv, { seq: 9, fetch: mockFetch() });
+  assert.deepEqual(recent.map((l) => l.content), ['local 4', 'local 5', 'agent 6', 'agent 7', 'agent 8']);
+});
+
+test('a reply whose marker was not polled yet and whose fetch ends after the context build started is still in it', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  const { rec, mark } = recorderFor({ delayMs: 30 });
+  mark(conv, [6]);          // written by send.js; the 2s poll has not run
+  record(conv, 7);          // the next inbound message arrives
+  await rec.settle(conv);   // what the bridge does before gatherRecentContext
+  const { recent } = await gather(conv, { seq: 7, fetch: mockFetch() });
+  assert.equal(recent.at(-1).content, 'agent 6');
+});
+
+test('a reply recorded before this process read the conversation\'s log file is kept (replay first)', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  // A log file from before a restart: on disk, not in memory yet.
+  const dir = path.join(tmpHome, 'zylos/components/openmax/runtime/group-logs');
+  fs.writeFileSync(path.join(dir, `${conv}.log`), [1, 2, 3, 4, 5].map((s) => JSON.stringify({
+    timestamp: 'T', message_id: idOf(s), sender_id: 'm-alice', sender_name: 'Alice', text: `local ${s}`, seq: s, parent_id: null, type: 'text',
+  })).join('\n') + '\n');
+  assert.equal(await recordSent(conv, 6), true);
+  record(conv, 7);
+  record(conv, 8);
+  // Recorded ahead of the replayed tail, the reply would be the oldest entry in
+  // memory and fall out of the window here.
+  const { recent, source } = await gather(conv, { seq: 8, fetch: mockFetch() });
+  assert.equal(source, 'local');
+  assert.deepEqual(recent.map((l) => l.content), ['local 3', 'local 4', 'local 5', 'agent 6', 'local 7']);
 });

@@ -238,14 +238,14 @@ test('comm-bridge: the sub-conversation comes from the conversation record and f
 
 test('comm-bridge: local history and context for groups and every sub-conversation', () => {
   assert.match(BRIDGE, /if \(fetchesConversationContext\(earlyConvType, sub\)\) \{[\s\S]*?logAndRecord\(msg\.conversation_id, historyEntryOf\(msg, /);
-  assert.match(BRIDGE, /if \(fetchesConversationContext\(convType, sub\)\) \{\n\s+await settleSentReplies\(msg\.conversation_id\);\n\s+const gathered = await gatherRecentContext\(\{/);
+  assert.match(BRIDGE, /if \(fetchesConversationContext\(convType, sub\)\) \{\n\s+await sentReplies\.settle\(msg\.conversation_id\);\n\s+const gathered = await gatherRecentContext\(\{/);
   // Incremental <subconversation-context>: only lines not yet delivered, and a
   // forwarded message remembers what it delivered (only for a sub-conversation).
   assert.match(BRIDGE, /recent = sub \? subContextDelivery\.unseen\(msg\.conversation_id, gathered\.recent\) : gathered\.recent;/);
   assert.match(BRIDGE, /if \(result\.outcome === 'sent' \|\| result\.outcome === 'stored'\) \{[\s\S]*?if \(sub\) subContextDelivery\.remember\(msg\.conversation_id, \[\.\.\.recent\.map\(l => l\.messageId\), msg\.id\]\);[\s\S]*?markRead/);
   // The Agent's own replies (never echoed back) go into local history from the sent markers.
-  assert.match(BRIDGE, /function pollDmSent\(\) \{[\s\S]*?recordSent\(entry\);/);
-  assert.match(BRIDGE, /recordSentMessage\(\{[\s\S]*?fetchDetail: \(\) => fetchMessageDetail\(orgId, conversationId, entry\.messageId\)/);
+  assert.match(BRIDGE, /const sentReplies = createSentReplyRecorder\(\{\n\s+drainMarkers: \(\) => drainSentMarkers\(SENT_DIR\),[\s\S]*?fetchDetail: fetchMessageDetail,/);
+  assert.match(BRIDGE, /function pollDmSent\(\) \{\n\s+sentReplies\.poll\(\);/);
   assert.match(BRIDGE, /baseLimit: config\.message\?\.context_messages \?\? DEFAULT_CONTEXT_MESSAGES,/);
   assert.match(BRIDGE, /maxLimit: config\.message\?\.context_max_messages \?\? DEFAULT_CONTEXT_MAX_MESSAGES,/);
   assert.doesNotMatch(BRIDGE, /rootMessage|root_message_id/, 'no root-message handling');
