@@ -71,6 +71,40 @@ async function apiMessageToContext(m, resolveName) {
 }
 
 /**
+ * What a sub-conversation's context has already given the Agent, so
+ * <subconversation-context> carries only the lines it has not seen: each
+ * message forwarded (as the current message or as a context line) is
+ * remembered by id per conversation, and `unseen` leaves those lines out.
+ * A line without an id is always kept. In memory only: after a bridge restart
+ * the next context is whole again. Bounded: the newest `maxIds` ids per
+ * conversation, the `maxConversations` most recently used conversations.
+ */
+export function createContextDelivery({ maxIds = 200, maxConversations = 1000 } = {}) {
+  const delivered = new Map();   // conversationId -> Set<messageId>, oldest first
+
+  return {
+    unseen(conversationId, lines) {
+      const seen = delivered.get(String(conversationId));
+      if (!seen) return lines;
+      return lines.filter((l) => !l.messageId || !seen.has(String(l.messageId)));
+    },
+    remember(conversationId, ids) {
+      const key = String(conversationId);
+      const seen = delivered.get(key) || new Set();
+      delivered.delete(key);
+      for (const id of ids) {
+        if (id == null || id === '') continue;
+        seen.delete(String(id));
+        seen.add(String(id));
+      }
+      while (seen.size > maxIds) seen.delete(seen.values().next().value);
+      delivered.set(key, seen);
+      while (delivered.size > maxConversations) delivered.delete(delivered.keys().next().value);
+    },
+  };
+}
+
+/**
  * The local history entry for a message: the get-message response merged over
  * the frame (`msg.message` holds the scalar fields, `msg.content` the
  * structured body). Media become labels; a merged forward is one line.

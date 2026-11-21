@@ -8,7 +8,7 @@ import path from 'node:path';
 // before importing anything that loads it.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zom-convctx-'));
 process.env.HOME = tmpHome;
-const { gatherRecentContext, recordSentMessage, historyEntryOf } = await import('./conversation-context.js');
+const { gatherRecentContext, recordSentMessage, historyEntryOf, createContextDelivery } = await import('./conversation-context.js');
 const { logAndRecord, ensureReplay, setLimits, getHistory } = await import('./group-history.js');
 
 // The context lines for <group-context> / <subconversation-context>: local
@@ -199,4 +199,51 @@ test('historyEntryOf: an inbound frame + get-message detail → the entry the br
     timestamp: 'T', message_id: 1795, sender_id: 'm-bob', sender_name: 'Bob',
     text: '[image: a1 | x.png] look', seq: 42, parent_id: '1790', type: 'image',
   });
+});
+
+// ── incremental <subconversation-context> ────────────────────────────────
+
+const line = (id, content = `m ${id}`) => ({ senderName: 'Bob', senderId: 'm-bob', content, messageId: id });
+
+test('incremental: a line the Agent was given (as context or as the current message) is not sent again', () => {
+  const d = createContextDelivery();
+  const conv = newConv();
+  // Turn 1: context 1, 2; current message 3.
+  assert.deepEqual(d.unseen(conv, [line('1'), line('2')]).map((l) => l.messageId), ['1', '2'], 'nothing delivered yet → whole');
+  d.remember(conv, ['1', '2', '3']);
+  // Turn 2 (current message 5): the window is 1..4, 4 being the Agent's reply.
+  const next = d.unseen(conv, [line('1'), line('2'), line('3'), line('4', 'agent reply')]);
+  assert.deepEqual(next.map((l) => l.messageId), ['4']);
+  d.remember(conv, [...next.map((l) => l.messageId), '5']);
+  // Turn 3: nothing new before it → no lines (no block).
+  assert.deepEqual(d.unseen(conv, [line('2'), line('3'), line('4'), line('5')]), []);
+});
+
+test('incremental: per conversation; a message never forwarded (smart mode, dropped) still shows up later', () => {
+  const d = createContextDelivery();
+  const a = newConv();
+  const b = newConv();
+  d.remember(a, ['1', '2']);
+  assert.deepEqual(d.unseen(b, [line('1')]).map((l) => l.messageId), ['1'], 'another conversation is unaffected');
+  assert.deepEqual(d.unseen(a, [line('1'), line('2'), line('9')]).map((l) => l.messageId), ['9']);
+});
+
+test('incremental: ids compare as strings; a line without an id is always kept', () => {
+  const d = createContextDelivery();
+  const conv = newConv();
+  d.remember(conv, [1795, null, '']);
+  const kept = d.unseen(conv, [line('1795'), { senderName: 'X', content: 'no id' }]);
+  assert.deepEqual(kept.map((l) => l.content), ['no id']);
+});
+
+test('incremental: bounded — oldest ids and least recently used conversations are forgotten (then sent again)', () => {
+  const d = createContextDelivery({ maxIds: 2, maxConversations: 2 });
+  const [a, b, c] = [newConv(), newConv(), newConv()];
+  d.remember(a, ['1', '2', '3']);
+  assert.deepEqual(d.unseen(a, [line('1'), line('2'), line('3')]).map((l) => l.messageId), ['1']);
+  d.remember(b, ['x']);
+  d.remember(a, ['4']);          // a used again → b is now the oldest
+  d.remember(c, ['y']);          // b forgotten
+  assert.deepEqual(d.unseen(b, [line('x')]).map((l) => l.messageId), ['x']);
+  assert.deepEqual(d.unseen(a, [line('4')]), []);
 });

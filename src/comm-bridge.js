@@ -75,7 +75,7 @@ import { createInboxLedger } from './lib/inbox-ledger.js';
 import { seedSessionFromLedger, commitIdentityRebind } from './lib/inbox-rebind.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, ensureReplay, setLimits } from './lib/group-history.js';
-import { gatherRecentContext, historyEntryOf, recordSentMessage } from './lib/conversation-context.js';
+import { gatherRecentContext, historyEntryOf, recordSentMessage, createContextDelivery } from './lib/conversation-context.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter, createMetricsReadinessEvaluator } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
@@ -536,6 +536,10 @@ const dmSeenWatch = createDmSeenWatcher({
   log,
   warn,
 });
+
+// <subconversation-context> is incremental: lines the Agent was already given
+// in this sub-conversation are not sent again (see createContextDelivery).
+const subContextDelivery = createContextDelivery();
 
 // The same markers put this Agent's own replies into local history: cws-comm
 // does not echo them back, so a context built from local history would miss
@@ -1033,8 +1037,9 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         resolveName: (memberId) => fetchMemberName(orgConfig.org_id, memberId),
         log,
       });
-      recent = gathered.recent;
-      log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${gathered.source} count=${recent.length}${sub ? ` subconversation=${sub.ownerKind}` : ''}`);
+      recent = sub ? subContextDelivery.unseen(msg.conversation_id, gathered.recent) : gathered.recent;
+      const skipped = gathered.recent.length - recent.length;
+      log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${gathered.source} count=${recent.length}${skipped ? ` already-delivered=${skipped}` : ''}${sub ? ` subconversation=${sub.ownerKind}` : ''}`);
     }
 
     // After `msg = { ...notification, ...detail }`, where detail is the
@@ -1265,6 +1270,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       // Stored but reported as an error: Core has the message, so it is handled
       // like a success (nothing shown, nothing resent).
       if (run) activity.confirmRun(run.runId, result.stdout);
+      if (sub) subContextDelivery.remember(msg.conversation_id, [...recent.map(l => l.messageId), msg.id]);
       log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}${result.sessionGroup ? ` group=${result.sessionGroup}` : ''}${result.outcome === 'stored' ? ' (stored, reported failed)' : ''}`);
       markRead(orgConfig, msg.conversation_id, msg.seq);
       return;
