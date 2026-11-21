@@ -144,12 +144,23 @@ test('agent session replaced, bridge not restarted: the envelope has the recent 
   const out = bridgeEnvelope(delivery, window, { content: 'what did we decide?', messageId: '1795000000000000016', seq: 16 });
   assert.equal(blockOf(out, 'subconversation-context'), [
     '<subconversation-context>',
-    `(2 earlier messages of this conversation omitted: already given to you in earlier turns. To read them: node ~/zylos/.claude/skills/openmax/src/cli/comm.js comm.get_messages '{"conversationId":"${S}","beforeSeq":13,"limit":2}')`,
+    `(2 earlier messages of this conversation omitted: already given to you in earlier turns. To read them: node ~/zylos/.claude/skills/openmax/src/cli/comm.js comm.get_messages '{"conversationId":"${S}","org":"${ORG}","beforeSeq":13,"limit":2}')`,
     '[Bob]: line 13',
     '[Nova]: line 14',
     '[Bob]: line 15',
     '</subconversation-context>',
   ].join('\n'));
+});
+
+test('no org id → the omission command carries no org key (never org: undefined)', () => {
+  const delivery = createContextDelivery();
+  const window = windowOf();
+  delivery.remember(S, window.map((l) => l.messageId));
+  const kept = delivery.unseen(S, window, SUB_CONTEXT_ALWAYS_RECENT);
+  const out = envelopeFor(APP_DM, { content: 'hi', messageId: '1795000000000000016', seq: 16 }, kept, {
+    orgId: undefined, subContextOmitted: omittedContext(S, window, kept, 16),
+  });
+  assert.match(out, new RegExp(`comm\\.get_messages '\\{"conversationId":"${S}","beforeSeq":13,"limit":2\\}'`));
 });
 
 test('nothing omitted → no omission line (first message, or only new lines)', () => {

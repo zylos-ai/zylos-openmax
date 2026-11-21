@@ -182,11 +182,13 @@ function formatContextLine(m) {
 /**
  * The <subconversation-context> note for lines left out because the Agent was
  * already given them: how many, and the comm.get_messages call that returns
- * them. Ids and numbers only, all from the bridge.
+ * them. Ids and numbers only, all from the bridge. The org id is passed too,
+ * so the command works on a multi-org install without COCO_ORG_ID.
  */
-function formatOmissionNote(omitted) {
+function formatOmissionNote(omitted, orgId) {
   if (!omitted) return '';
   const args = { conversationId: attrValue(omitted.conversationId) };
+  if (orgId) args.org = attrValue(orgId);
   if (Number.isFinite(omitted.beforeSeq)) args.beforeSeq = omitted.beforeSeq;
   if (Number.isFinite(omitted.limit)) args.limit = omitted.limit;
   return `(${omitted.count} earlier message${omitted.count === 1 ? '' : 's'} of this conversation omitted: already given to you in earlier turns. `
@@ -424,7 +426,7 @@ Before handling the current message, invoke the openmax skill and follow it. For
     // Lines left out as already delivered are announced first, with the
     // command that reads them back.
     const lines = recent.map(formatContextLine);
-    const omissionNote = formatOmissionNote(subContextOmitted);
+    const omissionNote = formatOmissionNote(subContextOmitted, orgId);
     if (omissionNote) lines.unshift(omissionNote);
     parts.push(`<subconversation-context>\n${lines.join('\n')}\n</subconversation-context>\n\n`);
   } else if (!subConversation && type !== 'dm' && recent && recent.length > 0) {
