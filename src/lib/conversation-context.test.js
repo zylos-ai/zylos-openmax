@@ -8,8 +8,8 @@ import path from 'node:path';
 // before importing anything that loads it.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zom-convctx-'));
 process.env.HOME = tmpHome;
-const { gatherRecentContext } = await import('./conversation-context.js');
-const { logAndRecord, ensureReplay, setLimits } = await import('./group-history.js');
+const { gatherRecentContext, recordSentMessage, historyEntryOf } = await import('./conversation-context.js');
+const { logAndRecord, ensureReplay, setLimits, getHistory } = await import('./group-history.js');
 
 // The context lines for <group-context> / <subconversation-context>: local
 // history first, then one GET …/messages page (before_seq = the message's seq,
@@ -63,7 +63,7 @@ test('API path → one request with before_seq = msg.seq and limit = context_mes
   assert.deepEqual(fetch.calls, [{ conversationId: conv, beforeSeq: 21, limit: 5 }]);
   assert.equal(recent.length, 5);
   assert.deepEqual(recent.map((l) => l.content), ['api 16', 'api 17', 'api 18', 'api 19', 'api 20']);
-  assert.deepEqual(recent[0], { senderName: 'Carol', senderId: 'm-carol', content: 'api 16' });
+  assert.deepEqual(recent[0], { senderName: 'Carol', senderId: 'm-carol', content: 'api 16', messageId: idOf(16) });
 });
 
 test('the line count follows config (context_messages = 3)', async () => {
@@ -123,4 +123,80 @@ test('a local entry stored with a raw id as its name gets a resolved name', asyn
   record(conv, 6);
   const { recent } = await gather(conv, { seq: 6, fetch: mockFetch() });
   assert.equal(recent[0].senderName, 'name-of-m-dave');
+});
+
+// ── the Agent's own replies (cws-comm does not echo them back) ───────────
+
+/** The get-message response for a reply this Agent sent. */
+function sentDetail(seq, text = `agent ${seq}`) {
+  return {
+    message: { id: idOf(seq), seq, sender_id: 'm-agent', type: 'agent_text', content: text },
+    content: { content_type: 'text', body: { text }, attachments: [] },
+  };
+}
+
+async function recordSent(conv, seq, { detail = sentDetail(seq), calls = [] } = {}) {
+  return recordSentMessage({
+    conversationId: conv, messageId: idOf(seq),
+    fetchDetail: async () => { calls.push(seq); return detail; },
+    resolveName: async (id) => (id === 'm-agent' ? 'Nova' : null),
+  });
+}
+
+test('local history: the Agent\'s own latest reply is in the next message\'s context', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  assert.equal(await recordSent(conv, 6), true);   // the Agent answered message 5
+  record(conv, 7);                                  // the next inbound message
+  const { recent, source } = await gather(conv, { seq: 7, fetch: mockFetch() });
+  assert.equal(source, 'local');
+  assert.deepEqual(recent.map((l) => l.content), ['local 2', 'local 3', 'local 4', 'local 5', 'agent 6']);
+  assert.deepEqual(recent.at(-1), { senderName: 'Nova', senderId: 'm-agent', content: 'agent 6', messageId: idOf(6) });
+});
+
+test('a reply recorded after the next inbound message still sorts by seq', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  record(conv, 7);
+  await recordSent(conv, 6);
+  record(conv, 8);
+  const { recent } = await gather(conv, { seq: 8, fetch: mockFetch() });
+  assert.deepEqual(recent.map((l) => l.content), ['local 3', 'local 4', 'local 5', 'agent 6', 'local 7']);
+});
+
+test('no local history kept for the conversation (plain DM) → nothing fetched, nothing recorded', async () => {
+  const conv = newConv();
+  const calls = [];
+  assert.equal(await recordSent(conv, 1, { calls }), false);
+  assert.deepEqual(calls, []);
+  assert.equal(getHistory(conv), null);
+});
+
+test('the reply could not be fetched → nothing recorded', async () => {
+  const conv = newConv();
+  record(conv, 1);
+  assert.equal(await recordSent(conv, 2, { detail: null }), false);
+  assert.deepEqual(getHistory(conv).map((e) => e.message_id), [idOf(1)]);
+});
+
+test('a reply recorded twice (poll and inbound flush) is one entry', async () => {
+  const conv = newConv();
+  record(conv, 1);
+  await recordSent(conv, 2);
+  await recordSent(conv, 2);
+  assert.deepEqual(getHistory(conv).map((e) => e.message_id), [idOf(1), idOf(2)]);
+});
+
+test('historyEntryOf: an inbound frame + get-message detail → the entry the bridge always recorded', () => {
+  const msg = {
+    id: 1795, conversation_id: 'c', sender_id: 'm-bob', seq: '42', type: 'IMAGE', parent_message_id: '1790',
+    message: { id: 1795, seq: 42, sender_id: 'm-bob', type: 'image', parent_id: '1790' },
+    content: { body: { text: 'look' }, attachments: [{ artifact_id: 'a1', file_name: 'x.png' }] },
+  };
+  assert.deepEqual(historyEntryOf(msg, 'Bob', 'T'), {
+    timestamp: 'T', message_id: 1795, sender_id: 'm-bob', sender_name: 'Bob',
+    text: '[image: a1 | x.png] look', seq: 42, parent_id: '1790', type: 'image',
+  });
 });

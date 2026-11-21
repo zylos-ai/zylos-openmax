@@ -124,6 +124,18 @@ export function logAndRecord(conversationId, entry) {
 }
 
 /**
+ * Whether local history is kept for this conversation: it has entries in
+ * memory or a log file. The bridge only records conversations that get a
+ * context block (groups and sub-conversations), so this tells them apart from a
+ * plain DM without the conversation record.
+ */
+export function hasHistory(conversationId) {
+  conversationId = String(conversationId);
+  if (chatHistories.get(conversationId)?.length) return true;
+  return fs.existsSync(path.join(LOGS_DIR, conversationId + '.log'));
+}
+
+/**
  * Get recent context messages from in-memory history.
  * Returns up to `limit` entries, excluding the specified message.
  * Returns null if no local history is available (caller should fall back to API).

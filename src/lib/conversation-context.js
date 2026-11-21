@@ -12,11 +12,16 @@
  * beforeSeq, limit)` returns API message objects ([] on failure);
  * `resolveName(memberId)` returns a display name or null.
  *
- * Each line is `{ senderName, senderId, content }` (formatContextLine in
- * message.js renders it).
+ * Each line is `{ senderName, senderId, content, messageId }` (formatContextLine
+ * in message.js renders it).
+ *
+ * cws-comm does not echo a sender's own messages back to it, so the Agent's own
+ * replies never arrive as inbound frames. recordSentMessage puts them into local
+ * history (send.js hands each sent message to the bridge, see dm-seen-watch.js),
+ * so a context built from local history has them like the API page does.
  */
 
-import { getHistory } from './group-history.js';
+import { getHistory, hasHistory, ensureReplay, logAndRecord } from './group-history.js';
 import { isChatHistory, FORWARDED_CONVERSATION } from './forwarded.js';
 import { formatStructuredForModel } from './structured-body.js';
 
@@ -28,7 +33,11 @@ async function localEntryToContext(e, resolveName) {
   if (!name || name === e.sender_id) {
     name = (await resolveName(e.sender_id)) || e.sender_id;
   }
-  return { senderName: name, senderId: e.sender_id, content: e.text };
+  return { senderName: name, senderId: e.sender_id, content: e.text, messageId: idString(e.message_id) };
+}
+
+function idString(id) {
+  return id == null || id === '' ? null : String(id);
 }
 
 async function apiMessageToContext(m, resolveName) {
@@ -58,7 +67,66 @@ async function apiMessageToContext(m, resolveName) {
     content = '[image]' + (text ? ' ' + text : '');
   }
   if (isChatHistory(m)) content = FORWARDED_CONVERSATION;
-  return { senderName, senderId: m.sender_id, content };
+  return { senderName, senderId: m.sender_id, content, messageId: idString(m.id) };
+}
+
+/**
+ * The local history entry for a message: the get-message response merged over
+ * the frame (`msg.message` holds the scalar fields, `msg.content` the
+ * structured body). Media become labels; a merged forward is one line.
+ */
+export function historyEntryOf(msg, senderName, timestamp = new Date().toISOString()) {
+  const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
+  const entryText = structured.body?.text
+    || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+    || (typeof msg.content === 'string' ? msg.content : '')
+    || '';
+  const msgType = (msg.type || msg.message?.type || '').toLowerCase();
+  const atts = Array.isArray(structured.attachments) ? structured.attachments : [];
+  const isImg = msgType === 'image' || msgType === 'agent_card';
+  let histText = entryText;
+  if ((isImg || atts.length > 0) && atts.length > 0) {
+    const kind = isImg ? 'image' : 'file';
+    const labels = atts.map(a => `[${kind}: ${a.artifact_id || '?'} | ${a.file_name || 'unknown'}]`);
+    histText = labels.join(' ') + (entryText ? ' ' + entryText : '');
+  } else if (isImg) {
+    histText = '[image]' + (entryText ? ' ' + entryText : '');
+  }
+  // A merged forward is one line in context, never its expanded records.
+  if (isChatHistory(msg)) histText = FORWARDED_CONVERSATION;
+  const seq = msg.seq ?? msg.message?.seq;
+  return {
+    timestamp,
+    message_id: msg.id ?? msg.message?.id,
+    sender_id: msg.sender_id || msg.message?.sender_id,
+    sender_name: senderName,
+    text: histText,
+    seq: seq != null ? Number(seq) : null,
+    parent_id: msg.parent_message_id || msg.message?.parent_message_id || msg.message?.parent_id || null,
+    type: msgType || 'text',
+  };
+}
+
+/**
+ * Record a message this Agent sent into local history, when history is kept
+ * for its conversation. `fetchDetail()` returns the get-message response (null
+ * on failure: nothing is recorded). Returns whether an entry was recorded.
+ */
+export async function recordSentMessage({ conversationId, messageId, fetchDetail, resolveName }) {
+  if (!conversationId || !messageId || !hasHistory(conversationId)) return false;
+  const detail = await fetchDetail();
+  if (!detail) return false;
+  const msg = { id: messageId, ...detail };
+  const senderId = msg.sender_id || msg.message?.sender_id;
+  const senderName = msg.sender_display_name
+    || msg.message?.sender_display_name
+    || (await resolveName(senderId))
+    || senderId;
+  // Replay first, so a log file not yet read by this process is read before
+  // the new entry (otherwise the tail would land after it in memory).
+  ensureReplay(conversationId);
+  logAndRecord(conversationId, historyEntryOf(msg, senderName));
+  return true;
 }
 
 /**

@@ -75,7 +75,7 @@ import { createInboxLedger } from './lib/inbox-ledger.js';
 import { seedSessionFromLedger, commitIdentityRebind } from './lib/inbox-rebind.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, ensureReplay, setLimits } from './lib/group-history.js';
-import { gatherRecentContext } from './lib/conversation-context.js';
+import { gatherRecentContext, historyEntryOf, recordSentMessage } from './lib/conversation-context.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter, createMetricsReadinessEvaluator } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
@@ -537,10 +537,39 @@ const dmSeenWatch = createDmSeenWatcher({
   warn,
 });
 
+// The same markers put this Agent's own replies into local history: cws-comm
+// does not echo them back, so a context built from local history would miss
+// them (see recordSentMessage). Pending recordings, by conversation.
+const sentRecordings = new Map();
+
+function recordSent(entry) {
+  const conversationId = entry.conversationId;
+  const orgId = entry.orgId || lookupConvOrg(conversationId);
+  if (!orgId) return;
+  const recording = recordSentMessage({
+    conversationId,
+    messageId: entry.messageId,
+    fetchDetail: () => fetchMessageDetail(orgId, conversationId, entry.messageId),
+    resolveName: (memberId) => fetchMemberName(orgId, memberId),
+  }).catch(e => warn(`record sent msg=${entry.messageId} conv=${conversationId} failed: ${e.message}`));
+  const pending = Promise.all([sentRecordings.get(conversationId), recording]);
+  sentRecordings.set(conversationId, pending);
+  pending.finally(() => {
+    if (sentRecordings.get(conversationId) === pending) sentRecordings.delete(conversationId);
+  });
+}
+
 function pollDmSent() {
   for (const entry of drainSentMarkers(SENT_DIR)) {
     dmSeenWatch.watch(entry).catch(e => warn(`dm-seen-watch: watch msg=${entry.messageId} failed: ${e.message}`));
+    recordSent(entry);
   }
+}
+
+/** Before a context is built: take in the replies sent so far and wait for this conversation's. */
+async function settleSentReplies(conversationId) {
+  pollDmSent();
+  await sentRecordings.get(conversationId);
 }
 tasks.register('dm-seen-poll', pollDmSent, TYPING_POLL_MS);
 tasks.start('dm-seen-poll');
@@ -919,39 +948,12 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     // for messages the bot doesn't handle.
     const earlyConvType = convTypeOf(conv, msg.conversation_id);
     if (fetchesConversationContext(earlyConvType, sub)) {
-      const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
-      const entryText = structured.body?.text
-        || (typeof msg.message?.content === 'string' ? msg.message.content : '')
-        || (typeof msg.content === 'string' ? msg.content : '')
-        || '';
-      const msgType = (msg.type || msg.message?.type || '').toLowerCase();
-      const atts = Array.isArray(structured.attachments) ? structured.attachments : [];
-      const isImg = msgType === 'image' || msgType === 'agent_card';
-      let histText = entryText;
-      if ((isImg || atts.length > 0) && atts.length > 0) {
-        const kind = isImg ? 'image' : 'file';
-        const labels = atts.map(a => `[${kind}: ${a.artifact_id || '?'} | ${a.file_name || 'unknown'}]`);
-        histText = labels.join(' ') + (entryText ? ' ' + entryText : '');
-      } else if (isImg) {
-        histText = '[image]' + (entryText ? ' ' + entryText : '');
-      }
-      // A merged forward is one line in context, never its expanded records.
-      if (isChatHistory(msg)) histText = FORWARDED_CONVERSATION;
       ensureReplay(msg.conversation_id);
       const historySenderName = msg.sender_display_name
         || msg.sender?.display_name
         || (await fetchMemberName(orgConfig.org_id, msg.sender_id))
         || msg.sender_id;
-      logAndRecord(msg.conversation_id, {
-        timestamp: new Date().toISOString(),
-        message_id: msg.id,
-        sender_id: msg.sender_id,
-        sender_name: historySenderName,
-        text: histText,
-        seq: msg.seq != null ? Number(msg.seq) : null,
-        parent_id: msg.parent_message_id || msg.message?.parent_id || null,
-        type: msgType || 'text',
-      });
+      logAndRecord(msg.conversation_id, historyEntryOf(msg, historySenderName));
     }
 
     const decision = await shouldHandleMessage(msg, conv || {}, orgConfig);
@@ -1019,6 +1021,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     let recent = [];
     const convType = convTypeOf(conv, msg.conversation_id);
     if (fetchesConversationContext(convType, sub)) {
+      await settleSentReplies(msg.conversation_id);
       const gathered = await gatherRecentContext({
         conversationId: msg.conversation_id,
         messageId: msg.id,
