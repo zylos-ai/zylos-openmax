@@ -19,20 +19,23 @@
  * flagged as `legacyThread`, and the message goes to the leading conversation.
 
  * Inbound C4 text format (tag on its own line; the attributed utterance lives
- * inside <current-message> for parity with other C4 channels):
+ * inside <current-message> for parity with other C4 channels; it comes right
+ * after the header elements, before the instruction and the context blocks):
  *   [OPENMAX DM]
  *   <sender-context kind="human" member-id="<memberId>"/>   (DM only, when known)
- *   <openmax-instruction>...</openmax-instruction>
  *   <current-message>
  *   <name> (<sender member id>) said: <content>
  *   </current-message>
+ *   <openmax-instruction>...</openmax-instruction>
  *
  *   [OPENMAX GROUP:<group>]
- *   <group-context>...</group-context>
  *   <current-message>
  *   <name> (<sender member id>) said: <content>
  *   </current-message>
- *   (with optional `---- file: <path>` or `---- image: <path>` suffix)
+ *   <openmax-instruction>...</openmax-instruction>
+ *   <group-context>...</group-context>
+ *   (optional `---- file: <path>` or `---- image: <path>` suffix right after
+ *   </current-message>)
  */
 
 import { randomUUID } from 'crypto';
@@ -176,6 +179,22 @@ function formatContextLine(m) {
   return `[${name}]: ${text}`;
 }
 
+/**
+ * The <subconversation-context> note for lines left out because the Agent was
+ * already given them: how many, and the comm.get_messages call that returns
+ * them. Ids and numbers only, all from the bridge. The org id is passed too,
+ * so the command works on a multi-org install without COCO_ORG_ID.
+ */
+function formatOmissionNote(omitted, orgId) {
+  if (!omitted) return '';
+  const args = { conversationId: attrValue(omitted.conversationId) };
+  if (orgId) args.org = attrValue(orgId);
+  if (Number.isFinite(omitted.beforeSeq)) args.beforeSeq = omitted.beforeSeq;
+  if (Number.isFinite(omitted.limit)) args.limit = omitted.limit;
+  return `(${omitted.count} earlier message${omitted.count === 1 ? '' : 's'} of this conversation omitted: already given to you in earlier turns. `
+    + `To read them: node ~/zylos/.claude/skills/openmax/src/cli/comm.js comm.get_messages '${JSON.stringify(args)}')`;
+}
+
 // The display name on the `<name> (<member id>) said:` line is sender-chosen,
 // so it must not be able to fake that shape: ASCII `(` / `)` become fullwidth
 // `（` / `）` (still readable, but never the id's delimiters, so the only ASCII
@@ -226,6 +245,9 @@ export const UNAVAILABLE_ATTACHMENT = '[附件无法获取]';
  *                            `subConversation` (boolean, set by the bridge
  *                            from the conversation record only) renders
  *                            `recent` as <subconversation-context>, DM or group.
+ *                            `subContextOmitted` ({ conversationId, count,
+ *                            beforeSeq, limit }, from omittedContext) adds the
+ *                            note on lines left out as already delivered.
  * @returns {string}
  */
 export function formatInboundForC4(conv, sender, current, recent = [], opts = {}) {
@@ -234,6 +256,7 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   const {
     groupName, quotedContent, smartHint, orgId, orgName, receipt, systemSender,
     senderMember, preferredConnectors, wfRef, quotedExcerpt, chatHistory, subConversation,
+    subContextOmitted,
   } = opts;
 
   const name = sender?.displayName || sender?.display_name || sender?.id || 'unknown';
@@ -343,10 +366,46 @@ export function formatInboundForC4(conv, sender, current, recent = [], opts = {}
   if (wfContext) header += `${wfContext}\n`;
   const parts = [header];
 
+  // The sender's member id after the name, so the Agent knows who spoke even
+  // when display names collide. Not repeated when the name already is the id
+  // (no resolvable name). The message id stays in <message-context>.
+  const senderId = attrValue(sender?.id);
+  const who = senderId && senderId !== name ? `${safeName} (${senderId})` : safeName;
+  let mediaSuffix = '';
+  const kind = current.type === 'image' ? 'image' : 'file';
+  if (Array.isArray(current?.mediaItems) && current.mediaItems.length > 0) {
+    for (const item of current.mediaItems) {
+      if (item.localPath) {
+        mediaSuffix += ` ---- ${kind}: ${escapeXml(item.localPath)}`;
+        if (item.fileName) mediaSuffix += ` name="${escapeXml(item.fileName)}"`;
+      } else if (item.id) {
+        mediaSuffix += ` ---- artifact_id: ${escapeXml(item.id)}`;
+        if (item.fileName) mediaSuffix += ` name="${escapeXml(item.fileName)}"`;
+        if (item.downloadFailed) mediaSuffix += ` ${UNAVAILABLE_ATTACHMENT}`;
+      } else {
+        // No artifact id to fetch it by: say so, so the message is never blank.
+        mediaSuffix += ` ---- ${UNAVAILABLE_ATTACHMENT}`;
+        if (item.fileName) mediaSuffix += ` name="${escapeXml(item.fileName)}"`;
+        if (item.contentType) mediaSuffix += ` content_type="${escapeXml(item.contentType)}"`;
+      }
+    }
+  } else if (current?.mediaLocalPath) {
+    mediaSuffix += ` ---- ${kind}: ${escapeXml(current.mediaLocalPath)}`;
+    if (current.mediaFileName) mediaSuffix += ` name="${escapeXml(current.mediaFileName)}"`;
+  } else if (current?.mediaId) {
+    mediaSuffix += ` ---- artifact_id: ${escapeXml(current.mediaId)}`;
+    if (current.mediaFileName) mediaSuffix += ` name="${escapeXml(current.mediaFileName)}"`;
+  }
+
+  // The current message comes right after the header, before the instruction
+  // and the context blocks, so the Agent reads what was asked first. Its media
+  // suffix stays right after </current-message>.
   // A merged forward (chat history) is the message text, rendered last into the
   // room the rest of the envelope leaves (see chatHistoryBudget); its slot in
-  // `parts` is filled in then. Absent it, nothing below changes.
-  let historySlot = -1;
+  // `parts` is filled in then.
+  parts.push(`<current-message>\n${who} said: `);
+  const historySlot = parts.length;
+  parts.push(chatHistory ? '' : safeContent, `\n</current-message>${mediaSuffix}\n\n`);
 
   // Skill discovery is advisory in the runtime: a model can occasionally
   // answer an inbound message without invoking the listed skill, especially
@@ -364,7 +423,11 @@ Before handling the current message, invoke the openmax skill and follow it. For
   if (subConversation && recent && recent.length > 0) {
     // A sub-conversation's recent messages (DM or group), in place of
     // <group-context>; same lines, no attributes. Nothing when there are none.
+    // Lines left out as already delivered are announced first, with the
+    // command that reads them back.
     const lines = recent.map(formatContextLine);
+    const omissionNote = formatOmissionNote(subContextOmitted, orgId);
+    if (omissionNote) lines.unshift(omissionNote);
     parts.push(`<subconversation-context>\n${lines.join('\n')}\n</subconversation-context>\n\n`);
   } else if (!subConversation && type !== 'dm' && recent && recent.length > 0) {
     const lines = recent.map(formatContextLine);
@@ -403,50 +466,13 @@ When uncertain, prefer NOT to reply. Reply with exactly [SKIP] to stay silent.
     parts.push(`${workReferenceContext}\n\n`);
   }
 
-  // The sender's member id after the name, so the Agent knows who spoke even
-  // when display names collide. Not repeated when the name already is the id
-  // (no resolvable name). The message id stays in <message-context>.
-  const senderId = attrValue(sender?.id);
-  const who = senderId && senderId !== name ? `${safeName} (${senderId})` : safeName;
+  // Every block above ends in a blank line; the envelope does not.
+  const join = () => parts.join('').replace(/\n+$/, '');
   if (chatHistory) {
-    parts.push(`<current-message>\n${who} said: `);
-    historySlot = parts.length;
-    parts.push('', '\n</current-message>');
-  } else {
-    parts.push(`<current-message>\n${who} said: ${safeContent}\n</current-message>`);
+    const budget = chatHistoryBudget(Buffer.byteLength(join(), 'utf8'));
+    parts[historySlot] = formatForwardedChatHistory(chatHistory, budget);
   }
-
-  let line = parts.join('');
-  const kind = current.type === 'image' ? 'image' : 'file';
-  if (Array.isArray(current?.mediaItems) && current.mediaItems.length > 0) {
-    for (const item of current.mediaItems) {
-      if (item.localPath) {
-        line += ` ---- ${kind}: ${escapeXml(item.localPath)}`;
-        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
-      } else if (item.id) {
-        line += ` ---- artifact_id: ${escapeXml(item.id)}`;
-        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
-        if (item.downloadFailed) line += ` ${UNAVAILABLE_ATTACHMENT}`;
-      } else {
-        // No artifact id to fetch it by: say so, so the message is never blank.
-        line += ` ---- ${UNAVAILABLE_ATTACHMENT}`;
-        if (item.fileName) line += ` name="${escapeXml(item.fileName)}"`;
-        if (item.contentType) line += ` content_type="${escapeXml(item.contentType)}"`;
-      }
-    }
-  } else if (current?.mediaLocalPath) {
-    line += ` ---- ${kind}: ${escapeXml(current.mediaLocalPath)}`;
-    if (current.mediaFileName) line += ` name="${escapeXml(current.mediaFileName)}"`;
-  } else if (current?.mediaId) {
-    line += ` ---- artifact_id: ${escapeXml(current.mediaId)}`;
-    if (current.mediaFileName) line += ` name="${escapeXml(current.mediaFileName)}"`;
-  }
-  if (chatHistory) {
-    const before = parts.slice(0, historySlot).join('');
-    const budget = chatHistoryBudget(Buffer.byteLength(line, 'utf8'));
-    line = before + formatForwardedChatHistory(chatHistory, budget) + line.slice(before.length);
-  }
-  return line;
+  return join();
 }
 
 /**

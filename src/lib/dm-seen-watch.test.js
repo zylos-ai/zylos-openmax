@@ -11,6 +11,7 @@ import {
   createDmSeenWatcher,
   resolveDmSeenConfig,
   sentMessageId,
+  sentMessageIds,
   writeSentMarker,
   drainSentMarkers,
   buildUnseenPrompt,
@@ -174,6 +175,32 @@ test('sentMessageId picks the last chunk, then id / message_id', () => {
   assert.equal(sentMessageId({ ok: true, skipped: true }), '');
 });
 
+test('sentMessageIds: every chunk of a split text, in order; else the one id', () => {
+  assert.deepEqual(sentMessageIds({ ok: true, chunks: 3, message_ids: ['1', null, 3] }), ['1', '3']);
+  assert.deepEqual(sentMessageIds({ id: 7 }), ['7']);
+  assert.deepEqual(sentMessageIds({ ok: true, skipped: true }), []);
+});
+
+test('a split reply: the marker carries every chunk id; the watch still uses the last', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-seen-'));
+  try {
+    const result = { ok: true, chunks: 3, message_ids: ['11', '12', '13'] };
+    assert.equal(writeSentMarker(dir, {
+      conversationId: AGENT_DM, messageId: sentMessageId(result), messageIds: sentMessageIds(result), sentAt: 5,
+    }), true);
+    assert.deepEqual(drainSentMarkers(dir), [{ conversationId: AGENT_DM, messageId: '13', messageIds: ['11', '12', '13'], orgId: '', sentAt: 5 }]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('send.js and comm.send put every chunk id in the marker', () => {
+  for (const rel of ['../../scripts/send.js', '../cli/comm.js']) {
+    const src = fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+    assert.match(src, /writeSentMarker\(SENT_DIR, \{[\s\S]*?messageIds: sentMessageIds\((result|res)\),/, rel);
+  }
+});
+
 test('markers round-trip through the directory and are consumed once', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dm-seen-'));
   try {
@@ -181,7 +208,7 @@ test('markers round-trip through the directory and are consumed once', () => {
     assert.equal(writeSentMarker(dir, { conversationId: AGENT_DM, messageId: '' }), false);
     assert.equal(writeSentMarker(dir, { conversationId: AGENT_DM, messageId: 'no-time' }), false, 'sentAt is required');
     fs.writeFileSync(path.join(dir, 'garbage.json'), '{not json');
-    assert.deepEqual(drainSentMarkers(dir), [{ conversationId: AGENT_DM, messageId: String(MSG), orgId: 'org-1', sentAt: 5 }]);
+    assert.deepEqual(drainSentMarkers(dir), [{ conversationId: AGENT_DM, messageId: String(MSG), messageIds: [String(MSG)], orgId: 'org-1', sentAt: 5 }]);
     assert.deepEqual(drainSentMarkers(dir), []);
     assert.deepEqual(fs.readdirSync(dir), [], 'garbage marker removed too');
   } finally {

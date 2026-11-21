@@ -75,7 +75,9 @@ import { createInboxLedger } from './lib/inbox-ledger.js';
 import { seedSessionFromLedger, commitIdentityRebind } from './lib/inbox-rebind.js';
 import { deliverWithInSweepRetry } from './lib/sync-head-retry.js';
 import { logAndRecord, ensureReplay, setLimits } from './lib/group-history.js';
-import { gatherRecentContext } from './lib/conversation-context.js';
+import {
+  gatherRecentContext, historyEntryOf, createSentReplyRecorder, createContextDelivery, omittedContext, SUB_CONTEXT_ALWAYS_RECENT,
+} from './lib/conversation-context.js';
 import { checkForUpdates, notifyUpgradeComplete, resolveAutoUpgradeSchedule } from './lib/auto-upgrade.js';
 import { createMetricsReporter, createMetricsReadinessEvaluator } from './lib/metrics-reporter.js';
 import { createChannelLivenessReporter } from './lib/channel-liveness-reporter.js';
@@ -537,10 +539,24 @@ const dmSeenWatch = createDmSeenWatcher({
   warn,
 });
 
+// <subconversation-context> is incremental: lines the Agent was already given
+// in this sub-conversation are not sent again (see createContextDelivery).
+const subContextDelivery = createContextDelivery();
+
+// The same markers put this Agent's own replies into local history: cws-comm
+// does not echo them back, so a context built from local history would miss
+// them (see createSentReplyRecorder).
+const sentReplies = createSentReplyRecorder({
+  drainMarkers: () => drainSentMarkers(SENT_DIR),
+  onMarker: (entry) => dmSeenWatch.watch(entry).catch(e => warn(`dm-seen-watch: watch msg=${entry.messageId} failed: ${e.message}`)),
+  fetchDetail: fetchMessageDetail,
+  resolveName: fetchMemberName,
+  lookupOrg: lookupConvOrg,
+  warn,
+});
+
 function pollDmSent() {
-  for (const entry of drainSentMarkers(SENT_DIR)) {
-    dmSeenWatch.watch(entry).catch(e => warn(`dm-seen-watch: watch msg=${entry.messageId} failed: ${e.message}`));
-  }
+  sentReplies.poll();
 }
 tasks.register('dm-seen-poll', pollDmSent, TYPING_POLL_MS);
 tasks.start('dm-seen-poll');
@@ -919,39 +935,12 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     // for messages the bot doesn't handle.
     const earlyConvType = convTypeOf(conv, msg.conversation_id);
     if (fetchesConversationContext(earlyConvType, sub)) {
-      const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
-      const entryText = structured.body?.text
-        || (typeof msg.message?.content === 'string' ? msg.message.content : '')
-        || (typeof msg.content === 'string' ? msg.content : '')
-        || '';
-      const msgType = (msg.type || msg.message?.type || '').toLowerCase();
-      const atts = Array.isArray(structured.attachments) ? structured.attachments : [];
-      const isImg = msgType === 'image' || msgType === 'agent_card';
-      let histText = entryText;
-      if ((isImg || atts.length > 0) && atts.length > 0) {
-        const kind = isImg ? 'image' : 'file';
-        const labels = atts.map(a => `[${kind}: ${a.artifact_id || '?'} | ${a.file_name || 'unknown'}]`);
-        histText = labels.join(' ') + (entryText ? ' ' + entryText : '');
-      } else if (isImg) {
-        histText = '[image]' + (entryText ? ' ' + entryText : '');
-      }
-      // A merged forward is one line in context, never its expanded records.
-      if (isChatHistory(msg)) histText = FORWARDED_CONVERSATION;
       ensureReplay(msg.conversation_id);
       const historySenderName = msg.sender_display_name
         || msg.sender?.display_name
         || (await fetchMemberName(orgConfig.org_id, msg.sender_id))
         || msg.sender_id;
-      logAndRecord(msg.conversation_id, {
-        timestamp: new Date().toISOString(),
-        message_id: msg.id,
-        sender_id: msg.sender_id,
-        sender_name: historySenderName,
-        text: histText,
-        seq: msg.seq != null ? Number(msg.seq) : null,
-        parent_id: msg.parent_message_id || msg.message?.parent_id || null,
-        type: msgType || 'text',
-      });
+      logAndRecord(msg.conversation_id, historyEntryOf(msg, historySenderName));
     }
 
     const decision = await shouldHandleMessage(msg, conv || {}, orgConfig);
@@ -1017,8 +1006,10 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     }
 
     let recent = [];
+    let subContextOmitted = null;
     const convType = convTypeOf(conv, msg.conversation_id);
     if (fetchesConversationContext(convType, sub)) {
+      await sentReplies.settle(msg.conversation_id);
       const gathered = await gatherRecentContext({
         conversationId: msg.conversation_id,
         messageId: msg.id,
@@ -1030,8 +1021,10 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         resolveName: (memberId) => fetchMemberName(orgConfig.org_id, memberId),
         log,
       });
-      recent = gathered.recent;
-      log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${gathered.source} count=${recent.length}${sub ? ` subconversation=${sub.ownerKind}` : ''}`);
+      recent = sub ? subContextDelivery.unseen(msg.conversation_id, gathered.recent, SUB_CONTEXT_ALWAYS_RECENT) : gathered.recent;
+      if (sub) subContextOmitted = omittedContext(msg.conversation_id, gathered.recent, recent, msg.seq);
+      const skipped = gathered.recent.length - recent.length;
+      log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${gathered.source} count=${recent.length}${skipped ? ` already-delivered=${skipped}` : ''}${sub ? ` subconversation=${sub.ownerKind}` : ''}`);
     }
 
     // After `msg = { ...notification, ...detail }`, where detail is the
@@ -1221,6 +1214,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         // A sub-conversation's lines render as <subconversation-context>, in
         // <group-context>'s place.
         subConversation: !!sub,
+        subContextOmitted,
         quotedExcerpt: quoteExcerptOf(msg, quotedMsgId),
         chatHistory: chatHistoryOf(msg),
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
@@ -1262,6 +1256,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       // Stored but reported as an error: Core has the message, so it is handled
       // like a success (nothing shown, nothing resent).
       if (run) activity.confirmRun(run.runId, result.stdout);
+      if (sub) subContextDelivery.remember(msg.conversation_id, [...recent.map(l => l.messageId), msg.id]);
       log(`fwd [${orgConfig.slug}] ${convType} ${msg.conversation_id} msg=${msg.id} seq=${msg.seq}${result.sessionGroup ? ` group=${result.sessionGroup}` : ''}${result.outcome === 'stored' ? ' (stored, reported failed)' : ''}`);
       markRead(orgConfig, msg.conversation_id, msg.seq);
       return;

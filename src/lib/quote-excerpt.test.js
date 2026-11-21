@@ -34,8 +34,7 @@ test('valid excerpt → <replying-to> shows the excerpt instead of the full quot
     quote_excerpts: { version: 1, items: [{ message_id: PARENT, text: '当初为什么排得靠后', offset: 4, note: 'phase 2' }] },
   }));
   assert.ok(out.includes(
-    '<replying-to>\n[Jessie]: 当初为什么排得靠后\n</replying-to>\n\n'
-    + '<current-message>',
+    '<replying-to>\n[Jessie]: 当初为什么排得靠后\n</replying-to>',
   ), out);
   assert.doesNotMatch(out, /第一段|第三段|quoted-excerpt|unverified/);
 });

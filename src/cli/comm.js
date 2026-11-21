@@ -29,7 +29,7 @@ import { assertAnswerable, buildChoiceRequest, resolveInteractionType } from '..
 import { askForm, hasAskedOf } from '../lib/card-message.js';
 import { assertAllImChannels } from '../lib/onboarding-channel-guard.js';
 import { formatLocalTime } from '../lib/local-time.js';
-import { SENT_DIR, writeSentMarker, sentMessageId } from '../lib/dm-seen-watch.js';
+import { SENT_DIR, writeSentMarker, sentMessageId, sentMessageIds } from '../lib/dm-seen-watch.js';
 import {
   claimGroupReminder,
   clearPendingGroup,
@@ -699,6 +699,7 @@ const COMMANDS = {
     writeSentMarker(SENT_DIR, {
       conversationId: params.conversationId,
       messageId: sentMessageId(res),
+      messageIds: sentMessageIds(res),
       orgId: resolveOrgConfig(params).org_id,
       sentAt,
     });

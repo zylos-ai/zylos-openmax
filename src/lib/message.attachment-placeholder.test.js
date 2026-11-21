@@ -13,20 +13,24 @@ test('placeholder text is the agreed literal', () => {
   assert.equal(UNAVAILABLE_ATTACHMENT, '[附件无法获取]');
 });
 
+// The envelope up to the end of the current message (and its media suffix):
+// the instruction and the context blocks follow it.
+const upToMessageEnd = (out) => out.slice(0, out.indexOf('\n\n<openmax-instruction>'));
+
 test('🔴 an attachment with neither localPath nor id renders a placeholder with its name and type', () => {
   const out = formatInboundForC4(conv, sender, {
     content: '', type: 'file',
     mediaItems: [{ fileName: 'a<b>.png', contentType: 'image/png' }],
   });
   assert.ok(
-    out.endsWith(' ---- [附件无法获取] name="a&lt;b&gt;.png" content_type="image/png"'),
+    upToMessageEnd(out).endsWith(' ---- [附件无法获取] name="a&lt;b&gt;.png" content_type="image/png"'),
     out,
   );
 });
 
 test('a bare unfetchable attachment (no name, no type) still renders the placeholder', () => {
   const out = formatInboundForC4(conv, sender, { content: '', type: 'file', mediaItems: [{}] });
-  assert.ok(out.endsWith('</current-message> ---- [附件无法获取]'), out);
+  assert.ok(upToMessageEnd(out).endsWith('</current-message> ---- [附件无法获取]'), out);
 });
 
 test('🔴 a failed download keeps the artifact id and adds the placeholder', () => {
@@ -34,7 +38,7 @@ test('🔴 a failed download keeps the artifact id and adds the placeholder', ()
     content: '', type: 'image',
     mediaItems: [{ id: 'art-1', fileName: 'x.png', downloadFailed: true }],
   });
-  assert.ok(out.endsWith(' ---- artifact_id: art-1 name="x.png" [附件无法获取]'), out);
+  assert.ok(upToMessageEnd(out).endsWith(' ---- artifact_id: art-1 name="x.png" [附件无法获取]'), out);
 });
 
 test('unchanged: downloaded and id-only (not attempted) attachments keep their format', () => {
@@ -42,6 +46,6 @@ test('unchanged: downloaded and id-only (not attempted) attachments keep their f
     content: 'hi', type: 'image',
     mediaItems: [{ id: 'art-1', fileName: 'x.png', localPath: '/tmp/x.png' }, { id: 'art-2', fileName: 'y.png' }],
   });
-  assert.ok(out.endsWith(' ---- image: /tmp/x.png name="x.png" ---- artifact_id: art-2 name="y.png"'), out);
+  assert.ok(upToMessageEnd(out).endsWith(' ---- image: /tmp/x.png name="x.png" ---- artifact_id: art-2 name="y.png"'), out);
   assert.ok(!out.includes(UNAVAILABLE_ATTACHMENT));
 });
