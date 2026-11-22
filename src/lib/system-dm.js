@@ -165,7 +165,7 @@ export async function sendSystemDm({ memberId, message }, deps = {}) {
   }
   const orgId = callerOrg || resolveOrgId();
   if (!orgId) {
-    throw fail('ORG_REQUIRED', 'cannot tell which org this send belongs to (this thread is not an OpenMax conversation and the Agent is in several orgs). Ask the requester; do not pick one. Nothing was sent.');
+    throw fail('ORG_REQUIRED', 'cannot tell which org this send belongs to (this thread is not an OpenMax conversation and the Agent is in several orgs). Ask the requester which org; do not pick one. Then run it again with COCO_ORG_ID=<that org id>. Nothing was sent.');
   }
   const self = selfMemberId(orgId);
   if (self === memberId) {

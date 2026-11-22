@@ -85,6 +85,14 @@ test('invalid input, no org, or self → refused before any request', async () =
   }
 });
 
+test('ORG_REQUIRED tells the Agent to ask the requester, then rerun with COCO_ORG_ID (as SKILL.md says)', async () => {
+  const { d, calls } = deps({ resolveOrgId: () => '', lookupOrg: () => '' });
+  d.env = { HOME: '/h', ZYLOS_SESSION_GROUP: 'lark:chat-1' };
+  await assert.rejects(sendSystemDm({ memberId: PEER, message: 'x' }, d),
+    (e) => e.code === 'ORG_REQUIRED' && /Ask the requester/.test(e.message) && /COCO_ORG_ID=<that org id>/.test(e.message));
+  assert.equal(calls.createDm.length, 0);
+});
+
 test('ORG_MISMATCH: COCO_ORG_ID disagrees with the org of the caller\'s OpenMax conversation → refused, nothing sent', async () => {
   const { d, calls } = deps();
   d.env = { ...d.env, COCO_ORG_ID: OTHER_ORG };
