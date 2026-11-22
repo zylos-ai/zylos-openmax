@@ -22,6 +22,7 @@ This is a **workspace integration plugin** for the Zylos agent ecosystem.
 - `src/lib/config.js` — Configuration loader with hot-reload
 - `src/lib/client.js` — Shared HTTP client (native fetch + auth)
 - `scripts/send.js` — C4 standard outbound interface
+- `scripts/system-dm.js` — System private-chat exit (owner-approved exception to one thread per address): one-off notice to a member's DM by member id via c4-send, audited
 
 ### Service CLIs (stateless, JSON in/out)
 

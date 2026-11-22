@@ -209,6 +209,26 @@ EOF_INTERNAL
 node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax '<conversation-uuid>' 'The weekly report is ready; take a look when you get a chance'
 ```
 
+### System private-chat exit: notify a member by member id from any thread
+
+The owner-approved exception to the one-thread-per-address rule (see SKILL.md "Session Groups and Sending"). It is only for a one-off notice to one member of your own org (a receipt, a reminder, a result) that needs no follow-up in your thread. Every other cross-conversation send (question cards, work the DM's thread must follow up, groups and topics, continuing another thread's conversation) still goes through the `internal` hand-off above. Judge the request by the requester's own permissions, and never forward content from another channel or conversation.
+
+```bash
+cat <<'EOF' | node ~/zylos/.claude/skills/openmax/scripts/system-dm.js '<member-uuid>'
+The weekly report is ready; take a look when you get a chance
+EOF
+# -> {"ok":true,"member_id":"<member-uuid>","conversation_id":"<dm-uuid>","created":false,
+#     "message_id":"<message id>","result":{"ok":true,"chunks":1,"message_ids":["<message id>"]}}
+```
+
+- **Org:** the org of the caller's own OpenMax conversation (from `ZYLOS_SESSION_GROUP` and `conv-org-map.json`). A `COCO_ORG_ID` that disagrees is refused with `ORG_MISMATCH`. Outside an OpenMax conversation it is the Agent's only org; with several, `ORG_REQUIRED`: ask the requester which org (do not pick one), then run the command again with `COCO_ORG_ID=<that org id>` set.
+- Resolves the DM with `POST /conversations/dm {peer_member_id}` (the existing DM, or a new one) and stores its org and type.
+- **Audit:** appends one JSON line before the send (`phase:"attempt"`) and one after it (`phase:"result"`, `outcome` `sent`/`failed`, `message_id`) to `~/zylos/components/openmax/logs/system-dm-audit.jsonl`. Fields: `ts`, `audit_id`, `caller_session_group`, `caller_run_id`, `caller_member_id` (this Agent), `caller_conversation_id`, `target_member_id`, `org_id`, `conversation_id`, `outcome`, `message_id`, `error_code`. No message text.
+- Sends through `c4-send.js openmax '<dm-uuid>|type:dm'` with `ZYLOS_SESSION_GROUP` and `ZYLOS_SYSTEM_SEND` removed: no `CROSS_SESSION_OUTBOUND`, and the message is recorded under the DM's own group `openmax:dm-<dm-uuid>`, so the thread that receives the member's reply has it in its C4 history. `ZYLOS_RUN_ID` is kept, so Core never takes the C4 row's `session_id` from the stale legacy `foreground-session.json`: the row carries the caller's session when the caller is Origin, and none otherwise; the audit line is the record of which thread sent it. On an older Core it is an ordinary `c4-send`.
+- Body: text, `[MEDIA:…]`, `[STRUCTURED]{…}`, or a display `[CARD]{…}` (no `kind` / `askedOf`). A question card is refused with `QUESTION_CARD`: hand it to the DM's thread with `internal`. `message_id` is the OpenMax message id (the last chunk's for long text); `result` is `scripts/send.js`'s own output.
+- Errors (stderr JSON, exit 1): `INVALID_ARGS`, `QUESTION_CARD`, `ORG_MISMATCH`, `ORG_REQUIRED`, `SELF_DM`, `DM_RESOLVE_FAILED` (nothing sent), `SEND_FAILED` (with c4-send's `stdout` / `stderr`; check the DM with `comm.get_messages` before resending).
+- **Receiving side:** the member's reply goes to the DM's thread. If that thread was already running, the system DM is in its C4 history but not in its context: make the message self-contained. A thread that gets a reply to a message it does not remember reads the DM with `comm.get_messages`, finds the sending thread in the audit log (`caller_session_group`), and tells it by `internal` when it needs to know. If more than one thread sent system DMs to this member recently, it does not guess: it handles the reply in the DM thread itself, or asks the member.
+
 ### Sending a message with an attachment in a group
 
 Simplest (recommended) — the outbound script does the upload and builds the message for you:
