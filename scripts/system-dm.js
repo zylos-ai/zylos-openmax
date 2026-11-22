@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 /**
- * System private-chat exit: send a message to an OpenMax member's DM by member
- * id, from any thread. See src/lib/system-dm.js.
+ * System private-chat exit: send a one-off notice to an OpenMax member's DM by
+ * member id, from any thread — the owner-approved exception to one thread per
+ * address (SKILL.md "Session Groups and Sending"). See src/lib/system-dm.js.
  *
  * Usage:
  *   node scripts/system-dm.js <member_id> <<'EOF'
- *   <text | [MEDIA:…] | [CARD]{…} | [STRUCTURED]{…}>
+ *   <text | [MEDIA:…] | [STRUCTURED]{…} | display [CARD]{…}>
  *   EOF
  *   node scripts/system-dm.js <member_id> '<message>'
  *
- * COCO_ORG_ID selects the org when the Agent is in more than one.
+ * The org is the caller's own OpenMax conversation's (ORG_MISMATCH when
+ * COCO_ORG_ID disagrees). Audit: ~/zylos/components/openmax/logs/system-dm-audit.jsonl.
  * Success: one JSON line on stdout
  *   {ok, member_id, conversation_id, created, message_id, result}, exit 0.
  * Failure: {error, code, …} on stderr, nothing on stdout, exit 1.
