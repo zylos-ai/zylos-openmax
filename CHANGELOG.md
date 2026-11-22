@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **System private-chat exit: `scripts/system-dm.js <member_id>` sends a message to an OpenMax member's DM by member id, from any thread.** It resolves the DM with `POST /conversations/dm {peer_member_id}` (existing or new; org and type stored in `conv-org-map.json`), then sends through `c4-send.js openmax '<dm id>|type:dm'` with the caller's `ZYLOS_SESSION_GROUP` / `ZYLOS_RUN_ID` removed, as Core's system notifications are sent. So (1) a multi-session Core makes no ownership comparison and there is no `CROSS_SESSION_OUTBOUND`; (2) the message is recorded in C4 under the DM's own group `openmax:dm-<dm id>`, where the member's reply arrives; (3) the result JSON on stdout carries the OpenMax `message_id` and `scripts/send.js`'s result. The body is anything c4-send takes (text, `[MEDIA:…]`, `[CARD]{…}`, `[STRUCTURED]{…}`), sent as is. `COCO_ORG_ID` selects the org for an Agent in several. Errors on stderr with exit 1: `INVALID_ARGS`, `ORG_REQUIRED`, `SELF_DM`, `DM_RESOLVE_FAILED` (nothing sent), `SEND_FAILED`. Documented in SKILL.md "Session Groups and Sending" and `references/comm-operations.md`. This is the path for `comm.send` callers that send across threads and need the message id back; `comm.send` itself is unchanged (still sends, with its deprecation warning).
+
 ## [2.36.1] - 2026-11-21
 
 ### Summary

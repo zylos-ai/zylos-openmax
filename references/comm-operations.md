@@ -209,6 +209,24 @@ EOF_INTERNAL
 node ~/zylos/.claude/skills/comm-bridge/scripts/c4-send.js openmax '<conversation-uuid>' 'The weekly report is ready; take a look when you get a chance'
 ```
 
+### System private-chat exit: notify a member by member id from any thread
+
+For a one-off notice (a receipt, a reminder, a result) the thread you are in can send to a member's DM itself, without the `internal` hand-off above:
+
+```bash
+cat <<'EOF' | node ~/zylos/.claude/skills/openmax/scripts/system-dm.js '<member-uuid>'
+The weekly report is ready; take a look when you get a chance
+EOF
+# -> {"ok":true,"member_id":"<member-uuid>","conversation_id":"<dm-uuid>","created":false,
+#     "message_id":"<message id>","result":{"ok":true,"chunks":1,"message_ids":["<message id>"]}}
+```
+
+- Resolves the DM with `POST /conversations/dm {peer_member_id}` (the existing DM, or a new one) and stores its org and type.
+- Sends through `c4-send.js openmax '<dm-uuid>|type:dm'` with `ZYLOS_SESSION_GROUP` / `ZYLOS_RUN_ID` removed (as Core's own system notifications are sent): no `CROSS_SESSION_OUTBOUND`, and the message is recorded under the DM's own group `openmax:dm-<dm-uuid>`, so the thread that receives the member's reply has it in its C4 history. On an older Core it is an ordinary `c4-send`.
+- Any body c4-send takes works: text, `[MEDIA:…]`, `[CARD]{…}`, `[STRUCTURED]{…}`. `message_id` is the OpenMax message id (the last chunk's for long text); `result` is `scripts/send.js`'s own output (`action_ids` for a card).
+- `COCO_ORG_ID` selects the org when the Agent is in more than one (`ORG_REQUIRED` otherwise). Errors (stderr JSON, exit 1): `INVALID_ARGS`, `ORG_REQUIRED`, `SELF_DM`, `DM_RESOLVE_FAILED` (nothing sent), `SEND_FAILED` (with c4-send's `stdout` / `stderr`; check the DM with `comm.get_messages` before resending).
+- The member's reply goes to the DM's thread, which has none of your context: make the message self-contained, and hand off with `internal` instead when that thread must follow up.
+
 ### Sending a message with an attachment in a group
 
 Simplest (recommended) — the outbound script does the upload and builds the message for you:

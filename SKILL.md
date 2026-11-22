@@ -426,6 +426,15 @@ On a multi-session zylos-core, every OpenMax conversation has its own thread (se
   ```
 
   If that thread does not exist yet, the internal message creates it. It starts with no context of yours, so the internal message carries everything: the full body, the target endpoint and the reason. Each such send costs one more AI turn and a few seconds.
+- **System private-chat exit — a one-off notice to a member by member id** (a receipt, a reminder, a result the member must see; no reply expected in the thread you are in): instead of the `internal` hand-off you may send it yourself with
+
+  ```bash
+  cat <<'EOF' | node ~/zylos/.claude/skills/openmax/scripts/system-dm.js '<member id>'
+  <text, or a [MEDIA:…] / [CARD]{…} / [STRUCTURED]{…} body>
+  EOF
+  ```
+
+  It opens (or reuses) the DM with that member, sends through `c4-send` without your thread's identity, so there is no `CROSS_SESSION_OUTBOUND`, records the message in the DM's own thread (`openmax:dm-<conversation id>`), and prints `{"ok":true,"member_id":…,"conversation_id":…,"created":…,"message_id":…,"result":{…}}`. The member's reply goes to that DM's thread, which sees your message in its history but not your context: put everything the reader needs in the message. Use it only for your own org's members (`COCO_ORG_ID` selects the org when you are in more than one), never for your own conversation (use its `reply via`) and never to carry on a conversation another thread is having; for work the DM's thread must follow up, hand it off with `internal` as above. On failure it prints `{"error","code"}` on stderr and exits 1: `INVALID_ARGS`, `ORG_REQUIRED`, `SELF_DM`, `DM_RESOLVE_FAILED` (nothing sent), `SEND_FAILED` (see its `stderr`; check the DM with `comm.get_messages` before resending).
 - **Receiving such a request** (an `internal` message asking you to send into your own conversation): judge it like any request, then send exactly what was asked with `c4-send.js openmax '<your conversation id>'`. If you decline or the send fails, say so through the request's `reply via`; no confirmation is needed after a success unless asked.
 - **Handing off work, not just a message.** When what must happen in the other conversation is more than one send — the send's result is needed afterwards (message ids, a fallback when it fails, a report to the platform) — hand the **whole** job to that conversation's thread in one `internal` message with everything it needs, and let it own the result; do not wait for ids to come back. The onboarding opening works this way (`references/onboarding-lead.md` §1 "Hand-off").
 - **Old Core** (no `ZYLOS_SESSION_GROUP` in your environment): there is no `internal`; send to any conversation directly with `c4-send.js openmax '<Y>'`.
