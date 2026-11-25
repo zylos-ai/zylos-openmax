@@ -20,6 +20,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'node:crypto';
 import { RUNTIME_DIR } from './session.js';
 
 export const CONNECT_RESULT_QUEUE_FILE = path.join(RUNTIME_DIR, 'pending-connect-results.json');
@@ -68,12 +69,15 @@ export function createConnectResultQueue({
   };
 
   const write = (items) => {
+    const temp = `${file}.${randomUUID()}.tmp`;
     try {
       fsDep.mkdirSync(path.dirname(file), { recursive: true });
-      // 0600: a result payload names the org and binding being connected.
-      fsDep.writeFileSync(file, JSON.stringify(items, null, 2), { mode: 0o600 });
+      // Preserve existing receipts if writing the replacement is interrupted.
+      fsDep.writeFileSync(temp, JSON.stringify(items, null, 2), { mode: 0o600, flag: 'wx' });
+      fsDep.renameSync(temp, file);
       return true;
     } catch (e) {
+      try { fsDep.rmSync(temp, { force: true }); } catch { /* The old queue is intact. */ }
       warn(`could not persist connect-result queue: ${e.message}`);
       return false;
     }

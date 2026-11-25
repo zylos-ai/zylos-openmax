@@ -1827,7 +1827,8 @@ const connectResultQueue = createConnectResultQueue({
     if (r.kind === 'browser-prepare') return browserRemote.resendPrepare(r);
     if (r.kind === 'computer-connected') {
       const org = activeOrgConfigs.get(r.slug);
-      if (org?.org_id !== r.orgId || org?.self?.member_id !== r.memberId) return;
+      if (!org?.self?.member_id) throw new Error('Waiting for the Computer Use Agent identity');
+      if (org.org_id !== r.orgId || org.self.member_id !== r.memberId) return;
       return computerRemote.verifyConnected(r);
     }
     return postConnectResult(r);
