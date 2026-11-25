@@ -57,6 +57,7 @@ import {
   createBrowserRemoteConnector, isBrowserRemoteCommand, relayUrlFromBase, BROWSER_RECONCILE_INTERVAL_MS,
   NO_PUBLIC_DOMAIN_NOTICE, createRelayUrlResolver, enqueueControl,
 } from './lib/browser-remote-connector.js';
+import { createComputerRemoteConnector, isComputerRemoteCommand } from './lib/computer-remote-connector.js';
 import { logSystemFrame } from './lib/system-events.js';
 import { createReceiptWatcher, CARD_RECORDED_EVENT } from './lib/receipt-watch.js';
 import { createDmSeenWatcher, resolveDmSeenConfig, drainSentMarkers, buildUnseenPrompt, SENT_DIR } from './lib/dm-seen-watch.js';
@@ -1563,6 +1564,12 @@ async function handleSystemEvent(orgConfig, frame) {
     return;
   }
 
+  if (kind === 'channel' && isComputerRemoteCommand(payload.data)) {
+    computerRemote.handleCommand(orgConfig, frame).catch(() =>
+      warn(`[${orgConfig.slug}] computer-remote command failed`));
+    return;
+  }
+
   if (kind === 'channel') {
     // Fire-and-forget, best-effort install/uninstall of an IM channel component
     // (cws-connect → cws-comm → openmax). handleChannelCommand never throws.
@@ -1816,7 +1823,15 @@ const postConnectResult = (r) => postForOrg(
 // The queue also carries undelivered OpenMax Browser prepare-results
 // (kind 'browser-prepare', stored without the Key; see browser-remote-connector).
 const connectResultQueue = createConnectResultQueue({
-  sendResult: (r) => (r.kind === 'browser-prepare' ? browserRemote.resendPrepare(r) : postConnectResult(r)),
+  sendResult: (r) => {
+    if (r.kind === 'browser-prepare') return browserRemote.resendPrepare(r);
+    if (r.kind === 'computer-connected') {
+      const org = activeOrgConfigs.get(r.slug);
+      if (org?.org_id !== r.orgId || org?.self?.member_id !== r.memberId) return;
+      return computerRemote.verifyConnected(r);
+    }
+    return postConnectResult(r);
+  },
   log,
   warn,
 });
@@ -1851,6 +1866,15 @@ const browserRemote = createBrowserRemoteConnector({
   resolveRelayUrl: createRelayUrlResolver({ getForOrg, apiPath }),
   persistUndeliveredResult: async (r) => { connectResultQueue.queue(r); },
   readQueued: () => connectResultQueue.read(),
+  log,
+  warn,
+});
+
+const computerRemote = createComputerRemoteConnector({
+  getForOrg,
+  postForOrg,
+  apiPath,
+  persistConnectedCheck: (r) => connectResultQueue.queue(r),
   log,
   warn,
 });

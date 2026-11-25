@@ -85,8 +85,9 @@ export function createConnectResultQueue({
     const next = read().filter((x) => entryKey(x) !== entryKey(r));
     next.push({ ...r, queuedAt: now() });
     // Cap from the front: the newest results are the ones worth keeping.
-    write(next.slice(-maxItems));
-    warn(`connect-result queued for resend binding=${r.bindingId} status=${r.status}`);
+    const saved = write(next.slice(-maxItems));
+    if (saved) warn(`connect-result queued for resend binding=${r.bindingId} status=${r.status}`);
+    return saved;
   };
 
   // Single-flight for resend. Every run does read-modify-write on one file, so
