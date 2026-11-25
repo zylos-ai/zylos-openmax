@@ -45,6 +45,6 @@ export async function enqueueControl(content, {
     error = await run(mode === 'single' ? 'origin' : group);
   }
   if (error) warn(`failed to enqueue ${label} control: ${error.message}`);
-  else log(`${label} control enqueued`);
+  else log(`${label} control enqueued (delivery unconfirmed)`);
   return error === null;
 }

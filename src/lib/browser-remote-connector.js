@@ -35,7 +35,7 @@ import { execFile as execFileCb } from 'child_process';
 import { promisify } from 'util';
 import { readPm2Statuses } from './channel-connector.js';
 import { RUNTIME_DIR } from './session.js';
-import { resolveAgentBaseUrl, publicBaseUrlFromEnv, readZylosEnvValue, isHttpUrl } from './agent-domain.js';
+import { configuredHttpsBaseUrl, resolveAgentBaseUrl, publicBaseUrlFromEnv, readZylosEnvValue, isHttpUrl } from './agent-domain.js';
 import { readCoreSettings } from './session-control.js';
 
 const HOME = process.env.HOME;
@@ -67,10 +67,8 @@ const codeError = (message, code) => Object.assign(new Error(message), { code })
 // host. Never follow a redirect or send credentials. A 426 confirms the
 // endpoint responds, while the extension still authenticates its WebSocket.
 async function configuredBrowserRelay(readSettings, fetchEndpoint) {
-  const { domain, protocol = 'https' } = readSettings() || {};
-  if (protocol !== 'https' || typeof domain !== 'string' || domain !== domain.trim()
-      || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(domain)) return null;
-  const base = `https://${domain}`;
+  const base = configuredHttpsBaseUrl(readSettings);
+  if (!base) return null;
   try {
     const response = await fetchEndpoint(`${base}/browser-remote/ext`, {
       redirect: 'manual', credentials: 'omit', signal: AbortSignal.timeout(2500),
