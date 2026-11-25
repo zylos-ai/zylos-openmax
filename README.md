@@ -19,7 +19,8 @@ zylos install openmax
 
 ## Workspace Computer Use enrollment
 
-For a fresh Agent, set `COMPUTER_REMOTE_ENROLLMENT_VERSION` to the exact
+For a fresh Agent, set `COMPUTER_REMOTE_ENROLLMENT_VERSION` in the Agent process
+environment or in `~/zylos/.env` to the exact
 stable tag of an official `zylos-ai/zylos-computer-remote` GitHub release
 that the operator has verified includes Workspace enrollment. Releases
 through `v0.1.6` predate enrollment. Until a supported release is available,

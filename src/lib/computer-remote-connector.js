@@ -202,6 +202,7 @@ export function createComputerRemoteConnector({
   postForOrg,
   apiPath,
   env = process.env,
+  readEnrollmentVersion = () => readZylosEnvValue('COMPUTER_REMOTE_ENROLLMENT_VERSION'),
   resolvePublicBase = createPublicBaseResolver({ getForOrg, apiPath, env }),
   remote = createComputerRemoteLocalClient(),
   remoteStateAbsent = () => noLocalRemoteState(env),
@@ -258,7 +259,7 @@ export function createComputerRemoteConnector({
     if (!ensureInFlight) ensureInFlight = (async () => {
       const info = await componentInfo();
       if (!info) {
-        const version = env.COMPUTER_REMOTE_ENROLLMENT_VERSION;
+        const version = env.COMPUTER_REMOTE_ENROLLMENT_VERSION ?? readEnrollmentVersion();
         // Releases through 0.1.6 predate Workspace enrollment. The operator
         // supplies an exact, reviewed version once a supported release exists.
         if (typeof version !== 'string' || !/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(version)
@@ -326,6 +327,7 @@ export function createComputerRemoteConnector({
 
   async function failPrepare(meta, phase) {
     // Raw subprocess, HTTP, URL and upstream errors could carry credentials.
+    warn(`computer-remote prepare refused binding=${meta.bindingId} reason=${phase}`);
     await post(meta, 'prepare-result', { ok: false, error: phase });
   }
 

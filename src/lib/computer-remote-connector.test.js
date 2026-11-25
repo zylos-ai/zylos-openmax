@@ -46,6 +46,7 @@ function fixture(overrides = {}) {
     apiPath: (route) => `/api/v1${route}`,
     now: () => epoch,
     wait: async () => {},
+    readEnrollmentVersion: () => undefined,
     resolvePublicBase: async () => 'https://agent.example.test',
     getForOrg: async (...args) => {
       calls.get.push(args);
@@ -145,7 +146,25 @@ test('requires an exact enrollment-capable release pin before installing', async
     await connector.handleCommand(org, frameFor('prepare'));
     assert.deepEqual(calls.post[0][2], { request_id: requestId, ok: false, error: 'remote_install_version_required' });
     assert.deepEqual(calls.remote, []);
+    assert.ok(calls.log.some(line => line.includes('reason=remote_install_version_required')));
   }
+});
+
+test('uses the local Zylos enrollment pin when the process has no explicit pin', async () => {
+  const commands = [];
+  const { connector } = fixture({
+    env: {},
+    readEnrollmentVersion: () => 'v0.1.8',
+    execFile: async (file, args) => {
+      commands.push([file, args]);
+      if (args[0] === 'info') throw componentMissing();
+    },
+  });
+  await connector.handleCommand(org, frameFor('prepare'));
+  assert.deepEqual(commands, [
+    ['zylos', ['info', 'computer-remote', '--json']],
+    ['zylos', ['add', 'zylos-ai/zylos-computer-remote@v0.1.8', '--yes']],
+  ]);
 });
 
 test('uses the configured HTTPS hostname only when the platform domain and explicit URL are absent', async () => {
