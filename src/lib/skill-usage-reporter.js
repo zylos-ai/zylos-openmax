@@ -11,13 +11,14 @@
  *   - decideReport: wait, drop (nothing to show), or report;
  *   - report → PUT to the conversation's org as the Agent itself.
  *
- * PUT outcomes, like channel-liveness (issue #72): a 404 means the route is
- * off or absent for that org — the org is paused for `reprobeMs` (warned once):
- * no PUT, and comm-bridge stops registering turns without a selection for it
- * (shouldRegister); after the pause the next report is the re-probe (turns with
- * a selection stay registered and are retried then). 503 / 5xx / 429 / network
- * → retried with exponential backoff while the registration is kept. Any other
- * 4xx → given up. Success → removed.
+ * PUT outcomes (skill-usage-contract.js): a 404 whose body carries
+ * `skill_usage_disabled` means the feature is off for that org — the org is
+ * paused for `reprobeMs` (warned once): no PUT, and comm-bridge stops
+ * registering turns without a selection for it (shouldRegister). The record
+ * that got it is dropped, so no single record keeps the org paused; after the
+ * pause the next real report is the probe. Any other 404 (route missing) or
+ * other 4xx gives up that record only. 503 / 5xx / 429 / network → retried
+ * with exponential backoff while the registration is kept. Success → removed.
  *
  * Not gated on OPENMAX_ACTIVITY. Never throws into the task loop.
  */
@@ -56,7 +57,7 @@ export function createSkillUsageReporter({
   /**
    * comm-bridge: whether to register a turn of this org. A turn with a
    * selection is always registered (its ③ fallback needs the report); one
-   * without is skipped while the org's endpoint is paused after a 404.
+   * without is skipped while the org is paused after a feature-off 404.
    */
   function shouldRegister(orgId, hasSelection) {
     return hasSelection || !isPaused(orgId);
@@ -74,7 +75,7 @@ export function createSkillUsageReporter({
           complete: decision.complete,
           skillIds: decision.skillIds,
         }),
-        { timeoutMs: requestTimeoutMs },
+        { timeoutMs: requestTimeoutMs, quietOnSuccess: true },
       );
       if (paused.has(orgId)) {
         paused.delete(orgId);
@@ -84,13 +85,12 @@ export function createSkillUsageReporter({
       log?.(`skill-usage: reported msg=${reg.source_message_id} reply=${decision.replyMessageId} complete=${decision.complete} skills=${decision.skillIds.length}${decision.reasons.length ? ` (${decision.reasons.join(',')})` : ''}`);
     } catch (err) {
       const kind = classifySkillUsageError(err);
-      if (kind === 'absent') {
+      if (kind === 'disabled') {
         if (!paused.has(orgId)) {
-          warn?.(`skill-usage: endpoint returns 404 for org ${orgId} (off or not deployed); pausing reports and no-selection registrations, re-probe in ${Math.round(reprobeMs / 60000)} min`);
+          warn?.(`skill-usage: feature off for org ${orgId} (404 skill_usage_disabled); pausing reports and no-selection registrations, re-probe in ${Math.round(reprobeMs / 60000)} min`);
         }
         paused.set(orgId, t + reprobeMs);
-        reg.report.next_at = t + reprobeMs;
-        writeSkillTurn(reg, { dir });
+        dropSkillTurn(reg.source_message_id, { dir });
       } else if (kind === 'retry') {
         reg.report.attempts += 1;
         reg.report.next_at = t + Math.min(retryMaxMs, retryBaseMs * 2 ** (reg.report.attempts - 1));

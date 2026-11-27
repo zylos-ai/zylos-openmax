@@ -20,11 +20,15 @@
  *
  * Answers the reporter relies on:
  *   2xx                → stored (or nothing to store); the registration is removed;
- *   404                → feature off (CONVERSATION_SKILLS_ENABLED) or route not
- *                        deployed: back off for the org, re-probe later;
- *   503, 5xx, 429,     → retry with backoff while the registration is kept;
+ *   404 + body {"error":{"code":"skill_usage_disabled"}}
+ *                      → the feature is off for the org (CONVERSATION_SKILLS_ENABLED):
+ *                        the org is paused and re-probed later; the record is dropped;
+ *   404 without that code (route missing, anything else)
+ *                      → that record only is given up; no org pause;
+ *   400, 403, 409, 422 (any other 4xx)
+ *                      → that record is rejected: given up;
+ *   503, 5xx, 429,     → retry with backoff while the registration is kept.
  *   network, timeout
- *   other 4xx          → give up (logged).
  */
 
 export const SKILL_USAGE_METHOD = 'PUT';
@@ -43,10 +47,17 @@ export function skillUsageBody({ sourceMessageId, replyMessageId, complete, skil
   };
 }
 
-/** How the reporter treats an error from the PUT. */
+/** The error code K3 returns, with 404, when the feature is off for the org. */
+export const SKILL_USAGE_DISABLED_CODE = 'skill_usage_disabled';
+
+/**
+ * How the reporter treats an error from the PUT (client.js errors carry
+ * `status` and the parsed response as `body`).
+ * @returns {'disabled'|'retry'|'give_up'}
+ */
 export function classifySkillUsageError(err) {
   const s = err?.status;
-  if (s === 404) return 'absent';
+  if (s === 404) return err?.body?.error?.code === SKILL_USAGE_DISABLED_CODE ? 'disabled' : 'give_up';
   if (s == null || s === 429 || s >= 500) return 'retry';
   return 'give_up';
 }

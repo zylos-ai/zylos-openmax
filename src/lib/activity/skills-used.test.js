@@ -193,7 +193,7 @@ test('a queued message (enqueue) is anchored where it is delivered, not where it
   assert.deepEqual(outcome(host, reg), { complete: true, skillIds: ['local:weekly-report'], reasons: [] });
 });
 
-test('interrupted turn → incomplete (Claude interrupt input, interrupted tool result, interrupted turn_end)', () => {
+test('interrupted turn → incomplete (Claude interrupt input, interrupted tool result)', () => {
   let host = makeHost();
   let r = runTurn(host, [userRec(inbound()), skillRec('weekly-report'), userRec([{ type: 'text', text: '[Request interrupted by user]' }]), turnEnd()]);
   assert.deepEqual(r.out.reasons, ['interrupted']);
@@ -205,6 +205,9 @@ test('interrupted turn → incomplete (Claude interrupt input, interrupted tool 
     turnEnd(),
   ]);
   assert.deepEqual(r.out.reasons, ['interrupted']);
+});
+
+test('a Codex-shaped interrupted turn_end (codex-rollout.js) → incomplete; the Claude turn_end carries no flag', () => {
   const scan = { anchored: true, ids: [], reasons: [], ended: false };
   feedTurnEvents(scan, [{ t: 'turn_end', interrupted: true }], { sourceMessageId: S, resolve: () => null });
   assert.equal(scan.ended, true);

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createSkillUsageReporter, isSkillUsageTurn } from './skill-usage-reporter.js';
-import { skillUsagePath, skillUsageBody, classifySkillUsageError } from './skill-usage-contract.js';
+import { skillUsagePath, skillUsageBody, classifySkillUsageError, SKILL_USAGE_DISABLED_CODE } from './skill-usage-contract.js';
 import { registerSkillTurn, planFirstReply, readSkillTurn, SKILL_TURN_RETENTION_MS } from './activity/skills-used.js';
 import { encodeProjectDir } from './activity/collector.js';
 import { createRunStore } from './activity/run-store.js';
@@ -64,7 +64,8 @@ function reporter(host, { responses = [], clockRef = { t: Date.now() }, ...opts 
       puts.push({ orgId, path: p, body, opts: o });
       const next = responses.shift();
       if (next == null || next === 200) return {};
-      throw Object.assign(new Error(`HTTP ${next}`), next === 'net' ? {} : { status: next });
+      if (next === 'off') throw Object.assign(new Error('HTTP 404'), { status: 404, body: { error: { code: SKILL_USAGE_DISABLED_CODE } } });
+      throw Object.assign(new Error(`HTTP ${next}`), next === 'net' ? {} : { status: next, body: { error: { code: 'not_found' } } });
     },
     now: () => clockRef.t,
     ...opts,
@@ -81,7 +82,10 @@ test('contract: PUT /agents/{member_id}/skill-usage with {source_message_id, rep
   assert.deepEqual(skillUsageBody({ sourceMessageId: S, replyMessageId: REPLY, complete: true, skillIds: ['local:a'] }),
     { source_message_id: S, reply_message_id: REPLY, complete: true, skill_ids: ['local:a'] });
   assert.deepEqual(skillUsageBody({ sourceMessageId: S, replyMessageId: REPLY, complete: false, skillIds: ['local:a'] }).skill_ids, [], 'incomplete never carries ids');
-  assert.equal(classifySkillUsageError({ status: 404 }), 'absent');
+  assert.equal(SKILL_USAGE_DISABLED_CODE, 'skill_usage_disabled');
+  assert.equal(classifySkillUsageError({ status: 404, body: { error: { code: 'skill_usage_disabled' } } }), 'disabled');
+  assert.equal(classifySkillUsageError({ status: 404 }), 'give_up', 'a plain 404 is not feature-off');
+  assert.equal(classifySkillUsageError({ status: 404, body: { error: { code: 'not_found' } } }), 'give_up');
   for (const s of [503, 500, 429, undefined]) assert.equal(classifySkillUsageError({ status: s }), 'retry', String(s));
   for (const s of [400, 403, 409, 422]) assert.equal(classifySkillUsageError({ status: s }), 'give_up', String(s));
 });
@@ -150,47 +154,96 @@ test('selection + interrupted turn → reported complete:false, no ids', async (
   assert.deepEqual(puts[0].body, { source_message_id: S, reply_message_id: REPLY, complete: false, skill_ids: [] });
 });
 
-test('404 → org paused: no PUT, no-selection turns not registered; re-probe after reprobeMs; success resumes', async () => {
+test('disabled 404 → org paused (no PUT, no no-selection registrations), the record dropped; the next real record re-probes after reprobeMs', async () => {
   const host = makeHost();
   const clockRef = { t: Date.now() };
   endedTurn(host, { selected: ['local:weekly-report'], t: clockRef.t });
-  const { r, puts, warns } = reporter(host, { responses: [404, 404, 200], clockRef, reprobeMs: 60_000 });
+  const { r, puts, warns } = reporter(host, { responses: ['off', 'off', 200], clockRef, reprobeMs: 60_000 });
   await r.tick();
   assert.equal(puts.length, 1);
-  assert.equal(exists(host), true, 'kept for the re-probe');
+  assert.equal(exists(host), false, 'the record that got feature-off is dropped, not kept for 24 h');
   assert.equal(r.shouldRegister(ORG, false), false, 'no-selection turns paused');
   assert.equal(r.shouldRegister(ORG, true), true, 'turns with a selection still registered');
   assert.equal(r.shouldRegister('org-other', false), true, 'only that org');
+  // A new record during the pause is not PUT.
+  const S2 = '700000000000000021';
+  endedTurn(host, { id: S2, selected: ['local:weekly-report'], t: clockRef.t, reply: '740000000000000021' });
   clockRef.t += 30_000;
   await r.tick();
   assert.equal(puts.length, 1, 'no PUT while paused');
+  // After the pause the next real record is the probe; still off → paused again, record dropped.
   clockRef.t += 31_000;
   await r.tick();
-  assert.equal(puts.length, 2, 're-probe');
-  assert.equal(warns.filter((w) => /404/.test(w)).length, 1, 'warned once');
+  assert.equal(puts.length, 2);
+  assert.equal(exists(host, S2), false);
+  assert.equal(r.shouldRegister(ORG, false), false);
+  assert.equal(warns.filter((w) => /skill_usage_disabled/.test(w)).length, 1, 'warned once');
+  // Feature on: the next record after the pause goes through and resumes the org.
+  const S3 = '700000000000000031';
   clockRef.t += 61_000;
+  endedTurn(host, { id: S3, t: clockRef.t, reply: '740000000000000031' });
   await r.tick();
   assert.equal(puts.length, 3);
-  assert.equal(exists(host), false);
+  assert.equal(exists(host, S3), false);
   assert.equal(r.shouldRegister(ORG, false), true, 'resumed');
 });
 
-test('404 on one turn pauses the whole org: its other pending turns are not PUT until the re-probe', async () => {
+test('disabled 404 on one record pauses the org: its other pending records are not PUT until the re-probe', async () => {
   const host = makeHost();
   const clockRef = { t: Date.now() };
   endedTurn(host, { id: S, selected: ['local:weekly-report'], t: clockRef.t });
   endedTurn(host, { id: '700000000000000012', selected: ['local:weekly-report'], t: clockRef.t, reply: '740000000000000012' });
-  const { r, puts } = reporter(host, { responses: [404], clockRef, reprobeMs: 60_000 });
+  const { r, puts } = reporter(host, { responses: ['off'], clockRef, reprobeMs: 60_000 });
   await r.tick();
-  assert.equal(puts.length, 1, 'the second turn of the paused org is not PUT in the same tick');
+  assert.equal(puts.length, 1, 'the second record of the paused org is not PUT in the same tick');
   clockRef.t += 30_000;
   await r.tick();
   assert.equal(puts.length, 1);
   clockRef.t += 31_000;
   await r.tick();
-  assert.equal(puts.length, 3, 're-probe succeeds, the other turn follows in the same tick');
-  assert.equal(exists(host), false);
+  assert.equal(puts.length, 2, 'the waiting record is the probe');
   assert.equal(exists(host, '700000000000000012'), false);
+});
+
+test('plain 404 (no skill_usage_disabled code) → only that record is given up; the org is not paused', async () => {
+  const host = makeHost();
+  endedTurn(host);
+  const S2 = '700000000000000022';
+  endedTurn(host, { id: S2, reply: '740000000000000022' });
+  const { r, puts } = reporter(host, { responses: [404, 200] });
+  await r.tick();
+  assert.equal(puts.length, 2, 'the other record of the same org is still PUT');
+  assert.equal(exists(host), false);
+  assert.equal(exists(host, S2), false);
+  assert.equal(r.shouldRegister(ORG, false), true);
+});
+
+test('a poison record (rejected every time) cannot keep the org paused or be retried', async () => {
+  const host = makeHost();
+  const clockRef = { t: Date.now() };
+  endedTurn(host, { t: clockRef.t });
+  const { r, puts } = reporter(host, { responses: [404, 422], clockRef });
+  await r.tick();
+  assert.equal(puts.length, 1);
+  assert.equal(exists(host), false, 'given up at once');
+  assert.equal(r.isPaused(ORG), false);
+  clockRef.t += 4 * 60 * 60 * 1000;
+  await r.tick();
+  assert.equal(puts.length, 1, 'never PUT again');
+  const S2 = '700000000000000023';
+  endedTurn(host, { id: S2, t: clockRef.t, reply: '740000000000000023' });
+  await r.tick();
+  assert.equal(puts.length, 2);
+  assert.equal(exists(host, S2), false);
+  assert.equal(r.isPaused(ORG), false);
+});
+
+test('the PUT is quiet on success (no [rpc] request/response pair per report)', async () => {
+  const host = makeHost();
+  endedTurn(host);
+  const { r, puts } = reporter(host);
+  await r.tick();
+  assert.equal(puts[0].opts.quietOnSuccess, true);
 });
 
 test('503 / network error → kept and retried with backoff; success later removes it', async () => {

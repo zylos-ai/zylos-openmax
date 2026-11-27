@@ -63,7 +63,7 @@ test('T9: sendStructuredMessage posts once to the endpoint conversation, quote f
   assert.deepEqual(out, { ok: true, structured: true, message_id: '7300000000000000201' });
 });
 
-test('OPENM-1396: [STRUCTURED] records the turn\'s first delivered reply; the body is unchanged', async () => {
+test('[STRUCTURED] records the turn\'s first delivered reply; the body is unchanged', async () => {
   const settled = [];
   const asked = [];
   const planFirstReply = (args) => { asked.push(args); return { settle: (o, id) => settled.push([o, id]) }; };

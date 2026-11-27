@@ -1318,8 +1318,9 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       return;
     }
     if (run) activity.dropRun(run.runId);
-    if (skillTurn) dropSkillTurn(sourceMessageId);
     removeReaction(msg.id, 'c4-failed');
+    // The turn never reached the runtime: nothing to report for it.
+    if (skillTurn) dropSkillTurn(sourceMessageId);
     warn(`c4-receive ${result.outcome} [${orgConfig.slug}] msg=${msg.id} conv=${msg.conversation_id}`);
     if (result.notice && shouldNoticeInboundFailure(msg, notification)) {
       sendRejectNotice(orgConfig, msg, result.notice).catch(() => {});

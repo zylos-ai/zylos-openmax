@@ -65,7 +65,7 @@ async function send(params, status = 200) {
   }
 }
 
-test('1396: comm.send with sourceMessageId records the first delivered reply only; body unchanged', async () => {
+test('comm.send with sourceMessageId records the first delivered reply only; body unchanged', async () => {
   registerTurn();
   let r = await send({ conversationId: CONV, content: 'first', sourceMessageId: SRC }, 400);
   assert.equal(r.ok, false);
@@ -79,7 +79,7 @@ test('1396: comm.send with sourceMessageId records the first delivered reply onl
   assert.equal(replyOf(), '7400000000000002001', 'later replies do not replace it');
 });
 
-test('1396: comm.send without sourceMessageId, or for an unregistered message, records nothing', async () => {
+test('comm.send without sourceMessageId, or for an unregistered message, records nothing', async () => {
   const src = '7300000000000002002';
   let r = await send({ conversationId: CONV, content: 'x' });
   assert.equal(r.ok, true, r.stderr);

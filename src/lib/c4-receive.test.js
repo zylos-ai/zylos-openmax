@@ -194,6 +194,8 @@ test('A: failure handling — stored counts as delivered; anything else drops th
   const tail = BRIDGE.slice(BRIDGE.indexOf('const result = await forwardInbound(endpoint'), BRIDGE.indexOf('function shouldNoticeInboundFailure'));
   assert.match(tail, /result\.outcome === 'sent' \|\| result\.outcome === 'stored'[\s\S]*markRead\(orgConfig[\s\S]*return;/);
   assert.match(tail, /activity\.dropRun\(run\.runId\);\n {4}removeReaction\(msg\.id, 'c4-failed'\);/);
+  // A registered skill-usage turn is dropped with the run (it never reached the runtime).
+  assert.match(tail, /removeReaction\(msg\.id, 'c4-failed'\);\n(?: {4}\/\/.*\n)* {4}if \(skillTurn\) dropSkillTurn\(sourceMessageId\);/);
   assert.match(tail, /if \(result\.notice && shouldNoticeInboundFailure\(msg, notification\)\)/);
   const exempt = BRIDGE.slice(BRIDGE.indexOf('function shouldNoticeInboundFailure'));
   assert.match(exempt, /notification\._via !== 'sync' && senderType !== 'AGENT' && !isSystemSender\(msg\)/);

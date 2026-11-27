@@ -509,7 +509,7 @@ function startNumericServer({ fail = [] } = {}) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, posts, port: server.address().port })));
 }
 
-test('1396: text — the first chunk of the first reply is recorded; later chunks / replies are not; no metadata is added', async () => {
+test('text — the first chunk of the first reply is recorded; later chunks / replies are not; no metadata is added', async () => {
   const conv = 'conv-skills-1396';
   const src = '7300000000000001396';
   registerTurn(conv, src);
@@ -540,7 +540,7 @@ test('1396: text — the first chunk of the first reply is recorded; later chunk
   for (const { body } of sends) assert.equal('metadata' in body, false, 'no skills-used item on any reply');
 });
 
-test('1396: text — a first send rejected with 400 records nothing; the next delivered reply is the first reply', async () => {
+test('text — a first send rejected with 400 records nothing; the next delivered reply is the first reply', async () => {
   const conv = 'conv-skills-1396-400';
   const src = '7300000000000001397';
   registerTurn(conv, src);
@@ -557,7 +557,7 @@ test('1396: text — a first send rejected with 400 records nothing; the next de
   }
 });
 
-test('1396: [MEDIA] — a rejected send records nothing; a delivered one is recorded', async () => {
+test('[MEDIA] — a rejected send records nothing; a delivered one is recorded', async () => {
   const conv = 'conv-skills-1396-media';
   const src = '7300000000000001398';
   registerTurn(conv, src);

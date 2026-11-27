@@ -27,7 +27,7 @@
  *   - the inbound arrived merged with another message, was injected into
  *     another message's turn, or another input entered the turn;
  *   - the turn was interrupted (Claude's「[Request interrupted by user…]」
- *     input, or an interrupted turn_end);
+ *     input or interrupted tool result);
  *   - a log record after the inbound has an unknown shape, does not parse, is
  *     too long to read, or the log was rewritten under the scan;
  *   - a Skill call without a skill name, or a name that maps to no skill_id;
@@ -181,7 +181,7 @@ export function writeSkillTurn(reg, { dir = SKILLS_USED_DIR } = {}) {
   writeJson(regPath(dir, reg.source_message_id), reg);
 }
 
-/** Registered source message ids, oldest file first. */
+/** Registered source message ids (in no particular order). */
 export function listSkillTurns({ dir = SKILLS_USED_DIR } = {}) {
   let names = [];
   try { names = fs.readdirSync(dir); } catch { return []; }
@@ -342,6 +342,8 @@ export function feedTurnEvents(scan, events, { sourceMessageId, resolve }) {
       continue;
     }
     if (ev.t === 'turn_end') {
+      // Codex-shaped turn_end only (codex-rollout.js); the Claude adapter's
+      // turn_end has no flag, its interrupts are the input / tool result above.
       if (ev.interrupted === true) why('interrupted');
       scan.ended = true;
       continue;

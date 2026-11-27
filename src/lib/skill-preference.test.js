@@ -84,7 +84,7 @@ test('malformed entries dropped one by one; duplicates keep the first; order kep
   assert.deepEqual(prefs, [{ skillId: 'sk_1', name: '一' }, { skillId: 'sk_6', name: '六' }]);
 });
 
-test('R1-P3: name is optional (cws-comm !643) — a missing or blank name falls back to the skill_id', () => {
+test('name is optional — a missing or blank name falls back to the skill_id', () => {
   const prefs = skillPreferenceOf(msgWith([skillsItem([
     { skill_id: 'sk_3' },
     { skill_id: 'local:weekly-report', name: '   ' },
