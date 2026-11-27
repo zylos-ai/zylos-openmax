@@ -64,7 +64,7 @@ function reporter(host, { responses = [], clockRef = { t: Date.now() }, ...opts 
       puts.push({ orgId, path: p, body, opts: o });
       const next = responses.shift();
       if (next == null || next === 200) return {};
-      if (next === 'off') throw Object.assign(new Error('HTTP 404'), { status: 404, body: { error: { code: SKILL_USAGE_DISABLED_CODE } } });
+      if (next === 'off') throw Object.assign(new Error('HTTP 404'), { status: 404, body: DISABLED_BODY });
       throw Object.assign(new Error(`HTTP ${next}`), next === 'net' ? {} : { status: next, body: { error: { code: 'not_found' } } });
     },
     now: () => clockRef.t,
@@ -72,6 +72,15 @@ function reporter(host, { responses = [], clockRef = { t: Date.now() }, ...opts 
   });
   return { r, puts, warns, clockRef };
 }
+
+// K3's feature-off answer, exactly as cws-core sends it (application/problem+json).
+const DISABLED_BODY = {
+  error: {
+    type: 'https://openmax.ai/problems/SKILL_USAGE_DISABLED', title: 'Not Found', status: 404,
+    detail: 'skill usage reporting is disabled for this organization', code: 'SKILL_USAGE_DISABLED',
+  },
+  request_id: 'req-1', server_time: '2026-11-27T12:00:00Z',
+};
 
 const exists = (host, id = S) => fs.existsSync(path.join(host.dir, `${id}.json`));
 
@@ -82,8 +91,11 @@ test('contract: PUT /agents/{member_id}/skill-usage with {source_message_id, rep
   assert.deepEqual(skillUsageBody({ sourceMessageId: S, replyMessageId: REPLY, complete: true, skillIds: ['local:a'] }),
     { source_message_id: S, reply_message_id: REPLY, complete: true, skill_ids: ['local:a'] });
   assert.deepEqual(skillUsageBody({ sourceMessageId: S, replyMessageId: REPLY, complete: false, skillIds: ['local:a'] }).skill_ids, [], 'incomplete never carries ids');
-  assert.equal(SKILL_USAGE_DISABLED_CODE, 'skill_usage_disabled');
-  assert.equal(classifySkillUsageError({ status: 404, body: { error: { code: 'skill_usage_disabled' } } }), 'disabled');
+  assert.equal(SKILL_USAGE_DISABLED_CODE, 'SKILL_USAGE_DISABLED');
+  assert.equal(classifySkillUsageError({ status: 404, body: DISABLED_BODY }), 'disabled');
+  for (const code of ['skill_usage_disabled', 'Skill_Usage_Disabled', 'NOT_FOUND', '', undefined]) {
+    assert.equal(classifySkillUsageError({ status: 404, body: { error: { ...DISABLED_BODY.error, code } } }), 'give_up', String(code));
+  }
   assert.equal(classifySkillUsageError({ status: 404 }), 'give_up', 'a plain 404 is not feature-off');
   assert.equal(classifySkillUsageError({ status: 404, body: { error: { code: 'not_found' } } }), 'give_up');
   for (const s of [503, 500, 429, undefined]) assert.equal(classifySkillUsageError({ status: s }), 'retry', String(s));
@@ -177,7 +189,7 @@ test('disabled 404 → org paused (no PUT, no no-selection registrations), the r
   assert.equal(puts.length, 2);
   assert.equal(exists(host, S2), false);
   assert.equal(r.shouldRegister(ORG, false), false);
-  assert.equal(warns.filter((w) => /skill_usage_disabled/.test(w)).length, 1, 'warned once');
+  assert.equal(warns.filter((w) => /SKILL_USAGE_DISABLED/.test(w)).length, 1, 'warned once');
   // Feature on: the next record after the pause goes through and resumes the org.
   const S3 = '700000000000000031';
   clockRef.t += 61_000;
@@ -205,7 +217,7 @@ test('disabled 404 on one record pauses the org: its other pending records are n
   assert.equal(exists(host, '700000000000000012'), false);
 });
 
-test('plain 404 (no skill_usage_disabled code) → only that record is given up; the org is not paused', async () => {
+test('plain 404 (no SKILL_USAGE_DISABLED code) → only that record is given up; the org is not paused', async () => {
   const host = makeHost();
   endedTurn(host);
   const S2 = '700000000000000022';
@@ -314,5 +326,32 @@ test('not gated on OPENMAX_ACTIVITY', async () => {
     assert.equal(puts.length, 1);
   } finally {
     if (prev === undefined) delete process.env.OPENMAX_ACTIVITY; else process.env.OPENMAX_ACTIVITY = prev;
+  }
+});
+
+test('real client: a problem+json 404 SKILL_USAGE_DISABLED body is parsed and classified as feature-off; lower-case code is not', async () => {
+  const http = await import('node:http');
+  const client = await import('./client.js');
+  for (const [code, expected] of [['SKILL_USAGE_DISABLED', 'disabled'], ['skill_usage_disabled', 'give_up']]) {
+    const server = http.createServer((req, res) => {
+      res.writeHead(404, { 'Content-Type': 'application/problem+json' });
+      res.end(JSON.stringify({ ...DISABLED_BODY, error: { ...DISABLED_BODY.error, code } }));
+    });
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    client.setBaseUrl(`http://127.0.0.1:${server.address().port}`);
+    client.setApiKey('test-token');
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      const err = await client.putForOrg('org-x', client.apiPath(skillUsagePath('agent-x')), {}, { timeoutMs: 5000 }).then(() => null, (e) => e);
+      assert.equal(err?.status, 404);
+      assert.equal(err.body?.error?.code, code, 'body parsed as JSON');
+      assert.equal(classifySkillUsageError(err), expected, code);
+    } finally {
+      client.setBaseUrl(null);
+      client.setApiKey(null);
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => server.close(resolve));
+    }
   }
 });

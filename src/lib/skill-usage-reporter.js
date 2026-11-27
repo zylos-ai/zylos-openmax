@@ -12,7 +12,7 @@
  *   - report → PUT to the conversation's org as the Agent itself.
  *
  * PUT outcomes (skill-usage-contract.js): a 404 whose body carries
- * `skill_usage_disabled` means the feature is off for that org — the org is
+ * `SKILL_USAGE_DISABLED` means the feature is off for that org — the org is
  * paused for `reprobeMs` (warned once): no PUT, and comm-bridge stops
  * registering turns without a selection for it (shouldRegister). The record
  * that got it is dropped, so no single record keeps the org paused; after the
@@ -87,7 +87,7 @@ export function createSkillUsageReporter({
       const kind = classifySkillUsageError(err);
       if (kind === 'disabled') {
         if (!paused.has(orgId)) {
-          warn?.(`skill-usage: feature off for org ${orgId} (404 skill_usage_disabled); pausing reports and no-selection registrations, re-probe in ${Math.round(reprobeMs / 60000)} min`);
+          warn?.(`skill-usage: feature off for org ${orgId} (404 SKILL_USAGE_DISABLED); pausing reports and no-selection registrations, re-probe in ${Math.round(reprobeMs / 60000)} min`);
         }
         paused.set(orgId, t + reprobeMs);
         dropSkillTurn(reg.source_message_id, { dir });

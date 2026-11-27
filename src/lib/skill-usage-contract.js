@@ -20,10 +20,13 @@
  *
  * Answers the reporter relies on:
  *   2xx                → stored (or nothing to store); the registration is removed;
- *   404 + body {"error":{"code":"skill_usage_disabled"}}
+ *   404 + problem+json body whose error.code is exactly "SKILL_USAGE_DISABLED"
+ *     ({"error":{"type":"…/SKILL_USAGE_DISABLED","title":"Not Found","status":404,
+ *       "detail":"…","code":"SKILL_USAGE_DISABLED"},"request_id":…,"server_time":…};
+ *      client.js parses every response body as JSON, whatever its Content-Type)
  *                      → the feature is off for the org (CONVERSATION_SKILLS_ENABLED):
  *                        the org is paused and re-probed later; the record is dropped;
- *   404 without that code (route missing, anything else)
+ *   404 without that exact code (route missing, other or lower-case code)
  *                      → that record only is given up; no org pause;
  *   400, 403, 409, 422 (any other 4xx)
  *                      → that record is rejected: given up;
@@ -47,8 +50,8 @@ export function skillUsageBody({ sourceMessageId, replyMessageId, complete, skil
   };
 }
 
-/** The error code K3 returns, with 404, when the feature is off for the org. */
-export const SKILL_USAGE_DISABLED_CODE = 'skill_usage_disabled';
+/** The error code K3 returns, with 404, when the feature is off for the org (exact match, cws-core upper-case codes). */
+export const SKILL_USAGE_DISABLED_CODE = 'SKILL_USAGE_DISABLED';
 
 /**
  * How the reporter treats an error from the PUT (client.js errors carry
