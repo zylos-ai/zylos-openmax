@@ -488,16 +488,23 @@ export function feedTurnEvents(scan, events, { sourceMessageId, resolve, known =
   return { consumed: i };
 }
 
+// A heredoc operator and its delimiter (quoted, unquoted or `\`-escaped).
+const HEREDOC_OP_RE = /^<<(-?)[ \t]*(?:'([^'\n]*)'|"([^"\n]*)"|\\?([^\s;&|()<>'"`]+))/;
+
 /**
  * Split a shell command into simple commands at `;` `&&` `||` `|` `&`, newlines,
  * `(` `)` `$(` and backticks, outside quotes (and at `$(` `)` and backticks
- * inside double quotes). Text after a line holding a heredoc (`<<`) is its
- * body, not commands: the split stops there (that line itself is kept).
+ * inside double quotes). A heredoc's body (the lines after the line that opens
+ * it, through its terminator line — leading tabs stripped for `<<-`; several
+ * on one line in order) is not commands and is skipped; parsing resumes after
+ * the terminator. An unterminated body runs to the end.
  */
+
 export function splitShellCommands(cmd) {
   const out = [];
   let cur = '';
   let q = null;
+  const heredocs = []; // opened on the current line, bodies not yet skipped
   const push = () => { if (cur.trim()) out.push(cur.trim()); cur = ''; };
   for (let i = 0; i < cmd.length; i++) {
     const c = cmd[i];
@@ -515,10 +522,29 @@ export function splitShellCommands(cmd) {
     }
     if (c === "'" || c === '"') { q = c; cur += c; continue; }
     if (c === '\\' && i + 1 < cmd.length) { cur += c + cmd[++i]; continue; }
+    if (c === '<' && cmd.startsWith('<<<', i)) { cur += '<<<'; i += 2; continue; }
+    if (c === '<' && cmd[i + 1] === '<') {
+      // A heredoc (`<<EOF`, `<<'EOF'`, `<<"EOF"`, `<<\EOF`, `<<-EOF`): its
+      // body starts on the next line; a here-string `<<<` is not one.
+      const m = HEREDOC_OP_RE.exec(cmd.slice(i));
+      if (m) {
+        heredocs.push({ strip: m[1] === '-', delim: m[2] ?? m[3] ?? m[4] });
+        cur += m[0];
+        i += m[0].length - 1;
+        continue;
+      }
+    }
     if (c === '\n') {
-      const heredoc = /<</.test(cur);
       push();
-      if (heredoc) return out;
+      // Skip each pending heredoc's body, through its terminator line, in order.
+      for (const { strip, delim } of heredocs.splice(0)) {
+        while (i < cmd.length) {
+          const end = cmd.indexOf('\n', i + 1);
+          const lineText = cmd.slice(i + 1, end === -1 ? cmd.length : end);
+          i = end === -1 ? cmd.length : end;
+          if ((strip ? lineText.replace(/^\t+/, '') : lineText) === delim) break;
+        }
+      }
       continue;
     }
     // `2>&1` / `&>f` are redirections, not a background `&`.
@@ -540,7 +566,7 @@ export function splitShellCommands(cmd) {
  * without output redirection targets (`> f`, `2>>f`; `<f` is kept). So a
  * write is not a read: `cat > SKILL.md <<'EOF'` (create-skill's way of
  * writing a skill — the redirect target is dropped and the heredoc body is
- * not a command, splitShellCommands) and an in-place edit (`-i…`,
+ * skipped through its terminator, splitShellCommands) and an in-place edit (`-i…`,
  * `--in-place`: `sed -i`, the whole simple command is skipped).
  */
 function bashReadArgs(command) {

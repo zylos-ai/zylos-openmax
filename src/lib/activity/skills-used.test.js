@@ -683,6 +683,45 @@ test('gavin P3-1: a Bash command that writes a SKILL.md (heredoc, sed -i, redire
   }
 });
 
+test('gavin r3 🔵: a heredoc body is skipped through its terminator, then parsing resumes — a read after it still counts', () => {
+  const W = '~/zylos/.claude/skills/weekly-report/SKILL.md';
+  const X = '~/zylos/.claude/skills/market--price-grab/SKILL.md';
+  const incomplete = [
+    // gavin's repro: write one skill with a heredoc, then read another
+    `cat > ${W} <<'EOF'\n---\nname: weekly-report\n---\nEOF\ncat ${X}`,
+    `cat > ${W} <<"EOF"\nbody\nEOF\nhead -5 ${X}`,
+    `cat > ${W} <<EOF\nbody\nEOF\nsed -n 1,5p ${X}`,
+    `cat > ${W} <<\\EOF\nbody\nEOF\ncat ${X}`,
+    // <<- strips leading tabs from the terminator line
+    `if true; then\n\tcat > ${W} <<-EOF\n\tbody\n\tEOF\n\tcat ${X}\nfi`,
+    // two heredocs on one line: both bodies skipped in order
+    `cat > /tmp/a <<A > /tmp/b <<B\na\nA\nb\nB\ncat ${X}`,
+    // a line in the body that merely looks like the terminator does not end it
+    `cat > ${W} <<EOF\n EOF\nEOFX\nEOF\ncat ${X}`,
+    // a here-string is not a heredoc: the next line is a command, not a body
+    `grep -c x <<< "abc"\ncat ${X}`,
+  ];
+  for (const command of incomplete) {
+    const host = makeHost();
+    assert.deepEqual(runTurn(host, [userRec(inbound()), toolRec('Bash', { command }), turnEnd()]).out.reasons, ['skill_file_read'], command);
+  }
+  const complete = [
+    // a read inside a body is not a command; nor after an unterminated body
+    `cat > /tmp/a <<EOF\ncat ${X}\nEOF\necho done`,
+    `cat > ${W} <<-EOF\n\tcat ${X}\n\tEOF\necho done`,
+    `cat > /tmp/a <<EOF\ncat ${X}\n`,
+    // the second heredoc of a line has its own body
+    `cat > /tmp/a <<A > /tmp/b <<B\na\nA\ncat ${X}\nB\necho done`,
+    // only the exact terminator line ends a body (` EOF` does not)
+    `cat > /tmp/a <<EOF\n EOF\ncat ${X}\nEOF\necho done`,
+  ];
+  for (const command of complete) {
+    const host = makeHost();
+    const { out } = runTurn(host, [userRec(inbound()), toolRec('Bash', { command }), turnEnd()]);
+    assert.equal(out.complete, true, `${command} → ${out.reasons}`);
+  }
+});
+
 test('gavin P3-2: only a SKILL.md of this host\'s skills dir counts — another repo\'s or a user-level one does not', () => {
   const complete = [
     toolRec('Read', { file_path: '/tmp/repo/skills/weekly-report/SKILL.md' }),
