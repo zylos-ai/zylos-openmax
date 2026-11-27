@@ -8,8 +8,10 @@ import path from 'node:path';
 // before importing anything that loads it.
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zom-convctx-'));
 process.env.HOME = tmpHome;
-const { gatherRecentContext } = await import('./conversation-context.js');
-const { logAndRecord, ensureReplay, setLimits } = await import('./group-history.js');
+const {
+  gatherRecentContext, recordSentMessage, historyEntryOf, createContextDelivery, createSentReplyRecorder, omittedContext, SUB_CONTEXT_ALWAYS_RECENT,
+} = await import('./conversation-context.js');
+const { logAndRecord, ensureReplay, setLimits, getHistory } = await import('./group-history.js');
 
 // The context lines for <group-context> / <subconversation-context>: local
 // history first, then one GET …/messages page (before_seq = the message's seq,
@@ -63,7 +65,7 @@ test('API path → one request with before_seq = msg.seq and limit = context_mes
   assert.deepEqual(fetch.calls, [{ conversationId: conv, beforeSeq: 21, limit: 5 }]);
   assert.equal(recent.length, 5);
   assert.deepEqual(recent.map((l) => l.content), ['api 16', 'api 17', 'api 18', 'api 19', 'api 20']);
-  assert.deepEqual(recent[0], { senderName: 'Carol', senderId: 'm-carol', content: 'api 16' });
+  assert.deepEqual(recent[0], { senderName: 'Carol', senderId: 'm-carol', content: 'api 16', messageId: idOf(16), seq: 16 });
 });
 
 test('the line count follows config (context_messages = 3)', async () => {
@@ -123,4 +125,233 @@ test('a local entry stored with a raw id as its name gets a resolved name', asyn
   record(conv, 6);
   const { recent } = await gather(conv, { seq: 6, fetch: mockFetch() });
   assert.equal(recent[0].senderName, 'name-of-m-dave');
+});
+
+// ── the Agent's own replies (cws-comm does not echo them back) ───────────
+
+/** The get-message response for a reply this Agent sent. */
+function sentDetail(seq, text = `agent ${seq}`) {
+  return {
+    message: { id: idOf(seq), seq, sender_id: 'm-agent', type: 'agent_text', content: text },
+    content: { content_type: 'text', body: { text }, attachments: [] },
+  };
+}
+
+async function recordSent(conv, seq, { detail = sentDetail(seq), calls = [] } = {}) {
+  return recordSentMessage({
+    conversationId: conv, messageId: idOf(seq),
+    fetchDetail: async () => { calls.push(seq); return detail; },
+    resolveName: async (id) => (id === 'm-agent' ? 'Nova' : null),
+  });
+}
+
+test('local history: the Agent\'s own latest reply is in the next message\'s context', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  assert.equal(await recordSent(conv, 6), true);   // the Agent answered message 5
+  record(conv, 7);                                  // the next inbound message
+  const { recent, source } = await gather(conv, { seq: 7, fetch: mockFetch() });
+  assert.equal(source, 'local');
+  assert.deepEqual(recent.map((l) => l.content), ['local 2', 'local 3', 'local 4', 'local 5', 'agent 6']);
+  assert.deepEqual(recent.at(-1), { senderName: 'Nova', senderId: 'm-agent', content: 'agent 6', messageId: idOf(6), seq: 6 });
+});
+
+test('a reply recorded after the next inbound message still sorts by seq', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  record(conv, 7);
+  await recordSent(conv, 6);
+  record(conv, 8);
+  const { recent } = await gather(conv, { seq: 8, fetch: mockFetch() });
+  assert.deepEqual(recent.map((l) => l.content), ['local 3', 'local 4', 'local 5', 'agent 6', 'local 7']);
+});
+
+test('no local history kept for the conversation (plain DM) → nothing fetched, nothing recorded', async () => {
+  const conv = newConv();
+  const calls = [];
+  assert.equal(await recordSent(conv, 1, { calls }), false);
+  assert.deepEqual(calls, []);
+  assert.equal(getHistory(conv), null);
+});
+
+test('the reply could not be fetched → nothing recorded', async () => {
+  const conv = newConv();
+  record(conv, 1);
+  assert.equal(await recordSent(conv, 2, { detail: null }), false);
+  assert.deepEqual(getHistory(conv).map((e) => e.message_id), [idOf(1)]);
+});
+
+test('a reply recorded twice (poll and inbound flush) is one entry', async () => {
+  const conv = newConv();
+  record(conv, 1);
+  await recordSent(conv, 2);
+  await recordSent(conv, 2);
+  assert.deepEqual(getHistory(conv).map((e) => e.message_id), [idOf(1), idOf(2)]);
+});
+
+test('historyEntryOf: an inbound frame + get-message detail → the entry the bridge always recorded', () => {
+  const msg = {
+    id: 1795, conversation_id: 'c', sender_id: 'm-bob', seq: '42', type: 'IMAGE', parent_message_id: '1790',
+    message: { id: 1795, seq: 42, sender_id: 'm-bob', type: 'image', parent_id: '1790' },
+    content: { body: { text: 'look' }, attachments: [{ artifact_id: 'a1', file_name: 'x.png' }] },
+  };
+  assert.deepEqual(historyEntryOf(msg, 'Bob', 'T'), {
+    timestamp: 'T', message_id: 1795, sender_id: 'm-bob', sender_name: 'Bob',
+    text: '[image: a1 | x.png] look', seq: 42, parent_id: '1790', type: 'image',
+  });
+});
+
+// ── incremental <subconversation-context> ────────────────────────────────
+
+const line = (id, content = `m ${id}`) => ({ senderName: 'Bob', senderId: 'm-bob', content, messageId: id });
+
+test('incremental: a line the Agent was given (as context or as the current message) is not sent again', () => {
+  const d = createContextDelivery();
+  const conv = newConv();
+  // Turn 1: context 1, 2; current message 3.
+  assert.deepEqual(d.unseen(conv, [line('1'), line('2')]).map((l) => l.messageId), ['1', '2'], 'nothing delivered yet → whole');
+  d.remember(conv, ['1', '2', '3']);
+  // Turn 2 (current message 5): the window is 1..4, 4 being the Agent's reply.
+  const next = d.unseen(conv, [line('1'), line('2'), line('3'), line('4', 'agent reply')]);
+  assert.deepEqual(next.map((l) => l.messageId), ['4']);
+  d.remember(conv, [...next.map((l) => l.messageId), '5']);
+  // Turn 3: nothing new before it → no lines (no block).
+  assert.deepEqual(d.unseen(conv, [line('2'), line('3'), line('4'), line('5')]), []);
+});
+
+test('incremental: per conversation; a message never forwarded (smart mode, dropped) still shows up later', () => {
+  const d = createContextDelivery();
+  const a = newConv();
+  const b = newConv();
+  d.remember(a, ['1', '2']);
+  assert.deepEqual(d.unseen(b, [line('1')]).map((l) => l.messageId), ['1'], 'another conversation is unaffected');
+  assert.deepEqual(d.unseen(a, [line('1'), line('2'), line('9')]).map((l) => l.messageId), ['9']);
+});
+
+test('incremental: ids compare as strings; a line without an id is always kept', () => {
+  const d = createContextDelivery();
+  const conv = newConv();
+  d.remember(conv, [1795, null, '']);
+  const kept = d.unseen(conv, [line('1795'), { senderName: 'X', content: 'no id' }]);
+  assert.deepEqual(kept.map((l) => l.content), ['no id']);
+});
+
+test('incremental: bounded — oldest ids and least recently used conversations are forgotten (then sent again)', () => {
+  const d = createContextDelivery({ maxIds: 2, maxConversations: 2 });
+  const [a, b, c] = [newConv(), newConv(), newConv()];
+  d.remember(a, ['1', '2', '3']);
+  assert.deepEqual(d.unseen(a, [line('1'), line('2'), line('3')]).map((l) => l.messageId), ['1']);
+  d.remember(b, ['x']);
+  d.remember(a, ['4']);          // a used again → b is now the oldest
+  d.remember(c, ['y']);          // b forgotten
+  assert.deepEqual(d.unseen(b, [line('x')]).map((l) => l.messageId), ['x']);
+  assert.deepEqual(d.unseen(a, [line('4')]), []);
+});
+
+// ── review P3s: cards, split replies, the timing before a context is built ──
+
+test('a card the Agent sent reads the same from local history as from the API page', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  const card = {
+    id: idOf(6), seq: 6, sender_id: 'm-agent', sender_display_name: 'Nova', type: 'agent_card',
+    content: { content_type: 'card', body: { title: '审批', blocks: [{ text: '请选择' }], actions: [{ label: '同意' }, { label: '拒绝' }] }, attachments: [] },
+  };
+  const detail = { message: { id: idOf(6), seq: 6, sender_id: 'm-agent', type: 'agent_card' }, content: card.content };
+  await recordSent(conv, 6, { detail });
+  record(conv, 7);
+  const local = (await gather(conv, { seq: 7, fetch: mockFetch() })).recent.at(-1);
+  const api = (await gather(newConv(), { seq: 7, fetch: mockFetch([card]) })).recent.at(-1);
+  assert.equal(local.content, '[image] 【审批】\n\n请选择\n\n[options] 同意 / 拒绝');
+  assert.equal(local.content, api.content);
+});
+
+/** A recorder over an in-memory marker queue; fetchDetail answers via `answer(seq)`. */
+function recorderFor({ delayMs = 0 } = {}) {
+  const queue = [];
+  const fetched = [];
+  const rec = createSentReplyRecorder({
+    drainMarkers: () => queue.splice(0),
+    fetchDetail: async (orgId, conversationId, messageId) => {
+      fetched.push(messageId);
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      const seq = Number(String(messageId).slice(-4));
+      return sentDetail(seq);
+    },
+    resolveName: async (orgId, id) => (id === 'm-agent' ? 'Nova' : null),
+  });
+  const mark = (conv, seqs) => queue.push({ conversationId: conv, messageId: idOf(seqs.at(-1)), messageIds: seqs.map(idOf), orgId: 'org-1' });
+  return { rec, mark, fetched };
+}
+
+test('a split reply: every chunk is recorded and in the next context', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  const { rec, mark, fetched } = recorderFor();
+  mark(conv, [6, 7, 8]);
+  record(conv, 9);
+  await rec.settle(conv);
+  assert.deepEqual(fetched, [idOf(6), idOf(7), idOf(8)]);
+  const { recent } = await gather(conv, { seq: 9, fetch: mockFetch() });
+  assert.deepEqual(recent.map((l) => l.content), ['local 4', 'local 5', 'agent 6', 'agent 7', 'agent 8']);
+});
+
+test('a reply whose marker was not polled yet and whose fetch ends after the context build started is still in it', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  for (let s = 1; s <= 5; s++) record(conv, s);
+  const { rec, mark } = recorderFor({ delayMs: 30 });
+  mark(conv, [6]);          // written by send.js; the 2s poll has not run
+  record(conv, 7);          // the next inbound message arrives
+  await rec.settle(conv);   // what the bridge does before gatherRecentContext
+  const { recent } = await gather(conv, { seq: 7, fetch: mockFetch() });
+  assert.equal(recent.at(-1).content, 'agent 6');
+});
+
+test('a reply recorded before this process read the conversation\'s log file is kept (replay first)', async () => {
+  setLimits(5, 15);
+  const conv = newConv();
+  // A log file from before a restart: on disk, not in memory yet.
+  const dir = path.join(tmpHome, 'zylos/components/openmax/runtime/group-logs');
+  fs.writeFileSync(path.join(dir, `${conv}.log`), [1, 2, 3, 4, 5].map((s) => JSON.stringify({
+    timestamp: 'T', message_id: idOf(s), sender_id: 'm-alice', sender_name: 'Alice', text: `local ${s}`, seq: s, parent_id: null, type: 'text',
+  })).join('\n') + '\n');
+  assert.equal(await recordSent(conv, 6), true);
+  record(conv, 7);
+  record(conv, 8);
+  // Recorded ahead of the replayed tail, the reply would be the oldest entry in
+  // memory and fall out of the window here.
+  const { recent, source } = await gather(conv, { seq: 8, fetch: mockFetch() });
+  assert.equal(source, 'local');
+  assert.deepEqual(recent.map((l) => l.content), ['local 3', 'local 4', 'local 5', 'agent 6', 'local 7']);
+});
+
+// ── owner decision on the incremental context: always the recent N + an omission note ──
+
+test('incremental: the last SUB_CONTEXT_ALWAYS_RECENT (3) lines are kept even when already delivered', () => {
+  assert.equal(SUB_CONTEXT_ALWAYS_RECENT, 3);
+  const d = createContextDelivery();
+  const conv = newConv();
+  d.remember(conv, ['1', '2', '3', '4', '5']);
+  const window = ['1', '2', '3', '4', '5'].map((id) => line(id));
+  assert.deepEqual(d.unseen(conv, window, SUB_CONTEXT_ALWAYS_RECENT).map((l) => l.messageId), ['3', '4', '5']);
+  // A new line in the middle is kept as well.
+  d.remember(conv, ['6']);
+  const mixed = [line('2'), line('3'), line('9'), line('4'), line('5'), line('6')];
+  assert.deepEqual(d.unseen(conv, mixed, SUB_CONTEXT_ALWAYS_RECENT).map((l) => l.messageId), ['9', '4', '5', '6']);
+});
+
+test('omittedContext: count and the comm.get_messages range of what was left out; null when nothing was', () => {
+  const window = [1, 2, 3, 4, 5].map((s) => ({ ...line(String(s)), seq: s }));
+  assert.deepEqual(omittedContext('c-1', window, window.slice(2), 6), { conversationId: 'c-1', count: 2, beforeSeq: 3, limit: 2 });
+  // A new line between omitted ones: the range covers up to the newest omitted line.
+  assert.deepEqual(omittedContext('c-1', window, [window[1], window[3], window[4]], 6), { conversationId: 'c-1', count: 2, beforeSeq: 4, limit: 3 });
+  assert.equal(omittedContext('c-1', window, window, 6), null);
+  // No seqs → the whole window before the current message.
+  const noSeq = window.map(({ seq, ...l }) => l);
+  assert.deepEqual(omittedContext('c-1', noSeq, noSeq.slice(3), 6), { conversationId: 'c-1', count: 3, beforeSeq: 6, limit: 5 });
 });

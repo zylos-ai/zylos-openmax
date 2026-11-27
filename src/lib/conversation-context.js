@@ -12,11 +12,16 @@
  * beforeSeq, limit)` returns API message objects ([] on failure);
  * `resolveName(memberId)` returns a display name or null.
  *
- * Each line is `{ senderName, senderId, content }` (formatContextLine in
- * message.js renders it).
+ * Each line is `{ senderName, senderId, content, messageId, seq }`
+ * (formatContextLine in message.js renders it).
+ *
+ * cws-comm does not echo a sender's own messages back to it, so the Agent's own
+ * replies never arrive as inbound frames. recordSentMessage puts them into local
+ * history (send.js hands each sent message to the bridge, see dm-seen-watch.js),
+ * so a context built from local history has them like the API page does.
  */
 
-import { getHistory } from './group-history.js';
+import { getHistory, hasHistory, ensureReplay, logAndRecord } from './group-history.js';
 import { isChatHistory, FORWARDED_CONVERSATION } from './forwarded.js';
 import { formatStructuredForModel } from './structured-body.js';
 
@@ -28,7 +33,16 @@ async function localEntryToContext(e, resolveName) {
   if (!name || name === e.sender_id) {
     name = (await resolveName(e.sender_id)) || e.sender_id;
   }
-  return { senderName: name, senderId: e.sender_id, content: e.text };
+  return { senderName: name, senderId: e.sender_id, content: e.text, messageId: idString(e.message_id), seq: seqNumber(e.seq) };
+}
+
+function idString(id) {
+  return id == null || id === '' ? null : String(id);
+}
+
+function seqNumber(seq) {
+  const n = Number(seq);
+  return seq == null || seq === '' || !Number.isFinite(n) ? null : n;
 }
 
 async function apiMessageToContext(m, resolveName) {
@@ -58,7 +72,186 @@ async function apiMessageToContext(m, resolveName) {
     content = '[image]' + (text ? ' ' + text : '');
   }
   if (isChatHistory(m)) content = FORWARDED_CONVERSATION;
-  return { senderName, senderId: m.sender_id, content };
+  return { senderName, senderId: m.sender_id, content, messageId: idString(m.id), seq: seqNumber(m.seq) };
+}
+
+/**
+ * The bridge side of the sent markers for local history: `poll()` drains the
+ * markers (`drainMarkers()`, each `{conversationId, messageIds, orgId, ...}`),
+ * hands each to `onMarker` (the DM seen-watch) and records every chunk of each
+ * sent message (recordSentMessage); `settle(conversationId)` is called before a
+ * context is built: it polls once more and waits for that conversation's
+ * pending recordings, so a reply sent just before the next message is in it.
+ * `fetchDetail(orgId, conversationId, messageId)` / `resolveName(orgId,
+ * memberId)` / `lookupOrg(conversationId)` are the bridge's I/O.
+ */
+export function createSentReplyRecorder({
+  drainMarkers, onMarker = () => {}, fetchDetail, resolveName, lookupOrg = () => '', warn = () => {},
+}) {
+  const pending = new Map();   // conversationId -> Promise of its recordings
+
+  function record(entry) {
+    const { conversationId } = entry;
+    const orgId = entry.orgId || lookupOrg(conversationId);
+    if (!orgId) return;
+    const ids = entry.messageIds?.length ? entry.messageIds : [entry.messageId];
+    const recordings = ids.map((messageId) => recordSentMessage({
+      conversationId,
+      messageId,
+      fetchDetail: () => fetchDetail(orgId, conversationId, messageId),
+      resolveName: (memberId) => resolveName(orgId, memberId),
+    }).catch((e) => warn(`record sent msg=${messageId} conv=${conversationId} failed: ${e.message}`)));
+    const all = Promise.all([pending.get(conversationId), ...recordings]);
+    pending.set(conversationId, all);
+    all.finally(() => {
+      if (pending.get(conversationId) === all) pending.delete(conversationId);
+    });
+  }
+
+  function poll() {
+    for (const entry of drainMarkers()) {
+      onMarker(entry);
+      record(entry);
+    }
+  }
+
+  async function settle(conversationId) {
+    poll();
+    await pending.get(conversationId);
+  }
+
+  return { poll, settle };
+}
+
+/**
+ * Lines of <subconversation-context> that are always sent, even when the Agent
+ * was already given them: the last exchange (typically a question, the Agent's
+ * answer and the follow-up) stays in view even if the Agent's runtime started
+ * a new session while the bridge kept running. Below the default window
+ * (context_messages = 5), so the incremental saving remains.
+ */
+export const SUB_CONTEXT_ALWAYS_RECENT = 3;
+
+/**
+ * What a sub-conversation's context has already given the Agent, so
+ * <subconversation-context> carries only the lines it has not seen: each
+ * message forwarded (as the current message or as a context line) is
+ * remembered by id per conversation, and `unseen` leaves those lines out,
+ * except the last `keepRecent` lines, which are always kept (see
+ * SUB_CONTEXT_ALWAYS_RECENT). A line without an id is always kept. In memory only: after a bridge restart
+ * the next context is whole again. Bounded: the newest `maxIds` ids per
+ * conversation, the `maxConversations` most recently used conversations.
+ */
+export function createContextDelivery({ maxIds = 200, maxConversations = 1000 } = {}) {
+  const delivered = new Map();   // conversationId -> Set<messageId>, oldest first
+
+  return {
+    unseen(conversationId, lines, keepRecent = 0) {
+      const seen = delivered.get(String(conversationId));
+      if (!seen) return lines;
+      const firstKept = lines.length - keepRecent;
+      return lines.filter((l, i) => i >= firstKept || !l.messageId || !seen.has(String(l.messageId)));
+    },
+    remember(conversationId, ids) {
+      const key = String(conversationId);
+      const seen = delivered.get(key) || new Set();
+      delivered.delete(key);
+      for (const id of ids) {
+        if (id == null || id === '') continue;
+        seen.delete(String(id));
+        seen.add(String(id));
+      }
+      while (seen.size > maxIds) seen.delete(seen.values().next().value);
+      delivered.set(key, seen);
+      while (delivered.size > maxConversations) delivered.delete(delivered.keys().next().value);
+    },
+  };
+}
+
+/**
+ * What `unseen` left out of a context window (`window` = the gathered lines,
+ * `kept` = what is sent), for the omission note: how many lines, and the
+ * comm.get_messages range that returns them (`beforeSeq` just past the newest
+ * omitted line, `limit` = the window lines up to it). Without seqs the range
+ * falls back to the whole window before the current message. null when
+ * nothing was left out.
+ */
+export function omittedContext(conversationId, window, kept, currentSeq) {
+  const keptSet = new Set(kept);
+  const omittedAt = window.map((l, i) => (keptSet.has(l) ? -1 : i)).filter((i) => i >= 0);
+  if (omittedAt.length === 0) return null;
+  const last = omittedAt.at(-1);
+  const lastSeq = window[last].seq;
+  const ranged = Number.isFinite(lastSeq);
+  return {
+    conversationId: String(conversationId),
+    count: omittedAt.length,
+    beforeSeq: ranged ? lastSeq + 1 : seqNumber(currentSeq),
+    limit: ranged ? last + 1 : window.length,
+  };
+}
+
+/**
+ * The local history entry for a message: the get-message response merged over
+ * the frame (`msg.message` holds the scalar fields, `msg.content` the
+ * structured body). Media become labels; a merged forward is one line.
+ */
+export function historyEntryOf(msg, senderName, timestamp = new Date().toISOString()) {
+  const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
+  // Same text chain as the API context lines (apiMessageToContext), so a card
+  // or another structured body reads the same from local history.
+  const entryText = structured.body?.text
+    || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+    || (typeof msg.content === 'string' ? msg.content : '')
+    || msg.content_text
+    || formatStructuredForModel(msg)
+    || '';
+  const msgType = (msg.type || msg.message?.type || '').toLowerCase();
+  const atts = Array.isArray(structured.attachments) ? structured.attachments : [];
+  const isImg = msgType === 'image' || msgType === 'agent_card';
+  let histText = entryText;
+  if ((isImg || atts.length > 0) && atts.length > 0) {
+    const kind = isImg ? 'image' : 'file';
+    const labels = atts.map(a => `[${kind}: ${a.artifact_id || '?'} | ${a.file_name || 'unknown'}]`);
+    histText = labels.join(' ') + (entryText ? ' ' + entryText : '');
+  } else if (isImg) {
+    histText = '[image]' + (entryText ? ' ' + entryText : '');
+  }
+  // A merged forward is one line in context, never its expanded records.
+  if (isChatHistory(msg)) histText = FORWARDED_CONVERSATION;
+  const seq = msg.seq ?? msg.message?.seq;
+  return {
+    timestamp,
+    message_id: msg.id ?? msg.message?.id,
+    sender_id: msg.sender_id || msg.message?.sender_id,
+    sender_name: senderName,
+    text: histText,
+    seq: seq != null ? Number(seq) : null,
+    parent_id: msg.parent_message_id || msg.message?.parent_message_id || msg.message?.parent_id || null,
+    type: msgType || 'text',
+  };
+}
+
+/**
+ * Record a message this Agent sent into local history, when history is kept
+ * for its conversation. `fetchDetail()` returns the get-message response (null
+ * on failure: nothing is recorded). Returns whether an entry was recorded.
+ */
+export async function recordSentMessage({ conversationId, messageId, fetchDetail, resolveName }) {
+  if (!conversationId || !messageId || !hasHistory(conversationId)) return false;
+  const detail = await fetchDetail();
+  if (!detail) return false;
+  const msg = { id: messageId, ...detail };
+  const senderId = msg.sender_id || msg.message?.sender_id;
+  const senderName = msg.sender_display_name
+    || msg.message?.sender_display_name
+    || (await resolveName(senderId))
+    || senderId;
+  // Replay first, so a log file not yet read by this process is read before
+  // the new entry (otherwise the tail would land after it in memory).
+  ensureReplay(conversationId);
+  logAndRecord(conversationId, historyEntryOf(msg, senderName));
+  return true;
 }
 
 /**

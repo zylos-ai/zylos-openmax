@@ -86,7 +86,7 @@ import {
   planReplyMetadata, attachRunToCardRequest, classifySendError, sha256, semanticBodyHash,
 } from '../src/lib/activity/reply.js';
 import { buildTextBody, buildMediaBody } from '../src/lib/outbound-body.js';
-import { SENT_DIR, writeSentMarker, sentMessageId } from '../src/lib/dm-seen-watch.js';
+import { SENT_DIR, writeSentMarker, sentMessageId, sentMessageIds } from '../src/lib/dm-seen-watch.js';
 
 const TYPING_DIR = path.join(RUNTIME_DIR, 'typing');
 
@@ -334,6 +334,7 @@ async function main() {
     writeSentMarker(SENT_DIR, {
       conversationId: ep.conversationId,
       messageId: sentMessageId(result),
+      messageIds: sentMessageIds(result),
       orgId: process.env.COCO_ORG_ID || '',
       sentAt,
     });

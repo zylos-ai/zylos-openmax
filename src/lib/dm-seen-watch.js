@@ -94,18 +94,34 @@ export function sentMessageId(result) {
 }
 
 /**
+ * Every message id of a send result, in send order: each chunk of a split
+ * text, else the one id sentMessageId finds. The bridge records them all into
+ * local history (the watch above needs only the last).
+ */
+export function sentMessageIds(result) {
+  const ids = Array.isArray(result?.message_ids) ? result.message_ids.map(idOf).filter(Boolean) : [];
+  if (ids.length > 0) return ids;
+  const one = sentMessageId(result);
+  return one ? [one] : [];
+}
+
+/**
  * Sender side: hand a sent message to the bridge. Never throws.
  * `sentAt` is required and must be taken BEFORE the send request: the watch
  * compares it with reconnect times and peer replies, and the HTTP response can
  * arrive after both. Without it no marker is written (nothing is watched).
  */
-export function writeSentMarker(dir, { conversationId, messageId, orgId = '', sentAt }) {
+export function writeSentMarker(dir, { conversationId, messageId, messageIds = [], orgId = '', sentAt }) {
   const id = idOf(messageId);
   if (!id || !conversationId || !Number.isFinite(sentAt) || sentAt <= 0) return false;
   try {
     fs.mkdirSync(dir, { recursive: true });
     const safe = id.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const body = JSON.stringify({ conversation_id: conversationId, message_id: id, org_id: orgId || '', sent_at: sentAt });
+    const ids = messageIds.map(idOf).filter(Boolean);
+    const body = JSON.stringify({
+      conversation_id: conversationId, message_id: id, org_id: orgId || '', sent_at: sentAt,
+      ...(ids.length > 0 ? { message_ids: ids } : {}),
+    });
     const tmp = path.join(dir, `${safe}.tmp`);
     fs.writeFileSync(tmp, body);
     // rename so the poller never reads a half-written marker
@@ -127,9 +143,13 @@ export function drainSentMarkers(dir) {
     try {
       const m = JSON.parse(fs.readFileSync(fp, 'utf8'));
       if (m?.conversation_id && m?.message_id) {
+        const messageId = idOf(m.message_id);
+        const messageIds = Array.isArray(m.message_ids) ? m.message_ids.map(idOf).filter(Boolean) : [];
         out.push({
           conversationId: String(m.conversation_id),
-          messageId: idOf(m.message_id),
+          messageId,
+          // Every chunk of the send (older markers: the one id).
+          messageIds: messageIds.length > 0 ? messageIds : [messageId],
           orgId: m.org_id || '',
           sentAt: Number(m.sent_at) || 0,
         });
