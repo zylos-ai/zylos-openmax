@@ -31,7 +31,9 @@
  *   400, 403, 409, 422 (any other 4xx)
  *                      → that record is rejected: given up (409 SKILL_USAGE_SOURCE_ALREADY_REPORTED
  *                        — the source message is already recorded under another
- *                        reply — included: only that record, no retry, no pause);
+ *                        reply —, 409 SKILL_USAGE_REPLY_ALREADY_REPORTED and
+ *                        403 SKILL_USAGE_AGENT_NOT_IN_CATALOG_ORG included: only
+ *                        that record, no retry, no pause);
  *   401                → the reporter re-mints the org's token and sends once
  *                        more; a second 401 gives that record up;
  *   503, 5xx, 429,     → retry with backoff while the registration is kept.

@@ -387,6 +387,42 @@ test('409 SKILL_USAGE_SOURCE_ALREADY_REPORTED (same source, other reply) → giv
   assert.equal(puts.length, 2, 'never retried');
 });
 
+// tech-plan v2.3.1 §5.1 (D-OPENM1396-K3-404-CONTRACT) / §6.2: K3's record-level
+// refusals are never 404 and never pause the org — only that record is given up.
+for (const [id, status, code] of [
+  ['TPL-01', 409, 'SKILL_USAGE_REPLY_ALREADY_REPORTED'],
+  ['TPL-02', 403, 'SKILL_USAGE_AGENT_NOT_IN_CATALOG_ORG'],
+]) {
+  test(`${id}: ${status} ${code} → only that record is given up; no org pause; no retry`, async () => {
+    const refusal = Object.assign(new Error(`HTTP ${status}`), {
+      status,
+      body: { error: { code, status, title: status === 409 ? 'Conflict' : 'Forbidden' } },
+    });
+    assert.equal(classifySkillUsageError(refusal), 'give_up');
+    const host = makeHost();
+    const OTHER = '700000000000000013';
+    endedTurn(host);
+    endedTurn(host, { id: OTHER, reply: '740000000000000013' });
+    const puts = [];
+    const { r, warns, clockRef } = reporter(host, {
+      putForOrg: async (orgId, p, body) => {
+        puts.push(body.source_message_id);
+        if (body.source_message_id === S) throw refusal;
+        return {};
+      },
+    });
+    await r.tick();
+    assert.deepEqual(puts.sort(), [S, OTHER].sort(), 'the other record of the same org is still reported');
+    assert.equal(exists(host), false, `the ${status} record is dropped`);
+    assert.equal(exists(host, OTHER), false, 'the other one was reported and removed');
+    assert.ok(warns.some((w) => w.includes(String(status)) && /giving up/.test(w)));
+    assert.equal(r.isPaused(ORG, clockRef.t), false, 'the org is not paused');
+    clockRef.t += 60 * 60 * 1000;
+    await r.tick();
+    assert.equal(puts.length, 2, 'never retried');
+  });
+}
+
 test('401 → token re-minted (force) and the PUT sent once more; success removes the record', async () => {
   const host = makeHost();
   endedTurn(host);
