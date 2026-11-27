@@ -18,7 +18,10 @@
  * paused for `reprobeMs` (warned once): no PUT, and comm-bridge stops
  * registering turns without a selection for it (shouldRegister). The record
  * that got it is dropped, so no single record keeps the org paused; after the
- * pause the next real report is the probe. Any other 404 (route missing) or
+ * pause the next real report is the probe. Any other 404 (route missing: a
+ * server without K3) gives up that record and backs the org's PUTs off for
+ * `routeBackoffMs` (warned once per window; registration goes on, records
+ * wait), so such a server is not hit — and warned about — on every turn. Any
  * other 4xx gives up that record only (409 SKILL_USAGE_SOURCE_ALREADY_REPORTED
  * included). A 401 (client.js's own refresh-and-retry did not cure it, or was
  * throttled) → the org's token is re-minted (reacquireToken force) and the
@@ -41,6 +44,8 @@ import { skillPreferenceApplies } from './skill-preference.js';
 
 export const SKILL_USAGE_TICK_MS = 5_000;
 export const SKILL_USAGE_REPROBE_MS = 3 * 60 * 60 * 1000;
+/** No PUT for an org this long after a 404 that is not SKILL_USAGE_DISABLED. */
+export const SKILL_USAGE_ROUTE_BACKOFF_MS = 60 * 60 * 1000;
 export const SKILL_USAGE_RETRY_BASE_MS = 30_000;
 export const SKILL_USAGE_RETRY_MAX_MS = 30 * 60 * 1000;
 
@@ -54,6 +59,7 @@ export function createSkillUsageReporter({
   runStore,
   now = Date.now,
   reprobeMs = SKILL_USAGE_REPROBE_MS,
+  routeBackoffMs = SKILL_USAGE_ROUTE_BACKOFF_MS,
   retryBaseMs = SKILL_USAGE_RETRY_BASE_MS,
   retryMaxMs = SKILL_USAGE_RETRY_MAX_MS,
   requestTimeoutMs = REPORT_REQUEST_TIMEOUT_MS,
@@ -61,6 +67,7 @@ export function createSkillUsageReporter({
   scanBytesPerTickTotal = SCAN_BYTES_PER_TICK_TOTAL,
 } = {}) {
   const paused = new Map(); // org_id → paused until (ms)
+  const routeBackoff = new Map(); // org_id → no PUT until (ms), after an unknown 404
   let rotation = 0; // where the next tick starts in the registration list
 
   const isPaused = (orgId, t = now()) => (paused.get(orgId) ?? 0) > t;
@@ -98,6 +105,7 @@ export function createSkillUsageReporter({
         await reacquireToken(orgId, { force: true });
         await put();
       }
+      routeBackoff.delete(orgId);
       if (paused.has(orgId)) {
         paused.delete(orgId);
         log?.(`skill-usage: endpoint recovered for org ${orgId} — resuming`);
@@ -112,6 +120,12 @@ export function createSkillUsageReporter({
         }
         paused.set(orgId, t + reprobeMs);
         dropSkillTurn(reg.source_message_id, { dir });
+      } else if (kind === 'route_missing') {
+        // No PUT of this org reaches here inside the window, so this warns
+        // at most once per window.
+        dropSkillTurn(reg.source_message_id, { dir });
+        routeBackoff.set(orgId, t + routeBackoffMs);
+        warn?.(`skill-usage: report msg=${reg.source_message_id} got 404 (${err?.body?.error?.code || 'no SKILL_USAGE_DISABLED code'}): endpoint missing for org ${orgId}? giving the record up; no reports for ${Math.round(routeBackoffMs / 60000)} min`);
       } else if (kind === 'retry') {
         reg.report.attempts += 1;
         reg.report.next_at = t + Math.min(retryMaxMs, retryBaseMs * 2 ** (reg.report.attempts - 1));
@@ -159,6 +173,7 @@ export function createSkillUsageReporter({
         }
         if (reg.report.next_at > t) continue;
         if (isPaused(reg.org_id, t)) continue;
+        if ((routeBackoff.get(reg.org_id) ?? 0) > t) continue;
         // eslint-disable-next-line no-await-in-loop
         await report(reg, decision, t);
       } catch (err) {
@@ -167,7 +182,9 @@ export function createSkillUsageReporter({
     }
   }
 
-  return { tick, shouldRegister, isPaused };
+  const isBackedOff = (orgId, t = now()) => (routeBackoff.get(orgId) ?? 0) > t;
+
+  return { tick, shouldRegister, isPaused, isBackedOff };
 }
 
 /**
@@ -186,10 +203,11 @@ export function isSkillUsageTurn({ endpointType, redirected, senderMember, syste
  * outcome proves Core never stored the inbound, so its turn will never run
  * and the registration is dropped. 'uncertain' / 'unknown' / 'failed' may
  * have been delivered: the registration is kept (a turn that never ran ends
- * unreported after TURN_END_WAIT_MS).
+ * unreported after TURN_END_WAIT_MS) — except a 'failed' whose c4-receive
+ * never started at all (`neverStarted`, forwardToC4): nothing was stored.
  */
-export function forwardDropsSkillTurn(outcome) {
-  return outcome === 'not_stored' || outcome === 'no_group';
+export function forwardDropsSkillTurn(outcome, { neverStarted = false } = {}) {
+  return outcome === 'not_stored' || outcome === 'no_group' || (outcome === 'failed' && neverStarted === true);
 }
 
 /**

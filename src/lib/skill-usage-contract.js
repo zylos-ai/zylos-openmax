@@ -26,8 +26,11 @@
  *      client.js parses every response body as JSON, whatever its Content-Type)
  *                      → the feature is off for the org (CONVERSATION_SKILLS_ENABLED):
  *                        the org is paused and re-probed later; the record is dropped;
- *   404 without that exact code (route missing, other or lower-case code)
- *                      → that record only is given up; no org pause;
+ *   404 without that exact code (route missing — a server without K3 —,
+ *     other or lower-case code)
+ *                      → that record is given up, and the org gets a short PUT
+ *                        backoff (the reporter's routeBackoffMs, 1 h, warned
+ *                        once per window); no pause of registrations;
  *   400, 403, 409, 422 (any other 4xx)
  *                      → that record is rejected: given up (409 SKILL_USAGE_SOURCE_ALREADY_REPORTED
  *                        — the source message is already recorded under another
@@ -62,11 +65,11 @@ export const SKILL_USAGE_DISABLED_CODE = 'SKILL_USAGE_DISABLED';
 /**
  * How the reporter treats an error from the PUT (client.js errors carry
  * `status` and the parsed response as `body`).
- * @returns {'disabled'|'retry'|'give_up'}
+ * @returns {'disabled'|'route_missing'|'retry'|'give_up'}
  */
 export function classifySkillUsageError(err) {
   const s = err?.status;
-  if (s === 404) return err?.body?.error?.code === SKILL_USAGE_DISABLED_CODE ? 'disabled' : 'give_up';
+  if (s === 404) return err?.body?.error?.code === SKILL_USAGE_DISABLED_CODE ? 'disabled' : 'route_missing';
   if (s == null || s === 429 || s >= 500) return 'retry';
   return 'give_up';
 }

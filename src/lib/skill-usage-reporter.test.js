@@ -94,10 +94,10 @@ test('contract: PUT /agents/{member_id}/skill-usage with {source_message_id, rep
   assert.equal(SKILL_USAGE_DISABLED_CODE, 'SKILL_USAGE_DISABLED');
   assert.equal(classifySkillUsageError({ status: 404, body: DISABLED_BODY }), 'disabled');
   for (const code of ['skill_usage_disabled', 'Skill_Usage_Disabled', 'NOT_FOUND', '', undefined]) {
-    assert.equal(classifySkillUsageError({ status: 404, body: { error: { ...DISABLED_BODY.error, code } } }), 'give_up', String(code));
+    assert.equal(classifySkillUsageError({ status: 404, body: { error: { ...DISABLED_BODY.error, code } } }), 'route_missing', String(code));
   }
-  assert.equal(classifySkillUsageError({ status: 404 }), 'give_up', 'a plain 404 is not feature-off');
-  assert.equal(classifySkillUsageError({ status: 404, body: { error: { code: 'not_found' } } }), 'give_up');
+  assert.equal(classifySkillUsageError({ status: 404 }), 'route_missing', 'a plain 404 is not feature-off');
+  assert.equal(classifySkillUsageError({ status: 404, body: { error: { code: 'not_found' } } }), 'route_missing');
   for (const s of [503, 500, 429, undefined]) assert.equal(classifySkillUsageError({ status: s }), 'retry', String(s));
   for (const s of [400, 403, 409, 422]) assert.equal(classifySkillUsageError({ status: s }), 'give_up', String(s));
 });
@@ -217,17 +217,38 @@ test('disabled 404 on one record pauses the org: its other pending records are n
   assert.equal(exists(host, '700000000000000012'), false);
 });
 
-test('plain 404 (no SKILL_USAGE_DISABLED code) → only that record is given up; the org is not paused', async () => {
+test('daniel P3: plain 404 (no SKILL_USAGE_DISABLED code: K3 route not deployed) → record given up, the org\'s PUTs backed off 1 h (warned once), registration not paused; the 3 h feature-off pause unchanged', async () => {
   const host = makeHost();
-  endedTurn(host);
+  const clockRef = { t: Date.now() };
+  endedTurn(host, { t: clockRef.t });
   const S2 = '700000000000000022';
-  endedTurn(host, { id: S2, reply: '740000000000000022' });
-  const { r, puts } = reporter(host, { responses: [404, 200] });
+  endedTurn(host, { id: S2, reply: '740000000000000022', t: clockRef.t });
+  const { r, puts, warns } = reporter(host, { responses: [404, 404, 200], clockRef });
   await r.tick();
-  assert.equal(puts.length, 2, 'the other record of the same org is still PUT');
-  assert.equal(exists(host), false);
+  assert.equal(puts.length, 1, 'the other record of the same org is not PUT in the backoff');
+  assert.equal(exists(host), false, 'the record that got it is dropped, as before');
+  assert.equal(exists(host, S2), true, 'the other record waits');
+  assert.equal(r.isBackedOff(ORG), true);
+  assert.equal(r.isBackedOff('org-other'), false, 'only that org');
+  assert.equal(r.isPaused(ORG), false, 'not the feature-off pause');
+  assert.equal(r.shouldRegister(ORG, false), true, 'registration goes on');
+  // Inside the hour: still no PUT, no more warnings.
+  for (let i = 0; i < 5; i++) { clockRef.t += 10 * 60 * 1000 - 1; await r.tick(); } // eslint-disable-line no-await-in-loop
+  assert.equal(puts.length, 1);
+  // After the hour the waiting record is the probe; still 404 → backed off again, warned again (new window).
+  clockRef.t += 60 * 60 * 1000;
+  await r.tick();
+  assert.equal(puts.length, 2);
   assert.equal(exists(host, S2), false);
-  assert.equal(r.shouldRegister(ORG, false), true);
+  assert.equal(warns.filter((w) => /got 404/.test(w)).length, 2, 'once per backoff window');
+  // Route deployed: the next record after the window goes through and clears the backoff.
+  const S3 = '700000000000000032';
+  clockRef.t += 60 * 60 * 1000 + 1;
+  endedTurn(host, { id: S3, t: clockRef.t, reply: '740000000000000032' });
+  await r.tick();
+  assert.equal(puts.length, 3);
+  assert.equal(exists(host, S3), false);
+  assert.equal(r.isBackedOff(ORG), false);
 });
 
 test('a poison record (rejected every time) cannot keep the org paused or be retried', async () => {
@@ -332,7 +353,7 @@ test('not gated on OPENMAX_ACTIVITY', async () => {
 test('real client: a problem+json 404 SKILL_USAGE_DISABLED body is parsed and classified as feature-off; lower-case code is not', async () => {
   const http = await import('node:http');
   const client = await import('./client.js');
-  for (const [code, expected] of [['SKILL_USAGE_DISABLED', 'disabled'], ['skill_usage_disabled', 'give_up']]) {
+  for (const [code, expected] of [['SKILL_USAGE_DISABLED', 'disabled'], ['skill_usage_disabled', 'route_missing']]) {
     const server = http.createServer((req, res) => {
       res.writeHead(404, { 'Content-Type': 'application/problem+json' });
       res.end(JSON.stringify({ ...DISABLED_BODY, error: { ...DISABLED_BODY.error, code } }));
@@ -494,6 +515,10 @@ test('P2-6: one global scan budget per tick across registrations; the start rota
 test('P3: forward outcomes — only a sure non-delivery drops the turn; the session group comes from Core or the forward', () => {
   for (const o of ['not_stored', 'no_group']) assert.equal(forwardDropsSkillTurn(o), true, o);
   for (const o of ['sent', 'stored', 'uncertain', 'unknown', 'failed']) assert.equal(forwardDropsSkillTurn(o), false, o);
+  // gavin P3-3: c4-receive never started (both attempts) → nothing stored → dropped at once.
+  assert.equal(forwardDropsSkillTurn('failed', { neverStarted: true }), true);
+  assert.equal(forwardDropsSkillTurn('failed', { neverStarted: false }), false);
+  for (const o of ['sent', 'stored', 'uncertain', 'unknown']) assert.equal(forwardDropsSkillTurn(o, { neverStarted: true }), false, `${o}: the flag only means something on failed`);
   assert.equal(skillTurnSessionGroup({ stdout: '{"ok":true,"sessionGroup":"openmax:dm-x","id":3}', sessionGroup: 'dm-x' }, 'openmax'), 'openmax:dm-x');
   assert.equal(skillTurnSessionGroup({ stdout: 'not json', sessionGroup: 'dm-x' }, 'openmax'), 'openmax:dm-x');
   assert.equal(skillTurnSessionGroup({ stdout: '{"ok":true}' }, 'openmax'), null, 'single-session Core');

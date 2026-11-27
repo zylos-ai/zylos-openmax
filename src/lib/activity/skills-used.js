@@ -35,7 +35,12 @@
  *     Claude Code built-in such as `simplify`, a plugin's `x:y`, a user-level
  *     skill — is not a host skill and is ignored);
  *   - a Read, or a Bash read (cat / head / sed …), of a skills/<dir>/SKILL.md
- *     of a non-system skill, or a subagent call (its log is not read);
+ *     of a non-system skill of this host, or a subagent call (its log is
+ *     not read);
+ *   - work deferred past the runtime's turn_end (Bash run_in_background,
+ *     Monitor, ScheduleWakeup, CronCreate, Workflow, SendMessage): the turn
+ *     that ends is not the end of the work, and a later wake-up's skills are
+ *     not read;
  *   - the activity run of the message is status_only or merged (only when
  *     activity is on; nothing here depends on OPENMAX_ACTIVITY otherwise);
  *   - more than 50 distinct skills;
@@ -49,10 +54,14 @@
  * Which session log: on a multi-session Core the turn runs in its session
  * group's own session, so once comm-bridge knows the group (the forward's
  * result, noteSkillTurnSessionGroup) the scan reads that group's session
- * log(s) only (activity-monitor/session-groups/<group>/current-session.json).
- * Without a group (single-session Core, or the group's pointer not readable)
- * it falls back to the newest MAX_TRACKED_LOGS logs, where the one live
- * session is.
+ * log(s) (activity-monitor/session-groups/<group>/current-session.json).
+ * A pointer counts only once its log has been written since the registration
+ * (POINTER_FRESH_SLACK_MS), judged again on every tick: a group's pointer
+ * outlives the group (reclaimed group, single-session Core that still names a
+ * group), and an idle live session writes its log only once it takes the
+ * turn. Until a pointer counts — no group, single-session Core, pointer not
+ * readable or stale — the scan reads the newest MAX_TRACKED_LOGS logs, where
+ * the one live session is.
  *
  * Never throws into the send path or the bridge.
  */
@@ -89,16 +98,27 @@ export const SCAN_BYTES_PER_TICK_TOTAL = 8 * 1024 * 1024;
  * from its start: the message reached it at most a tick before.
  */
 export const NEW_LOG_LOOKBACK_BYTES = 8 * 1024 * 1024;
+/**
+ * A session group's pointer counts when its log was written at most this long
+ * before the registration (or after it): file mtimes are taken from a coarser
+ * clock than Date.now(). A reclaimed group's log is far older.
+ */
+export const POINTER_FRESH_SLACK_MS = 5 * 1000;
 
 const SKILL_ID_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
 const LOCATION_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const MARKET_PREFIX = 'market--';
 const SKILL_MD_HEAD_BYTES = 64 * 1024;
 const DELEGATE_TOOLS = new Set(['Agent', 'Task']);
-// A skill's SKILL.md read directly, not through the Skill tool: <dir> captured.
-const SKILL_MD_RE = /skills\/([^/\s"'`]+)\/SKILL\.md/g;
-// A Bash command that reads a file's content (not ls / grep -l / edits).
-const BASH_READ_RE = /(^|[\s;&|(`])(cat|head|tail|sed|less|more|awk|bat|nl|view)(\s|$)/;
+// Work that goes on after the runtime's turn_end (a later wake-up may call
+// skills the list would miss): background Bash, monitors, wake-ups, crons,
+// workflows, messages to other agents.
+const DEFERRED_TOOLS = new Set(['Monitor', 'ScheduleWakeup', 'CronCreate', 'Workflow', 'SendMessage']);
+const defersWork = (ev) => DEFERRED_TOOLS.has(ev.name) || (ev.name === 'Bash' && ev.input?.run_in_background === true);
+// A path to a skill's SKILL.md: <path> and <dir> captured.
+const SKILL_MD_RE = /([^\s"'`;|&()<>]*skills\/([^/\s"'`;|&()<>]+)\/SKILL\.md)(?![^\s"'`;|&()<>])/g;
+// Commands that print a file's content (not ls / grep -l / edits).
+const BASH_READ_VERBS = new Set(['cat', 'head', 'tail', 'sed', 'less', 'more', 'awk', 'bat', 'nl', 'view']);
 // Inputs that start or enter a turn (an `enqueue` only queues a message).
 const TURN_INPUT_FORMS = new Set(['user', 'queued_command', 'absorbed']);
 // Claude Code's own input after an interrupt (Esc / interrupted tool use).
@@ -159,6 +179,11 @@ export function groupSessionLog(group, { homeDir, zylosDir }) {
   } catch {
     return null;
   }
+}
+
+/** Whether a log was written since `since` (POINTER_FRESH_SLACK_MS slack). */
+function writtenSince(p, since) {
+  try { return fs.statSync(p).mtimeMs >= since - POINTER_FRESH_SLACK_MS; } catch { return false; }
 }
 
 // ── registration (comm-bridge) ────────────────────────────────────────────────
@@ -408,9 +433,11 @@ const namesSource = (ev, id) => ev?.t === 'input' && Array.isArray(ev.segments) 
  * the message again before that restarts the turn (a redelivery).
  * `known(name)` (buildSkillIdMap): whether an unresolved Skill name is a skill
  * of this host at all; without it every unresolved name counts.
+ * `isLocalSkillMd(path)`: whether a SKILL.md path read is one of this host's
+ * skills dir; without it every such path counts.
  * @returns {{ consumed: number }} events used up to and including the turn_end
  */
-export function feedTurnEvents(scan, events, { sourceMessageId, resolve, known = () => true }) {
+export function feedTurnEvents(scan, events, { sourceMessageId, resolve, known = () => true, isLocalSkillMd = () => true }) {
   const why = (r) => { if (!scan.reasons.includes(r)) scan.reasons.push(r); };
   let i = 0;
   for (; i < events.length && !scan.ended; i++) {
@@ -455,20 +482,106 @@ export function feedTurnEvents(scan, events, { sourceMessageId, resolve, known =
       continue;
     }
     if (DELEGATE_TOOLS.has(ev.name)) { why('delegated'); continue; }
-    if (readsSkillFile(ev)) why('skill_file_read');
+    if (defersWork(ev)) { why('deferred_work'); continue; }
+    if (readsSkillFile(ev, isLocalSkillMd)) why('skill_file_read');
   }
   return { consumed: i };
 }
 
-/** Skill dirs whose SKILL.md this tool call reads (Read, or a Bash read). */
-function skillFilesRead(ev) {
+/**
+ * Split a shell command into simple commands at `;` `&&` `||` `|` `&`, newlines,
+ * `(` `)` `$(` and backticks, outside quotes (and at `$(` `)` and backticks
+ * inside double quotes). Text after a line holding a heredoc (`<<`) is its
+ * body, not commands: the split stops there (that line itself is kept).
+ */
+export function splitShellCommands(cmd) {
+  const out = [];
+  let cur = '';
+  let q = null;
+  const push = () => { if (cur.trim()) out.push(cur.trim()); cur = ''; };
+  for (let i = 0; i < cmd.length; i++) {
+    const c = cmd[i];
+    if (q) {
+      if (c === q) q = null;
+      else if (c === '\\' && q === '"' && i + 1 < cmd.length) { cur += c + cmd[++i]; continue; }
+      else if (q === '"' && ('`)'.includes(c) || (c === '$' && cmd[i + 1] === '('))) {
+        // Command substitution inside double quotes runs a command too.
+        if (c === '$') i++;
+        push();
+        continue;
+      }
+      cur += c;
+      continue;
+    }
+    if (c === "'" || c === '"') { q = c; cur += c; continue; }
+    if (c === '\\' && i + 1 < cmd.length) { cur += c + cmd[++i]; continue; }
+    if (c === '\n') {
+      const heredoc = /<</.test(cur);
+      push();
+      if (heredoc) return out;
+      continue;
+    }
+    // `2>&1` / `&>f` are redirections, not a background `&`.
+    const redirectAmp = c === '&' && (cmd[i - 1] === '>' || cmd[i + 1] === '>');
+    if ((';&|()`'.includes(c) && !redirectAmp) || (c === '$' && cmd[i + 1] === '(')) {
+      if (c === '$') i++;
+      push();
+      continue;
+    }
+    cur += c;
+  }
+  push();
+  return out;
+}
+
+/**
+ * The text of a Bash command whose files a read verb prints: for each simple
+ * command whose verb (after `VAR=…` / `sudo`) is a read verb, its arguments
+ * without output redirection targets (`> f`, `2>>f`; `<f` is kept). So a
+ * write is not a read: `cat > SKILL.md <<'EOF'` (create-skill's way of
+ * writing a skill — the redirect target is dropped and the heredoc body is
+ * not a command, splitShellCommands) and an in-place edit (`-i…`,
+ * `--in-place`: `sed -i`, the whole simple command is skipped).
+ */
+function bashReadArgs(command) {
+  const out = [];
+  for (const simple of splitShellCommands(command)) {
+    const words = simple.split(/\s+/);
+    let k = 0;
+    while (k < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]) || words[k] === 'sudo' || words[k] === 'command')) k++;
+    if (!BASH_READ_VERBS.has(words[k])) continue;
+    const args = words.slice(k + 1);
+    if (args.some((a) => /^-i/.test(a) || a === '--in-place' || a.startsWith('--in-place='))) continue;
+    out.push(args.join(' ').replace(/\d*>>?&?\s*\S*/g, ' '));
+  }
+  return out;
+}
+
+/**
+ * Expand a path as the runtime's shell would see it (`~`, `$HOME`, relative
+ * to the zylos dir, where the runtime runs) and tell whether it names a
+ * <skillsDir>/<dir>/SKILL.md of this host.
+ */
+function isHostSkillMd(raw, { homeDir, zylosDir, skillsDir }) {
+  let p = raw.replace(/^(~|\$HOME|\$\{HOME\})(?=\/)/, homeDir);
+  if (!path.isAbsolute(p)) p = path.join(zylosDir, p);
+  const parent = path.dirname(path.dirname(path.normalize(p)));
+  if (parent === path.normalize(skillsDir)) return true;
+  try { return fs.realpathSync(parent) === fs.realpathSync(skillsDir); } catch { return false; }
+}
+
+/**
+ * Skill dirs whose SKILL.md this tool call reads (Read, or a Bash read),
+ * kept only where `isLocal(path)` (a SKILL.md of this host's skills dir).
+ */
+function skillFilesRead(ev, isLocal) {
   let texts = [];
   if (ev.name === 'Read') texts = [ev.input?.file_path];
-  else if (ev.name === 'Bash' && typeof ev.input?.command === 'string' && BASH_READ_RE.test(ev.input.command)) texts = [ev.input.command];
+  else if (ev.name === 'Bash' && typeof ev.input?.command === 'string') texts = bashReadArgs(ev.input.command);
   const dirs = [];
   for (const t of texts) {
     if (typeof t !== 'string') continue;
-    for (const m of t.matchAll(SKILL_MD_RE)) dirs.push(m[1]);
+    for (const m of t.matchAll(SKILL_MD_RE)) if (isLocal(m[1])) dirs.push(m[2]);
   }
   return dirs;
 }
@@ -476,12 +589,15 @@ function skillFilesRead(ev) {
 /**
  * Whether a tool call reads a skill's SKILL.md directly (bypassing the Skill
  * tool, so the use is not seen). Only Read and Bash reads count; Grep / Glob /
- * Edit and the like are not a use. A system skill's file (system-skills.js —
- * the runtime reads comm-bridge's before its first send, Memory Sync reads
- * zylos-memory's) is not counted.
+ * Edit / writes and the like are not a use, nor is a SKILL.md outside this
+ * host's skills dir (a cloned repo, a user-level skill). A system skill's
+ * file (system-skills.js — the runtime reads comm-bridge's before its first
+ * send, Memory Sync reads zylos-memory's) is not counted; create-skill is not
+ * a system skill (PRD §6.7 lists it), so reading its SKILL.md is a use the
+ * list cannot name.
  */
-function readsSkillFile(ev) {
-  return skillFilesRead(ev).some((d) => !isSystemSkillDir(d));
+function readsSkillFile(ev, isLocal) {
+  return skillFilesRead(ev, isLocal).some((d) => !isSystemSkillDir(d));
 }
 
 function parseLine(line, sessionId) {
@@ -547,10 +663,11 @@ function readLines(file, cur, budget, size, { allowLong = true } = {}) {
  * Advance a registration's scan by at most `budget` log bytes. Reads only
  * past the stored offsets: the logs that existed at registration from where
  * they ended then; a log first seen later from NEW_LOG_LOOKBACK_BYTES before
- * its end; once the inbound is found, only that log. Which logs: with the
- * turn's session group known (reg.session_group), that group's session logs
- * only — every session the group's pointer named since (scan.group_logs);
- * otherwise the newest MAX_TRACKED_LOGS. Mutates `reg.scan`.
+ * its end; once the inbound is found, only that log. Which logs: once the
+ * turn's session group (reg.session_group) has a pointer whose log was
+ * written since the registration, that group's session logs only — every
+ * such session the pointer named since (scan.group_logs); until then the
+ * newest MAX_TRACKED_LOGS. Mutates `reg.scan`.
  * @returns {{ ended: boolean, bytes: number }}
  */
 export function advanceScan(reg, {
@@ -577,6 +694,7 @@ export function advanceScan(reg, {
   const map = () => (resolver ||= buildSkillIdMap({ skillsDir }));
   const resolve = (name) => map().resolve(name);
   const known = (name) => map().known(name);
+  const isLocalSkillMd = (p) => isHostSkillMd(p, { homeDir, zylosDir, skillsDir });
   const firstSight = (size) => ({ offset: Math.max(0, size - NEW_LOG_LOOKBACK_BYTES), skipping: size > NEW_LOG_LOOKBACK_BYTES });
   try {
     let files;
@@ -584,7 +702,12 @@ export function advanceScan(reg, {
       files = [scan.anchor_log];
     } else {
       const groupLog = reg.session_group ? groupSessionLog(reg.session_group, { homeDir, zylosDir }) : null;
-      if (groupLog && !(scan.group_logs || []).includes(groupLog)) (scan.group_logs ||= []).push(groupLog);
+      // Judged on every tick: a stale pointer (reclaimed group, single-session
+      // Core) is not trusted, and an idle live session counts from the tick
+      // its log is first written after the registration.
+      if (groupLog && !(scan.group_logs || []).includes(groupLog) && writtenSince(groupLog, reg.registered_at)) {
+        (scan.group_logs ||= []).push(groupLog);
+      }
       if (scan.group_logs?.length) {
         // The group's own session(s): other logs are other groups' sessions.
         for (const p of Object.keys(scan.logs)) if (!scan.group_logs.includes(p)) delete scan.logs[p];
@@ -593,7 +716,8 @@ export function advanceScan(reg, {
           try { scan.logs[p] = firstSight(fs.statSync(p).size); } catch {}
         }
       } else {
-        // No group (single-session Core) or its pointer not readable yet.
+        // No group (single-session Core), or its pointer not readable or not
+        // (yet) written since the registration.
         for (const l of recentLogs({ homeDir, zylosDir })) {
           if (!scan.logs[l.p]) scan.logs[l.p] = firstSight(l.size);
         }
@@ -622,7 +746,7 @@ export function advanceScan(reg, {
           consumedBytes += Buffer.byteLength(line, 'utf8') + 1;
           if (!line.trim()) continue;
           const wasAnchored = state.anchored;
-          feedTurnEvents(state, parseLine(line, sessionId), { sourceMessageId: reg.source_message_id, resolve, known });
+          feedTurnEvents(state, parseLine(line, sessionId), { sourceMessageId: reg.source_message_id, resolve, known, isLocalSkillMd });
           if (state.anchored && !wasAnchored) {
             // Found: the other logs are not read again.
             scan.anchor_log = file;

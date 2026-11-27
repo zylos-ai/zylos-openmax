@@ -233,13 +233,14 @@ test('unknown record / unparsable line, unrecognized Skill, SKILL.md read, subag
     [[{ type: 'assistant', timestamp: ts(), message: { content: 'not-an-array' } }], 'unknown_record'],
     [['{"type":"assistant", broken'], 'unknown_record'],
     [[toolRec('Skill', { skill: 42 })], 'unrecognized_invocation'],
-    [[toolRec('Read', { file_path: '/home/x/zylos/.claude/skills/weekly-report/SKILL.md' })], 'skill_file_read'],
+    [(h) => [toolRec('Read', { file_path: path.join(h.zylosDir, '.claude/skills/weekly-report/SKILL.md') })], 'skill_file_read'],
     [[toolRec('Bash', { command: 'cat ~/zylos/.claude/skills/weekly-report/SKILL.md' })], 'skill_file_read'],
     [[toolRec('Task', { description: 'x', prompt: 'y' })], 'delegated'],
   ];
   for (const [recs, reason] of cases) {
     const host = makeHost();
-    assert.deepEqual(runTurn(host, [userRec(inbound()), ...recs, turnEnd()]).out.reasons, [reason], reason);
+    const r = typeof recs === 'function' ? recs(host) : recs;
+    assert.deepEqual(runTurn(host, [userRec(inbound()), ...r, turnEnd()]).out.reasons, [reason], reason);
   }
   // Running a skill's own CLI is not reading the skill.
   const host = makeHost();
@@ -292,12 +293,13 @@ test('P2-7: only Read / Bash reads of a non-system SKILL.md count as skill_file_
     assert.equal(out.complete, true, `${JSON.stringify(rec.message.content[0].input)} → ${out.reasons}`);
   }
   const incomplete = [
-    toolRec('Read', { file_path: '/home/x/zylos/.claude/skills/weekly-report/SKILL.md' }),
-    toolRec('Bash', { command: 'sed -n 1,80p ~/zylos/.claude/skills/market--price-grab/SKILL.md' }),
-    toolRec('Bash', { command: 'cat ~/zylos/.claude/skills/comm-bridge/SKILL.md ~/zylos/.claude/skills/weekly-report/SKILL.md' }),
+    (h) => toolRec('Read', { file_path: path.join(h.zylosDir, '.claude/skills/weekly-report/SKILL.md') }),
+    () => toolRec('Bash', { command: 'sed -n 1,80p ~/zylos/.claude/skills/market--price-grab/SKILL.md' }),
+    () => toolRec('Bash', { command: 'cat ~/zylos/.claude/skills/comm-bridge/SKILL.md ~/zylos/.claude/skills/weekly-report/SKILL.md' }),
   ];
-  for (const rec of incomplete) {
+  for (const mk of incomplete) {
     const host = makeHost();
+    const rec = mk(host);
     assert.deepEqual(runTurn(host, [userRec(inbound()), rec, turnEnd()]).out.reasons, ['skill_file_read'], JSON.stringify(rec.message.content[0].input));
   }
 });
@@ -592,6 +594,140 @@ test('P2-6: group pointer missing / invalid group / bad session id → no group 
   pointGroup(host, 'openmax:dm-y', '../../x');
   assert.equal(groupSessionLog('openmax:dm-y', dirs), null);
   assert.equal(noteSkillTurnSessionGroup(S, 'openmax:dm-x', { dir: host.stateDir }), false, 'no registration');
+});
+
+// --- review 11-27 r2 (gavin P2 / P3-1 / P3-2, daniel P2) -------------------------
+
+const oneDayAgo = () => new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+test('gavin P2: a stale group pointer (log not written since the registration) is not trusted — the turn_end in a newer, other log is found → complete', () => {
+  const host = makeHost();
+  const GROUP = 'openmax:dm-cv-dm-1';
+  // The group was reclaimed long ago: its pointer still names its last log.
+  const dead = appendLog(host, [userRec('older turn'), turnEnd()], 'dead-sess.jsonl');
+  fs.utimesSync(dead, oneDayAgo(), oneDayAgo());
+  pointGroup(host, GROUP, 'dead-sess');
+  assert.equal(register(host), true);
+  // c4-receive still answers with the group (single-session Core / reclaimed group).
+  assert.equal(noteSkillTurnSessionGroup(S, GROUP, { dir: host.stateDir }), true);
+  appendLog(host, [userRec(inbound()), skillRec('weekly-report'), turnEnd()], 'live-sess.jsonl');
+  const { reg, ended } = advance(host);
+  assert.equal(ended, true, 'the newest-logs fallback is kept while the pointer is stale');
+  assert.deepEqual(outcome(host, reg), { complete: true, skillIds: ['local:weekly-report'], reasons: [] });
+  assert.equal(reg.scan.anchor_log, path.join(host.projDir, 'live-sess.jsonl'));
+  assert.equal(reg.scan.group_logs, undefined, 'a stale pointer never joins the group logs');
+});
+
+test('gavin P2: freshness is judged on every tick — an idle live session whose log is first written after the registration still anchors the turn', () => {
+  const host = makeHost();
+  const GROUP = 'openmax:dm-cv-dm-1';
+  // The group's session is alive but idle: its log was last written a minute
+  // before the registration, and six busier logs are newer.
+  const grp = appendLog(host, [userRec('older turn'), turnEnd()], 'grp-sess.jsonl');
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(grp, old, old);
+  const others = [1, 2, 3, 4, 5, 6].map((i) => `other-${i}.jsonl`);
+  const bump = () => { for (const n of others) appendLog(host, [userRec(`noise ${clock}`), turnEnd()], n); };
+  bump();
+  pointGroup(host, GROUP, 'grp-sess');
+  assert.equal(register(host), true);
+  noteSkillTurnSessionGroup(S, GROUP, { dir: host.stateDir });
+  // Tick 1: the pointer's log has not been written since → not (yet) trusted.
+  let r = advance(host);
+  assert.equal(r.ended, false);
+  assert.equal(r.reg.scan.group_logs, undefined);
+  // The session takes the turn; the busier logs stay newer.
+  appendLog(host, [userRec(inbound()), skillRec('weekly-report'), turnEnd()], 'grp-sess.jsonl');
+  bump();
+  r = advance(host);
+  assert.equal(r.ended, true, 'tick 2 re-judges the pointer: now written since the registration');
+  assert.deepEqual(r.reg.scan.group_logs, [grp]);
+  assert.equal(r.reg.scan.anchor_log, grp);
+  assert.deepEqual(outcome(host, r.reg), { complete: true, skillIds: ['local:weekly-report'], reasons: [] });
+});
+
+test('gavin P3-1: a Bash command that writes a SKILL.md (heredoc, sed -i, redirect) is not a read; reads with redirects / pipes still are', () => {
+  const complete = [
+    "cat > ~/zylos/.claude/skills/weekly-report/SKILL.md <<'EOF'\n---\nname: weekly-report\n---\ncat ~/zylos/.claude/skills/weekly-report/SKILL.md\nEOF",
+    'cat <<EOF > ~/zylos/.claude/skills/weekly-report/SKILL.md\nx\nEOF',
+    "sed -i 's/a/b/' ~/zylos/.claude/skills/weekly-report/SKILL.md",
+    "sed -i.bak -e 's/a/b/' ~/zylos/.claude/skills/weekly-report/SKILL.md",
+    'cat /tmp/draft.md > ~/zylos/.claude/skills/weekly-report/SKILL.md',
+    'head -5 /tmp/draft.md >> ~/zylos/.claude/skills/weekly-report/SKILL.md',
+    'cat /tmp/draft.md &> ~/zylos/.claude/skills/weekly-report/SKILL.md',
+    'echo hi | tee ~/zylos/.claude/skills/weekly-report/SKILL.md',
+    'mkdir -p ~/zylos/.claude/skills/new && cat /tmp/x > ~/zylos/.claude/skills/new/SKILL.md',
+  ];
+  for (const command of complete) {
+    const host = makeHost();
+    const { out } = runTurn(host, [userRec(inbound()), toolRec('Bash', { command }), turnEnd()]);
+    assert.equal(out.complete, true, `${command} → ${out.reasons}`);
+  }
+  const incomplete = [
+    'cat ~/zylos/.claude/skills/weekly-report/SKILL.md 2>/dev/null',
+    'cat /tmp/a 2>&1 ~/zylos/.claude/skills/weekly-report/SKILL.md',
+    'ls ~/zylos && cat ~/zylos/.claude/skills/weekly-report/SKILL.md | head -20',
+    'echo "$(cat ~/zylos/.claude/skills/weekly-report/SKILL.md)"',
+    'X=1 sed -n 1,20p "$HOME/zylos/.claude/skills/weekly-report/SKILL.md"',
+    // stdin from a heredoc, the SKILL.md still printed
+    'cat - ~/zylos/.claude/skills/weekly-report/SKILL.md <<EOF\nheader\nEOF',
+    // create-skill is listed normally (PRD §6.7), not a system skill: reading
+    // its SKILL.md is a use the list cannot name.
+    'cat ~/zylos/.claude/skills/create-skill/SKILL.md',
+  ];
+  for (const command of incomplete) {
+    const host = makeHost();
+    fs.mkdirSync(path.join(host.zylosDir, '.claude/skills/create-skill'), { recursive: true });
+    fs.writeFileSync(path.join(host.zylosDir, '.claude/skills/create-skill/SKILL.md'), '---\nname: create-skill\n---\n');
+    assert.deepEqual(runTurn(host, [userRec(inbound()), toolRec('Bash', { command }), turnEnd()]).out.reasons, ['skill_file_read'], command);
+  }
+});
+
+test('gavin P3-2: only a SKILL.md of this host\'s skills dir counts — another repo\'s or a user-level one does not', () => {
+  const complete = [
+    toolRec('Read', { file_path: '/tmp/repo/skills/weekly-report/SKILL.md' }),
+    toolRec('Read', { file_path: '/home/x/.claude/skills/weekly-report/SKILL.md' }),
+    toolRec('Bash', { command: 'cat ~/.claude/skills/weekly-report/SKILL.md' }),
+    toolRec('Bash', { command: 'cat ~/zylos/workspace/repo/skills/weekly-report/SKILL.md' }),
+    toolRec('Bash', { command: 'cat workspace/repo/.claude/skills/weekly-report/SKILL.md' }),
+  ];
+  for (const rec of complete) {
+    const host = makeHost();
+    const { out } = runTurn(host, [userRec(inbound()), rec, turnEnd()]);
+    assert.equal(out.complete, true, `${JSON.stringify(rec.message.content[0].input)} → ${out.reasons}`);
+  }
+  const incomplete = [
+    (h) => toolRec('Read', { file_path: path.join(h.zylosDir, '.claude/skills/weekly-report/SKILL.md') }),
+    // relative to the zylos dir, where the runtime runs
+    () => toolRec('Bash', { command: 'cat .claude/skills/weekly-report/SKILL.md' }),
+    () => toolRec('Bash', { command: 'cat ${HOME}/zylos/.claude/skills/weekly-report/SKILL.md' }),
+  ];
+  for (const mk of incomplete) {
+    const host = makeHost();
+    const rec = mk(host);
+    assert.deepEqual(runTurn(host, [userRec(inbound()), rec, turnEnd()]).out.reasons, ['skill_file_read'], JSON.stringify(rec.message.content[0].input));
+  }
+});
+
+test('daniel P2: work deferred past the turn_end (background Bash, Monitor, ScheduleWakeup, CronCreate, Workflow, SendMessage) → incomplete deferred_work', () => {
+  const deferred = [
+    toolRec('Bash', { command: 'sleep 60 && node check.js', run_in_background: true }),
+    toolRec('Monitor', { command: 'tail -f x.log', description: 'x', timeout_ms: 1000 }),
+    toolRec('ScheduleWakeup', { delay_ms: 60000, prompt: 'continue' }),
+    toolRec('CronCreate', { schedule: '*/5 * * * *', prompt: 'poll' }),
+    toolRec('Workflow', { script: 'x' }),
+    toolRec('SendMessage', { to: 'worker', message: 'do it' }),
+  ];
+  for (const rec of deferred) {
+    const host = makeHost();
+    const { out } = runTurn(host, [userRec(inbound()), sendRec(), rec, turnEnd()], { selected: ['local:weekly-report'] });
+    assert.deepEqual(out, { complete: false, skillIds: [], reasons: ['deferred_work'] }, rec.message.content[0].name);
+  }
+  // A foreground Bash (run_in_background absent or false) is not deferred.
+  for (const input of [{ command: 'node x.js' }, { command: 'node x.js', run_in_background: false }]) {
+    const host = makeHost();
+    assert.equal(runTurn(host, [userRec(inbound()), toolRec('Bash', input), turnEnd()]).out.complete, true, JSON.stringify(input));
+  }
 });
 
 // --- OPEN-2: card POST wrapper ----------------------------------------------------

@@ -1314,13 +1314,14 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     registerConvOrg(msg.conversation_id, orgConfig.org_id, convRecordFields(conv));
     if (replyConvId !== msg.conversation_id) registerConvOrg(replyConvId, orgConfig.org_id, convRecordFields(replyConv));
     const result = await forwardInbound(endpoint, run ? run.marker + body : body, inboundPriority(msg), caps);
-    // Skills used (OPENM-1396): a turn Core surely never got is dropped; any
-    // other outcome (sent, stored, or unsure: uncertain / unknown / failed)
-    // keeps it — an unsure one that never ran ends unreported after
+    // Skills used (OPENM-1396): a turn Core surely never got (not_stored,
+    // no_group, failed with c4-receive never started) is dropped; any other
+    // outcome (sent, stored, or unsure: uncertain / unknown / failed) keeps
+    // it — an unsure one that never ran ends unreported after
     // TURN_END_WAIT_MS. The session group it went to tells the reporter which
     // session log to read (multi-session Core).
     if (skillTurn) {
-      if (forwardDropsSkillTurn(result.outcome)) dropSkillTurn(sourceMessageId);
+      if (forwardDropsSkillTurn(result.outcome, result)) dropSkillTurn(sourceMessageId);
       else {
         const group = skillTurnSessionGroup(result, CHANNEL);
         if (group) noteSkillTurnSessionGroup(sourceMessageId, group);

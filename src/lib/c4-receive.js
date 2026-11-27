@@ -172,7 +172,9 @@ export function conversationKindPending(caps, record, stored) {
  * @param {number} [opts.timeoutMs]
  * @param {number} [opts.retryDelayMs]
  * @returns {Promise<{outcome:'sent'|'stored'|'not_stored'|'uncertain'|'unknown'|'failed'|'no_group',
- *   notice:string|null, stdout?:string, sessionGroup?:string}>}
+ *   notice:string|null, stdout?:string, sessionGroup?:string, neverStarted?:true}>}
+ *   `neverStarted` (only on 'failed'): neither attempt started c4-receive, so
+ *   nothing was stored.
  *   `sessionGroup` (the group name passed to Core) is on every outcome once
  *   it was computed, so a caller can follow a turn whose delivery is unsure.
  *   `notice` is the text to show the user (TRY_LATER / MAYBE_LOST), null when
@@ -235,5 +237,7 @@ export async function forwardToC4({ channel, endpoint, content, priority, caps }
     return retried;
   }
   warn(`c4-receive failed after retry, not resending [group=${group}]: ${second.stderr || second.error.message}`);
-  return withGroup({ outcome: 'failed', notice: MAYBE_LOST });
+  // Neither attempt started: Core surely has nothing (the caller may forget
+  // the message, e.g. its skill-usage registration).
+  return withGroup({ outcome: 'failed', notice: MAYBE_LOST, ...(neverStarted(second.error) ? { neverStarted: true } : {}) });
 }
