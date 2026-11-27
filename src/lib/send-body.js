@@ -39,8 +39,8 @@
 
 import { randomUUID } from 'crypto';
 import { looksLikeMarkdown } from './message.js';
-import { attachRunMetadata, postWithRunMetadata, semanticBodyHash, classifySendError } from './activity/reply.js';
-import { planSkillsUsed, withSkillsUsed } from './activity/skills-used.js';
+import { attachRunMetadata, postWithRunMetadata, semanticBodyHash } from './activity/reply.js';
+import { planFirstReply } from './activity/skills-used.js';
 import { SOURCE_MESSAGE_ID_RE } from './activity/constants.js';
 
 export function ensureClientMsgId(id) {
@@ -476,7 +476,7 @@ export function parseStructuredMessage(message) {
  * @param {string} [deps.replyTo] - the endpoint's `|reply:`
  * @param {string|null} [deps.sourceMessageId] - the endpoint's `|msg:`
  * @param {object} [deps.runStore] - test hook
- * @param {function} [deps.planSkillsUsed] - test hook (activity/skills-used.js)
+ * @param {function} [deps.planFirstReply] - test hook (activity/skills-used.js)
  */
 export async function sendStructuredMessage(conversationId, parsed, deps) {
   const params = {
@@ -497,24 +497,19 @@ export async function sendStructuredMessage(conversationId, parsed, deps) {
     clientMsgIdSupplied: !!parsed.params.clientMsgId,
     ...(deps.runStore ? { store: deps.runStore } : {}),
   });
-  // Skills used this turn (OPENM-1396): the turn's first reply carries the
-  // skills-used context item. Planned after the run, so neither retry hash
-  // includes it.
-  const skillsPlan = (deps.planSkillsUsed || planSkillsUsed)({
+  // Skills used this turn (OPENM-1396): record the turn's first delivered
+  // reply for the turn-end report to cws-core.
+  const firstReply = (deps.planFirstReply || planFirstReply)({
     sourceMessageId: deps.sourceMessageId ?? null,
     convId: conversationId,
-    bodyHash: () => semanticBodyHash(body),
   });
   const res = await postWithRunMetadata(
     deps.post,
     deps.apiPath(`/conversations/${conversationId}/messages`),
-    withSkillsUsed(body, skillsPlan),
+    body,
     plan,
     deps.runStore ? { store: deps.runStore } : {},
-  ).catch((e) => {
-    skillsPlan?.settle(classifySendError(e));
-    return rethrowMentionAllNotAllowed(e, params, body.mentions, '[STRUCTURED]');
-  });
-  skillsPlan?.settle('ok');
+  ).catch((e) => rethrowMentionAllNotAllowed(e, params, body.mentions, '[STRUCTURED]'));
+  firstReply?.settle('ok', res?.id || res?.message_id);
   return { ok: true, structured: true, message_id: res?.id || res?.message_id || null };
 }

@@ -471,87 +471,26 @@ test('T11: a legacy thread endpoint is sent to its leading conversation, no pare
   }
 });
 
-// ── OPENM-1396: skills-used on the turn's first reply ─────────────────────────
+// ── OPENM-1396: the turn's first delivered reply is recorded (no metadata) ────
 
 const SKILLS_STATE_DIR = path.join(tmpHome, 'zylos/components/openmax/runtime/skills-used');
 
-/** A turn of `conv` for message `src` that carried skills and called weekly-report. */
-function setupSkillTurn(conv, src) {
-  const zylosDir = path.join(tmpHome, 'zylos');
-  const skillDir = path.join(zylosDir, '.claude/skills/weekly-report');
-  fs.mkdirSync(skillDir, { recursive: true });
-  fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: weekly-report\n---\n');
-  const proj = path.join(tmpHome, '.claude/projects', fs.realpathSync(zylosDir).replace(/[^A-Za-z0-9]/g, '-'));
-  fs.mkdirSync(proj, { recursive: true });
-  const at = (s) => new Date(Date.parse('2026-11-19T10:00:00Z') + s * 1000).toISOString();
-  const inbound = `[OPENMAX DM]\n<message-context conversation-id="${conv}" source-message-id="${src}"/>\nhi\n---- reply via: node c4-send.js "openmax" "${conv}|msg:${src}"`;
-  fs.writeFileSync(path.join(proj, `s-${src}.jsonl`), [
-    { type: 'user', timestamp: at(1), uuid: `u-${src}`, message: { content: inbound } },
-    { type: 'assistant', timestamp: at(2), uuid: `a-${src}`, message: { content: [{ type: 'tool_use', id: `t-${src}`, name: 'Skill', input: { skill: 'weekly-report' } }] } },
-  ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+/** A registered Web DM turn of `conv` for message `src` (activity/skills-used.js v2 shape). */
+function registerTurn(conv, src) {
   fs.mkdirSync(SKILLS_STATE_DIR, { recursive: true });
   fs.writeFileSync(path.join(SKILLS_STATE_DIR, `${src}.json`), JSON.stringify({
-    v: 1, source_message_id: src, conversation_id: conv, registered_at: Date.now(), selected_skill_ids: ['local:weekly-report'],
+    v: 2, source_message_id: src, conversation_id: conv, org_id: 'org-test', member_id: 'agent-1',
+    registered_at: Date.now(), runtime: 'claude', selected_skill_ids: [],
+    scan: { logs: {}, anchor_log: null, ids: [], reasons: [], ended_at: null }, report: { attempts: 0, next_at: 0 },
   }));
 }
+const replyOf = (src) => {
+  try { return JSON.parse(fs.readFileSync(path.join(SKILLS_STATE_DIR, `${src}.reply`), 'utf8')).reply_message_id; } catch { return null; }
+};
 
-const skillsUsedOf = (src) => ({ context: { items: [{
-  type: 'skills-used', audience: 'ui', attrs: { 'reply-to': src, complete: true }, data: { skill_ids: ['local:weekly-report'] },
-}] } });
-
-test('1396: a reply to a message that carried skills — first chunk carries skills-used, later chunks and later replies do not', async () => {
-  const conv = 'conv-skills-1396';
-  const src = '7300000000000001396';
-  setupSkillTurn(conv, src);
-
-  const { server, posts, port } = await startCaptureServer();
-  try {
-    let r = await runSend(port, `${conv}|msg:${src}`, `${'a'.repeat(4500)}\n\n${'b'.repeat(4500)}`);
-    assert.equal(r.code, 0, r.stderr);
-    r = await runSend(port, `${conv}|msg:${src}`, 'second reply');
-    assert.equal(r.code, 0, r.stderr);
-    // A reply to a message without skills: unchanged body.
-    r = await runSend(port, `${conv}|msg:7300000000000000001`, 'other');
-    assert.equal(r.code, 0, r.stderr);
-  } finally {
-    server.close();
-  }
-  const sends = posts.filter((p) => p.url === `/api/v1/conversations/${conv}/messages`);
-  assert.ok(sends.length >= 4, `expected a split first reply, got ${sends.length}`);
-  assert.deepEqual(sends[0].body.metadata, skillsUsedOf(src));
-  for (const { body } of sends.slice(1)) assert.equal('metadata' in body, false);
-});
-
-test('1396 R1-P3: text — a first send rejected with 400 releases skills-used; the next reply carries it, and only that one', async () => {
-  const conv = 'conv-skills-1396-400';
-  const src = '7300000000000001397';
-  setupSkillTurn(conv, src);
-  const { server, posts, port } = await startScriptedServer([400]);
-  try {
-    let r = await runSend(port, `${conv}|msg:${src}`, 'first try');
-    assert.notEqual(r.code, 0);
-    assert.equal(fs.existsSync(path.join(SKILLS_STATE_DIR, `${src}.claim`)), false, 'claim released');
-    r = await runSend(port, `${conv}|msg:${src}`, 'second try');
-    assert.equal(r.code, 0, r.stderr);
-    r = await runSend(port, `${conv}|msg:${src}`, 'third');
-    assert.equal(r.code, 0, r.stderr);
-  } finally {
-    server.close();
-  }
-  assert.equal(posts.length, 3);
-  assert.deepEqual(posts[0].body.metadata, skillsUsedOf(src));
-  assert.deepEqual(posts[1].body.metadata, skillsUsedOf(src));
-  assert.equal('metadata' in posts[2].body, false);
-});
-
-test('1396 R1-P3: [MEDIA] — a rejected send releases skills-used; a delivered one settles it', async () => {
-  const conv = 'conv-skills-1396-media';
-  const src = '7300000000000001398';
-  setupSkillTurn(conv, src);
-  const file = path.join(tmpHome, 'report-1396.txt');
-  fs.writeFileSync(file, 'weekly numbers');
+/** Answers POST …/messages with numeric ids 7400…01, 7400…02, …; `fail` lists 1-based send numbers that get 400. */
+function startNumericServer({ fail = [] } = {}) {
   const posts = [];
-  let failNextSend = true;
   const server = http.createServer((req, res) => {
     let raw = '';
     req.on('data', (d) => { raw += d; });
@@ -559,27 +498,83 @@ test('1396 R1-P3: [MEDIA] — a rejected send releases skills-used; a delivered 
       const body = raw ? JSON.parse(raw) : {};
       if (req.method === 'POST') posts.push({ url: req.url, body });
       let status = 200;
-      let out = { id: `m${posts.length}` };
+      let out = { id: String(7400000000000000000n + BigInt(posts.length)) };
       if (req.url.endsWith('/uploads/prepare')) out = { upload_token: 'tok', instant_upload: true };
       else if (req.url.endsWith('/uploads/finalize')) out = { media_id: 'med-1', artifact_id: 'art-1' };
-      else if (req.url.endsWith('/messages') && failNextSend) { failNextSend = false; status = 400; out = { error: 'bad' }; }
+      else if (req.url.endsWith('/messages') && fail.includes(posts.filter((p) => p.url.endsWith('/messages')).length)) { status = 400; out = { error: 'bad' }; }
       res.writeHead(status, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(out));
     });
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const claim = path.join(SKILLS_STATE_DIR, `${src}.claim`);
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, posts, port: server.address().port })));
+}
+
+test('1396: text — the first chunk of the first reply is recorded; later chunks / replies are not; no metadata is added', async () => {
+  const conv = 'conv-skills-1396';
+  const src = '7300000000000001396';
+  registerTurn(conv, src);
+  const { server, posts, port } = await startNumericServer();
   try {
-    let r = await runSend(server.address().port, `${conv}|msg:${src}`, `[MEDIA:file]${file}`);
-    assert.notEqual(r.code, 0);
-    assert.equal(fs.existsSync(claim), false, 'claim released after 400');
-    r = await runSend(server.address().port, `${conv}|msg:${src}`, `[MEDIA:file]${file}`);
+    let r = await runSend(port, `${conv}|msg:${src}`, `${'a'.repeat(4500)}\n\n${'b'.repeat(4500)}`);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(JSON.parse(fs.readFileSync(claim, 'utf8')).state, 'delivered');
+    const first = replyOf(src);
+    r = await runSend(port, `${conv}|msg:${src}`, 'second reply');
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(replyOf(src), first, 'a later reply does not replace it');
+    assert.equal(first, '7400000000000000001');
+    // A reply to an unregistered message records nothing.
+    r = await runSend(port, `${conv}|msg:7300000000000000001`, 'other');
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(fs.existsSync(path.join(SKILLS_STATE_DIR, '7300000000000000001.reply')), false);
+    // Another conversation's reply naming the message records nothing either.
+    const src2 = '7300000000000001400';
+    registerTurn(conv, src2);
+    r = await runSend(port, `conv-other|msg:${src2}`, 'elsewhere');
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(replyOf(src2), null);
   } finally {
     server.close();
   }
-  const sends = posts.filter((p) => p.url === `/api/v1/conversations/${conv}/messages`);
+  const sends = posts.filter((p) => p.url.endsWith('/messages'));
+  assert.ok(sends.length >= 5, `expected a split first reply, got ${sends.length}`);
+  for (const { body } of sends) assert.equal('metadata' in body, false, 'no skills-used item on any reply');
+});
+
+test('1396: text — a first send rejected with 400 records nothing; the next delivered reply is the first reply', async () => {
+  const conv = 'conv-skills-1396-400';
+  const src = '7300000000000001397';
+  registerTurn(conv, src);
+  const { server, port } = await startNumericServer({ fail: [1] });
+  try {
+    let r = await runSend(port, `${conv}|msg:${src}`, 'first try');
+    assert.notEqual(r.code, 0);
+    assert.equal(replyOf(src), null);
+    r = await runSend(port, `${conv}|msg:${src}`, 'second try');
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(replyOf(src), '7400000000000000002');
+  } finally {
+    server.close();
+  }
+});
+
+test('1396: [MEDIA] — a rejected send records nothing; a delivered one is recorded', async () => {
+  const conv = 'conv-skills-1396-media';
+  const src = '7300000000000001398';
+  registerTurn(conv, src);
+  const file = path.join(tmpHome, 'report-1396.txt');
+  fs.writeFileSync(file, 'weekly numbers');
+  const { server, posts, port } = await startNumericServer({ fail: [1] });
+  try {
+    let r = await runSend(port, `${conv}|msg:${src}`, `[MEDIA:file]${file}`);
+    assert.notEqual(r.code, 0);
+    assert.equal(replyOf(src), null);
+    r = await runSend(port, `${conv}|msg:${src}`, `[MEDIA:file]${file}`);
+    assert.equal(r.code, 0, r.stderr);
+  } finally {
+    server.close();
+  }
+  const sends = posts.filter((p) => p.url.endsWith('/messages'));
   assert.equal(sends.length, 2);
-  for (const { body } of sends) assert.deepEqual(body.metadata, skillsUsedOf(src));
+  assert.equal(replyOf(src), String(7400000000000000000n + BigInt(posts.indexOf(sends[1]) + 1)));
+  for (const { body } of sends) assert.equal('metadata' in body, false);
 });

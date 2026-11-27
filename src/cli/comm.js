@@ -60,6 +60,7 @@ import {
   semanticBodyHash,
 } from '../lib/activity/reply.js';
 import { SOURCE_MESSAGE_ID_RE } from '../lib/activity/constants.js';
+import { planFirstReply } from '../lib/activity/skills-used.js';
 
 
 // Canonical 8-4-4-4-12 hex UUID (any version), as cws-core requires for path ids.
@@ -692,12 +693,16 @@ const COMMANDS = {
     // scripts/send.js. The marker is written only once the POST (or its
     // bare 422 retry inside postWithRunMetadata) succeeded.
     const sentAt = Date.now();
+    // Skills used this turn (OPENM-1396): a reply naming its inbound message
+    // may be the turn's first reply (same rule as scripts/send.js).
+    const firstReply = planFirstReply({ sourceMessageId, convId: params.conversationId });
     const res = await postWithRunMetadata(
       (p, b) => postWithAuthRetry(p, b, 'comm.send'),
       apiPath(`/conversations/${params.conversationId}/messages`),
       body,
       plan,
     ).catch((e) => rethrowMentionAllNotAllowed(e, params, body.mentions, 'comm.send'));
+    firstReply?.settle('ok', sentMessageId(res));
     writeSentMarker(SENT_DIR, {
       conversationId: params.conversationId,
       messageId: sentMessageId(res),

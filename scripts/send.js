@@ -85,7 +85,7 @@ import { RUNTIME_DIR } from '../src/lib/session.js';
 import {
   planReplyMetadata, attachRunToCardRequest, classifySendError, sha256, semanticBodyHash,
 } from '../src/lib/activity/reply.js';
-import { planSkillsUsed, withSkillsUsed } from '../src/lib/activity/skills-used.js';
+import { planFirstReply } from '../src/lib/activity/skills-used.js';
 import { buildTextBody, buildMediaBody } from '../src/lib/outbound-body.js';
 import { SENT_DIR, writeSentMarker, sentMessageId } from '../src/lib/dm-seen-watch.js';
 
@@ -130,34 +130,31 @@ async function sendText(ep, text) {
   const plan = bodies.length
     ? planReplyMetadata({ convId, sourceMessageId: ep.sourceMessageId, kind: 'text', bodyHash: () => semanticBodyHash(bodies[0]), newKey: newClientMsgId })
     : null;
-  // Skills used this turn (OPENM-1396): the first chunk of the turn's first
-  // reply carries the skills-used context item (null when the inbound message
-  // carried no skills, or an earlier reply already took it).
-  const skillsPlan = bodies.length
-    ? planSkillsUsed({ sourceMessageId: ep.sourceMessageId, convId, bodyHash: () => semanticBodyHash(bodies[0]) })
+  // Skills used this turn (OPENM-1396): the turn's first delivered reply is
+  // recorded (its first chunk's message id) for the turn-end report to
+  // cws-core; null when the turn is not registered or a reply was recorded.
+  const firstReply = bodies.length
+    ? planFirstReply({ sourceMessageId: ep.sourceMessageId, convId })
     : null;
   const results = [];
   for (let i = 0; i < bodies.length; i++) {
     const agentRun = plan ? (i === 0 ? plan.firstAgentRun : plan.laterAgentRun) : null;
-    const body = withSkillsUsed({
+    const body = {
       client_msg_id: (i === 0 && plan?.clientMsgId) || newClientMsgId(),
       ...bodies[i],
       ...(agentRun ? { agent_run: agentRun } : {}),
-    }, i === 0 ? skillsPlan : null);
+    };
     let res;
     try {
       // eslint-disable-next-line no-await-in-loop
       res = await post(apiPath(`/conversations/${convId}/messages`), body);
     } catch (e) {
-      if (i === 0) {
-        plan?.settle(classifySendError(e));
-        skillsPlan?.settle(classifySendError(e));
-      }
+      if (i === 0) plan?.settle(classifySendError(e));
       throw e;
     }
     if (i === 0) {
       plan?.settle('ok');
-      skillsPlan?.settle('ok');
+      firstReply?.settle('ok', res?.id || res?.message_id);
     }
     results.push(res?.id || res?.message_id || null);
   }
@@ -207,28 +204,23 @@ async function sendMediaMessage(ep, { kind, localPath, caption, mentions }) {
     bodyHash: () => semanticBodyHash(semantic, { attachmentDigests: [sha256(fs.readFileSync(localPath))] }),
     newKey: newClientMsgId,
   });
-  // Skills used this turn (OPENM-1396), as for text; same retry hash.
-  const skillsPlan = planSkillsUsed({
-    sourceMessageId: ep.sourceMessageId,
-    convId,
-    bodyHash: () => semanticBodyHash(semantic, { attachmentDigests: [sha256(fs.readFileSync(localPath))] }),
-  });
+  // Skills used this turn (OPENM-1396), as for text.
+  const firstReply = planFirstReply({ sourceMessageId: ep.sourceMessageId, convId });
   const agentRun = plan?.firstAgentRun;
-  const body = withSkillsUsed({
+  const body = {
     client_msg_id: plan?.clientMsgId || newClientMsgId(),
     ...semantic,
     ...(agentRun ? { agent_run: agentRun } : {}),
-  }, skillsPlan);
+  };
   let res;
   try {
     res = await post(apiPath(`/conversations/${convId}/messages`), body);
   } catch (e) {
     plan?.settle(classifySendError(e));
-    skillsPlan?.settle(classifySendError(e));
     rethrowMentionAllNotAllowed(e, { conversationId: convId }, mentions, '[MEDIA]');
   }
   plan?.settle('ok');
-  skillsPlan?.settle('ok');
+  firstReply?.settle('ok', res?.id || res?.message_id);
   return res;
 }
 
