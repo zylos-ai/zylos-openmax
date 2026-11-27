@@ -311,7 +311,11 @@ test('a partial last line is left for the next tick; a per-tick budget spreads a
   // Budget: 3 records per tick at most.
   appendLog(host, Array.from({ length: 9 }, () => skillRec('price-grab')).concat([turnEnd()]));
   let ticks = 0;
-  do { r = advance(host, S, { budget: 3 * 200 }); ticks++; } while (!r.ended && ticks < 50);
+  do {
+    r = advance(host, S, { budget: 3 * 200 });
+    assert.ok(r.bytes <= 3 * 200, `tick read ${r.bytes} bytes`);
+    ticks++;
+  } while (!r.ended && ticks < 50);
   assert.ok(ticks > 2, `took ${ticks} ticks`);
   assert.deepEqual(outcome(host, r.reg).skillIds, ['local:weekly-report', 'sk_mkt_1']);
 });
@@ -423,7 +427,7 @@ test('decide: no Web reply → wait REPLY_WAIT_MS after turn_end, then drop; Cod
 
 // --- housekeeping --------------------------------------------------------------------------
 
-test('dropSkillTurn removes registration and reply; sweepOrphans removes stale reply files only', () => {
+test('dropSkillTurn removes registration and reply; sweepOrphans removes only stale replies with no registration', () => {
   const host = makeHost();
   register(host);
   planFirstReply({ sourceMessageId: S, convId: CONV, dir: host.stateDir }).settle('ok', '7400000000000000001');
@@ -434,6 +438,10 @@ test('dropSkillTurn removes registration and reply; sweepOrphans removes stale r
   const old = (Date.now() - SKILL_TURN_RETENTION_MS - 1000) / 1000;
   fs.utimesSync(path.join(host.stateDir, '5.reply'), old, old);
   fs.writeFileSync(path.join(host.stateDir, '6.reply'), '{}');
+  // A stale reply of a LIVE registration stays (removed with the registration).
+  register(host, { id: '7' });
+  fs.writeFileSync(path.join(host.stateDir, '7.reply'), '{}');
+  fs.utimesSync(path.join(host.stateDir, '7.reply'), old, old);
   sweepOrphans({ dir: host.stateDir });
-  assert.deepEqual(fs.readdirSync(host.stateDir), ['6.reply']);
+  assert.deepEqual(fs.readdirSync(host.stateDir).sort(), ['6.reply', '7.json', '7.reply']);
 });

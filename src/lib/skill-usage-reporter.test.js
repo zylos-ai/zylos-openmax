@@ -175,6 +175,24 @@ test('404 → org paused: no PUT, no-selection turns not registered; re-probe af
   assert.equal(r.shouldRegister(ORG, false), true, 'resumed');
 });
 
+test('404 on one turn pauses the whole org: its other pending turns are not PUT until the re-probe', async () => {
+  const host = makeHost();
+  const clockRef = { t: Date.now() };
+  endedTurn(host, { id: S, selected: ['local:weekly-report'], t: clockRef.t });
+  endedTurn(host, { id: '700000000000000012', selected: ['local:weekly-report'], t: clockRef.t, reply: '740000000000000012' });
+  const { r, puts } = reporter(host, { responses: [404], clockRef, reprobeMs: 60_000 });
+  await r.tick();
+  assert.equal(puts.length, 1, 'the second turn of the paused org is not PUT in the same tick');
+  clockRef.t += 30_000;
+  await r.tick();
+  assert.equal(puts.length, 1);
+  clockRef.t += 31_000;
+  await r.tick();
+  assert.equal(puts.length, 3, 're-probe succeeds, the other turn follows in the same tick');
+  assert.equal(exists(host), false);
+  assert.equal(exists(host, '700000000000000012'), false);
+});
+
 test('503 / network error → kept and retried with backoff; success later removes it', async () => {
   const host = makeHost();
   const clockRef = { t: Date.now() };

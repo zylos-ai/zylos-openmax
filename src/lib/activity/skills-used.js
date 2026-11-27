@@ -194,6 +194,8 @@ export function sweepOrphans({ dir = SKILLS_USED_DIR, now = Date.now() } = {}) {
   try { names = fs.readdirSync(dir); } catch { return; }
   for (const n of names) {
     if (!n.endsWith('.reply') && !n.endsWith('.tmp')) continue;
+    // A live registration's reply is removed with it (dropSkillTurn), never here.
+    if (n.endsWith('.reply') && names.includes(`${n.slice(0, -6)}.json`)) continue;
     const p = path.join(dir, n);
     try { if (now - fs.statSync(p).mtimeMs > SKILL_TURN_RETENTION_MS) fs.unlinkSync(p); } catch {}
   }
