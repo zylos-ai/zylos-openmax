@@ -60,6 +60,7 @@ import {
   semanticBodyHash,
 } from '../lib/activity/reply.js';
 import { SOURCE_MESSAGE_ID_RE } from '../lib/activity/constants.js';
+import { planFirstReply, postRecordingFirstReply } from '../lib/activity/skills-used.js';
 
 
 // Canonical 8-4-4-4-12 hex UUID (any version), as cws-core requires for path ids.
@@ -302,8 +303,10 @@ async function askChoice(params, verb) {
     request,
     clientMsgIdSupplied: cardParams.clientMsgId !== undefined,
   });
+  // Skills used this turn (OPENM-1396, OPEN-2): a card can be the turn's first reply.
+  const firstReply = planFirstReply({ sourceMessageId, convId: params.conversationId });
   const res = await postWithRunMetadata(
-    (p, b) => postWithAuthRetry(p, b, verb),
+    postRecordingFirstReply((p, b) => postWithAuthRetry(p, b, verb), firstReply),
     apiPath(`/conversations/${params.conversationId}/interaction-requests`),
     request,
     plan,
@@ -692,12 +695,16 @@ const COMMANDS = {
     // scripts/send.js. The marker is written only once the POST (or its
     // bare 422 retry inside postWithRunMetadata) succeeded.
     const sentAt = Date.now();
+    // Skills used this turn (OPENM-1396): a reply naming its inbound message
+    // may be the turn's first reply (same rule as scripts/send.js).
+    const firstReply = planFirstReply({ sourceMessageId, convId: params.conversationId });
     const res = await postWithRunMetadata(
       (p, b) => postWithAuthRetry(p, b, 'comm.send'),
       apiPath(`/conversations/${params.conversationId}/messages`),
       body,
       plan,
     ).catch((e) => rethrowMentionAllNotAllowed(e, params, body.mentions, 'comm.send'));
+    firstReply?.settle('ok', sentMessageId(res));
     writeSentMarker(SENT_DIR, {
       conversationId: params.conversationId,
       messageId: sentMessageId(res),
@@ -736,8 +743,10 @@ const COMMANDS = {
       request,
       clientMsgIdSupplied: params.clientMsgId !== undefined,
     });
+    // Skills used this turn (OPENM-1396, OPEN-2): a card can be the turn's first reply.
+    const firstReply = planFirstReply({ sourceMessageId, convId: params.conversationId });
     return postWithRunMetadata(
-      (p, b) => postWithAuthRetry(p, b, 'comm.send_card'),
+      postRecordingFirstReply((p, b) => postWithAuthRetry(p, b, 'comm.send_card'), firstReply),
       apiPath(`/conversations/${params.conversationId}/interaction-requests`),
       request,
       plan,
@@ -783,8 +792,10 @@ const COMMANDS = {
     assertConfirmCardShape({ interactionType: 'form', kind, askedOf: asked, meta, card }, 'comm.ask');
     // Agent activity: the form carries agent_run like a choice card (see
     // askChoice); a caller-kept clientMsgId stays the form's and the claim's key.
+    // Skills used this turn (OPENM-1396, OPEN-2): a form can be the turn's first reply.
+    const firstReply = planFirstReply({ sourceMessageId, convId: params.conversationId });
     const res = await askForm(params.conversationId, { kind, askedOf: asked, meta, card }, {
-      post: (path, body) => postWithAuthRetry(path, body, 'comm.ask'),
+      post: postRecordingFirstReply((path, body) => postWithAuthRetry(path, body, 'comm.ask'), firstReply),
       // Same org-scoped client as the POST above, so the lookup asks the org
       // the card goes to.
       conversationType: async (id, timeoutMs) => {

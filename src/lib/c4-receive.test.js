@@ -124,6 +124,7 @@ test('T5: rejection classes by error.persisted — stored / not stored / uncerta
     assert.equal(r.outcome, outcome);
     assert.equal(r.notice, notice);
     assert.equal(calls.length, 1, 'never resent');
+    assert.equal(r.sessionGroup, `group-${G}`, 'the group is on every outcome (OPENM-1396: an unsure turn is followed)');
     assert.ok(warns.some((w) => w.includes('(X') && w.includes(`group-${G}`)), 'the log names the code and the group');
     if (notice) assert.equal(notice.includes('core text'), false, 'the user never sees Core\'s text');
   }
@@ -138,6 +139,7 @@ test('T5: timeout or a non-zero exit without JSON → MAYBE_LOST, not resent', a
     assert.equal(r.outcome, 'unknown');
     assert.equal(r.notice, MAYBE_LOST);
     assert.equal(calls.length, 1);
+    assert.equal(r.sessionGroup, `group-${G}`);
   }
   assert.equal(C4_RECEIVE_TIMEOUT_MS, 30000, 'Q5: 30 seconds kept');
 });
@@ -158,6 +160,18 @@ test('T5: a spawn failure is retried once (same argv, group kept); success after
   assert.equal(r.outcome, 'failed');
   assert.equal(r.notice, MAYBE_LOST);
   assert.equal(calls.length, 2, 'exactly one retry');
+  assert.equal(r.neverStarted, true, 'neither attempt started: nothing stored');
+});
+
+test('gavin P3-3: failed is flagged neverStarted only when the retry did not start either', async () => {
+  const spawnErr = () => Object.assign(new Error('spawn EAGAIN'), { syscall: 'spawn /usr/bin/node', code: 'EAGAIN' });
+  // The retry started and died without a structured answer: Core may have it.
+  const died = Object.assign(new Error('Command failed'), { code: 1 });
+  const { impl } = fakeExec([{ error: spawnErr() }, { error: died }]);
+  const r = await forwardToC4({ channel: 'openmax', endpoint: `${G}|type:group`, content: 'b', caps: { sessionGroup: true } },
+    { ...quiet, execFileImpl: impl, receivePath: RECEIVE, retryDelayMs: 1 });
+  assert.equal(r.outcome, 'failed');
+  assert.equal(r.neverStarted, undefined);
 });
 
 test('Q6: the fixed notices are bilingual (Chinese line, then English)', () => {
@@ -194,6 +208,9 @@ test('A: failure handling — stored counts as delivered; anything else drops th
   const tail = BRIDGE.slice(BRIDGE.indexOf('const result = await forwardInbound(endpoint'), BRIDGE.indexOf('function shouldNoticeInboundFailure'));
   assert.match(tail, /result\.outcome === 'sent' \|\| result\.outcome === 'stored'[\s\S]*markRead\(orgConfig[\s\S]*return;/);
   assert.match(tail, /activity\.dropRun\(run\.runId\);\n {4}removeReaction\(msg\.id, 'c4-failed'\);/);
+  // A registered skill-usage turn is dropped only when Core surely never
+  // stored it; otherwise the turn's session group is noted for the reporter.
+  assert.match(tail, /if \(skillTurn\) \{\n {6}if \(forwardDropsSkillTurn\(result\.outcome, result\)\) dropSkillTurn\(sourceMessageId\);\n {6}else \{\n {8}const group = skillTurnSessionGroup\(result, CHANNEL\);\n {8}if \(group\) noteSkillTurnSessionGroup\(sourceMessageId, group\);/);
   assert.match(tail, /if \(result\.notice && shouldNoticeInboundFailure\(msg, notification\)\)/);
   const exempt = BRIDGE.slice(BRIDGE.indexOf('function shouldNoticeInboundFailure'));
   assert.match(exempt, /notification\._via !== 'sync' && senderType !== 'AGENT' && !isSystemSender\(msg\)/);

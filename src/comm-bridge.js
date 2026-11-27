@@ -43,6 +43,11 @@ import {
 import { classifySystemEvent, isSenderlessUpdate, routeImOwnerNotice } from './lib/system-event-routing.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { connectorPreferenceOf } from './lib/connector-preference.js';
+import { skillPreferenceOf, skillPreferenceApplies } from './lib/skill-preference.js';
+import { registerSkillTurn, dropSkillTurn, noteSkillTurnSessionGroup } from './lib/activity/skills-used.js';
+import {
+  createSkillUsageReporter, isSkillUsageTurn, forwardDropsSkillTurn, skillTurnSessionGroup, SKILL_USAGE_TICK_MS,
+} from './lib/skill-usage-reporter.js';
 import { workflowRefOf } from './lib/wf-context.js';
 import { quoteExcerptOf, quotedMessageText } from './lib/quote-excerpt.js';
 import { chatHistoryOf, isChatHistory, FORWARDED_CONVERSATION } from './lib/forwarded.js';
@@ -154,6 +159,11 @@ const WS_STALL_CHECK_INTERVAL_MS = 30 * 1000;
 const WS_STALL_THRESHOLD_MS      = 90 * 1000;
 
 const tasks = new TaskRegistry();
+
+// Skills used per Web DM turn (OPENM-1396): turns are registered by the
+// message handler and reported to cws-core after their turn_end by the
+// 'skill-usage' task below. Not gated on OPENMAX_ACTIVITY.
+const skillUsage = createSkillUsageReporter({ log, warn });
 
 const handleAgentDiagnostics = createDiagnosticsHandler({
   isEnabled: () => config.diagnostics?.enabled === true,
@@ -1225,6 +1235,28 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
       displayContent = labels.join(' ') + (text ? ' ' + text : '');
     }
 
+    // Skills picked in the input box (OPENM-1396): rendered as
+    // <skill-preference>. Every Web DM (and DM topic) turn from a human member
+    // is registered — with or without picked skills — so that after its
+    // turn_end the skills it used are reported to cws-core (skill-usage task,
+    // activity/skills-used.js). Groups, other kinds and card receipts are not.
+    // Registered before the forward, so the log offsets precede the turn.
+    // A pick is only rendered for a DM (or DM topic) from a human member.
+    const skillFacts = {
+      endpointType: conversationEndpointOf(replyConv, replyConvId)?.endpointType,
+      redirected: replyTarget.redirected,
+      senderMember: senderMemberFrom(msg),
+      systemSender: isSystemSender(msg),
+    };
+    const preferredSkills = skillPreferenceApplies(skillFacts) ? skillPreferenceOf(msg) : null;
+    const selectedSkillIds = preferredSkills ? preferredSkills.map((p) => p.skillId) : [];
+    const skillTurn = isSkillUsageTurn(skillFacts)
+      && skillUsage.shouldRegister(orgConfig.org_id, selectedSkillIds.length > 0)
+      && registerSkillTurn({
+        sourceMessageId, conversationId: replyConvId, orgId: orgConfig.org_id,
+        memberId: orgConfig.self?.member_id, selectedSkillIds,
+      });
+
     const body = formatInboundForC4(
       { type: replyConvType, id: replyConvId, name: groupName },
       { displayName: senderName, id: msg.sender_id || msg.message?.sender_id },
@@ -1249,6 +1281,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
         orgId: orgConfig.org_id, orgName: orgConfig.org_name,
         receipt: receiptFacts(msg),
         preferredConnectors: connectorPreferenceOf(msg),
+        preferredSkills,
         wfRef: workflowRefOf(msg),
         systemSender: isSystemSender(msg)
           ? { memberId: msg.sender_id || msg.message?.sender_id }
@@ -1281,6 +1314,19 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     registerConvOrg(msg.conversation_id, orgConfig.org_id, convRecordFields(conv));
     if (replyConvId !== msg.conversation_id) registerConvOrg(replyConvId, orgConfig.org_id, convRecordFields(replyConv));
     const result = await forwardInbound(endpoint, run ? run.marker + body : body, inboundPriority(msg), caps);
+    // Skills used (OPENM-1396): a turn Core surely never got (not_stored,
+    // no_group, failed with c4-receive never started) is dropped; any other
+    // outcome (sent, stored, or unsure: uncertain / unknown / failed) keeps
+    // it — an unsure one that never ran ends unreported after
+    // TURN_END_WAIT_MS. The session group it went to tells the reporter which
+    // session log to read (multi-session Core).
+    if (skillTurn) {
+      if (forwardDropsSkillTurn(result.outcome, result)) dropSkillTurn(sourceMessageId);
+      else {
+        const group = skillTurnSessionGroup(result, CHANNEL);
+        if (group) noteSkillTurnSessionGroup(sourceMessageId, group);
+      }
+    }
     if (result.outcome === 'sent' || result.outcome === 'stored') {
       // Stored but reported as an error: Core has the message, so it is handled
       // like a success (nothing shown, nothing resent).
@@ -2914,6 +2960,8 @@ if (config.channelLiveness?.enabled !== false) {
     delay: CHANNEL_LIVENESS_INITIAL_DELAY_MS,
   });
 }
+// OPENM-1396: report each registered Web DM turn's skills after its turn_end.
+tasks.register('skill-usage', skillUsage.tick, SKILL_USAGE_TICK_MS, { delay: SKILL_USAGE_TICK_MS });
 if (config.taskInventory?.enabled !== false) {
   const reportTaskInventory = createTaskInventoryReporter(activeOrgConfigs, {
     log, warn,
@@ -2932,6 +2980,7 @@ tasks.start('connect-result-resend');
 tasks.start('frame-metrics');
 tasks.start('write-confirm-expiry');
 tasks.start('owner-config-sync');
+tasks.start('skill-usage');
 if (config.metricsReport?.enabled !== false) tasks.start('metrics-report');
 metricsReadinessTrigger?.start();
 if (config.channelLiveness?.enabled !== false) tasks.start('channel-liveness');

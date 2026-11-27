@@ -62,3 +62,29 @@ test('T9: sendStructuredMessage posts once to the endpoint conversation, quote f
   assert.equal('agent_run' in posts[0].body, false, 'no run registered → no agent_run');
   assert.deepEqual(out, { ok: true, structured: true, message_id: '7300000000000000201' });
 });
+
+test('[STRUCTURED] records the turn\'s first delivered reply; the body is unchanged', async () => {
+  const settled = [];
+  const asked = [];
+  const planFirstReply = (args) => { asked.push(args); return { settle: (o, id) => settled.push([o, id]) }; };
+  const posts = [];
+  const deps = {
+    apiPath: (p) => `/api/v1${p}`,
+    sourceMessageId: '7300000000000000199',
+    runStore: createRunStore({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'om-structured-runs-')) }),
+    planFirstReply,
+  };
+  await sendStructuredMessage('conv-s', parseStructuredMessage(structured({ content: 'x', metadata: { mine: 1 } })), {
+    ...deps, post: async (p, body) => { posts.push(body); return { id: '7300000000000000300' }; },
+  });
+  assert.deepEqual(posts[0].metadata, { mine: 1 }, 'no context item added');
+  assert.deepEqual(asked[0], { sourceMessageId: '7300000000000000199', convId: 'conv-s' });
+  assert.deepEqual(settled, [['ok', '7300000000000000300']]);
+
+  // A failed send settles nothing (the next reply may be the first).
+  const err = Object.assign(new Error('bad'), { status: 400 });
+  await assert.rejects(sendStructuredMessage('conv-s', parseStructuredMessage(structured({ content: 'x' })), {
+    ...deps, post: async () => { throw err; },
+  }), /bad/);
+  assert.equal(settled.length, 1);
+});

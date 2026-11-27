@@ -470,3 +470,139 @@ test('T11: a legacy thread endpoint is sent to its leading conversation, no pare
     assert.match(stderr, /legacy thread endpoint/);
   }
 });
+
+// ── OPENM-1396: the turn's first delivered reply is recorded (no metadata) ────
+
+const SKILLS_STATE_DIR = path.join(tmpHome, 'zylos/components/openmax/runtime/skills-used');
+
+/** A registered Web DM turn of `conv` for message `src` (activity/skills-used.js v2 shape). */
+function registerTurn(conv, src) {
+  fs.mkdirSync(SKILLS_STATE_DIR, { recursive: true });
+  fs.writeFileSync(path.join(SKILLS_STATE_DIR, `${src}.json`), JSON.stringify({
+    v: 2, source_message_id: src, conversation_id: conv, org_id: 'org-test', member_id: 'agent-1',
+    registered_at: Date.now(), runtime: 'claude', selected_skill_ids: [],
+    scan: { logs: {}, anchor_log: null, ids: [], reasons: [], ended_at: null }, report: { attempts: 0, next_at: 0 },
+  }));
+}
+const replyOf = (src) => {
+  try { return JSON.parse(fs.readFileSync(path.join(SKILLS_STATE_DIR, `${src}.reply`), 'utf8')).reply_message_id; } catch { return null; }
+};
+
+/** Answers POST …/messages with numeric ids 7400…01, 7400…02, …; `fail` lists 1-based send numbers that get 400. */
+function startNumericServer({ fail = [] } = {}) {
+  const posts = [];
+  const server = http.createServer((req, res) => {
+    let raw = '';
+    req.on('data', (d) => { raw += d; });
+    req.on('end', () => {
+      const body = raw ? JSON.parse(raw) : {};
+      if (req.method === 'POST') posts.push({ url: req.url, body });
+      let status = 200;
+      let out = { id: String(7400000000000000000n + BigInt(posts.length)) };
+      if (req.url.endsWith('/uploads/prepare')) out = { upload_token: 'tok', instant_upload: true };
+      else if (req.url.endsWith('/uploads/finalize')) out = { media_id: 'med-1', artifact_id: 'art-1' };
+      else if (req.url.endsWith('/messages') && fail.includes(posts.filter((p) => p.url.endsWith('/messages')).length)) { status = 400; out = { error: 'bad' }; }
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(out));
+    });
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, posts, port: server.address().port })));
+}
+
+test('text — the first chunk of the first reply is recorded; later chunks / replies are not; no metadata is added', async () => {
+  const conv = 'conv-skills-1396';
+  const src = '7300000000000001396';
+  registerTurn(conv, src);
+  const { server, posts, port } = await startNumericServer();
+  try {
+    let r = await runSend(port, `${conv}|msg:${src}`, `${'a'.repeat(4500)}\n\n${'b'.repeat(4500)}`);
+    assert.equal(r.code, 0, r.stderr);
+    const first = replyOf(src);
+    r = await runSend(port, `${conv}|msg:${src}`, 'second reply');
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(replyOf(src), first, 'a later reply does not replace it');
+    assert.equal(first, '7400000000000000001');
+    // A reply to an unregistered message records nothing.
+    r = await runSend(port, `${conv}|msg:7300000000000000001`, 'other');
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(fs.existsSync(path.join(SKILLS_STATE_DIR, '7300000000000000001.reply')), false);
+    // Another conversation's reply naming the message records nothing either.
+    const src2 = '7300000000000001400';
+    registerTurn(conv, src2);
+    r = await runSend(port, `conv-other|msg:${src2}`, 'elsewhere');
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(replyOf(src2), null);
+  } finally {
+    server.close();
+  }
+  const sends = posts.filter((p) => p.url.endsWith('/messages'));
+  assert.ok(sends.length >= 5, `expected a split first reply, got ${sends.length}`);
+  for (const { body } of sends) assert.equal('metadata' in body, false, 'no skills-used item on any reply');
+});
+
+test('text — a first send rejected with 400 records nothing; the next delivered reply is the first reply', async () => {
+  const conv = 'conv-skills-1396-400';
+  const src = '7300000000000001397';
+  registerTurn(conv, src);
+  const { server, port } = await startNumericServer({ fail: [1] });
+  try {
+    let r = await runSend(port, `${conv}|msg:${src}`, 'first try');
+    assert.notEqual(r.code, 0);
+    assert.equal(replyOf(src), null);
+    r = await runSend(port, `${conv}|msg:${src}`, 'second try');
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(replyOf(src), '7400000000000000002');
+  } finally {
+    server.close();
+  }
+});
+
+test('[MEDIA] — a rejected send records nothing; a delivered one is recorded', async () => {
+  const conv = 'conv-skills-1396-media';
+  const src = '7300000000000001398';
+  registerTurn(conv, src);
+  const file = path.join(tmpHome, 'report-1396.txt');
+  fs.writeFileSync(file, 'weekly numbers');
+  const { server, posts, port } = await startNumericServer({ fail: [1] });
+  try {
+    let r = await runSend(port, `${conv}|msg:${src}`, `[MEDIA:file]${file}`);
+    assert.notEqual(r.code, 0);
+    assert.equal(replyOf(src), null);
+    r = await runSend(port, `${conv}|msg:${src}`, `[MEDIA:file]${file}`);
+    assert.equal(r.code, 0, r.stderr);
+  } finally {
+    server.close();
+  }
+  const sends = posts.filter((p) => p.url.endsWith('/messages'));
+  assert.equal(sends.length, 2);
+  assert.equal(replyOf(src), String(7400000000000000000n + BigInt(posts.indexOf(sends[1]) + 1)));
+  for (const { body } of sends) assert.equal('metadata' in body, false);
+});
+
+test('OPEN-2: a [CARD] sent before any text is recorded as the turn\'s first reply; the later text is not', async () => {
+  const src = '7300000000000001401';
+  registerTurn(DISPATCH_CONV, src);
+  const card = { kind: 'confirm', askedOf: 'm-owner', title: '继续吗', text: '要继续吗', options: ['是', '否'] };
+  let r = await dispatch(`${DISPATCH_CONV}|msg:${src}`, `[CARD]${JSON.stringify(card)}`);
+  assert.equal(r.code, 0, r.stderr);
+  const cardId = JSON.parse(r.stdout).message_id;
+  assert.equal(replyOf(src), cardId, 'the card is the first reply');
+  r = await dispatch(`${DISPATCH_CONV}|msg:${src}`, 'and here is the text');
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(replyOf(src), cardId, 'the later text does not replace it');
+});
+
+test('OPEN-2: a [CARD] display card is recorded too; a card to an unregistered message records nothing', async () => {
+  const src = '7300000000000001402';
+  registerTurn(DISPATCH_CONV, src);
+  const card = {
+    cardKind: 'onboarding.partner', title: '再添加一个 Agent', text: '可以随时添加',
+    options: [{ label: '添加 Agent', behavior: 'open_create_agent' }],
+  };
+  let r = await dispatch(`${DISPATCH_CONV}|msg:${src}`, `[CARD]${JSON.stringify(card)}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(replyOf(src), JSON.parse(r.stdout).message_id);
+  r = await dispatch(`${DISPATCH_CONV}|msg:7300000000000001403`, `[CARD]${JSON.stringify(card)}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(replyOf('7300000000000001403'), null);
+});
