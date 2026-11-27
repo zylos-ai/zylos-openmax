@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   registerSkillTurn, dropSkillTurn, readSkillTurn, buildSkillIdMap, feedTurnEvents, advanceScan, finalizeScan,
   decideReport, planFirstReply, readFirstReply, listSkillTurns, sweepOrphans,
+  noteSkillTurnSessionGroup, groupSessionLog, postRecordingFirstReply,
   MAX_SKILLS_USED_IDS, TURN_END_WAIT_MS, REPLY_WAIT_MS, SKILL_TURN_RETENTION_MS,
 } from './skills-used.js';
 import { encodeProjectDir } from './collector.js';
@@ -231,7 +232,6 @@ test('unknown record / unparsable line, unrecognized Skill, SKILL.md read, subag
   const cases = [
     [[{ type: 'assistant', timestamp: ts(), message: { content: 'not-an-array' } }], 'unknown_record'],
     [['{"type":"assistant", broken'], 'unknown_record'],
-    [[skillRec('not-installed')], 'unrecognized_skill'],
     [[toolRec('Skill', { skill: 42 })], 'unrecognized_invocation'],
     [[toolRec('Read', { file_path: '/home/x/zylos/.claude/skills/weekly-report/SKILL.md' })], 'skill_file_read'],
     [[toolRec('Bash', { command: 'cat ~/zylos/.claude/skills/weekly-report/SKILL.md' })], 'skill_file_read'],
@@ -244,6 +244,71 @@ test('unknown record / unparsable line, unrecognized Skill, SKILL.md read, subag
   // Running a skill's own CLI is not reading the skill.
   const host = makeHost();
   assert.equal(runTurn(host, [userRec(inbound()), toolRec('Bash', { command: 'node ~/zylos/.claude/skills/openmax/src/cli/kb.js search {}' }), turnEnd()]).out.complete, true);
+});
+
+test('P2-7: a host skill whose name maps to no skill_id → unrecognized_skill; a name no host skill claims is ignored', () => {
+  // price-grab is a market dir without a readable .market-managed: a real
+  // skill of this host the report cannot name.
+  let host = makeHost({ marketFile: null });
+  assert.deepEqual(runTurn(host, [userRec(inbound()), skillRec('price-grab'), turnEnd()]).out.reasons, ['unrecognized_skill']);
+  // Claude Code built-ins, plugin-namespaced and user-level skills are not
+  // skills of this host: ignored, the turn stays complete with the others.
+  host = makeHost();
+  const { out } = runTurn(host, [
+    userRec(inbound()), skillRec('simplify'), skillRec('code-review:code-review'), skillRec('weekly-report'),
+    skillRec('my-personal-skill'), turnEnd(),
+  ]);
+  assert.equal(out.complete, true, JSON.stringify(out.reasons));
+  assert.deepEqual(out.skillIds, ['local:weekly-report']);
+});
+
+test('P2-7: buildSkillIdMap.known — any name a skill dir claims, mapped or not', () => {
+  const host = makeHost({ marketFile: null });
+  const map = buildSkillIdMap({ skillsDir: path.join(host.zylosDir, '.claude/skills') });
+  assert.equal(map.known('price-grab'), true);
+  assert.equal(map.known('market--price-grab'), true);
+  assert.equal(map.known('weekly-report'), true);
+  assert.equal(map.known('simplify'), false);
+});
+
+test('P2-7: only Read / Bash reads of a non-system SKILL.md count as skill_file_read', () => {
+  const complete = [
+    // system skills: read by the runtime itself (comm-bridge before a send, Memory Sync)
+    toolRec('Read', { file_path: '/home/x/zylos/.claude/skills/comm-bridge/SKILL.md' }),
+    toolRec('Read', { file_path: '/home/x/zylos/.claude/skills/zylos-memory/SKILL.md' }),
+    toolRec('Bash', { command: 'cat ~/zylos/.claude/skills/scheduler/SKILL.md' }),
+    toolRec('Read', { file_path: '/home/x/zylos/.claude/skills/openmax/SKILL.md' }),
+    toolRec('Read', { file_path: '/home/x/zylos/.claude/skills/Restart-Claude/SKILL.md' }),
+    toolRec('Bash', { command: 'head -40 ~/zylos/.claude/skills/upgrade-claude/SKILL.md' }),
+    // not reads of a skill's content
+    toolRec('Grep', { pattern: 'name:', path: '/home/x/zylos/.claude/skills/weekly-report/SKILL.md' }),
+    toolRec('Glob', { pattern: 'skills/weekly-report/SKILL.md' }),
+    toolRec('Bash', { command: 'ls -la ~/zylos/.claude/skills/weekly-report/SKILL.md' }),
+    toolRec('Edit', { file_path: '/home/x/zylos/.claude/skills/weekly-report/SKILL.md', old_string: 'a', new_string: 'b' }),
+  ];
+  for (const rec of complete) {
+    const host = makeHost();
+    const { out } = runTurn(host, [userRec(inbound()), rec, turnEnd()]);
+    assert.equal(out.complete, true, `${JSON.stringify(rec.message.content[0].input)} → ${out.reasons}`);
+  }
+  const incomplete = [
+    toolRec('Read', { file_path: '/home/x/zylos/.claude/skills/weekly-report/SKILL.md' }),
+    toolRec('Bash', { command: 'sed -n 1,80p ~/zylos/.claude/skills/market--price-grab/SKILL.md' }),
+    toolRec('Bash', { command: 'cat ~/zylos/.claude/skills/comm-bridge/SKILL.md ~/zylos/.claude/skills/weekly-report/SKILL.md' }),
+  ];
+  for (const rec of incomplete) {
+    const host = makeHost();
+    assert.deepEqual(runTurn(host, [userRec(inbound()), rec, turnEnd()]).out.reasons, ['skill_file_read'], JSON.stringify(rec.message.content[0].input));
+  }
+});
+
+test('feedTurnEvents without `known` keeps counting every unresolved name (conservative default)', () => {
+  const scan = { anchored: true, ids: [], reasons: [], ended: false };
+  feedTurnEvents(scan, [{ t: 'tool_start', name: 'Skill', input: { skill: 'whatever' } }], { sourceMessageId: S, resolve: () => null });
+  assert.deepEqual(scan.reasons, ['unrecognized_skill']);
+  const scan2 = { anchored: true, ids: [], reasons: [], ended: false };
+  feedTurnEvents(scan2, [{ t: 'tool_start', name: 'Skill', input: { skill: 'plug:thing' } }], { sourceMessageId: S, resolve: () => null });
+  assert.deepEqual(scan2.reasons, [], 'a plugin-namespaced name is never a host skill');
 });
 
 test('activity run of the message status_only / merged_turn → incomplete; another message\'s run does not matter', () => {
@@ -447,4 +512,100 @@ test('dropSkillTurn removes registration and reply; sweepOrphans removes only st
   fs.utimesSync(path.join(host.stateDir, '7.reply'), old, old);
   sweepOrphans({ dir: host.stateDir });
   assert.deepEqual(fs.readdirSync(host.stateDir).sort(), ['6.reply', '7.json', '7.reply']);
+});
+
+// --- P2-6: the session group's own log, not the newest N ---------------------------
+
+function pointGroup(host, group, sessionId) {
+  const d = path.join(host.zylosDir, 'activity-monitor/session-groups', group);
+  fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(path.join(d, 'current-session.json'), JSON.stringify({ runId: 'r1', sessionId, startupControlIds: [], ts: 1 }));
+}
+
+test('P2-6: with the session group noted, its session log is read even when 6 busier logs are newer', () => {
+  const host = makeHost();
+  const GROUP = 'openmax:dm-cv-dm-1';
+  // The group's session log is the oldest of seven being written.
+  appendLog(host, [userRec('older turn'), turnEnd()], 'grp-sess.jsonl');
+  const others = [1, 2, 3, 4, 5, 6].map((i) => `other-${i}.jsonl`);
+  const bump = () => { for (const n of others) appendLog(host, [userRec(`noise ${clock}`), turnEnd()], n); };
+  bump();
+  assert.equal(register(host), true);
+  pointGroup(host, GROUP, 'grp-sess');
+  assert.equal(noteSkillTurnSessionGroup(S, GROUP, { dir: host.stateDir }), true);
+  assert.equal(noteSkillTurnSessionGroup(S, 'openmax:other', { dir: host.stateDir }), false, 'kept once set');
+  appendLog(host, [userRec(inbound()), skillRec('weekly-report')], 'grp-sess.jsonl');
+  bump();
+  appendLog(host, [turnEnd()], 'grp-sess.jsonl');
+  bump();
+  const { reg, ended } = advance(host);
+  assert.equal(ended, true);
+  assert.deepEqual(outcome(host, reg), { complete: true, skillIds: ['local:weekly-report'], reasons: [] });
+  assert.equal(reg.scan.anchor_log, path.join(host.projDir, 'grp-sess.jsonl'));
+});
+
+test('P2-6: without a group the same layout falls back to the newest logs (and misses it) — the case the group fixes', () => {
+  const host = makeHost();
+  appendLog(host, [userRec('older turn'), turnEnd()], 'grp-sess.jsonl');
+  const others = [1, 2, 3, 4, 5, 6].map((i) => `other-${i}.jsonl`);
+  const bump = () => { for (const n of others) appendLog(host, [userRec(`noise ${clock}`), turnEnd()], n); };
+  const age = () => { const old = new Date(Date.now() - 60_000); fs.utimesSync(path.join(host.projDir, 'grp-sess.jsonl'), old, old); };
+  bump();
+  age();
+  assert.equal(register(host), true);
+  appendLog(host, [userRec(inbound()), skillRec('weekly-report'), turnEnd()], 'grp-sess.jsonl');
+  // mtime order: every other log is newer.
+  age();
+  bump();
+  assert.equal(advance(host).ended, false);
+});
+
+test('P2-6: group pointer rotates to a new session before the turn is found — both sessions are read; other logs are dropped', () => {
+  const host = makeHost();
+  const GROUP = 'openmax:dm-cv-dm-1';
+  appendLog(host, [userRec('older')], 'g-old.jsonl');
+  appendLog(host, [userRec('noise')], 'other.jsonl');
+  assert.equal(register(host), true);
+  pointGroup(host, GROUP, 'g-old');
+  noteSkillTurnSessionGroup(S, GROUP, { dir: host.stateDir });
+  let r = advance(host);
+  assert.equal(r.ended, false);
+  assert.deepEqual(Object.keys(r.reg.scan.logs), [path.join(host.projDir, 'g-old.jsonl')], 'only the group\'s logs');
+  pointGroup(host, GROUP, 'g-new');
+  appendLog(host, [userRec(inbound()), skillRec('price-grab'), turnEnd()], 'g-new.jsonl');
+  r = advance(host);
+  assert.equal(r.ended, true);
+  assert.deepEqual(r.reg.scan.group_logs, [path.join(host.projDir, 'g-old.jsonl'), path.join(host.projDir, 'g-new.jsonl')]);
+  assert.deepEqual(outcome(host, r.reg).skillIds, ['sk_mkt_1']);
+});
+
+test('P2-6: group pointer missing / invalid group / bad session id → no group log (newest-logs fallback)', () => {
+  const host = makeHost();
+  const dirs = { homeDir: host.home, zylosDir: host.zylosDir };
+  assert.equal(groupSessionLog('openmax:dm-x', dirs), null, 'no pointer');
+  pointGroup(host, 'openmax:dm-x', 'nope');
+  assert.equal(groupSessionLog('openmax:dm-x', dirs), null, 'pointer names a log that is not there');
+  appendLog(host, [userRec('x')], 'nope.jsonl');
+  assert.equal(groupSessionLog('openmax:dm-x', dirs), path.join(host.projDir, 'nope.jsonl'));
+  assert.equal(groupSessionLog('../etc', dirs), null);
+  assert.equal(groupSessionLog('openmax:a/../../b', dirs), null);
+  pointGroup(host, 'openmax:dm-y', '../../x');
+  assert.equal(groupSessionLog('openmax:dm-y', dirs), null);
+  assert.equal(noteSkillTurnSessionGroup(S, 'openmax:dm-x', { dir: host.stateDir }), false, 'no registration');
+});
+
+// --- OPEN-2: card POST wrapper ----------------------------------------------------
+
+test('OPEN-2: postRecordingFirstReply settles with the card\'s message id on success only; null plan → same fn', async () => {
+  const settled = [];
+  const plan = { settle: (o, id) => settled.push([o, id]) };
+  const ok = postRecordingFirstReply(async () => ({ message_id: '7400000000000000009', action_ids: ['a'] }), plan);
+  assert.deepEqual(await ok('/p', {}), { message_id: '7400000000000000009', action_ids: ['a'] });
+  const nested = postRecordingFirstReply(async () => ({ data: { message_id: '7400000000000000010' } }), plan);
+  await nested('/p', {});
+  const bad = postRecordingFirstReply(async () => { throw Object.assign(new Error('x'), { status: 400 }); }, plan);
+  await assert.rejects(bad('/p', {}));
+  assert.deepEqual(settled, [['ok', '7400000000000000009'], ['ok', '7400000000000000010']]);
+  const fn = async () => 1;
+  assert.equal(postRecordingFirstReply(fn, null), fn);
 });

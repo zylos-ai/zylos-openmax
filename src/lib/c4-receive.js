@@ -173,6 +173,8 @@ export function conversationKindPending(caps, record, stored) {
  * @param {number} [opts.retryDelayMs]
  * @returns {Promise<{outcome:'sent'|'stored'|'not_stored'|'uncertain'|'unknown'|'failed'|'no_group',
  *   notice:string|null, stdout?:string, sessionGroup?:string}>}
+ *   `sessionGroup` (the group name passed to Core) is on every outcome once
+ *   it was computed, so a caller can follow a turn whose delivery is unsure.
  *   `notice` is the text to show the user (TRY_LATER / MAYBE_LOST), null when
  *   nothing should be shown ('sent', 'stored').
  */
@@ -198,8 +200,10 @@ export async function forwardToC4({ channel, endpoint, content, priority, caps }
     });
   });
 
-  const settle = ({ error, stdout }, label) => {
-    if (!error) return { outcome: 'sent', notice: null, stdout, ...(sessionGroup ? { sessionGroup } : {}) };
+  const withGroup = (r) => (r && sessionGroup ? { ...r, sessionGroup } : r);
+  const settle = ({ error, stdout }, label) => withGroup(settleOnce({ error, stdout }, label));
+  const settleOnce = ({ error, stdout }, label) => {
+    if (!error) return { outcome: 'sent', notice: null, stdout };
     const response = parseC4Response(stdout);
     if (isStructuredRejection(response)) {
       const { code, message } = response.error;
@@ -219,7 +223,7 @@ export async function forwardToC4({ channel, endpoint, content, priority, caps }
   if (done) return done;
   if (!neverStarted(first.error)) {
     warn(`c4-receive failed, outcome unknown, not resending [group=${group}]: ${first.stderr || first.error.message}`);
-    return { outcome: 'unknown', notice: MAYBE_LOST };
+    return withGroup({ outcome: 'unknown', notice: MAYBE_LOST });
   }
   // c4-receive never started, so nothing was stored - retry once.
   warn(`c4-receive did not start, retrying in ${retryDelayMs}ms: ${first.error.message}`);
@@ -231,5 +235,5 @@ export async function forwardToC4({ channel, endpoint, content, priority, caps }
     return retried;
   }
   warn(`c4-receive failed after retry, not resending [group=${group}]: ${second.stderr || second.error.message}`);
-  return { outcome: 'failed', notice: MAYBE_LOST };
+  return withGroup({ outcome: 'failed', notice: MAYBE_LOST });
 }

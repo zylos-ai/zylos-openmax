@@ -578,3 +578,31 @@ test('[MEDIA] — a rejected send records nothing; a delivered one is recorded',
   assert.equal(replyOf(src), String(7400000000000000000n + BigInt(posts.indexOf(sends[1]) + 1)));
   for (const { body } of sends) assert.equal('metadata' in body, false);
 });
+
+test('OPEN-2: a [CARD] sent before any text is recorded as the turn\'s first reply; the later text is not', async () => {
+  const src = '7300000000000001401';
+  registerTurn(DISPATCH_CONV, src);
+  const card = { kind: 'confirm', askedOf: 'm-owner', title: '继续吗', text: '要继续吗', options: ['是', '否'] };
+  let r = await dispatch(`${DISPATCH_CONV}|msg:${src}`, `[CARD]${JSON.stringify(card)}`);
+  assert.equal(r.code, 0, r.stderr);
+  const cardId = JSON.parse(r.stdout).message_id;
+  assert.equal(replyOf(src), cardId, 'the card is the first reply');
+  r = await dispatch(`${DISPATCH_CONV}|msg:${src}`, 'and here is the text');
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(replyOf(src), cardId, 'the later text does not replace it');
+});
+
+test('OPEN-2: a [CARD] display card is recorded too; a card to an unregistered message records nothing', async () => {
+  const src = '7300000000000001402';
+  registerTurn(DISPATCH_CONV, src);
+  const card = {
+    cardKind: 'onboarding.partner', title: '再添加一个 Agent', text: '可以随时添加',
+    options: [{ label: '添加 Agent', behavior: 'open_create_agent' }],
+  };
+  let r = await dispatch(`${DISPATCH_CONV}|msg:${src}`, `[CARD]${JSON.stringify(card)}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(replyOf(src), JSON.parse(r.stdout).message_id);
+  r = await dispatch(`${DISPATCH_CONV}|msg:7300000000000001403`, `[CARD]${JSON.stringify(card)}`);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(replyOf('7300000000000001403'), null);
+});

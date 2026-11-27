@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createSkillUsageReporter, isSkillUsageTurn } from './skill-usage-reporter.js';
+import { createSkillUsageReporter, isSkillUsageTurn, forwardDropsSkillTurn, skillTurnSessionGroup } from './skill-usage-reporter.js';
 import { skillUsagePath, skillUsageBody, classifySkillUsageError, SKILL_USAGE_DISABLED_CODE } from './skill-usage-contract.js';
 import { registerSkillTurn, planFirstReply, readSkillTurn, SKILL_TURN_RETENTION_MS } from './activity/skills-used.js';
 import { encodeProjectDir } from './activity/collector.js';
@@ -354,4 +354,112 @@ test('real client: a problem+json 404 SKILL_USAGE_DISABLED body is parsed and cl
       await new Promise((resolve) => server.close(resolve));
     }
   }
+});
+
+// --- review 11-27 (gavin P2-6 / P3, daniel P3) -------------------------------------
+
+test('409 SKILL_USAGE_SOURCE_ALREADY_REPORTED (same source, other reply) → given up like any non-404 4xx; no retry, no pause', async () => {
+  const conflict = Object.assign(new Error('HTTP 409'), {
+    status: 409,
+    body: { error: { code: 'SKILL_USAGE_SOURCE_ALREADY_REPORTED', status: 409, title: 'Conflict' } },
+  });
+  assert.equal(classifySkillUsageError(conflict), 'give_up');
+  const host = makeHost();
+  const OTHER = '700000000000000012';
+  endedTurn(host);
+  endedTurn(host, { id: OTHER, reply: '740000000000000012' });
+  const puts = [];
+  const { r, warns, clockRef } = reporter(host, {
+    putForOrg: async (orgId, p, body) => {
+      puts.push(body.source_message_id);
+      if (body.source_message_id === S) throw conflict;
+      return {};
+    },
+  });
+  await r.tick();
+  assert.deepEqual(puts.sort(), [S, OTHER].sort(), 'the other entry of the same org is still reported');
+  assert.equal(exists(host), false, 'the 409 entry is dropped');
+  assert.equal(exists(host, OTHER), false, 'the other one was reported and removed');
+  assert.ok(warns.some((w) => /409/.test(w) && /giving up/.test(w)));
+  assert.equal(r.isPaused(ORG, clockRef.t), false, 'the org is not paused');
+  clockRef.t += 60 * 60 * 1000;
+  await r.tick();
+  assert.equal(puts.length, 2, 'never retried');
+});
+
+test('401 → token re-minted (force) and the PUT sent once more; success removes the record', async () => {
+  const host = makeHost();
+  endedTurn(host);
+  const reacq = [];
+  const { r, puts } = reporter(host, { responses: [401, 200], reacquireToken: async (orgId, o) => { reacq.push([orgId, o]); } });
+  await r.tick();
+  assert.equal(puts.length, 2);
+  assert.deepEqual(puts[0].body, puts[1].body, 'the same report');
+  assert.deepEqual(reacq, [[ORG, { force: true }]]);
+  assert.equal(exists(host), false);
+});
+
+test('401 twice → given up after the one retry', async () => {
+  const host = makeHost();
+  endedTurn(host);
+  let reacq = 0;
+  const { r, puts, warns } = reporter(host, { responses: [401, 401, 200], reacquireToken: async () => { reacq += 1; } });
+  await r.tick();
+  assert.equal(puts.length, 2);
+  assert.equal(reacq, 1);
+  assert.equal(exists(host), false);
+  assert.ok(warns.some((w) => /401/.test(w) && /giving up/.test(w)));
+});
+
+test('401 then 503 → kept for the usual backoff retry', async () => {
+  const host = makeHost();
+  endedTurn(host);
+  const { r, puts } = reporter(host, { responses: [401, 503], reacquireToken: async () => {} });
+  await r.tick();
+  assert.equal(puts.length, 2);
+  assert.equal(exists(host), true);
+  assert.equal(readSkillTurn(S, { dir: host.dir }).report.attempts, 1);
+});
+
+test('P2-6: one global scan budget per tick across registrations; the start rotates so none starves', async () => {
+  const host = makeHost();
+  const ids = ['700000000000000021', '700000000000000022', '700000000000000023'];
+  for (const id of ids) {
+    assert.ok(registerSkillTurn({
+      sourceMessageId: id, conversationId: CONV, orgId: ORG, memberId: AGENT, selectedSkillIds: [],
+      dir: host.dir, homeDir: host.home, zylosDir: host.zylosDir,
+    }));
+  }
+  // ~3 KiB of other traffic, then each turn.
+  const pad = { type: 'user', timestamp: ts(), message: { content: 'x'.repeat(1000) } };
+  log(host, [pad, pad, pad]);
+  for (const id of ids) log(host, [userRec(inbound(id)), skillRec('weekly-report'), turnEnd()]);
+  for (const id of ids) planFirstReply({ sourceMessageId: id, convId: CONV, dir: host.dir }).settle('ok', REPLY);
+  const total = 1024;
+  const scanned = [];
+  const { r, puts } = reporter(host, { scanBytesPerTick: 1024, scanBytesPerTickTotal: total });
+  const offsets = () => ids.map((id) => {
+    const reg = readSkillTurn(id, { dir: host.dir });
+    return reg ? Object.values(reg.scan.logs).reduce((a, l) => a + l.offset, 0) : null;
+  });
+  const before = offsets();
+  await r.tick();
+  const after = offsets();
+  scanned.push(after.map((a, i) => (a ?? 0) - (before[i] ?? 0)));
+  // Lines are ~1 KiB: at most the global budget plus one line read in all.
+  const sum = scanned[0].reduce((a, b) => a + b, 0);
+  assert.ok(sum <= total + 1100, `read ${sum} bytes in one tick`);
+  assert.ok(scanned[0].filter((b) => b > 0).length < ids.length, 'not every registration read: the budget ran out');
+  // Over enough ticks every registration finishes and is reported.
+  for (let i = 0; i < 20 && puts.length < 3; i++) await r.tick(); // eslint-disable-line no-await-in-loop
+  assert.equal(puts.length, 3);
+});
+
+test('P3: forward outcomes — only a sure non-delivery drops the turn; the session group comes from Core or the forward', () => {
+  for (const o of ['not_stored', 'no_group']) assert.equal(forwardDropsSkillTurn(o), true, o);
+  for (const o of ['sent', 'stored', 'uncertain', 'unknown', 'failed']) assert.equal(forwardDropsSkillTurn(o), false, o);
+  assert.equal(skillTurnSessionGroup({ stdout: '{"ok":true,"sessionGroup":"openmax:dm-x","id":3}', sessionGroup: 'dm-x' }, 'openmax'), 'openmax:dm-x');
+  assert.equal(skillTurnSessionGroup({ stdout: 'not json', sessionGroup: 'dm-x' }, 'openmax'), 'openmax:dm-x');
+  assert.equal(skillTurnSessionGroup({ stdout: '{"ok":true}' }, 'openmax'), null, 'single-session Core');
+  assert.equal(skillTurnSessionGroup(undefined, 'openmax'), null);
 });

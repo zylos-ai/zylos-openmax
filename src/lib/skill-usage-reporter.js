@@ -6,8 +6,10 @@
  *
  * Each tick, for every registration:
  *   - past SKILL_TURN_RETENTION_MS → removed (gives up, retries included);
- *   - the session log is read on from the stored offsets (bounded per tick)
- *     until the turn's turn_end;
+ *   - the session log is read on from the stored offsets until the turn's
+ *     turn_end — bounded per registration (SCAN_BYTES_PER_TICK) and for all
+ *     registrations together (SCAN_BYTES_PER_TICK_TOTAL); the registration
+ *     the tick starts with rotates, so none waits behind the others;
  *   - decideReport: wait, drop (nothing to show), or report;
  *   - report → PUT to the conversation's org as the Agent itself.
  *
@@ -17,20 +19,25 @@
  * registering turns without a selection for it (shouldRegister). The record
  * that got it is dropped, so no single record keeps the org paused; after the
  * pause the next real report is the probe. Any other 404 (route missing) or
- * other 4xx gives up that record only. 503 / 5xx / 429 / network → retried
- * with exponential backoff while the registration is kept. Success → removed.
+ * other 4xx gives up that record only (409 SKILL_USAGE_SOURCE_ALREADY_REPORTED
+ * included). A 401 (client.js's own refresh-and-retry did not cure it, or was
+ * throttled) → the org's token is re-minted (reacquireToken force) and the
+ * PUT is sent once more; a second 401 gives up that record. 503 / 5xx / 429 /
+ * network → retried with exponential backoff while the registration is kept.
+ * Success → removed.
  *
  * Not gated on OPENMAX_ACTIVITY. Never throws into the task loop.
  */
 
-import { putForOrg as realPutForOrg, apiPath as realApiPath } from './client.js';
+import { putForOrg as realPutForOrg, apiPath as realApiPath, reacquireToken as realReacquireToken } from './client.js';
 import { REPORT_REQUEST_TIMEOUT_MS } from './metrics-reporter.js';
 import {
-  SKILLS_USED_DIR, SKILL_TURN_RETENTION_MS,
+  SKILLS_USED_DIR, SKILL_TURN_RETENTION_MS, SCAN_BYTES_PER_TICK, SCAN_BYTES_PER_TICK_TOTAL,
   listSkillTurns, readSkillTurn, writeSkillTurn, dropSkillTurn, readFirstReply, sweepOrphans,
   advanceScan, finalizeScan, decideReport,
 } from './activity/skills-used.js';
 import { skillUsagePath, skillUsageBody, classifySkillUsageError } from './skill-usage-contract.js';
+import { skillPreferenceApplies } from './skill-preference.js';
 
 export const SKILL_USAGE_TICK_MS = 5_000;
 export const SKILL_USAGE_REPROBE_MS = 3 * 60 * 60 * 1000;
@@ -41,6 +48,7 @@ export function createSkillUsageReporter({
   log, warn,
   putForOrg = realPutForOrg,
   apiPath = realApiPath,
+  reacquireToken = realReacquireToken,
   dir = SKILLS_USED_DIR,
   scanDeps = {},
   runStore,
@@ -49,8 +57,11 @@ export function createSkillUsageReporter({
   retryBaseMs = SKILL_USAGE_RETRY_BASE_MS,
   retryMaxMs = SKILL_USAGE_RETRY_MAX_MS,
   requestTimeoutMs = REPORT_REQUEST_TIMEOUT_MS,
+  scanBytesPerTick = SCAN_BYTES_PER_TICK,
+  scanBytesPerTickTotal = SCAN_BYTES_PER_TICK_TOTAL,
 } = {}) {
   const paused = new Map(); // org_id → paused until (ms)
+  let rotation = 0; // where the next tick starts in the registration list
 
   const isPaused = (orgId, t = now()) => (paused.get(orgId) ?? 0) > t;
 
@@ -65,18 +76,28 @@ export function createSkillUsageReporter({
 
   async function report(reg, decision, t) {
     const orgId = reg.org_id;
+    const put = () => putForOrg(
+      orgId,
+      apiPath(skillUsagePath(reg.member_id)),
+      skillUsageBody({
+        sourceMessageId: reg.source_message_id,
+        replyMessageId: decision.replyMessageId,
+        complete: decision.complete,
+        skillIds: decision.skillIds,
+      }),
+      { timeoutMs: requestTimeoutMs, quietOnSuccess: true },
+    );
     try {
-      await putForOrg(
-        orgId,
-        apiPath(skillUsagePath(reg.member_id)),
-        skillUsageBody({
-          sourceMessageId: reg.source_message_id,
-          replyMessageId: decision.replyMessageId,
-          complete: decision.complete,
-          skillIds: decision.skillIds,
-        }),
-        { timeoutMs: requestTimeoutMs, quietOnSuccess: true },
-      );
+      try {
+        await put();
+      } catch (err) {
+        if (err?.status !== 401) throw err;
+        // A 401 client.js did not cure (its one refresh is throttled per org):
+        // mint a fresh token and send once more; a second 401 is given up.
+        warn?.(`skill-usage: report msg=${reg.source_message_id} got 401; re-acquiring the token and retrying once`);
+        await reacquireToken(orgId, { force: true });
+        await put();
+      }
       if (paused.has(orgId)) {
         paused.delete(orgId);
         log?.(`skill-usage: endpoint recovered for org ${orgId} — resuming`);
@@ -106,7 +127,12 @@ export function createSkillUsageReporter({
   async function tick() {
     const t = now();
     sweepOrphans({ dir, now: t });
-    for (const id of listSkillTurns({ dir })) {
+    const ids = listSkillTurns({ dir }).sort();
+    // Rotate the start so a busy registration cannot starve the ones after it.
+    const start = ids.length ? rotation % ids.length : 0;
+    rotation = start + 1;
+    let scanLeft = scanBytesPerTickTotal;
+    for (const id of [...ids.slice(start), ...ids.slice(0, start)]) {
       try {
         const reg = readSkillTurn(id, { dir });
         if (!reg || reg.v !== 2 || !reg.scan) { dropSkillTurn(id, { dir }); continue; }
@@ -115,9 +141,10 @@ export function createSkillUsageReporter({
           log?.(`skill-usage: msg=${id} expired unreported`);
           continue;
         }
-        if (!reg.scan.ended_at) {
+        if (!reg.scan.ended_at && scanLeft > 0) {
           const before = JSON.stringify(reg.scan);
-          advanceScan(reg, { ...scanDeps, now: t });
+          const { bytes } = advanceScan(reg, { ...scanDeps, budget: Math.min(scanBytesPerTick, scanLeft), now: t });
+          scanLeft -= bytes;
           if (JSON.stringify(reg.scan) !== before) writeSkillTurn(reg, { dir });
         }
         const outcome = reg.scan.ended_at
@@ -151,6 +178,31 @@ export function createSkillUsageReporter({
  * receipt is redirected to the card's conversation and is not a Web turn).
  */
 export function isSkillUsageTurn({ endpointType, redirected, senderMember, systemSender }) {
-  return (endpointType === 'dm' || endpointType === 'dm-topic')
-    && !redirected && !systemSender && senderMember?.kind === 'human';
+  return !redirected && skillPreferenceApplies({ endpointType, senderMember, systemSender });
+}
+
+/**
+ * comm-bridge, after the forward (c4-receive.js forwardToC4): whether the
+ * outcome proves Core never stored the inbound, so its turn will never run
+ * and the registration is dropped. 'uncertain' / 'unknown' / 'failed' may
+ * have been delivered: the registration is kept (a turn that never ran ends
+ * unreported after TURN_END_WAIT_MS).
+ */
+export function forwardDropsSkillTurn(outcome) {
+  return outcome === 'not_stored' || outcome === 'no_group';
+}
+
+/**
+ * comm-bridge: the full session group (`namespace:name`) a forwarded turn
+ * went to — Core's own answer when c4-receive printed one (`--json`
+ * `sessionGroup`), else `<channel>:<the group name passed to Core>`. Null on a
+ * single-session Core (no group).
+ */
+export function skillTurnSessionGroup(result, channel) {
+  try {
+    const out = result?.stdout ? JSON.parse(String(result.stdout).trim()) : null;
+    if (typeof out?.sessionGroup === 'string' && out.sessionGroup) return out.sessionGroup;
+  } catch {}
+  const name = result?.sessionGroup;
+  return typeof name === 'string' && name ? `${channel}:${name}` : null;
 }

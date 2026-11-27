@@ -63,6 +63,17 @@ export function skillPreferenceOf(msg) {
   return out.length ? out : null;
 }
 
+/**
+ * Whether a message's skill pick applies (wsb#830 review P3): only a DM, or a
+ * topic of one, from a human member — not a group chat, not an Agent, not a
+ * System Member. The input box only offers skills there; a `skills` item on
+ * anything else is ignored (not rendered, not registered).
+ */
+export function skillPreferenceApplies({ endpointType, senderMember, systemSender }) {
+  return (endpointType === 'dm' || endpointType === 'dm-topic')
+    && !systemSender && senderMember?.kind === 'human';
+}
+
 function escapeText(s) {
   return String(s).replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

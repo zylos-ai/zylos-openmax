@@ -30,9 +30,12 @@
  *     input or interrupted tool result);
  *   - a log record after the inbound has an unknown shape, does not parse, is
  *     too long to read, or the log was rewritten under the scan;
- *   - a Skill call without a skill name, or a name that maps to no skill_id;
- *   - a tool input that reads a skills/<dir>/SKILL.md directly, or a subagent
- *     call (its log is not read);
+ *   - a Skill call without a skill name, or a name of a skill of this host
+ *     that maps to no skill_id (a name no skill directory here claims — a
+ *     Claude Code built-in such as `simplify`, a plugin's `x:y`, a user-level
+ *     skill — is not a host skill and is ignored);
+ *   - a Read, or a Bash read (cat / head / sed …), of a skills/<dir>/SKILL.md
+ *     of a non-system skill, or a subagent call (its log is not read);
  *   - the activity run of the message is status_only or merged (only when
  *     activity is on; nothing here depends on OPENMAX_ACTIVITY otherwise);
  *   - more than 50 distinct skills;
@@ -42,6 +45,14 @@
  * `.market-managed` file naming its skill_id; any other skill directory is
  * `local:<dir>` (the C-16 location_id). System skills are reported like any
  * other: cws-core filters by the Agent's catalog and stores the names.
+ *
+ * Which session log: on a multi-session Core the turn runs in its session
+ * group's own session, so once comm-bridge knows the group (the forward's
+ * result, noteSkillTurnSessionGroup) the scan reads that group's session
+ * log(s) only (activity-monitor/session-groups/<group>/current-session.json).
+ * Without a group (single-session Core, or the group's pointer not readable)
+ * it falls back to the newest MAX_TRACKED_LOGS logs, where the one live
+ * session is.
  *
  * Never throws into the send path or the bridge.
  */
@@ -53,8 +64,8 @@ import { parseClaudeRecord } from './adapters/claude-jsonl.js';
 import { encodeProjectDir, readRuntimeName } from './collector.js';
 import { endpointSourceMessageId } from './marker.js';
 import { createRunStore } from './run-store.js';
-import { stringLeaves } from './classify.js';
 import { SOURCE_MESSAGE_ID_RE, MAX_TRACKED_LOGS, MAX_LINE_BYTES } from './constants.js';
+import { isSystemSkillDir } from './system-skills.js';
 
 export const SKILLS_USED_DIR = process.env.OPENMAX_SKILLS_USED_DIR || path.join(RUNTIME_DIR, 'skills-used');
 export const MAX_SKILLS_USED_IDS = 50;
@@ -67,6 +78,12 @@ export const REPLY_WAIT_MS = 5 * 60 * 1000;
 /** Log bytes one registration reads per tick, all logs together. */
 export const SCAN_BYTES_PER_TICK = 4 * 1024 * 1024;
 /**
+ * Log bytes all registrations together read per reporter tick
+ * (skill-usage-reporter.js). A single over-long line may overshoot it once
+ * (up to MAX_LINE_BYTES), as for SCAN_BYTES_PER_TICK.
+ */
+export const SCAN_BYTES_PER_TICK_TOTAL = 8 * 1024 * 1024;
+/**
  * A log first seen after the registration (a new session, or an older log
  * written again) is read from this far before its end at first sight, not
  * from its start: the message reached it at most a tick before.
@@ -78,15 +95,19 @@ const LOCATION_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 const MARKET_PREFIX = 'market--';
 const SKILL_MD_HEAD_BYTES = 64 * 1024;
 const DELEGATE_TOOLS = new Set(['Agent', 'Task']);
-// A tool input naming a skill's SKILL.md: the skill is being read directly,
-// not through the Skill tool.
-const SKILL_MD_RE = /skills\/[^/\s"'`]+\/SKILL\.md/;
+// A skill's SKILL.md read directly, not through the Skill tool: <dir> captured.
+const SKILL_MD_RE = /skills\/([^/\s"'`]+)\/SKILL\.md/g;
+// A Bash command that reads a file's content (not ls / grep -l / edits).
+const BASH_READ_RE = /(^|[\s;&|(`])(cat|head|tail|sed|less|more|awk|bat|nl|view)(\s|$)/;
 // Inputs that start or enter a turn (an `enqueue` only queues a message).
 const TURN_INPUT_FORMS = new Set(['user', 'queued_command', 'absorbed']);
 // Claude Code's own input after an interrupt (Esc / interrupted tool use).
 const INTERRUPT_RE = /^\[Request interrupted by user/;
 
 const validMessageId = (id) => typeof id === 'string' && SOURCE_MESSAGE_ID_RE.test(id);
+// zylos-core session group (c4-session-group.js parseSessionGroup): namespace[:name].
+const SESSION_GROUP_RE = /^[a-z][a-z0-9_-]{0,31}(:[A-Za-z0-9][A-Za-z0-9_.:-]{0,94})?$/;
+const SESSION_ID_RE = /^[A-Za-z0-9-]{1,128}$/;
 const regPath = (dir, id) => path.join(dir, `${id}.json`);
 const replyPath = (dir, id) => path.join(dir, `${id}.reply`);
 
@@ -118,6 +139,26 @@ function recentLogs(dirs) {
     .filter(Boolean)
     .sort((x, y) => y.mtime - x.mtime)
     .slice(0, MAX_TRACKED_LOGS);
+}
+
+/**
+ * The session log of a session group's current session on a multi-session
+ * Core (zylos-core session-group-paths.js: activity-monitor/session-groups/
+ * <group>/current-session.json names the session; every group session runs
+ * in the zylos dir, so its log is in the same project dir). Null when the
+ * pointer or the log is not there.
+ */
+export function groupSessionLog(group, { homeDir, zylosDir }) {
+  try {
+    if (typeof group !== 'string' || !SESSION_GROUP_RE.test(group)) return null;
+    const pointer = readJson(path.join(zylosDir, 'activity-monitor/session-groups', group, 'current-session.json'));
+    const sid = pointer?.sessionId;
+    if (typeof sid !== 'string' || !SESSION_ID_RE.test(sid)) return null;
+    const p = path.join(projectDir({ homeDir, zylosDir }), `${sid}.jsonl`);
+    return fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
 }
 
 // ── registration (comm-bridge) ────────────────────────────────────────────────
@@ -161,6 +202,26 @@ export function registerSkillTurn({
     return true;
   } catch (err) {
     return err?.code === 'EEXIST';
+  }
+}
+
+/**
+ * comm-bridge, after the forward: the session group the turn went to (the
+ * full `namespace:name`), so the scan reads that group's session log rather
+ * than guessing from the newest logs. Ignored for an invalid group, an
+ * unknown registration, or one that already has it. Never throws.
+ */
+export function noteSkillTurnSessionGroup(sourceMessageId, sessionGroup, { dir = SKILLS_USED_DIR } = {}) {
+  try {
+    const id = String(sourceMessageId ?? '');
+    if (!validMessageId(id) || typeof sessionGroup !== 'string' || !SESSION_GROUP_RE.test(sessionGroup)) return false;
+    const reg = readJson(regPath(dir, id));
+    if (!reg || reg.session_group) return false;
+    reg.session_group = sessionGroup;
+    writeJson(regPath(dir, id), reg);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -233,6 +294,24 @@ export function planFirstReply({ sourceMessageId, convId, dir = SKILLS_USED_DIR 
   }
 }
 
+/**
+ * Wrap a card POST (…/interaction-requests) so a delivered card is recorded as
+ * the turn's first reply, like a text reply (OPEN-2): a card sent before any
+ * text is the reply the turn's skills belong to, and the later text is not.
+ * Settles on the POST's own success, with the card's message id, so a card
+ * the server accepted is recorded even if the caller later refuses the
+ * response (e.g. no action_ids). A failed POST records nothing.
+ * `firstReply` null → `postFn` unchanged.
+ */
+export function postRecordingFirstReply(postFn, firstReply) {
+  if (!firstReply) return postFn;
+  return async (p, body) => {
+    const res = await postFn(p, body);
+    firstReply.settle('ok', res?.message_id ?? res?.data?.message_id ?? res?.id ?? null);
+    return res;
+  };
+}
+
 export function readFirstReply(sourceMessageId, { dir = SKILLS_USED_DIR } = {}) {
   const r = readJson(replyPath(dir, String(sourceMessageId)));
   return r && validMessageId(r.reply_message_id) ? r.reply_message_id : null;
@@ -276,8 +355,11 @@ function marketSkillId(dirPath) {
  * Map every skill directory of `skillsDir` (one level, no dot dirs) to its
  * skill_id, keyed by both its SKILL.md frontmatter `name` and its directory
  * name. A key two skills claim with different ids resolves to nothing, as
- * does a market directory without a readable `.market-managed`.
- * @returns {{ resolve: (name: string) => string|null }}
+ * does a market directory without a readable `.market-managed`. `known`
+ * tells whether any skill directory here claims the name at all (a name none
+ * claims is not a skill of this host: a Claude Code built-in, a plugin's, a
+ * user-level one).
+ * @returns {{ resolve: (name: string) => string|null, known: (name: string) => boolean }}
  */
 export function buildSkillIdMap({ skillsDir }) {
   const byKey = new Map();
@@ -300,7 +382,10 @@ export function buildSkillIdMap({ skillsDir }) {
     put(dir, id);
     put(frontmatterName(md), id);
   }
-  return { resolve: (name) => (typeof name === 'string' && byKey.get(name)) || null };
+  return {
+    resolve: (name) => (typeof name === 'string' && byKey.get(name)) || null,
+    known: (name) => typeof name === 'string' && byKey.has(name),
+  };
 }
 
 // ── the turn, from the runtime log (incremental) ──────────────────────────────
@@ -321,9 +406,11 @@ const namesSource = (ev, id) => ev?.t === 'input' && Array.isArray(ev.segments) 
  * (an input of a turn-starting form naming the message) are skipped; the
  * turn_end after it ends the turn and the rest is ignored. An input naming
  * the message again before that restarts the turn (a redelivery).
+ * `known(name)` (buildSkillIdMap): whether an unresolved Skill name is a skill
+ * of this host at all; without it every unresolved name counts.
  * @returns {{ consumed: number }} events used up to and including the turn_end
  */
-export function feedTurnEvents(scan, events, { sourceMessageId, resolve }) {
+export function feedTurnEvents(scan, events, { sourceMessageId, resolve, known = () => true }) {
   const why = (r) => { if (!scan.reasons.includes(r)) scan.reasons.push(r); };
   let i = 0;
   for (; i < events.length && !scan.ended; i++) {
@@ -357,14 +444,44 @@ export function feedTurnEvents(scan, events, { sourceMessageId, resolve }) {
       const name = ev.input?.skill;
       if (typeof name !== 'string' || !name.trim()) { why('unrecognized_invocation'); continue; }
       const id = resolve(name.trim());
-      if (!id) { why('unrecognized_skill'); continue; }
+      if (!id) {
+        // Not a skill of this host (built-in, plugin `x:y`, user-level): not
+        // reportable, and it does not make the list less whole.
+        if (name.includes(':') || !known(name.trim())) continue;
+        why('unrecognized_skill');
+        continue;
+      }
       if (!scan.ids.includes(id)) scan.ids.push(id);
       continue;
     }
     if (DELEGATE_TOOLS.has(ev.name)) { why('delegated'); continue; }
-    if (stringLeaves(ev.input).some((l) => SKILL_MD_RE.test(l))) why('skill_file_read');
+    if (readsSkillFile(ev)) why('skill_file_read');
   }
   return { consumed: i };
+}
+
+/** Skill dirs whose SKILL.md this tool call reads (Read, or a Bash read). */
+function skillFilesRead(ev) {
+  let texts = [];
+  if (ev.name === 'Read') texts = [ev.input?.file_path];
+  else if (ev.name === 'Bash' && typeof ev.input?.command === 'string' && BASH_READ_RE.test(ev.input.command)) texts = [ev.input.command];
+  const dirs = [];
+  for (const t of texts) {
+    if (typeof t !== 'string') continue;
+    for (const m of t.matchAll(SKILL_MD_RE)) dirs.push(m[1]);
+  }
+  return dirs;
+}
+
+/**
+ * Whether a tool call reads a skill's SKILL.md directly (bypassing the Skill
+ * tool, so the use is not seen). Only Read and Bash reads count; Grep / Glob /
+ * Edit and the like are not a use. A system skill's file (system-skills.js —
+ * the runtime reads comm-bridge's before its first send, Memory Sync reads
+ * zylos-memory's) is not counted.
+ */
+function readsSkillFile(ev) {
+  return skillFilesRead(ev).some((d) => !isSystemSkillDir(d));
 }
 
 function parseLine(line, sessionId) {
@@ -430,7 +547,10 @@ function readLines(file, cur, budget, size, { allowLong = true } = {}) {
  * Advance a registration's scan by at most `budget` log bytes. Reads only
  * past the stored offsets: the logs that existed at registration from where
  * they ended then; a log first seen later from NEW_LOG_LOOKBACK_BYTES before
- * its end; once the inbound is found, only that log. Mutates `reg.scan`.
+ * its end; once the inbound is found, only that log. Which logs: with the
+ * turn's session group known (reg.session_group), that group's session logs
+ * only — every session the group's pointer named since (scan.group_logs);
+ * otherwise the newest MAX_TRACKED_LOGS. Mutates `reg.scan`.
  * @returns {{ ended: boolean, bytes: number }}
  */
 export function advanceScan(reg, {
@@ -454,14 +574,29 @@ export function advanceScan(reg, {
   }
   let bytes = 0;
   let resolver = null;
-  const resolve = (name) => (resolver ||= buildSkillIdMap({ skillsDir })).resolve(name);
+  const map = () => (resolver ||= buildSkillIdMap({ skillsDir }));
+  const resolve = (name) => map().resolve(name);
+  const known = (name) => map().known(name);
+  const firstSight = (size) => ({ offset: Math.max(0, size - NEW_LOG_LOOKBACK_BYTES), skipping: size > NEW_LOG_LOOKBACK_BYTES });
   try {
     let files;
     if (scan.anchor_log) {
       files = [scan.anchor_log];
     } else {
-      for (const l of recentLogs({ homeDir, zylosDir })) {
-        if (!scan.logs[l.p]) scan.logs[l.p] = { offset: Math.max(0, l.size - NEW_LOG_LOOKBACK_BYTES), skipping: l.size > NEW_LOG_LOOKBACK_BYTES };
+      const groupLog = reg.session_group ? groupSessionLog(reg.session_group, { homeDir, zylosDir }) : null;
+      if (groupLog && !(scan.group_logs || []).includes(groupLog)) (scan.group_logs ||= []).push(groupLog);
+      if (scan.group_logs?.length) {
+        // The group's own session(s): other logs are other groups' sessions.
+        for (const p of Object.keys(scan.logs)) if (!scan.group_logs.includes(p)) delete scan.logs[p];
+        for (const p of scan.group_logs) {
+          if (scan.logs[p]) continue;
+          try { scan.logs[p] = firstSight(fs.statSync(p).size); } catch {}
+        }
+      } else {
+        // No group (single-session Core) or its pointer not readable yet.
+        for (const l of recentLogs({ homeDir, zylosDir })) {
+          if (!scan.logs[l.p]) scan.logs[l.p] = firstSight(l.size);
+        }
       }
       files = Object.keys(scan.logs);
     }
@@ -487,7 +622,7 @@ export function advanceScan(reg, {
           consumedBytes += Buffer.byteLength(line, 'utf8') + 1;
           if (!line.trim()) continue;
           const wasAnchored = state.anchored;
-          feedTurnEvents(state, parseLine(line, sessionId), { sourceMessageId: reg.source_message_id, resolve });
+          feedTurnEvents(state, parseLine(line, sessionId), { sourceMessageId: reg.source_message_id, resolve, known });
           if (state.anchored && !wasAnchored) {
             // Found: the other logs are not read again.
             scan.anchor_log = file;

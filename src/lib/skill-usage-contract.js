@@ -29,7 +29,11 @@
  *   404 without that exact code (route missing, other or lower-case code)
  *                      → that record only is given up; no org pause;
  *   400, 403, 409, 422 (any other 4xx)
- *                      → that record is rejected: given up;
+ *                      → that record is rejected: given up (409 SKILL_USAGE_SOURCE_ALREADY_REPORTED
+ *                        — the source message is already recorded under another
+ *                        reply — included: only that record, no retry, no pause);
+ *   401                → the reporter re-mints the org's token and sends once
+ *                        more; a second 401 gives that record up;
  *   503, 5xx, 429,     → retry with backoff while the registration is kept.
  *   network, timeout
  */

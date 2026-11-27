@@ -85,7 +85,7 @@ import { RUNTIME_DIR } from '../src/lib/session.js';
 import {
   planReplyMetadata, attachRunToCardRequest, classifySendError, sha256, semanticBodyHash,
 } from '../src/lib/activity/reply.js';
-import { planFirstReply } from '../src/lib/activity/skills-used.js';
+import { planFirstReply, postRecordingFirstReply } from '../src/lib/activity/skills-used.js';
 import { buildTextBody, buildMediaBody } from '../src/lib/outbound-body.js';
 import { SENT_DIR, writeSentMarker, sentMessageId } from '../src/lib/dm-seen-watch.js';
 
@@ -328,8 +328,11 @@ async function main() {
       // src/lib/auth-retry.js. The request is built once, so a retry carries
       // the same client_msg_id and cannot post a second card.
       const cardConvId = ep.conversationId;
+      // Skills used this turn (OPENM-1396, OPEN-2): a card (choice, form or
+      // display) can be the turn's first reply, recorded like a text one.
+      const firstReply = planFirstReply({ sourceMessageId: ep.sourceMessageId, convId: cardConvId });
       result = await sendCardMessage(cardConvId, card, {
-        post: authRetryPost('[CARD]'),
+        post: postRecordingFirstReply(authRetryPost('[CARD]'), firstReply),
         // Agent activity: the card carries agent_run like a text
         // reply (claim keyed by the card's client_msg_id; onboarding cards
         // skipped). See attachRunToCardRequest.

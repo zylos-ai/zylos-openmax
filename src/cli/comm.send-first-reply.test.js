@@ -29,7 +29,7 @@ const replyOf = (src = SRC) => {
   try { return JSON.parse(fs.readFileSync(path.join(STATE, `${src}.reply`), 'utf8')).reply_message_id; } catch { return null; }
 };
 
-async function send(params, status = 200) {
+async function send(params, status = 200, verb = 'comm.send') {
   const posts = [];
   const server = createServer((req, res) => {
     const chunks = [];
@@ -38,13 +38,23 @@ async function send(params, status = 200) {
       const raw = Buffer.concat(chunks).toString('utf8');
       if (req.method === 'POST') posts.push(JSON.parse(raw));
       res.writeHead(status, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(status === 200 ? { id: `740000000000000200${posts.length}` } : { error: 'bad' }));
+      let out = { id: `740000000000000200${posts.length}` };
+      if (req.url.endsWith('/interaction-requests')) {
+        const body = JSON.parse(raw);
+        out = {
+          message_id: `740000000000000300${posts.length}`,
+          action_ids: (body.choice?.options || []).map((_, i) => `act_${i}`),
+          form_option_ids: Object.fromEntries((body.form?.fields || []).filter((f) => f.type !== 'text').map((f) => [f.key, f.options.map((_, i) => `opt_${i}`)])),
+        };
+      }
+      if (req.method === 'GET') out = { id: CONV, type: 'dm' };
+      res.end(JSON.stringify(status === 200 ? out : { error: 'bad' }));
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const outcome = await new Promise((resolve) => {
-      execFile(process.execPath, [cliPath, 'comm.send', JSON.stringify(params)], {
+      execFile(process.execPath, [cliPath, verb, JSON.stringify(params)], {
         env: {
           ...process.env,
           HOME,
@@ -87,3 +97,25 @@ test('comm.send without sourceMessageId, or for an unregistered message, records
   assert.equal(r.ok, true, r.stderr);
   assert.equal(replyOf(src), null);
 });
+
+// OPEN-2: a card sent before any text is the turn's first reply.
+for (const [verb, params] of [
+  ['comm.send_card', { title: '继续吗', text: '要继续吗', options: ['是', '否'] }],
+  ['comm.ask_card', { kind: 'confirm', askedOf: 'm-owner', title: '继续吗', text: '要继续吗', options: ['是', '否'] }],
+  ['comm.ask', { interactionType: 'form', kind: 'survey', askedOf: 'm-owner', title: '选一个', fields: [{ key: 'q1', label: '哪个', options: ['A', 'B'] }] }],
+]) {
+  test(`${verb} with sourceMessageId records a card-first reply; the later text does not replace it`, async () => {
+    const src = { 'comm.send_card': '7300000000000002011', 'comm.ask_card': '7300000000000002012', 'comm.ask': '7300000000000002013' }[verb];
+    registerTurn(CONV, src);
+    let r = await send({ conversationId: CONV, sourceMessageId: src, ...params }, 400, verb);
+    assert.equal(r.ok, false);
+    assert.equal(replyOf(src), null, 'a rejected card records nothing');
+    r = await send({ conversationId: CONV, sourceMessageId: src, ...params }, 200, verb);
+    assert.equal(r.ok, true, r.stderr);
+    const cardId = replyOf(src);
+    assert.match(cardId || '', /^7400000000000003/, `card message id recorded, got ${cardId}`);
+    r = await send({ conversationId: CONV, content: 'text after the card', sourceMessageId: src });
+    assert.equal(r.ok, true, r.stderr);
+    assert.equal(replyOf(src), cardId);
+  });
+}

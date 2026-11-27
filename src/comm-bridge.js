@@ -43,9 +43,11 @@ import {
 import { classifySystemEvent, isSenderlessUpdate, routeImOwnerNotice } from './lib/system-event-routing.js';
 import { formatReceiptForModel, receiptFacts, resolveReplyTarget } from './lib/interaction-receipt.js';
 import { connectorPreferenceOf } from './lib/connector-preference.js';
-import { skillPreferenceOf } from './lib/skill-preference.js';
-import { registerSkillTurn, dropSkillTurn } from './lib/activity/skills-used.js';
-import { createSkillUsageReporter, isSkillUsageTurn, SKILL_USAGE_TICK_MS } from './lib/skill-usage-reporter.js';
+import { skillPreferenceOf, skillPreferenceApplies } from './lib/skill-preference.js';
+import { registerSkillTurn, dropSkillTurn, noteSkillTurnSessionGroup } from './lib/activity/skills-used.js';
+import {
+  createSkillUsageReporter, isSkillUsageTurn, forwardDropsSkillTurn, skillTurnSessionGroup, SKILL_USAGE_TICK_MS,
+} from './lib/skill-usage-reporter.js';
 import { workflowRefOf } from './lib/wf-context.js';
 import { quoteExcerptOf, quotedMessageText } from './lib/quote-excerpt.js';
 import { chatHistoryOf, isChatHistory, FORWARDED_CONVERSATION } from './lib/forwarded.js';
@@ -1239,14 +1241,17 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     // turn_end the skills it used are reported to cws-core (skill-usage task,
     // activity/skills-used.js). Groups, other kinds and card receipts are not.
     // Registered before the forward, so the log offsets precede the turn.
-    const preferredSkills = skillPreferenceOf(msg);
-    const selectedSkillIds = preferredSkills ? preferredSkills.map((p) => p.skillId) : [];
-    const skillTurn = isSkillUsageTurn({
+    // A pick is only rendered for a DM (or DM topic) from a human member.
+    const skillFacts = {
       endpointType: conversationEndpointOf(replyConv, replyConvId)?.endpointType,
       redirected: replyTarget.redirected,
       senderMember: senderMemberFrom(msg),
       systemSender: isSystemSender(msg),
-    }) && skillUsage.shouldRegister(orgConfig.org_id, selectedSkillIds.length > 0)
+    };
+    const preferredSkills = skillPreferenceApplies(skillFacts) ? skillPreferenceOf(msg) : null;
+    const selectedSkillIds = preferredSkills ? preferredSkills.map((p) => p.skillId) : [];
+    const skillTurn = isSkillUsageTurn(skillFacts)
+      && skillUsage.shouldRegister(orgConfig.org_id, selectedSkillIds.length > 0)
       && registerSkillTurn({
         sourceMessageId, conversationId: replyConvId, orgId: orgConfig.org_id,
         memberId: orgConfig.self?.member_id, selectedSkillIds,
@@ -1309,6 +1314,18 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     registerConvOrg(msg.conversation_id, orgConfig.org_id, convRecordFields(conv));
     if (replyConvId !== msg.conversation_id) registerConvOrg(replyConvId, orgConfig.org_id, convRecordFields(replyConv));
     const result = await forwardInbound(endpoint, run ? run.marker + body : body, inboundPriority(msg), caps);
+    // Skills used (OPENM-1396): a turn Core surely never got is dropped; any
+    // other outcome (sent, stored, or unsure: uncertain / unknown / failed)
+    // keeps it — an unsure one that never ran ends unreported after
+    // TURN_END_WAIT_MS. The session group it went to tells the reporter which
+    // session log to read (multi-session Core).
+    if (skillTurn) {
+      if (forwardDropsSkillTurn(result.outcome)) dropSkillTurn(sourceMessageId);
+      else {
+        const group = skillTurnSessionGroup(result, CHANNEL);
+        if (group) noteSkillTurnSessionGroup(sourceMessageId, group);
+      }
+    }
     if (result.outcome === 'sent' || result.outcome === 'stored') {
       // Stored but reported as an error: Core has the message, so it is handled
       // like a success (nothing shown, nothing resent).
@@ -1319,8 +1336,6 @@ function makeOrgMessageHandler(orgConfig, sessionRef, inboxLedger, wsRef, receip
     }
     if (run) activity.dropRun(run.runId);
     removeReaction(msg.id, 'c4-failed');
-    // The turn never reached the runtime: nothing to report for it.
-    if (skillTurn) dropSkillTurn(sourceMessageId);
     warn(`c4-receive ${result.outcome} [${orgConfig.slug}] msg=${msg.id} conv=${msg.conversation_id}`);
     if (result.notice && shouldNoticeInboundFailure(msg, notification)) {
       sendRejectNotice(orgConfig, msg, result.notice).catch(() => {});
