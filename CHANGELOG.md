@@ -44,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **OpenMax Browser notices on multi-session zylos-core (#322, related to #313).** Session notices go through one helper (`src/lib/session-control.js`): the missing-public-URL and connection-authorized notices target `origin`, a DM-unseen reminder targets its own conversation's session group, and single-session Core keeps using `origin`. The owner-changed notice is now recorded as a no-reply message in conversation history (instead of a control) so Memory Sync sees it.
 - **Browser relay URL fallback (#322).** When Workspace has no bound domain and `AGENT_PUBLIC_BASE_URL` is unset, the Agent probes only the host's own configured HTTPS domain (zylos-core config `domain`, `https`) at `/browser-remote/ext`, without redirects or credentials; a 426 answer lets prepare use it. A browser prepare without a public URL now fails with the stable code `BROWSER_PUBLIC_URL_MISSING` and says whether the Agent session notice was queued; existing extensions show a generic prepare failure for it until the extension is updated. Concurrent notices are coalesced; a successful enqueue starts the 10-minute cooldown.
 
+### Fixed
+
+- **The owner is DMed again when a connection needs re-authorization (#189).** `sendOwnerReauthDm` read the opened DM's id as `id` / `conversation_id`, but `POST /api/v1/conversations/dm` returns `{ conversation: { id, … }, created }`, so the id was always missing: the DM was never posted and the bridge only logged `reauth owner DM not sent (no-conversation)`. It now reads `conversation.id`, the same field the auto-upgrade owner notices read from that endpoint. The unit test's mock returns the real shape, and a new test checks that the old top-level shapes post nothing.
+
 ## [2.37.1] - 2026-11-24
 
 ### Summary
